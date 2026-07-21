@@ -7,7 +7,7 @@
 
 # Image officielle multi-architecture vérifiée le 2026-07-19. Toute mise à jour
 # doit conserver un tag patch-level et un digest, puis repasser le build.
-FROM python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
+FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
 
 # Public artifact identity; upstream provenance remains in THIRD_PARTY_NOTICES.md.
 LABEL org.opencontainers.image.title="Hivemind embedded long runtime"
