@@ -19,7 +19,7 @@ are not installation steps or public architecture contracts.
 
 ---
 
-## [1.2.3] — 2026-07-20
+## [1.2.3] — 2026-07-21
 
 > Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
 > boundary. Downstream extension seams are described in
@@ -27,6 +27,11 @@ are not installation steps or public architecture contracts.
 
 ### Changed
 
+- **Dependency and build-runtime refresh.** Pinned public Actions advance to
+  `actions/checkout` 7.0.1 and `actions/setup-python` 7.0.0; the Hivemind and
+  embedded Graph Memory images move to Python 3.14.6, the Hivemind builder moves
+  to `uv` 0.9.30 on the same Python ABI, and the Graph lock now carries
+  `boto3` 1.43.52 / `aiohttp` 3.14.2 with regenerated hashes.
 - **Public documentation and onboarding hardening.** The English/French entry
   pages, deployment/security references, MCP contract, migration playbook,
   CLI examples, memory-rule templates, community files, and Codex/Claude Code
