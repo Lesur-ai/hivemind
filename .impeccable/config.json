@@ -1,0 +1,13 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "Space Grotesk",
+        "reason": "Frozen Hivemind display face (ADMIN_CONSOLE_DESIGN.md §2.2.3)"
+      }
+    ]
+  }
+}

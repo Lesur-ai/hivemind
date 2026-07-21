@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hivemind Admin</title>
+    <link rel="icon" href="/static/img/hivemind-favicon.svg">
+    <link rel="stylesheet" href="/static/css/admin.css">
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+        <img src="/static/img/hivemind-mark-dark.svg" alt="" class="login-logo" height="64">
+        <div class="brand-wordmark login-wordmark">hivemind</div>
+        <h2 class="login-title">Admin console</h2>
+        <p class="login-subtitle">Sign in with an operator token.</p>
+        <div class="login-form">
+            <label for="loginToken">Access token</label>
+            <input type="password" id="loginToken" placeholder="Paste your token…" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+            <div class="login-error" id="loginError" role="alert"></div>
+            <button id="loginBtn" class="btn btn-primary login-submit">Sign in</button>
+        </div>
+        <div class="login-footer"><span id="loginVersion" class="mono"></span></div>
+    </div>
+</div>
+
+<!-- APP SHELL -->
+<div class="app">
+    <nav id="sidebar" class="sidebar" aria-label="Primary">
+        <button type="button" id="sidebarMenuToggle" class="sidebar-menu-toggle" aria-label="Menu" aria-expanded="false">
+            <span class="menu-icon-slot"></span>
+        </button>
+        <a class="sidebar-brand" href="#/dashboard">
+            <img src="/static/img/hivemind-mark-dark.svg" alt="" height="28">
+            <span class="brand-wordmark">hivemind</span>
+        </a>
+        <div id="identityBlock" class="identity"></div>
+        <ul class="nav-primary" id="sidebarNav"></ul>
+        <div class="nav-flex-spacer"></div>
+        <div class="nav-group">
+            <div class="nav-group-label">Operator tools</div>
+            <ul class="nav-operator" id="sidebarNavOperator"></ul>
+        </div>
+        <a class="nav-live" href="/live" target="_blank" rel="noopener">
+            <span class="nav-live-icon-slot"></span>
+            <span class="nav-label">Live viewer</span>
+        </a>
+        <div class="sidebar-footer"><span id="headerVersion" class="mono"></span></div>
+    </nav>
+    <main id="content" class="content" tabindex="-1">
+        <div class="state state-loading"><span class="spinner" aria-hidden="true"></span><span>Loading…</span></div>
+    </main>
+    <div class="sidebar-scrim" id="sidebarScrim"></div>
+</div>
+
+<div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
+<script src="/static/js/admin-tool-capabilities.generated.js"></script>
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script src="/static/js/admin-api.js"></script>
+<script src="/static/js/admin-app.js"></script>
+<script src="/static/js/admin/views-dashboard.js"></script>
+<script src="/static/js/admin/views-spaces.js"></script>
+<script src="/static/js/admin/views-space-detail.js"></script>
+<script src="/static/js/admin/views-consolidation.js"></script>
+<script src="/static/js/admin/views-audit.js"></script>
+<script src="/static/js/admin/views-access.js"></script>
+<script src="/static/js/admin/views-operator.js"></script>
+<script src="/static/js/admin/views-mesh.js"></script>
+</body>
+</html>

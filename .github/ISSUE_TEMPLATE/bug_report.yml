@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible, non-security problem
+title: "[Bug]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report suspected vulnerabilities here. Use the private security channel in `SECURITY.md`.
+  - type: input
+    id: version
+    attributes:
+      label: Hivemind version or commit
+      description: Give the released tag, VERSION value, or exact commit.
+      placeholder: 1.0.0-beta.1 or a full commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include deployment shape, OS, runtime, and relevant dependency versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest commands, requests, or test case that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and observed behavior
+      description: State what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs or test evidence
+      description: Paste minimal, redacted logs and any failing or passing test evidence. Remove secrets and private data.
+    validations:
+      required: true

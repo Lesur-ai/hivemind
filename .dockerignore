@@ -1,0 +1,6 @@
+# Deployment secrets must never enter a Docker build context.
+.git
+.env
+.env.*
+*.key
+*.pem

@@ -1,0 +1,325 @@
+# docker-compose.yml — Hivemind MCP service + WAF + embedded long runtime + optional dev MinIO
+#
+# Usage:
+#   docker compose build
+#   docker compose up -d                      # default: WAF + hivemind + embedded long (graph-memory + Neo4j + Qdrant)
+#   docker compose --profile dev up -d        # dev: also brings up MinIO (local S3)
+#   docker compose logs -f
+#
+# Network architecture:
+#   Internet -> WAF (port 8080) -> hivemind (port 8002, internal only)
+#   The embedded long runtime (graph-memory:8002), Neo4j and Qdrant stay on the
+#   internal Docker network with NO host ports and NO WAF route — only Hivemind
+#   is the public MCP entrypoint.
+#   MinIO S3 (console 9001 exposed for admin) — dev profile only.
+#
+# Embedded long runtime (mandatory, ADR-0019):
+#   Since P7 the long ontology/knowledge-graph engine is a repository-shipped
+#   product component, built from ./services/graph-memory (no operator-supplied
+#   long backend image, no separate provisioning). It is brought up by
+#   the DEFAULT `docker compose up -d` alongside its Neo4j and Qdrant datastores.
+#   Long state stays derived-only / non-authoritative (ADR-0010): no commit,
+#   rollback, audit, tombstone, watermark, membership or recovery truth; the
+#   internal token/endpoint config is local-only (never in shared state/backups).
+x-hivemind-image: &hivemind-image
+  build:
+    context: .
+  image: hivemind:latest
+  pull_policy: build
+
+services:
+  # External image indexes below were verified on 2026-07-19. Tags document
+  # the upstream release; digests make pulls immutable across architectures.
+  # ─────────────────────────────────────────────────────────────
+  # MinIO — S3-compatible object storage (local dev)
+  # ─────────────────────────────────────────────────────────────
+  minio:
+    profiles: [dev]
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # RA-2 : bloque l'escalade de privilège intra-conteneur (setuid, etc.).
+    security_opt:
+      - "no-new-privileges:true"
+    command: server /data --console-address ":9001"
+    ports:
+      - "9001:9001"       # Web console only — S3 API stays internal
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      MINIO_DRIVE_MAX_TIMEOUT: 1m
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+
+  # ─────────────────────────────────────────────────────────────
+  # MinIO init — creates the bucket on first run, then exits
+  # ─────────────────────────────────────────────────────────────
+  minio-init:
+    profiles: [dev]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    security_opt:
+      - "no-new-privileges:true"     # RA-2
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD};
+        mc mb --ignore-existing local/$${BUCKET_NAME};
+        echo 'Bucket ready';
+      "
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      BUCKET_NAME: ${S3_BUCKET_NAME:-hivemind}
+    networks:
+      - hivemind-network
+
+  # ─────────────────────────────────────────────────────────────
+  # WAF — Caddy + Coraza OWASP CRS + Rate Limiting
+  # ─────────────────────────────────────────────────────────────
+  # Only point of entry exposed publicly. Proxies hivemind:8002 ONLY.
+  # The embedded long runtime, Neo4j and Qdrant get NO WAF route.
+  # ─────────────────────────────────────────────────────────────
+  waf:
+    build: ./waf
+    # RA-2 : durcissement du seul conteneur exposé publiquement.
+    # - no-new-privileges : bloque l'escalade setuid intra-conteneur.
+    # - cap_drop ALL puis cap_add NET_BIND_SERVICE : ne garde que la capacité
+    #   de binder des ports privilégiés (nécessaire pour 80/443 en prod TLS ;
+    #   inoffensif sur :8080). Caddy tourne en non-root (voir waf/Dockerfile).
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - "${WAF_PORT:-8080}:8080"
+      # Uncomment in production with Let's Encrypt TLS:
+      # - "80:80"
+      # - "443:443"
+    volumes:
+      - ./waf/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Uncomment to persist Let's Encrypt certificates:
+      # - caddy_data:/data
+      # - caddy_config:/config
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:-:8080}
+      # Project Mesh is enabled by default. Set the feature gate explicitly to
+      # false only for a deliberately non-Mesh deployment; that retains the
+      # legacy WAF catch-all instead of the 256 KiB pre-Coraza Mesh guard.
+      - HIVEMIND_MESH_ENABLED=${HIVEMIND_MESH_ENABLED:-true}
+    depends_on:
+      - hivemind
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+
+  # ─────────────────────────────────────────────────────────────
+  # Embedded-secret volume init — least-privilege ownership migration
+  # ─────────────────────────────────────────────────────────────
+  # Runs before Hivemind on first install/recreation. It has no network,
+  # environment, ports, or unrelated mounts; CAP_CHOWN is its only capability.
+  # The main service below remains non-root with cap_drop: ALL.
+  # ─────────────────────────────────────────────────────────────
+  hivemind-secrets-init:
+    <<: *hivemind-image
+    container_name: hivemind-secrets-init
+    user: "0:0"
+    command: ["python", "/app/scripts/init_embedded_secret_volume.py"]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    volumes:
+      - hivemind_secrets:/data/secrets
+    restart: "no"
+    healthcheck:
+      disable: true
+
+  # ─────────────────────────────────────────────────────────────
+  # Hivemind — MCP server (formerly Live Memory service)
+  # ─────────────────────────────────────────────────────────────
+  # NOT exposed publicly — accessible only via the WAF.
+  # Internal module path stays `live_mem` (ADR-0018: rebrand the public
+  # artifact identity, freeze the internal module tree).
+  # ─────────────────────────────────────────────────────────────
+  hivemind:
+    <<: *hivemind-image
+    container_name: hivemind
+    # NO "ports:" — the WAF is the only point of entry
+    # RA-2 : l'app tourne déjà en non-root (uid 10001, voir Dockerfile). On
+    # retire toutes les capacités (bind :8002 > 1024, aucune requise) et on
+    # bloque l'escalade de privilège.
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    env_file: .env
+    environment:
+      # Embedded long runtime binding. The URL is the
+      # internal compose service, not localhost/external. LONG_EMBEDDED_TOKEN is
+      # a local-only secret; leave empty to let Hivemind durably create and
+      # register a scoped internal token during startup, before serving traffic.
+      - LONG_EMBEDDED_URL=${LONG_EMBEDDED_URL:-http://graph-memory:8002}
+      - LONG_EMBEDDED_TOKEN=${LONG_EMBEDDED_TOKEN:-}
+      # Compose deliberately fixes this basename so the isolated initializer
+      # can validate an exact entry grammar without receiving any environment.
+      - LONG_EMBEDDED_TOKEN_FILE=/data/secrets/long_embedded_token
+    volumes:
+      # Local-only secret store for the startup-created embedded long token
+      # (survives restarts). Never shared, never routed through the WAF/host.
+      - hivemind_secrets:/data/secrets
+    depends_on:
+      hivemind-secrets-init:
+        condition: service_completed_successfully
+      graph-memory:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # ─────────────────────────────────────────────────────────────
+  # Embedded long runtime — Graph Memory (mandatory, ADR-0019)
+  # ─────────────────────────────────────────────────────────────
+  # Repository-built from ./services/graph-memory (vendored at a pinned upstream
+  # commit — see THIRD_PARTY_NOTICES.md). NOT exposed to the host and NOT routed
+  # through the WAF; Hivemind reaches it at http://graph-memory:8002 on the
+  # internal network. Long stays derived-only / non-authoritative (ADR-0010).
+  # ─────────────────────────────────────────────────────────────
+  graph-memory:
+    build: ./services/graph-memory
+    image: hivemind-graph-memory:latest
+    container_name: hivemind-graph-memory
+    # NO "ports:" — internal network only (reachable at graph-memory:8002)
+    env_file: .env
+    environment:
+      # The shared env file contains Hivemind service configuration. Never
+      # propagate the instance Mesh signing capability into the derived long
+      # runtime: an explicit empty override wins over env_file inheritance.
+      - HIVEMIND_MESH_PRIVATE_KEY=
+      # Internal datastore URLs (container DNS on hivemind-network)
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION_PREFIX=${QDRANT_COLLECTION_PREFIX:-memory_}
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      # Embedding model (LLMaaS) — S3_* and LLMAAS_API_* come from .env (env_file)
+      - LLMAAS_EMBEDDING_MODEL=${LLMAAS_EMBEDDING_MODEL:-bge-m3:567m}
+      - LLMAAS_EMBEDDING_DIMENSIONS=${LLMAAS_EMBEDDING_DIMENSIONS:-1024}
+      # Distinct internal identity so the shared .env MCP_SERVER_NAME does not
+      # bleed Hivemind's public identity into the embedded service handshake/logs.
+      - MCP_SERVER_NAME=hivemind-graph-memory
+      - MCP_SERVER_DEBUG=${MCP_SERVER_DEBUG:-false}
+      # Unified token authority: the embedded service
+      # validates Hivemind's token store; there is NO separate Graph Memory
+      # token. ADMIN_BOOTSTRAP_KEY is the single shared admin credential and the
+      # token store key is local-only; localhost auth-bypass is disabled so the
+      # service fails closed on a missing/rejected credential.
+      - ADMIN_BOOTSTRAP_KEY=${ADMIN_BOOTSTRAP_KEY}
+      - LOCALHOST_AUTH_BYPASS=false
+      - HIVEMIND_TOKENS_S3_KEY=${HIVEMIND_TOKENS_S3_KEY:-_system/tokens.json}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────────
+  # Neo4j — graph database for the embedded long runtime (internal only)
+  # ─────────────────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.26.28-community@sha256:362542416de6c09a971484d1893878016cc3b5cdec166e54b1c824a220ecd6b9
+    container_name: hivemind-neo4j
+    # NO "ports:" — internal network only
+    # For local debug, uncomment:
+    # ports:
+    #   - "127.0.0.1:7475:7474"
+    #   - "127.0.0.1:7688:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
+      # Memory sizing — tune to the host. These raise the minimum resource floor
+      # above a short/mid-only install (ADR-0019 §Consequences).
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+
+  # ─────────────────────────────────────────────────────────────
+  # Qdrant — vector database for the embedded long runtime (internal only)
+  # ─────────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.16.2@sha256:dab6de32f7b2cc599985a7c764db3e8b062f70508fb85ca074aa856f829bf335
+    container_name: hivemind-qdrant
+    # NO "ports:" — internal network only
+    # For local debug, uncomment:
+    # ports:
+    #   - "127.0.0.1:6333:6333"
+    # To enable Qdrant auth in production, set QDRANT_API_KEY in .env and uncomment:
+    # environment:
+    #   - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - hivemind-network
+
+networks:
+  hivemind-network:
+    driver: bridge
+
+volumes:
+  minio_data:  # dev profile only — not created in prod
+  neo4j_data:
+  neo4j_logs:
+  qdrant_data:
+  hivemind_secrets:  # Local-only auto-generated embedded long token (0600)
+# Uncomment in production:
+#   caddy_data:
+#   caddy_config:

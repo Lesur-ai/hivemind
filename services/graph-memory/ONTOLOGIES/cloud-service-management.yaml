@@ -1,0 +1,762 @@
+# =============================================================================
+# Ontologie Cloud Service Management
+# =============================================================================
+# Specialisee pour l'extraction de connaissances depuis la documentation
+# d'exploitation et de gestion d'un service cloud managé : LLMaaS, DBaaS,
+# Agent-as-a-Service, Kubernetes-as-a-Service, Object Storage, etc.
+
+name: cloud-service-management
+version: "1.0"
+description: |
+  Ontologie pour les services cloud managés operes en production.
+  Elle couvre a la fois le service expose aux clients, ses composants
+  techniques, son exploitation, sa facturation, ses quotas, ses SLA, ses
+  incidents, ses changements, ses runbooks et ses contraintes de conformite.
+
+  Cette ontologie est volontairement generique : elle convient a un LLMaaS,
+  un DBaaS, un Agent-as-a-Service, un service Kubernetes manage, un stockage
+  objet, une API managée ou tout autre service cloud type "as a service".
+
+context: |
+  Tu es un architecte cloud senior specialise dans l'exploitation de services
+  cloud managés en production.
+
+  Tu dois identifier avec precision :
+  - Le service cloud expose, ses offres, ses endpoints et ses capacites.
+  - Les composants techniques qui servent ce service : proxy, API gateway,
+    runtime, base de donnees, workers, orchestrateurs, load balancers.
+  - Les ressources d'infrastructure : hosts, GPU/CPU, stockage, reseau,
+    regions, zones, environnements.
+  - Les mecanismes d'exploitation : supervision, alerting, incidents,
+    problemes, changements, RFC, decisions, validations et runbooks.
+  - Les elements de gouvernance de service : clients, tenants, quotas,
+    metering, pricing, SLA/SLO, conformite et controles de securite.
+
+  IMPORTANT :
+  - Ne specialise pas l'extraction sur LLMaaS. LLMaaS n'est qu'un exemple.
+  - Ne cree jamais de type "Other". Utilise le type le plus proche.
+  - Privilegie les faits durables et actionnables pour un agent d'exploitation.
+  - Les secrets, tokens, mots de passe et cles d'API ne doivent jamais etre
+    extraits comme entites. Si un document mentionne un secret, extrais
+    seulement le mecanisme de gestion de secret, pas la valeur.
+  - Les logs longs et sorties de commandes ne sont pas des entites. Ils peuvent
+    justifier une Validation, un Incident ou une OperationalDecision.
+
+entity_types:
+  # Service et exposition
+  - name: CloudService
+    description: Service cloud managé expose a des clients ou utilisateurs
+    priority: high
+    examples:
+      - "LLMaaS Cloud Temple"
+      - "Database as a Service PostgreSQL"
+      - "Agent-as-a-Service"
+      - "Object Storage S3 compatible"
+      - "Managed Kubernetes"
+
+  - name: ServiceOffering
+    description: Offre, tier, plan, mode ou variante commerciale du service
+    examples:
+      - "Offre Standard"
+      - "Offre Premium"
+      - "Inference Dedicated"
+      - "PostgreSQL HA"
+      - "Agent Runtime Enterprise"
+
+  - name: ServiceCapability
+    description: Capacite fonctionnelle fournie par le service
+    examples:
+      - "Chat completions"
+      - "Embeddings"
+      - "Rerank"
+      - "Backup automatique"
+      - "Tool calling"
+
+  - name: APIEndpoint
+    description: Endpoint API, route, interface MCP, console ou interface publique
+    priority: high
+    examples:
+      - "POST /v1/chat/completions"
+      - "POST /v1/embeddings"
+      - "GET /v1/models"
+      - "memory_search (outil MCP)"
+      - "Console d'administration DBaaS"
+
+  - name: Tenant
+    description: Tenant, espace client, projet, organisation cliente ou domaine d'isolation
+    examples:
+      - "Tenant production"
+      - "Projet client sante"
+      - "Space llmaas"
+      - "Namespace objet"
+
+  - name: Client
+    description: Client, consommateur, application cliente ou integration externe
+    examples:
+      - "Portail Legifrance"
+      - "Control Center"
+      - "Application metier client"
+
+  # Composants techniques
+  - name: ServiceComponent
+    description: Composant technique participant au service
+    priority: high
+    examples:
+      - "API Gateway"
+      - "Reverse proxy"
+      - "Billing worker"
+      - "Scheduler"
+      - "Control plane"
+
+  - name: RuntimeEngine
+    description: Moteur d'execution, runtime, serveur d'inference ou moteur de base de donnees
+    priority: high
+    examples:
+      - "vLLM"
+      - "Ollama"
+      - "PostgreSQL 17"
+      - "Qdrant"
+      - "Agent runtime"
+
+  - name: Workload
+    description: Instance executable, daemon, container, service systemd, job ou deployment
+    examples:
+      - "llm-proxy-rust.service"
+      - "vllm@ia21.service"
+      - "postgresql.service"
+      - "billing-recompute job"
+
+  - name: DataStore
+    description: Base, bucket, file store, queue, topic ou stockage applicatif
+    examples:
+      - "Neo4j graph store"
+      - "Qdrant collection"
+      - "S3 billing bucket"
+      - "PostgreSQL primary database"
+
+  - name: ConfigurationItem
+    description: Fichier de configuration, variable d'environnement, parametre ou item de configuration
+    priority: high
+    examples:
+      - "instance.yaml"
+      - "config.toml"
+      - "API_BASE_URL"
+      - "pricing.yaml"
+      - "systemd unit override"
+
+  - name: AutomationTool
+    description: Script, pipeline, outil de deploiement, outil d'administration ou commande automatisee
+    examples:
+      - "deploy_bm.py"
+      - "diagnose_mac_proxy_remote.py"
+      - "Terraform module"
+      - "Ansible playbook"
+      - "CI deployment pipeline"
+
+  # Infrastructure
+  - name: InfrastructureNode
+    description: Host, VM, bare metal, appliance, serveur GPU, noeud ou machine d'execution
+    priority: high
+    examples:
+      - "ai-server-rtx6000-12"
+      - "db-primary-01"
+      - "load-balancer-01"
+      - "worker-node-03"
+
+  - name: ComputeResource
+    description: Ressource de calcul ou accelerateur
+    examples:
+      - "NVIDIA RTX 6000 Ada"
+      - "NVIDIA L40S"
+      - "AMD Radeon AI PRO R9700"
+      - "32 vCPU"
+      - "128 Go RAM"
+
+  - name: StorageResource
+    description: Ressource de stockage, volume, classe de stockage ou capacite
+    examples:
+      - "NVMe local"
+      - "Block Storage Premium"
+      - "Object Storage bucket"
+      - "Volume 2 To"
+
+  - name: NetworkComponent
+    description: Composant reseau, VIP, routeur, firewall, load balancer ou connectivite
+    examples:
+      - "Load Balancer public"
+      - "VIP 192.168.25.10"
+      - "Firewall egress"
+      - "Private backend network"
+
+  - name: Environment
+    description: Environnement logique ou etape de cycle de vie
+    examples:
+      - "production"
+      - "preproduction"
+      - "staging"
+      - "sandbox"
+
+  - name: Region
+    description: Region, zone geographique, datacenter ou zone de disponibilite
+    examples:
+      - "FR1"
+      - "PAR7S"
+      - "TH3S"
+      - "Region France"
+
+  # Capacites metier specialisees, mais generiques
+  - name: ManagedResource
+    description: Ressource geree par le service pour le compte d'un tenant
+    examples:
+      - "Modele IA"
+      - "Instance PostgreSQL"
+      - "Agent conversationnel"
+      - "Cluster Kubernetes"
+      - "Bucket objet"
+
+  - name: DataModel
+    description: Modele de donnees, schema, format de requete/reponse ou contrat API
+    examples:
+      - "OpenAI chat completion schema"
+      - "UsageRecord"
+      - "TenantQuota"
+      - "DatabaseConnectionString"
+
+  # Gouvernance de service
+  - name: BillingMeter
+    description: Compteur de consommation ou unite de mesure facturable
+    priority: high
+    examples:
+      - "tokens_in"
+      - "tokens_out"
+      - "requete rerank x1M"
+      - "vCPU-hour"
+      - "GiB-month"
+
+  - name: PricingRule
+    description: Regle tarifaire, unite de prix, formule de facturation ou exception de prix
+    priority: high
+    examples:
+      - "Rerank facture par million de requetes"
+      - "PostgreSQL facture par vCPU/mois"
+      - "Stockage facture par Go/mois"
+      - "Remise engagement annuel"
+
+  - name: QuotaPolicy
+    description: Quota, limite, rate limit, reservation ou politique de capacite
+    examples:
+      - "100 RPM par tenant"
+      - "Limite 1M tokens/jour"
+      - "Maximum 20 connexions"
+      - "Reservation GPU dediee"
+
+  - name: SLA
+    description: Engagement de service contractuel ou operationnel
+    priority: high
+    examples:
+      - "Disponibilite 99.9%"
+      - "GTI P1 15 minutes"
+      - "GTR P1 4 heures"
+      - "RPO 1 heure"
+
+  - name: SLO
+    description: Objectif de niveau de service mesure, non necessairement contractuel
+    examples:
+      - "P95 latency < 2s"
+      - "Taux d'erreur < 1%"
+      - "Freshness metering < 5 minutes"
+
+  - name: Metric
+    description: Metrique de supervision, KPI, signal technique ou metier
+    examples:
+      - "latence P99"
+      - "GPU memory usage"
+      - "HTTP 5xx rate"
+      - "billing aggregation lag"
+
+  - name: Alert
+    description: Alerte, seuil d'alerte, detection ou notification operationnelle
+    examples:
+      - "Alerte backend down"
+      - "Alerte quota proche limite"
+      - "Alerte PCIe Gen downgrade"
+
+  # Exploitation
+  - name: Incident
+    description: Incident operationnel, degradation, panne ou anomalie constatee
+    priority: high
+    examples:
+      - "Incident proxy name mismatch"
+      - "Incident facturation RERANK"
+      - "Incident DB failover"
+      - "Incident agent timeout"
+
+  - name: Problem
+    description: Probleme racine, dette technique, cause recurrente ou analyse de fond
+    examples:
+      - "Dette generate_instance_yaml.py"
+      - "Race condition aggregation billing"
+      - "Absence de healthcheck backend"
+
+  - name: ChangeRequest
+    description: Changement, RFC, mise en production, remediation ou evolution approuvee
+    priority: high
+    examples:
+      - "RFC-0083 deploiement bare metal unifie"
+      - "RFC proxy hardening"
+      - "Migration PostgreSQL HA"
+
+  - name: OperationalDecision
+    description: Decision d'architecture, d'exploitation ou de securite
+    priority: high
+    examples:
+      - "Utiliser build local avant rsync"
+      - "Deprecier l'ancien collecteur vLLM"
+      - "Stocker le token dans un vault"
+
+  - name: Runbook
+    description: Procedure d'exploitation, diagnostic, remediation ou rollback
+    examples:
+      - "Runbook diagnostic proxy Mac"
+      - "Runbook failover DB"
+      - "Runbook rollback deploiement"
+
+  - name: Validation
+    description: Test, preuve, verification, recette ou resultat de validation
+    priority: high
+    examples:
+      - "curl /health OK"
+      - "pytest 27/27"
+      - "diff --check OK"
+      - "Recalcul billing valide"
+
+  - name: MaintenanceWindow
+    description: Fenetre de maintenance, plage de changement ou periode d'intervention
+    examples:
+      - "Maintenance dimanche 22h"
+      - "Fenetre HNO"
+      - "Intervention RMA ia17"
+
+  # Securite, conformite, documentation
+  - name: SecurityControl
+    description: Controle de securite, authentification, autorisation, chiffrement ou garde-fou
+    priority: high
+    examples:
+      - "Bearer token"
+      - "mTLS"
+      - "RBAC"
+      - "Secret vault"
+      - "WAF"
+
+  - name: ComplianceRequirement
+    description: Exigence ou cadre de conformite applicable au service
+    examples:
+      - "SecNumCloud"
+      - "RGPD"
+      - "HDS"
+      - "NIS2"
+      - "DORA"
+
+  - name: Risk
+    description: Risque operationnel, securite, disponibilite, facturation ou conformite
+    examples:
+      - "Risque double facturation"
+      - "Risque fuite de secret"
+      - "Risque saturation GPU"
+      - "Risque rollback incomplet"
+
+  - name: Role
+    description: Role humain, role IAM, equipe ou responsabilite operationnelle
+    examples:
+      - "Equipe MCO"
+      - "Service Owner"
+      - "Tenant admin"
+      - "Mainteneur"
+      - "Lecteur"
+
+  - name: Documentation
+    description: Document canonique, RFC, incident report, README, ADR, spec ou page de documentation
+    priority: high
+    examples:
+      - "RFC-0089-Mise-a-jour-Memory-Bank.md"
+      - "INC-20260603-MAC-PROXY-NAME-MISMATCH.md"
+      - "scripts/README.md"
+      - "ADR service metering"
+
+relation_types:
+  - name: PROVIDES
+    description: Fournit un service, une offre ou une capacite
+    examples:
+      - "Cloud Provider -> PROVIDES -> Managed Kubernetes"
+      - "CloudService -> PROVIDES -> Chat completions"
+
+  - name: EXPOSES
+    description: Expose un endpoint, une console ou une interface
+    examples:
+      - "CloudService -> EXPOSES -> POST /v1/chat/completions"
+      - "Control plane -> EXPOSES -> Console admin"
+
+  - name: CONSUMES
+    description: Consomme un service, une API, une ressource ou un quota
+    examples:
+      - "Client -> CONSUMES -> CloudService"
+      - "Workload -> CONSUMES -> GPU memory"
+
+  - name: PRODUCES
+    description: Produit une donnee, une metrique, un livrable ou un artefact
+    examples:
+      - "Billing worker -> PRODUCES -> UsageRecord"
+      - "Runbook -> PRODUCES -> Validation"
+
+  - name: SUPPORTS
+    description: Supporte un protocole, une capacite, un mode ou une ressource geree
+    examples:
+      - "CloudService -> SUPPORTS -> Tool calling"
+      - "RuntimeEngine -> SUPPORTS -> Modele IA"
+
+  - name: IMPLEMENTS
+    description: Implemente une capacite, une decision, une regle ou un controle
+    examples:
+      - "Proxy -> IMPLEMENTS -> Backend healthcheck"
+      - "AutomationTool -> IMPLEMENTS -> Runbook deploiement"
+
+  - name: PART_OF
+    description: Fait partie d'un ensemble, service, environnement ou architecture
+    examples:
+      - "RuntimeEngine -> PART_OF -> CloudService"
+      - "APIEndpoint -> PART_OF -> Service API"
+
+  - name: DEPENDS_ON
+    description: Depend d'un composant, service, ressource ou pre-requis
+    examples:
+      - "DBaaS -> DEPENDS_ON -> Block Storage"
+      - "Agent-as-a-Service -> DEPENDS_ON -> LLMaaS"
+
+  - name: RUNS_ON
+    description: S'execute sur une infrastructure ou ressource de calcul
+    examples:
+      - "vLLM workload -> RUNS_ON -> ai-server-rtx6000-12"
+      - "PostgreSQL primary -> RUNS_ON -> db-primary-01"
+
+  - name: DEPLOYED_ON
+    description: Est deploye dans un environnement, une region ou une infrastructure
+    examples:
+      - "CloudService -> DEPLOYED_ON -> production"
+      - "Workload -> DEPLOYED_ON -> FR1"
+
+  - name: ROUTES_TO
+    description: Route ou achemine du trafic vers un composant
+    examples:
+      - "Load Balancer -> ROUTES_TO -> Reverse proxy"
+      - "Proxy -> ROUTES_TO -> Runtime backend"
+
+  - name: STORES_IN
+    description: Stocke des donnees dans un datastore ou stockage
+    examples:
+      - "UsageRecord -> STORES_IN -> S3 billing bucket"
+      - "Vector embedding -> STORES_IN -> Qdrant collection"
+
+  - name: CONFIGURED_BY
+    description: Est configure par un fichier, parametre ou item de configuration
+    examples:
+      - "RuntimeEngine -> CONFIGURED_BY -> instance.yaml"
+      - "CloudService -> CONFIGURED_BY -> pricing.yaml"
+
+  - name: MANAGED_BY
+    description: Est gere, administre ou orchestre par un composant, role ou outil
+    examples:
+      - "CloudService -> MANAGED_BY -> Control plane"
+      - "Workload -> MANAGED_BY -> systemd"
+
+  - name: AUTOMATED_BY
+    description: Est automatise par un script, pipeline ou outil
+    examples:
+      - "Deployment -> AUTOMATED_BY -> deploy_bm.py"
+      - "Diagnostic -> AUTOMATED_BY -> diagnose_mac_proxy_remote.py"
+
+  - name: OWNED_BY
+    description: A pour owner, responsable ou equipe proprietaire
+    examples:
+      - "CloudService -> OWNED_BY -> Service Owner"
+      - "Runbook -> OWNED_BY -> Equipe MCO"
+
+  - name: OPERATED_BY
+    description: Est exploite par une equipe, un role ou un prestataire
+    examples:
+      - "CloudService -> OPERATED_BY -> Equipe MCO"
+      - "Incident -> OPERATED_BY -> Astreinte N2"
+
+  - name: AUTHENTICATED_BY
+    description: Utilise un mecanisme d'authentification
+    examples:
+      - "APIEndpoint -> AUTHENTICATED_BY -> Bearer token"
+      - "Console -> AUTHENTICATED_BY -> SSO"
+
+  - name: PROTECTED_BY
+    description: Est protege par un controle de securite
+    examples:
+      - "APIEndpoint -> PROTECTED_BY -> WAF"
+      - "Secret -> PROTECTED_BY -> Vault"
+
+  - name: COMPLIANT_WITH
+    description: Est conforme ou soumis a une exigence de conformite
+    examples:
+      - "CloudService -> COMPLIANT_WITH -> SecNumCloud"
+      - "Runbook -> COMPLIANT_WITH -> Politique secrets"
+
+  - name: HAS_SLA
+    description: Possede un engagement SLA
+    examples:
+      - "CloudService -> HAS_SLA -> Disponibilite 99.9%"
+      - "Incident P1 -> HAS_SLA -> GTI 15 minutes"
+
+  - name: HAS_SLO
+    description: Possede un objectif SLO mesure
+    examples:
+      - "APIEndpoint -> HAS_SLO -> P95 latency < 2s"
+      - "Billing pipeline -> HAS_SLO -> Freshness < 5 minutes"
+
+  - name: MEASURED_BY
+    description: Est mesure par une metrique, un compteur ou KPI
+    examples:
+      - "CloudService -> MEASURED_BY -> HTTP 5xx rate"
+      - "CloudService -> MEASURED_BY -> BillingMeter"
+
+  - name: MONITORED_BY
+    description: Est supervise par une alerte, une metrique ou un outil de monitoring
+    examples:
+      - "RuntimeEngine -> MONITORED_BY -> GPU memory usage"
+      - "DBaaS -> MONITORED_BY -> replication lag alert"
+
+  - name: ALERTS_ON
+    description: Alerte sur un risque, une metrique ou un etat
+    examples:
+      - "Alerte backend down -> ALERTS_ON -> Runtime backend"
+      - "Alerte quota -> ALERTS_ON -> QuotaPolicy"
+
+  - name: PRICED_BY
+    description: Est facture ou valorise par une regle tarifaire
+    examples:
+      - "ServiceCapability -> PRICED_BY -> Rerank x1M"
+      - "ManagedResource -> PRICED_BY -> vCPU/mois"
+
+  - name: LIMITED_BY
+    description: Est limite par un quota, rate limit ou capacite reservee
+    examples:
+      - "Tenant -> LIMITED_BY -> 100 RPM"
+      - "APIEndpoint -> LIMITED_BY -> Token quota"
+
+  - name: AFFECTS
+    description: Affecte un service, composant, client, tenant ou SLA
+    examples:
+      - "Incident -> AFFECTS -> CloudService"
+      - "Risk -> AFFECTS -> BillingMeter"
+
+  - name: CAUSED_BY
+    description: Est cause par un probleme, changement, composant ou decision
+    examples:
+      - "Incident -> CAUSED_BY -> Configuration mismatch"
+      - "Incident -> CAUSED_BY -> Race condition"
+
+  - name: MITIGATED_BY
+    description: Est mitige par une decision, runbook, controle ou changement
+    examples:
+      - "Risk -> MITIGATED_BY -> SecurityControl"
+      - "Incident -> MITIGATED_BY -> Runbook rollback"
+
+  - name: RESOLVED_BY
+    description: Est resolu par une action, validation, decision ou changement
+    examples:
+      - "Incident -> RESOLVED_BY -> ChangeRequest"
+      - "Problem -> RESOLVED_BY -> OperationalDecision"
+
+  - name: CHANGED_BY
+    description: Est modifie par un changement, RFC ou intervention
+    examples:
+      - "ConfigurationItem -> CHANGED_BY -> RFC deploiement"
+      - "ServiceComponent -> CHANGED_BY -> Hotfix proxy"
+
+  - name: VALIDATED_BY
+    description: Est valide par un test, recette, preuve ou controle
+    examples:
+      - "ChangeRequest -> VALIDATED_BY -> pytest 27/27"
+      - "Runbook -> VALIDATED_BY -> curl /health OK"
+
+  - name: DOCUMENTED_IN
+    description: Est documente dans un document canonique
+    examples:
+      - "Incident -> DOCUMENTED_IN -> INC-20260603"
+      - "OperationalDecision -> DOCUMENTED_IN -> RFC-0089"
+
+  - name: ESCALATES_TO
+    description: Escalade vers un role, niveau de support ou equipe
+    examples:
+      - "Incident P1 -> ESCALATES_TO -> Astreinte N2"
+      - "Alert -> ESCALATES_TO -> Service Owner"
+
+  - name: SCHEDULED_DURING
+    description: Est programme pendant une fenetre de maintenance ou periode
+    examples:
+      - "ChangeRequest -> SCHEDULED_DURING -> Maintenance HNO"
+      - "RMA -> SCHEDULED_DURING -> Fenetre datacenter"
+
+  - name: REQUIRES_APPROVAL
+    description: Necessite une approbation, decision ou validation humaine
+    examples:
+      - "ChangeRequest -> REQUIRES_APPROVAL -> Service Owner"
+      - "Risk acceptance -> REQUIRES_APPROVAL -> RSSI"
+
+  - name: REPLACES
+    description: Remplace, deprecie ou supersede une decision, config ou composant
+    examples:
+      - "Nouveau collector -> REPLACES -> Ancien collector"
+      - "RFC-0088 -> REPLACES -> Procedure proxy manuelle"
+
+extraction_rules:
+  max_entities: 100
+  max_relations: 140
+  include_metrics: true
+  include_durations: true
+  include_amounts: true
+  extract_implicit_relations: true
+
+  priority_entities:
+    - CloudService
+    - APIEndpoint
+    - ServiceComponent
+    - RuntimeEngine
+    - InfrastructureNode
+    - BillingMeter
+    - PricingRule
+    - SLA
+    - Incident
+    - ChangeRequest
+    - OperationalDecision
+    - Validation
+    - SecurityControl
+    - Documentation
+
+  special_instructions: |
+    # --- OBJECTIF D'EXTRACTION ---
+    - Construis un graphe utile a l'exploitation d'un service cloud manage.
+    - Favorise les relations actionnables : AFFECTS, CAUSED_BY, MITIGATED_BY,
+      RESOLVED_BY, VALIDATED_BY, DOCUMENTED_IN, CONFIGURED_BY, RUNS_ON.
+    - Relie les faits aux documents canoniques quand un RFC, un incident report,
+      un README, un ADR ou une spec est mentionne.
+
+    # --- NOMMAGE CANONIQUE ---
+    - Les noms d'entites doivent etre stables entre documents.
+    - Pour un service : "NomService (type)" si le type clarifie le domaine.
+      Exemple : "LLMaaS Cloud Temple (AI inference service)".
+    - Pour un endpoint : conserve la methode et le chemin si disponibles.
+      Exemple : "POST /v1/rerank".
+    - Pour un composant : ajoute une courte responsabilite stable.
+      Exemple : "llm-proxy-rust (reverse proxy inference)".
+    - Pour un incident/RFC : conserve l'identifiant officiel.
+      Exemple : "RFC-0088 (durcissement proxy Macs)".
+
+    # --- MAPPINGS OBLIGATOIRES ---
+    - Les RFC, changements, mises en production, remediations et deploiements
+      sont des ChangeRequest.
+    - Les ADR, choix d'architecture, arbitrages et decisions d'exploitation
+      sont des OperationalDecision.
+    - Les scripts, playbooks, pipelines CI/CD et outils CLI sont des AutomationTool.
+    - Les fichiers YAML/TOML/env/systemd et parametres de configuration sont des
+      ConfigurationItem. Ne cree pas de type File, EnvVar ou ConfigParameter.
+    - Les modeles IA, bases, agents, clusters, buckets et instances creees pour
+      un tenant sont des ManagedResource.
+    - Les mesures de consommation facturables sont des BillingMeter.
+    - Les unites de prix, exceptions tarifaires et formules sont des PricingRule.
+    - Les limites de consommation, reservations et rate limits sont des QuotaPolicy.
+    - Les tests, recettes, preuves de bon fonctionnement et resultats de commande
+      synthetiques sont des Validation.
+    - Les chemins de fichiers de documentation sont des Documentation uniquement
+      s'ils sont canoniques pour la comprehension du fait.
+
+    # --- SECRETS ET DONNEES SENSIBLES ---
+    - N'extrais JAMAIS la valeur d'un token, mot de passe, secret, cle API,
+      cle privee ou credential.
+    - Si un secret est mentionne, extrais seulement "Secret vault" ou le controle
+      de securite associe comme SecurityControl.
+    - Ne mets jamais un secret dans le nom ou la description d'une entite.
+
+    # --- ANTI-BRUIT ---
+    - N'extrais pas les logs ligne par ligne.
+    - N'extrais pas chaque flag CLI, chaque variable locale ou chaque ligne de
+      sortie de commande.
+    - N'extrais pas les identifiants numeriques isoles sans role operationnel.
+    - N'extrais pas les dates seules comme entites ; integre-les dans l'incident,
+      le changement ou la fenetre de maintenance si elles sont utiles.
+    - Ne cree pas de hubs artificiels : un CloudService ne doit pas etre relie
+      a toutes les entites du document. Relie les entites les plus specifiques.
+
+    # --- RELATIONS INTERDITES OU A EVITER ---
+    - Evite RELATED_TO. Choisis une relation specifique.
+    - "uses" generique doit devenir SUPPORTS, CONSUMES, DEPENDS_ON,
+      CONFIGURED_BY, MANAGED_BY ou AUTOMATED_BY selon le sens.
+    - "fixed by" doit devenir RESOLVED_BY.
+    - "tested by" doit devenir VALIDATED_BY.
+    - "documented by" doit devenir DOCUMENTED_IN.
+
+examples:
+  - input: |
+      RFC-0088 durcit le deploiement des proxies Macs. L'incident
+      INC-20260603-MAC-PROXY-NAME-MISMATCH a affecte le proxy Mac car
+      le nom du backend declare ne correspondait pas au nom attendu par
+      le heartbeat. Le script diagnose_mac_proxy_remote.py valide le fix
+      par appel /health et verification du backend actif.
+    expected_entities:
+      - {name: "RFC-0088 (durcissement proxies Macs)", type: "ChangeRequest"}
+      - {name: "INC-20260603-MAC-PROXY-NAME-MISMATCH", type: "Incident"}
+      - {name: "Proxy Mac (reverse proxy inference)", type: "ServiceComponent"}
+      - {name: "Backend heartbeat", type: "ServiceCapability"}
+      - {name: "diagnose_mac_proxy_remote.py", type: "AutomationTool"}
+      - {name: "Verification /health backend actif", type: "Validation"}
+    expected_relations:
+      - {from: "INC-20260603-MAC-PROXY-NAME-MISMATCH", to: "Proxy Mac (reverse proxy inference)", type: "AFFECTS"}
+      - {from: "INC-20260603-MAC-PROXY-NAME-MISMATCH", to: "Backend heartbeat", type: "CAUSED_BY"}
+      - {from: "INC-20260603-MAC-PROXY-NAME-MISMATCH", to: "RFC-0088 (durcissement proxies Macs)", type: "RESOLVED_BY"}
+      - {from: "RFC-0088 (durcissement proxies Macs)", to: "diagnose_mac_proxy_remote.py", type: "AUTOMATED_BY"}
+      - {from: "RFC-0088 (durcissement proxies Macs)", to: "Verification /health backend actif", type: "VALIDATED_BY"}
+
+  - input: |
+      Le service PostgreSQL DBaaS expose une console d'administration et une
+      API de provisioning. L'offre PostgreSQL HA s'execute sur deux noeuds,
+      depend du Block Storage Premium et possede un SLA de disponibilite 99.95%.
+      La consommation est facturee en vCPU/mois et GiB/mois.
+    expected_entities:
+      - {name: "PostgreSQL DBaaS", type: "CloudService"}
+      - {name: "PostgreSQL HA", type: "ServiceOffering"}
+      - {name: "Console d'administration DBaaS", type: "APIEndpoint"}
+      - {name: "API de provisioning DBaaS", type: "APIEndpoint"}
+      - {name: "Block Storage Premium", type: "StorageResource"}
+      - {name: "Disponibilite 99.95%", type: "SLA"}
+      - {name: "vCPU/mois", type: "BillingMeter"}
+      - {name: "GiB/mois", type: "BillingMeter"}
+    expected_relations:
+      - {from: "PostgreSQL DBaaS", to: "Console d'administration DBaaS", type: "EXPOSES"}
+      - {from: "PostgreSQL DBaaS", to: "API de provisioning DBaaS", type: "EXPOSES"}
+      - {from: "PostgreSQL HA", to: "Block Storage Premium", type: "DEPENDS_ON"}
+      - {from: "PostgreSQL DBaaS", to: "Disponibilite 99.95%", type: "HAS_SLA"}
+      - {from: "PostgreSQL DBaaS", to: "vCPU/mois", type: "MEASURED_BY"}
+      - {from: "PostgreSQL DBaaS", to: "GiB/mois", type: "MEASURED_BY"}
+
+  - input: |
+      L'Agent-as-a-Service expose un endpoint MCP tool_call et consomme un
+      modele LLM externe. Les tenants sont limites a 50 executions simultanees.
+      Les secrets d'outils sont stockes dans un vault et jamais dans les prompts.
+      Le runbook de rollback est documente dans ADR-agent-runtime.md.
+    expected_entities:
+      - {name: "Agent-as-a-Service", type: "CloudService"}
+      - {name: "MCP tool_call endpoint", type: "APIEndpoint"}
+      - {name: "Modele LLM externe", type: "ManagedResource"}
+      - {name: "50 executions simultanees par tenant", type: "QuotaPolicy"}
+      - {name: "Secret vault", type: "SecurityControl"}
+      - {name: "Runbook rollback Agent-as-a-Service", type: "Runbook"}
+      - {name: "ADR-agent-runtime.md", type: "Documentation"}
+    expected_relations:
+      - {from: "Agent-as-a-Service", to: "MCP tool_call endpoint", type: "EXPOSES"}
+      - {from: "Agent-as-a-Service", to: "Modele LLM externe", type: "DEPENDS_ON"}
+      - {from: "Tenant", to: "50 executions simultanees par tenant", type: "LIMITED_BY"}
+      - {from: "MCP tool_call endpoint", to: "Secret vault", type: "PROTECTED_BY"}
+      - {from: "Runbook rollback Agent-as-a-Service", to: "ADR-agent-runtime.md", type: "DOCUMENTED_IN"}

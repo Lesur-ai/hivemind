@@ -1,0 +1,13 @@
+{
+  "name": "hivemind-admin-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Playwright integration proof for the P8-5 Access view driven against the REAL admin shell (admin-app.js). Complements the dependency-free node:vm harness in tests/js/.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test --reporter=line"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

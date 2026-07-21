@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 96" width="300" height="96" fill="none" role="img" aria-label="hivemind">
+  <title>Hivemind — horizontal lockup (dark surface)</title>
+  <!-- Mark + Newsreader wordmark. Exact rendering needs the Newsreader webfont;
+       degrades to a serif fallback otherwise. Source: Hivemind Brand Book. -->
+  <g transform="translate(8 24) scale(0.5)">
+    <line x1="23" y1="24" x2="23" y2="72" stroke="#F7F8F5" stroke-width="2" opacity="0.26"/>
+    <line x1="73" y1="24" x2="73" y2="72" stroke="#F7F8F5" stroke-width="2" opacity="0.26"/>
+    <line x1="23" y1="48" x2="73" y2="48" stroke="#F7F8F5" stroke-width="2" opacity="0.26"/>
+    <circle cx="48" cy="48" r="13" fill="#F59E0B" opacity="0.18"/>
+    <circle cx="23" cy="24" r="6" fill="#00A7C7"/>
+    <circle cx="73" cy="24" r="6" fill="#00A7C7"/>
+    <circle cx="23" cy="48" r="6" fill="#F59E0B"/>
+    <circle cx="73" cy="48" r="6" fill="#F59E0B"/>
+    <circle cx="48" cy="48" r="8" fill="#F59E0B"/>
+    <circle cx="23" cy="72" r="6" fill="#F7F8F5"/>
+    <circle cx="73" cy="72" r="6" fill="#F7F8F5"/>
+  </g>
+  <text x="62" y="61" font-family="Newsreader, Georgia, 'Times New Roman', serif" font-size="44" font-weight="500" letter-spacing="-0.4" fill="#F7F8F5">hivemind</text>
+</svg>

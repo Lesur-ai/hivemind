@@ -1,0 +1,285 @@
+# =============================================================================
+# Coraza WAF + Caddy — Configuration for the Hivemind MCP server (Streamable HTTP)
+# =============================================================================
+#
+# Ce Caddyfile configure :
+# 1. Coraza WAF avec OWASP CRS (protection OWASP Top 10)
+# 2. Reverse proxy vers le service MCP (port 8002)
+# 3. Headers de sécurité (CSP, HSTS, X-Frame-Options, etc.)
+# 4. Gestion Streamable HTTP pour le protocole MCP (endpoint /mcp)
+# 5. Rate limiting par IP
+# 6. TLS automatique via Let's Encrypt (si domaine configuré)
+#
+# =============================================================================
+#
+# ARCHITECTURE DES ROUTES :
+#
+#   /mcp*        → Reverse Proxy DIRECT (MCP Streamable HTTP, pas de WAF)
+#   /mesh/v1*    → limite brute 256 KiB + WAF URI/headers + routes pair signées
+#   /api/*       → WAF Coraza + Reverse Proxy (timeout 5min pour outils longs)
+#   /*           → WAF Coraza + Reverse Proxy (statiques, health, etc.)
+#
+# La route /mcp est authentifiée par token MCP côté serveur.
+# Le WAF Coraza bufférise les réponses pour les inspecter, ce qui est
+# incompatible avec le streaming SSE optionnel de Streamable HTTP.
+#
+# Migration SSE → Streamable HTTP (issue #1) :
+#   - /sse* + /messages/* fusionnés en /mcp* (endpoint unique)
+#   - Rate limiting recalibré (×3 : chaque appel = 3 requêtes HTTP)
+#
+# =============================================================================
+#
+# MODES D'UTILISATION :
+#
+# 1. DÉVELOPPEMENT (HTTP, pas de TLS) :
+#    - Laisser SITE_ADDRESS=:8080 dans le .env
+#    - Accès via http://localhost:8080
+#
+# 2. PRODUCTION (HTTPS + Let's Encrypt automatique) :
+#    - Mettre SITE_ADDRESS=mon-service.votre-domaine.com dans le .env
+#    - Exposer les ports 80 + 443 dans docker-compose.yml
+#    - Caddy obtient et renouvelle le certificat TLS automatiquement
+#
+# 3. PRODUCTION derrière un reverse proxy amont (nginx, etc.) :
+#    - Laisser SITE_ADDRESS=:8080 (HTTP)
+#    - Le reverse proxy amont gère le TLS
+#
+# =============================================================================
+{
+	# Ordre des directives : rate_limit → limite body Mesh → WAF → reverse_proxy.
+	# P10-2 : ``request_body`` DOIT s'exécuter avant Coraza. Coraza accepte
+	# historiquement 75 MB avec ProcessPartial ; une limite placée après lui
+	# laisserait donc le WAF lire/bufferiser un corps Mesh hors contrat avant le
+	# rejet applicatif.
+	order rate_limit first
+	order coraza_waf after rate_limit
+	order request_body before coraza_waf
+
+	# Pas de page admin Caddy
+	admin off
+
+	# HM-17 : rate-limiting derrière un PROXY AMONT (mode 3, cf. en-tête).
+	# Les zones rate_limit ci-dessous clés sur {remote_host} = le peer TCP vu
+	# par Caddy. Si un reverse proxy amont (nginx, ALB, Cloudflare…) est devant
+	# Caddy, ce peer est CONSTANT pour tous les clients réels → une SEULE bucket
+	# partagée : un client abusif épuise tout le budget pour tout le monde.
+	# Dans ce cas, DÉCOMMENTER le bloc suivant (adapter les CIDR au proxy amont)
+	# et remplacer `key {remote_host}` par `key {client_ip}` dans les zones :
+	#
+	#   servers {
+	#       trusted_proxies static 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+	#       client_ip_headers X-Forwarded-For X-Real-IP
+	#   }
+	#
+	# En exposition directe / Let's Encrypt, {remote_host} = vraie IP client :
+	# ne rien changer.
+}
+
+# Politique Coraza paramétrée par handle. L'argument injecte soit l'unique
+# exclusion de corps Mesh (handle default-on), soit un commentaire inerte
+# (fallback historique). Garder une seule copie évite la dérive du reste de CRS
+# tout en préservant strictement l'inspection du corps quand Mesh est désactivé.
+(hivemind_coraza) {
+	coraza_waf {
+		load_owasp_crs
+		directives `
+			Include @coraza.conf-recommended
+			Include @crs-setup.conf.example
+			Include @owasp_crs/*.conf
+
+			SecRuleEngine On
+
+			SecAction "id:900110,phase:1,pass,nolog,\
+				setvar:tx.inbound_anomaly_score_threshold=5,\
+				setvar:tx.outbound_anomaly_score_threshold=4"
+
+			SecRequestBodyLimit 75000000
+			SecRequestBodyNoFilesLimit 75000000
+			SecRequestBodyLimitAction ProcessPartial
+
+			SecAction "id:900220,phase:1,pass,nolog,\
+				setvar:'tx.allowed_request_content_type=|application/json|text/plain|multipart/form-data|application/x-www-form-urlencoded|application/octet-stream|'"
+
+			{args[0]}
+
+			# ---------------------------------------------------------
+			# Exclusion ciblée : console admin authentifiée (/api/tool)
+			# ---------------------------------------------------------
+			# Le corps de POST /api/tool transporte du markdown légitime
+			# (rules de Memory Bank : caractères '<', mot 'delete', '**',
+			# backticks…) que l'OWASP CRS prend pour des attaques XSS/SQLi.
+			# Le score d'anomalie dépasse le seuil → 403 à corps vide, que
+			# l'UI affiche comme "Empty response" (échec de space_create).
+			#
+			# Cet endpoint est déjà protégé : cookie HttpOnly + permission
+			# write obligatoire, et il ne proxifie que des appels d'outils
+			# structurés {tool, arguments}. On désactive donc l'inspection
+			# du CORPS pour ce seul chemin (même logique assumée que /mcp*).
+			# Restent actifs : rate-limiting, limites de taille, inspection
+			# de l'URI et des headers (path traversal, scanners, etc.).
+			SecRule REQUEST_URI "@beginsWith /api/tool" \
+				"id:900500,phase:1,pass,nolog,ctl:requestBodyAccess=Off"
+		`
+	}
+}
+
+# SITE_ADDRESS est défini par la variable d'env (défaut: :8080)
+{$SITE_ADDRESS::8080} {
+	# =========================================================================
+	# Headers de Sécurité (appliqués à TOUTES les routes)
+	# =========================================================================
+	# LM2-05 fix : 'unsafe-inline' retiré de script-src — combiné avec un XSS
+	# (LM2-01), cette directive permettait l'exfiltration du token bearer admin.
+	# 'unsafe-inline' reste sur style-src car les CSS inline sont utilisés par
+	# le placeholder dans live.html (ex: style="display:none") et n'exposent
+	# pas le même vecteur d'attaque.
+	# LM2-06 fix : les CDN externes (unpkg, jsdelivr) sont supprimés de la CSP
+	# car marked.js et purify.js sont maintenant servis depuis /static/vendor/.
+	header {
+		# HM-14 fix : form-action 'self' ajouté (ne retombe pas sur default-src).
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; object-src 'none'; form-action 'self'; base-uri 'self'"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		-Server
+		-X-Powered-By
+	}
+
+	# =========================================================================
+	# Rate Limiting par IP (appliqué AVANT le WAF)
+	# =========================================================================
+	# Limites calibrées pour des agents IA avec Streamable HTTP :
+	# - MCP : 600 événements/min/IP (un appel d'outil peut produire plusieurs
+	#   requêtes Streamable HTTP)
+	# - API REST : 120 événements/min/IP (interface web)
+	# - Global : 1 500 événements/min/IP (toutes routes confondues)
+	#
+	# Note : Streamable HTTP utilise 3 requêtes HTTP par appel d'outil :
+	#   1. POST /mcp — Initialize session
+	#   2. POST /mcp — Call tool
+	#   3. DELETE /mcp — Close session (optionnel)
+	# Ces limites sont volontairement permissives pour les agents et les tests
+	# et les scénarios multi-agents. Réduire en production si besoin.
+	# =========================================================================
+	rate_limit {
+		zone mesh {
+			match {
+				expression `{env.HIVEMIND_MESH_ENABLED} == "true"`
+				path /mesh/v1*
+			}
+			key {remote_host}
+			events 120
+			window 1m
+		}
+		zone mcp {
+			match {
+				path /mcp*
+			}
+			key {remote_host}
+			events 600
+			window 1m
+		}
+		zone api {
+			match {
+				path /api/*
+			}
+			key {remote_host}
+			events 120
+			window 1m
+		}
+		zone global {
+			key {remote_host}
+			events 1500
+			window 1m
+		}
+	}
+
+	# =========================================================================
+	# Route 1 : MCP Streamable HTTP — SANS WAF
+	# =========================================================================
+	# Le protocole MCP utilise Streamable HTTP (POST/GET/DELETE /mcp).
+	# Le serveur peut répondre en SSE downstream (streaming optionnel).
+	# Coraza bufférise les réponses → incompatible avec le streaming.
+	# Le body JSON peut contenir du base64 volumineux → faux positifs CRS.
+	# Certains outils peuvent prendre plusieurs minutes (consolidation LLM).
+	# =========================================================================
+	handle /mcp* {
+		reverse_proxy hivemind:8002 {
+			flush_interval -1
+			transport http {
+				read_timeout 1800s
+				write_timeout 1800s
+				response_header_timeout 1800s
+			}
+		}
+	}
+
+	# =========================================================================
+	# Route 2 : namespace pair Project Mesh — BORNE AVANT WAF
+	# =========================================================================
+	# Le matcher volontairement large réserve aussi les variantes malformées
+	# (/mesh/v10, slash encodé, double/trailing slash, etc.). L'ASGI applique
+	# ensuite la grammaire fermée des cinq routes et ne laisse jamais retomber une
+	# requête Mesh vers MCP ou l'interface web.
+	#
+	# ``max_size`` borne les octets wire bruts. La configuration applicative peut
+	# resserrer ce plafond mais jamais le dépasser. Un 413 émis ici est un refus
+	# transport non signé, pas une réponse protocolaire pair.
+	# =========================================================================
+	@mesh_enabled {
+		expression `{env.HIVEMIND_MESH_ENABLED} == "true"`
+		path /mesh/v1*
+	}
+	handle @mesh_enabled {
+		request_body {
+			max_size 256KiB
+		}
+		# Mesh bodies are canonical signed payloads with their own strict parser.
+		# Leave only this enabled handle's body to request_body + application;
+		# otherwise Coraza consumes the guarded stream and wraps typed 413 as 500.
+		import hivemind_coraza `SecRule REQUEST_URI "@beginsWith /mesh/v1" "id:900490,phase:1,pass,nolog,ctl:requestBodyAccess=Off"`
+		reverse_proxy hivemind:8002 {
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+				response_header_timeout 300s
+			}
+		}
+	}
+
+	# =========================================================================
+	# Route 3 : Tout le reste — AVEC WAF Coraza
+	# =========================================================================
+	# Protégé par OWASP CRS contre : injections SQL/NoSQL, XSS, LFI/RFI,
+	# SSRF, path traversal, scanner/bot detection.
+	# =========================================================================
+	handle {
+		# In the explicitly disabled fallback path, preserve historical full-body inspection.
+		import hivemind_coraza `# Mesh feature explicitly disabled: request body inspection remains enabled.`
+
+		# API REST — timeout généreux pour outils longs (5 min)
+		@api {
+			path /api/*
+		}
+		reverse_proxy @api hivemind:8002 {
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+				response_header_timeout 300s
+			}
+		}
+
+		# Tout le reste — timeout standard
+		reverse_proxy hivemind:8002
+	}
+
+	# =========================================================================
+	# Logging
+	# =========================================================================
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+}

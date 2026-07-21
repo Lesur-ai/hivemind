@@ -1,0 +1,335 @@
+# =============================================================================
+# Ontologie Services Managés / Infogérance
+# =============================================================================
+# Spécialisée pour l'extraction d'informations depuis des documents
+# liés à l'infogérance, services managés, MCO, support, RACI.
+
+name: managed-services
+version: "1.0"
+description: |
+  Ontologie spécialisée pour les documents de services managés et infogérance.
+  Optimisée pour extraire les périmètres de responsabilité, SLA de support,
+  processus ITIL, incidents, changements, et matrices RACI.
+
+# Instructions spécifiques pour le LLM
+context: |
+  Tu es un expert en services managés et infogérance IT.
+  Tu dois identifier avec précision :
+  - Les périmètres de responsabilité (client vs prestataire)
+  - Les processus ITIL (incidents, problèmes, changements, mises en production)
+  - Les SLA de support (GTI, GTR, plages horaires)
+  - Les rôles et responsabilités (RACI)
+  - Les escalades et astreintes
+  - Les outils et interfaces de ticketing
+  - Les indicateurs de performance (KPI)
+  
+  IMPORTANT: La clarté des responsabilités est cruciale en infogérance.
+  Identifie clairement QUI fait QUOI et QUAND.
+
+# =============================================================================
+# Types d'entités spécifiques aux Services Managés
+# =============================================================================
+entity_types:
+  # Périmètres et Services
+  - name: ManagedService
+    description: Service managé fourni
+    examples:
+      - "Administration système"
+      - "Supervision 24/7"
+      - "Gestion des sauvegardes"
+      - "Patch management"
+
+  - name: ServicePerimeter
+    description: Périmètre de service (inclus/exclus)
+    examples:
+      - "Périmètre MCO"
+      - "Infogérance niveau 1-2-3"
+      - "Administration OS"
+      - "Hors périmètre: développement applicatif"
+
+  - name: SupportLevel
+    description: Niveau de support
+    examples:
+      - "Support N1 (helpdesk)"
+      - "Support N2 (expertise)"
+      - "Support N3 (éditeur)"
+      - "Astreinte 24/7"
+
+  # Processus ITIL
+  - name: ITILProcess
+    description: Processus ITIL
+    examples:
+      - "Gestion des incidents"
+      - "Gestion des problèmes"
+      - "Gestion des changements"
+      - "Gestion des mises en production"
+
+  - name: Incident
+    description: Type ou sévérité d'incident
+    examples:
+      - "Incident P1 (critique)"
+      - "Incident P2 (majeur)"
+      - "Incident P3 (mineur)"
+      - "Incident de sécurité"
+
+  - name: ChangeType
+    description: Type de changement
+    examples:
+      - "Changement standard"
+      - "Changement normal"
+      - "Changement urgent"
+      - "Changement d'urgence"
+
+  # SLA et Engagements
+  - name: SLA
+    description: Engagement de niveau de service support
+    priority: high
+    examples:
+      - "GTI P1: 15 minutes"
+      - "GTR P1: 4 heures"
+      - "Temps de réponse: 1h ouvrable"
+      - "Taux de résolution N1: 80%"
+
+  - name: ServiceWindow
+    description: Plage de service
+    examples:
+      - "HO (heures ouvrées): 8h-18h"
+      - "HNO (heures non ouvrées)"
+      - "24/7/365"
+      - "Jours ouvrés France"
+
+  - name: Astreinte
+    description: Service d'astreinte
+    examples:
+      - "Astreinte 24/7"
+      - "Astreinte week-end"
+      - "Escalade N3"
+
+  # Rôles et Responsabilités
+  - name: Role
+    description: Rôle dans l'organisation du service
+    examples:
+      - "Service Delivery Manager"
+      - "Responsable Technique"
+      - "Analyste N2"
+      - "DBA"
+
+  - name: Team
+    description: Équipe ou groupe
+    examples:
+      - "Équipe MCO"
+      - "NOC (Network Operations Center)"
+      - "SOC (Security Operations Center)"
+      - "CAB (Change Advisory Board)"
+
+  - name: RACIResponsibility
+    description: Responsabilité RACI
+    examples:
+      - "R - Responsable"
+      - "A - Accountable"
+      - "C - Consulted"
+      - "I - Informed"
+
+  # Outils et Interfaces
+  - name: Tool
+    description: Outil de gestion de service
+    examples:
+      - "ServiceNow"
+      - "JIRA Service Management"
+      - "Console Shiva"
+      - "Nagios/Centreon"
+
+  - name: Interface
+    description: Interface ou portail
+    examples:
+      - "Portail client"
+      - "Système de ticketing"
+      - "Dashboard supervision"
+      - "API ITSM"
+
+  # Livrables et Rapports
+  - name: Deliverable
+    description: Livrable de service
+    examples:
+      - "Rapport mensuel d'activité"
+      - "Comité de pilotage"
+      - "Revue de service"
+      - "Plan de capacité"
+
+  - name: KPI
+    description: Indicateur de performance
+    examples:
+      - "MTTR (Mean Time To Repair)"
+      - "MTBF (Mean Time Between Failures)"
+      - "Taux de disponibilité"
+      - "Nombre d'incidents/mois"
+
+  # Personnes et Organisations
+  - name: Person
+    description: Contact ou responsable
+    examples:
+      - "Responsable compte client"
+      - "RSSI"
+      - "DPO"
+
+  - name: Organization
+    description: Organisation impliquée
+    examples:
+      - "Cloud Temple MCO"
+      - "Équipe DSI Client"
+      - "Éditeur logiciel"
+
+  # Activités et Tâches
+  - name: Activity
+    description: Activité d'exploitation
+    examples:
+      - "Supervision proactive"
+      - "Patch management mensuel"
+      - "Revue de logs sécurité"
+      - "Test de restauration"
+
+  - name: MaintenanceWindow
+    description: Fenêtre de maintenance
+    examples:
+      - "Maintenance mensuelle: 1er dimanche"
+      - "Maintenance d'urgence"
+      - "Créneau de mise à jour"
+
+# =============================================================================
+# Types de relations spécifiques aux Services Managés
+# =============================================================================
+relation_types:
+  - name: PROVIDES
+    description: Fournit un service
+    examples:
+      - "Cloud Temple → PROVIDES → Supervision 24/7"
+
+  - name: RESPONSIBLE_FOR
+    description: Responsable de (RACI - R)
+    examples:
+      - "Équipe MCO → RESPONSIBLE_FOR → Gestion incidents"
+
+  - name: ACCOUNTABLE_FOR
+    description: Redevable de (RACI - A)
+    examples:
+      - "Service Delivery Manager → ACCOUNTABLE_FOR → SLA"
+
+  - name: CONSULTED_FOR
+    description: Consulté pour (RACI - C)
+    examples:
+      - "Client → CONSULTED_FOR → Changements majeurs"
+
+  - name: INFORMED_OF
+    description: Informé de (RACI - I)
+    examples:
+      - "Direction → INFORMED_OF → Incidents P1"
+
+  - name: HAS_SLA
+    description: Possède un SLA
+    examples:
+      - "Incident P1 → HAS_SLA → GTI 15 min"
+
+  - name: ESCALATES_TO
+    description: Escalade vers
+    examples:
+      - "N1 → ESCALATES_TO → N2"
+      - "N2 → ESCALATES_TO → Astreinte"
+
+  - name: USES_TOOL
+    description: Utilise un outil
+    examples:
+      - "MCO → USES_TOOL → ServiceNow"
+
+  - name: PART_OF
+    description: Fait partie de
+    examples:
+      - "Patch management → PART_OF → MCO"
+
+  - name: REQUIRES_APPROVAL
+    description: Nécessite approbation
+    examples:
+      - "Changement majeur → REQUIRES_APPROVAL → CAB"
+
+  - name: PRODUCES
+    description: Produit un livrable
+    examples:
+      - "Comité pilotage → PRODUCES → Compte-rendu"
+
+  - name: MEASURED_BY
+    description: Mesuré par un KPI
+    examples:
+      - "Qualité support → MEASURED_BY → MTTR"
+
+  - name: APPLIES_TO
+    description: S'applique à
+    examples:
+      - "SLA P1 → APPLIES_TO → Infrastructure critique"
+
+  - name: DURING
+    description: Pendant une plage horaire
+    examples:
+      - "Support N1 → DURING → HO 8h-18h"
+
+  - name: EXCLUDES
+    description: Exclut du périmètre
+    examples:
+      - "Périmètre MCO → EXCLUDES → Développement"
+
+  - name: INCLUDES
+    description: Inclut dans le périmètre
+    examples:
+      - "Périmètre MCO → INCLUDES → Supervision"
+
+# =============================================================================
+# Règles d'extraction spécifiques
+# =============================================================================
+extraction_rules:
+  max_entities: 60
+  max_relations: 80
+  include_metrics: true
+  include_durations: true
+  include_amounts: false  # Moins pertinent en infogérance pure
+  extract_implicit_relations: true
+  
+  priority_entities:
+    - ManagedService
+    - SLA
+    - SupportLevel
+    - Role
+    - RACIResponsibility
+    - Activity
+
+  special_instructions: |
+    - Identifie TOUS les SLA avec leurs valeurs (GTI, GTR, temps de réponse)
+    - Distingue les niveaux de support (N1, N2, N3)
+    - Note les plages horaires de service (HO, HNO, 24/7)
+    - Identifie les responsabilités RACI
+    - Distingue ce qui est INCLUS vs EXCLUS du périmètre
+    - Identifie les processus d'escalade
+
+# =============================================================================
+# Exemples d'extraction
+# =============================================================================
+examples:
+  - input: |
+      L'équipe MCO Cloud Temple assure la supervision 24/7 de l'infrastructure.
+      GTI Incident P1: 15 minutes, GTR: 4 heures.
+      Support N1 en heures ouvrées (8h-18h), astreinte N2/N3 en HNO.
+      Rapport mensuel d'activité fourni lors du comité de pilotage.
+      Le patch management mensuel est réalisé le 1er dimanche du mois.
+    expected_entities:
+      - {name: "Équipe MCO Cloud Temple", type: "Team"}
+      - {name: "Supervision 24/7", type: "ManagedService"}
+      - {name: "GTI P1: 15 minutes", type: "SLA"}
+      - {name: "GTR P1: 4 heures", type: "SLA"}
+      - {name: "Support N1", type: "SupportLevel"}
+      - {name: "HO 8h-18h", type: "ServiceWindow"}
+      - {name: "Astreinte N2/N3", type: "Astreinte"}
+      - {name: "Rapport mensuel", type: "Deliverable"}
+      - {name: "Comité de pilotage", type: "Deliverable"}
+      - {name: "Patch management mensuel", type: "Activity"}
+      - {name: "1er dimanche du mois", type: "MaintenanceWindow"}
+    expected_relations:
+      - {from: "Équipe MCO", to: "Supervision 24/7", type: "RESPONSIBLE_FOR"}
+      - {from: "Incident P1", to: "GTI 15 min", type: "HAS_SLA"}
+      - {from: "Support N1", to: "HO 8h-18h", type: "DURING"}

@@ -1,0 +1,169 @@
+name: Public tag release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# No permission is implicit. The only write-capable job is gated by the public
+# repository identity, a protected tag, and the public-release environment.
+permissions: {}
+
+jobs:
+  verify:
+    name: Verify public tag
+    if: >-
+      github.repository == 'Lesur-ai/hivemind' &&
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release_gate.outputs.version }}
+      source_sha: ${{ steps.release_gate.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - id: release_gate
+        name: Verify tag, VERSION, changelog, and main reachability
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          commit="$(git rev-parse "${TAG_SHA}^{commit}")"
+          if [ "$(git rev-parse HEAD)" != "$commit" ]; then
+            echo "::error::Checked-out tree is not the pushed tag commit."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "::error::Tag commit ${commit} is not reachable from public main."
+            exit 1
+          fi
+          version="$(tr -d '[:space:]' < VERSION)"
+          case "$version" in
+            ""|0.0.0|0.0.0+*)
+              echo "::error::VERSION is an unreleased placeholder (${version:-empty})."
+              exit 1
+              ;;
+          esac
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+            echo "::error::VERSION is not a SemVer version (${version})."
+            exit 1
+          fi
+          if [ "v${version}" != "$TAG_NAME" ]; then
+            echo "::error::Tag ${TAG_NAME} does not match VERSION (v${version})."
+            exit 1
+          fi
+          if ! grep -Fq "## [${version}] — " CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no release section for ${version}."
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish public image and attestation
+    if: >-
+      github.repository == 'Lesur-ai/hivemind' &&
+      startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: public-release
+    concurrency:
+      group: public-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      PUBLIC_IMAGE: ghcr.io/lesur-ai/hivemind
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.verify.outputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - id: image
+        name: Build and publish public image from the verified tag commit
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64/v8
+          push: true
+          tags: ${{ env.PUBLIC_IMAGE }}:${{ needs.verify.outputs.version }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.verify.outputs.source_sha }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+          sbom: true
+          provenance: mode=max
+
+      - name: Record immutable image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          SOURCE_SHA: ${{ needs.verify.outputs.source_sha }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          IMAGE_NAME: ${{ env.PUBLIC_IMAGE }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Build did not return a SHA-256 image digest."
+            exit 1
+          fi
+          export IMAGE_DIGEST SOURCE_SHA VERSION IMAGE_NAME
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = {
+              "image": os.environ["IMAGE_NAME"],
+              "digest": os.environ["IMAGE_DIGEST"],
+              "source_sha": os.environ["SOURCE_SHA"],
+              "version": os.environ["VERSION"],
+          }
+          Path("public-release-evidence.json").write_text(
+              json.dumps(evidence, sort_keys=True, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          {
+            printf '### Public image evidence\n\n'
+            printf '* Image: `%s@%s`\n' "$IMAGE_NAME" "$IMAGE_DIGEST"
+            printf '* Source commit: `%s`\n' "$SOURCE_SHA"
+            printf '* Version: `%s`\n' "$VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload public release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-release-evidence-${{ needs.verify.outputs.version }}
+          path: public-release-evidence.json
+          if-no-files-found: error
+
+      - name: Attest public image provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.PUBLIC_IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true

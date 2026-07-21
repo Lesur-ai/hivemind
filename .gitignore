@@ -1,0 +1,81 @@
+# === Dossiers de travail ===
+chantier/
+memory-bank/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# === Test / Coverage artifacts ===
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+
+# === Environment / Secrets ===
+.env
+.env.local
+.env.production
+*.pem
+*.key
+
+# === Docker ===
+docker-compose.override.yml
+docker-compose-local.yml
+
+# === MCP config (local) ===
+.mcp.json
+.codex/
+
+# === IDE ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# === Logs ===
+*.log
+logs/
+
+# === OS ===
+Thumbs.db
+.DS_Store
+DESIGN/Graph-mem/
+.clinerules/
+starter-kit/
+DESIGN/mcp-vault
+DESIGN/mcp-mission
+DESIGN/mcp-agent
+DESIGN/EVALUATION.md
+DESIGN/SYNTHESE_TRANSVERSE.md
+waf/.smbdeleteAAA73f84.4
+.venv-tests/
+scripts/test_hallucination.py
+
+# === Embedded Graph Memory runtime (services/graph-memory/) ===
+# Caches / venvs / secrets are already covered by the global Python + secret
+# rules above (they match at any depth). These cover datastore volumes if an
+# operator ever runs the embedded service standalone with bind mounts; the
+# default compose uses named volumes (P7-2), so these normally never appear.
+neo4j_data/
+neo4j_logs/
+qdrant_data/
+qdrant_snapshots/
+
+# === P8-7 admin console proof harness output (scripts/admin_console_proof.py) ===
+# Screenshots + proof-report.json are attached to the PR, never committed, so the
+# head SHA stays stable across proof re-runs.
+proof-artifacts/

@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Temple — Graph Memory</title>
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="/static/css/graph.css">
+</head>
+<body>
+
+<!-- ═══════════════ ÉCRAN DE LOGIN ═══════════════ -->
+<div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+        <img src="/static/img/logo-cloudtemple.svg" alt="Cloud Temple" class="login-logo">
+        <h2>Graph Memory</h2>
+        <p class="login-subtitle">Visualisation du graphe de connaissances</p>
+        <div class="login-form">
+            <label for="loginToken">🔑 Token d'accès</label>
+            <input type="password" id="loginToken" placeholder="Collez votre token ici…" autocomplete="off" spellcheck="false">
+            <div class="login-error" id="loginError"></div>
+            <button id="loginBtn">Se connecter</button>
+        </div>
+        <p class="login-hint">Contactez votre administrateur pour obtenir un token d'accès.</p>
+    </div>
+</div>
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<div class="header">
+    <div class="header-brand">
+        <img src="/static/img/logo-cloudtemple.svg" alt="Cloud Temple" class="header-logo">
+        <span class="header-separator">|</span>
+        <h1>Graph Memory</h1>
+    </div>
+    <div class="controls">
+        <select id="memorySelect"><option value="">-- Mémoire --</option></select>
+        <button id="loadBtn" disabled>Charger</button>
+        <button class="btn-settings" id="settingsBtn">⚙️</button>
+        <button class="btn-settings btn-fit" id="fitBtn">🔍 Fit</button>
+        <button class="btn-settings btn-ask-header" id="askBtn" disabled>💬 Ask</button>
+        <span class="header-separator">|</span>
+        <select id="layoutSelect" class="layout-select" title="Forme du graphe">
+            <option value="barnesHut">🌿 Organique</option>
+            <option value="forceAtlas2">🔬 ForceAtlas2</option>
+            <option value="hierarchicalUD">📐 Hiérarchie ↓</option>
+            <option value="hierarchicalLR">📐 Hiérarchie →</option>
+        </select>
+        <button class="btn-toggle active" id="toggleEdgeLabels" title="Afficher/masquer les labels sur les arêtes">🏷️ Labels</button>
+        <button class="btn-toggle active" id="toggleShadows" title="Afficher/masquer les ombres sur les nœuds">💡 Ombres</button>
+        <button class="btn-toggle active" id="toggleSmooth" title="Arêtes courbes ou droites">〰️ Courbes</button>
+        <button class="btn-toggle btn-toggle-docs active" id="toggleMentions" title="Afficher/masquer les nœuds Document et les liens MENTIONS dans le graphe">📄 Documents</button>
+        <button class="btn-logout" id="logoutBtn" title="Déconnexion">🔓</button>
+    </div>
+</div>
+
+<!-- ═══════════════ BANNIÈRE MODE ISOLATION ═══════════════ -->
+<div class="isolation-banner" id="isolationBanner">
+    <span>🔬 <strong>Mode Focus</strong> — Affichage du sous-graphe lié à votre question</span>
+    <button id="exitIsolationBtn">🔄 Graphe complet</button>
+</div>
+
+<!-- ═══════════════ MODALE PARAMÈTRES ═══════════════ -->
+<div class="modal-overlay" id="settingsModal">
+    <div class="modal">
+        <h2>⚙️ Paramètres du graphe</h2>
+        <div class="param-group"><label>Distance (springLength)</label><div class="param-row"><input type="range" id="paramSpringLength" min="100" max="800" value="400"><span class="param-value" id="valSpringLength">400</span></div></div>
+        <div class="param-group"><label>Répulsion (gravity)</label><div class="param-row"><input type="range" id="paramGravity" min="1000" max="50000" value="15000"><span class="param-value" id="valGravity">-15000</span></div></div>
+        <div class="param-group"><label>Taille nœuds</label><div class="param-row"><input type="range" id="paramNodeSize" min="10" max="50" value="20"><span class="param-value" id="valNodeSize">20</span></div></div>
+        <div class="param-group"><label>Taille texte</label><div class="param-row"><input type="range" id="paramFontSize" min="8" max="20" value="11"><span class="param-value" id="valFontSize">11</span></div></div>
+        <div class="modal-actions"><button class="btn-secondary" id="resetParams">Reset</button><button id="applyParams">Appliquer</button></div>
+    </div>
+</div>
+
+<!-- ═══════════════ LAYOUT PRINCIPAL ═══════════════ -->
+<div class="main">
+
+    <!-- ═══════════════ SIDEBAR ═══════════════ -->
+    <div class="sidebar">
+
+        <!-- Stats -->
+        <h3>📊 Stats</h3>
+        <div class="stats">
+            <div class="stat"><span>Entités</span><span class="stat-value" id="nodeCount">-</span></div>
+            <div class="stat"><span>Relations</span><span class="stat-value" id="edgeCount">-</span></div>
+        </div>
+
+        <!-- ═══ FILTRE : Types d'entités ═══ -->
+        <div class="filter-section">
+            <div class="filter-header" data-action="toggle-section" data-section="entityTypes">
+                <span>🏷️ Types d'entités</span>
+                <span class="filter-chevron" id="chevron-entityTypes">▼</span>
+            </div>
+            <div class="filter-actions" id="actions-entityTypes">
+                <button data-action="select-all-entity-types" title="Tout afficher">Tous</button>
+                <button data-action="select-no-entity-types" title="Tout masquer">Aucun</button>
+                <button data-action="invert-entity-types" title="Inverser">Inverser</button>
+            </div>
+            <div class="filter-body" id="body-entityTypes">
+                <!-- Checkboxes générées dynamiquement par sidebar.js -->
+                <div class="filter-empty">Chargez une mémoire…</div>
+            </div>
+        </div>
+
+        <!-- ═══ FILTRE : Types de relations ═══ -->
+        <div class="filter-section">
+            <div class="filter-header" data-action="toggle-section" data-section="edgeTypes">
+                <span>🔗 Types de relations</span>
+                <span class="filter-chevron" id="chevron-edgeTypes">▼</span>
+            </div>
+            <div class="filter-actions" id="actions-edgeTypes">
+                <button data-action="select-all-edge-types" title="Tous">Tous</button>
+                <button data-action="select-no-edge-types" title="Aucun">Aucun</button>
+                <button data-action="invert-edge-types" title="Inverser">Inverser</button>
+            </div>
+            <div class="filter-body" id="body-edgeTypes">
+                <div class="filter-empty">Chargez une mémoire…</div>
+            </div>
+        </div>
+
+        <!-- ═══ FILTRE : Documents ═══ -->
+        <div class="filter-section">
+            <div class="filter-header" data-action="toggle-section" data-section="documents">
+                <span>📄 Documents</span>
+                <span class="filter-chevron" id="chevron-documents">▼</span>
+            </div>
+            <div class="filter-actions" id="actions-documents">
+                <button data-action="select-all-documents" title="Tous">Tous</button>
+                <button data-action="select-no-documents" title="Aucun">Aucun</button>
+            </div>
+            <div class="filter-body" id="body-documents">
+                <div class="filter-empty">Chargez une mémoire…</div>
+            </div>
+        </div>
+
+        <!-- Recherche -->
+        <h3>🔍 Recherche</h3>
+        <input type="text" id="searchInput" placeholder="Rechercher une entité…">
+
+        <!-- Liste d'entités -->
+        <h3>📋 Entités <span id="entityListCount" class="entity-list-count"></span></h3>
+        <div class="entity-list" id="entityList"></div>
+
+    </div>
+
+    <!-- ═══════════════ ZONE GRAPHE ═══════════════ -->
+    <div class="graph-container">
+        <div id="graph"></div>
+        <div class="loading hidden" id="loading"><div class="spinner"></div><p>Chargement…</p></div>
+        <div class="node-details" id="nodeDetails">
+            <button class="node-details-close" id="nodeDetailsClose">✕</button>
+            <div id="detailContent"></div>
+        </div>
+
+        <!-- Panneau ASK (en bas du graphe) -->
+        <div class="ask-panel" id="askPanel">
+            <div class="ask-resize-handle" id="askResizeHandle" title="Glisser pour redimensionner"></div>
+            <div class="ask-header">
+                <span>💬</span>
+                <input type="text" id="askInput" placeholder="Posez une question sur cette mémoire…">
+                <button id="askSubmitBtn">Envoyer</button>
+                <button class="ask-close" id="askCloseBtn">✕</button>
+            </div>
+            <div class="ask-body" id="askBody">
+                <p class="ask-placeholder">Posez une question en langage naturel. Les entités trouvées seront mises en évidence dans le graphe.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════ SCRIPTS MODULAIRES ═══════════════ -->
+<script src="/static/js/config.js"></script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/graph.js"></script>
+<script src="/static/js/sidebar.js"></script>
+<script src="/static/js/ask.js"></script>
+<script src="/static/js/app.js"></script>
+
+</body>
+</html>

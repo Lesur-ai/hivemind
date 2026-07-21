@@ -1,0 +1,9 @@
+# Playwright / npm install artifacts — never committed. package.json +
+# package-lock.json pin the toolchain; the browser and node_modules are
+# provisioned by `npm ci` + `npx playwright install` (locally) or the
+# Playwright container (CI job `e2e`).
+node_modules/
+test-results/
+playwright-report/
+blob-report/
+.playwright/

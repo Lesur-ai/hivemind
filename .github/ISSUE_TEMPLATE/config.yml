@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Lesur-ai/hivemind/security/advisories/new
+    about: Use a private GitHub Security Advisory. Never disclose vulnerability details in a public issue.
+  - name: Read the support guide
+    url: https://github.com/Lesur-ai/hivemind/blob/main/SUPPORT.md
+    about: Check the supported troubleshooting and reproducibility information before opening an issue.

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hivemind"
+dynamic = ["version"]
+requires-python = ">=3.11"
+# LM2-26 fix : bornes basses remontées pour exclure les versions vulnérables
+# connues. uv.lock épingle les versions exactes ; ces bornes protègent les
+# builds `pip install live-memory` sans uv.lock (CVE-2026-32871 sur mcp<1.27,
+# CVE-2026-52869/52870 et CVE-2026-59950 sur mcp<1.28.1).
+# LM2-27 fix : httpx-sse retiré (introuvable dans le code source, surface
+# d'attaque inutile depuis la migration Streamable HTTP).
+dependencies = [
+    "mcp[cli]>=1.28.1",       # CVE-2026-32871/52869/52870/59950 — fixé en 1.28.1
+    "uvicorn>=0.32.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "click>=8.1",
+    "rich>=13.0",
+    "prompt-toolkit>=3.0",
+    "httpx>=0.28",
+    "boto3>=1.40",
+    "openai>=1.50",
+    "python-dotenv>=1.0",
+    "cryptography>=48.0.1",   # Ed25519 signatures ; HM-06 : >=48.0.1 corrige
+                              # GHSA-537c-gmf6-5ccf (OpenSSL statiquement lié).
+]
+
+[dependency-groups]
+dev = ["pytest>=9.0", "pytest-asyncio>=1.3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Restreint le collect pytest au répertoire officiel `tests/`.
+# Les scripts utilitaires (`scripts/test_*.py`, `chantier/test_*.py`)
+# sont des outils E2E manuels ou des reliques historiques — ils
+# ne doivent pas faire échouer la CI.
+testpaths = ["tests"]
+markers = [
+    # Exploration étendue opt-in du property test Hivemind (issue #11).
+    # Exclue du run CI nominal ; activer avec `-m slow` + HIVEMIND_PROPERTY_SLOW=1.
+    "slow: exhaustive/opt-in checks excluded from the default test run",
+]

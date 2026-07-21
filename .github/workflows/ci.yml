@@ -1,0 +1,73 @@
+name: Public CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# This workflow is safe for fork pull requests: it neither requests package
+# permissions nor references repository, organization, or environment secrets.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test public tree
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js for browser-harness tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Run public test suite
+        run: uv run pytest tests/ -q
+
+      - name: Check public documentation links
+        run: uv run python scripts/check_doc_links.py
+
+  build:
+    name: Build ${{ matrix.name }} image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Hivemind
+            context: .
+          - name: WAF
+            context: waf
+          - name: Graph Memory
+            context: services/graph-memory
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build image without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          push: false

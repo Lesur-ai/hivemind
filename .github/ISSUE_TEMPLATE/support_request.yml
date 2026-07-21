@@ -1,0 +1,37 @@
+name: Support request
+description: Ask a reproducible, non-sensitive usage question
+title: "[Support]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities or share credentials here. Follow `SECURITY.md` for private reporting.
+  - type: input
+    id: version
+    attributes:
+      label: Hivemind version or commit
+      description: Give the released tag, VERSION value, or exact commit.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and deployment
+      description: Include the deployment shape, OS, runtime, and relevant versions.
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question and expected result
+      description: Explain what you tried, what you expected, and what happened.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproduction or test evidence
+      description: Include minimal redacted commands, logs, configuration, or a test case where useful.
+    validations:
+      required: true

@@ -1,0 +1,194 @@
+{
+  "_comment": "Frozen MCP tool surface for the single public facade. Editing this file is a DELIBERATE surface change: any public tool added, renamed, removed, or relevelled MUST update this fixture and the test header MUST justify the change. See tests/test_mcp_tool_surface.py and docs/TOOL_MAPPING.md (ADR-0002, ADR-0005).",
+  "_permission_level_format": "Each entry is either a scalar level (single unconditional gate) or an object {'default': <level>, 'conditional': {<key>: <level>}} where <key> is a canonical form of an ast.If test that the handler uses to gate a check_*_permission / check_access call on a parameter. Canonical keys: '<param>=True' / '<param>=False' for Name/UnaryOp(Not) tests, '<param>!=<other>' / '<param>==<other>' for Compare tests. See _canonical_condition_key in tests/test_mcp_tool_surface.py.",
+  "total": 61,
+  "historical_count": 48,
+  "alias_count": 13,
+  "tier_alias_counts": {
+    "short": 3,
+    "mid": 6,
+    "long": 4
+  },
+  "alias_map": {
+    "live_note": "short_note",
+    "live_read": "short_read",
+    "live_search": "short_search",
+    "bank_read": "mid_read",
+    "bank_read_all": "mid_read_all",
+    "bank_list": "mid_list",
+    "bank_write": "mid_write",
+    "bank_consolidate": "mid_consolidate",
+    "bank_delete": "mid_delete",
+    "graph_connect": "long_connect",
+    "graph_push": "long_push",
+    "graph_status": "long_status",
+    "graph_disconnect": "long_disconnect"
+  },
+  "tier_aliases": {
+    "short": [
+      "short_note",
+      "short_read",
+      "short_search"
+    ],
+    "mid": [
+      "mid_consolidate",
+      "mid_delete",
+      "mid_list",
+      "mid_read",
+      "mid_read_all",
+      "mid_write"
+    ],
+    "long": [
+      "long_connect",
+      "long_disconnect",
+      "long_push",
+      "long_status"
+    ]
+  },
+  "historical": [
+    "admin_audit_recent",
+    "admin_bulk_update_tokens",
+    "admin_create_token",
+    "admin_delete_token",
+    "admin_gc_notes",
+    "admin_list_tokens",
+    "admin_purge_tokens",
+    "admin_revoke_token",
+    "admin_update_token",
+    "backup_create",
+    "backup_delete",
+    "backup_download",
+    "backup_list",
+    "backup_restore",
+    "bank_compact",
+    "bank_consolidate",
+    "bank_consolidation_queues",
+    "bank_consolidation_status",
+    "bank_delete",
+    "bank_list",
+    "bank_read",
+    "bank_read_all",
+    "bank_repair",
+    "bank_stale_spaces",
+    "bank_write",
+    "graph_connect",
+    "graph_disconnect",
+    "graph_push",
+    "graph_status",
+    "live_note",
+    "live_read",
+    "live_search",
+    "long_ingest",
+    "long_query",
+    "space_create",
+    "space_delete",
+    "space_export",
+    "space_info",
+    "space_invite_token",
+    "space_list",
+    "space_rules",
+    "space_summary",
+    "space_update",
+    "space_update_rules",
+    "system_about",
+    "system_health",
+    "system_whoami",
+    "token_create"
+  ],
+  "permission_level": {
+    "admin_audit_recent": "admin",
+    "admin_bulk_update_tokens": "admin",
+    "admin_create_token": "admin",
+    "admin_delete_token": "admin",
+    "admin_gc_notes": "admin",
+    "admin_list_tokens": "admin",
+    "admin_purge_tokens": "admin",
+    "admin_revoke_token": "admin",
+    "admin_update_token": "admin",
+    "backup_create": {
+      "default": "public",
+      "conditional": {
+        "space_id=False": "admin",
+        "space_id=True": "write"
+      }
+    },
+    "backup_delete": "manage",
+    "backup_download": "read",
+    "backup_list": {
+      "default": "read",
+      "conditional": {
+        "space_id=True": "read"
+      }
+    },
+    "backup_restore": "manage",
+    "bank_compact": "manage",
+    "bank_consolidate": {
+      "default": "write",
+      "conditional": {
+        "agent == ''": "manage",
+        "agent!=caller": "manage"
+      }
+    },
+    "bank_consolidation_queues": "read",
+    "bank_consolidation_status": "read",
+    "bank_delete": "manage",
+    "bank_list": "read",
+    "bank_read": "read",
+    "bank_read_all": "read",
+    "bank_repair": "manage",
+    "bank_stale_spaces": "read",
+    "bank_write": "manage",
+    "graph_connect": "write",
+    "graph_disconnect": {
+      "default": "write",
+      "conditional": {
+        "use_embedded=True": "manage"
+      }
+    },
+    "graph_push": {
+      "default": "write",
+      "conditional": {
+        "include_volatile=True": "manage"
+      }
+    },
+    "graph_status": "read",
+    "live_note": "write",
+    "live_read": "read",
+    "live_search": "read",
+    "long_ingest": "manage",
+    "long_query": "read",
+    "space_create": "manage",
+    "space_delete": "manage",
+    "space_export": "read",
+    "space_info": "read",
+    "space_invite_token": "manage",
+    "space_list": "read",
+    "space_rules": "read",
+    "space_summary": "read",
+    "space_update": "write",
+    "space_update_rules": "manage",
+    "system_about": "public",
+    "system_health": "public",
+    "system_whoami": "read",
+    "token_create": "manage"
+  },
+  "live_note_contract": {
+    "_comment": "Token=Agent contract for live_note (v0.8.1): the agent identity is always taken from the auth token's client_name, never a parameter. Cat\u00e9gorie set is frozen for the consolidator's category-key index.",
+    "categories": [
+      "observation",
+      "decision",
+      "todo",
+      "insight",
+      "question",
+      "progress",
+      "issue"
+    ],
+    "parameters": [
+      "space_id",
+      "category",
+      "content",
+      "tags"
+    ],
+    "agent_parameter_forbidden": true
+  }
+}

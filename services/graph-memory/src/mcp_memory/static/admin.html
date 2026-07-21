@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Temple — Graph Memory Admin</title>
+    <link rel="stylesheet" href="/static/css/admin.css?v=3.2.0-admin">
+</head>
+<body>
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-card">
+            <img src="/static/img/logo-cloudtemple.svg" alt="Cloud Temple" class="login-logo">
+            <h2>Graph Memory <span class="login-badge">Admin</span></h2>
+            <p class="login-subtitle">Administration console</p>
+            <div class="login-form">
+                <label for="loginToken">Access Token</label>
+                <input type="password" id="loginToken" placeholder="Paste your token..." autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+                <div class="login-error" id="loginError"></div>
+                <button id="loginBtn">Sign in</button>
+            </div>
+        </div>
+    </div>
+
+    <header class="header">
+        <div class="header-brand">
+            <img src="/static/img/logo-cloudtemple.svg" alt="Cloud Temple" class="header-logo">
+            <span class="header-sep">|</span>
+            <h1>Graph Memory</h1>
+            <span class="header-badge">Admin</span>
+            <span class="header-version" id="headerVersion"></span>
+        </div>
+        <div class="header-right">
+            <span class="header-user" id="headerUser"></span>
+            <a href="/graph" class="header-link">Graph</a>
+            <button class="btn-logout" id="logoutBtn" title="Logout">Logout</button>
+        </div>
+    </header>
+
+    <div class="admin-layout">
+        <nav class="sidebar">
+            <div class="sidebar-section" id="sidebarNav"></div>
+        </nav>
+        <main class="content" id="content">
+            <div class="page-loading">Loading...</div>
+        </main>
+    </div>
+
+    <script src="/static/js/admin-api.js?v=3.2.0-admin"></script>
+    <script src="/static/js/admin-app.js?v=3.2.0-admin"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+# Vendored third-party runtime — preserve upstream bytes verbatim.
+#
+# The embedded Graph Memory runtime under services/graph-memory/ is vendored
+# from cloud-temple/graph-memory @ ae9afb0b (Apache-2.0; see THIRD_PARTY_NOTICES.md).
+# Disable whitespace error checks (so `git diff --check` / `git apply` do not flag
+# upstream trailing whitespace as a Hivemind defect) and mark the tree as vendored
+# so GitHub language stats treat it as imported source rather than first-party code.
+services/graph-memory/** -whitespace linguist-vendored

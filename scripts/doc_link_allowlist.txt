@@ -1,0 +1,9 @@
+# scripts/doc_link_allowlist.txt — release-gate docs link-check allowlist.
+#
+# One entry per line; entries are paths resolved relative to the repo root.
+# Comments start with `#`; blank lines are ignored. Loaded by
+# scripts/check_doc_links.py (see also the DOC_LINK_ALLOWLIST env var).
+#
+# Allowlist policy: only add a target that is *intentionally* drafted by a
+# sibling P6 child PR not yet merged into `main`. Once the sibling lands,
+# remove the entry. The allowlist is not a way to silence real breakage.

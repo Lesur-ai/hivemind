@@ -1,0 +1,513 @@
+{
+  "version": 1,
+  "registered_total": 61,
+  "registry_entries": 48,
+  "serialized_schema_budget_bytes": 65536,
+  "discovery": {
+    "read": [
+      "system_about",
+      "system_health",
+      "system_whoami",
+      "space_list",
+      "space_info",
+      "space_rules",
+      "space_summary",
+      "short_read",
+      "short_search",
+      "mid_list",
+      "mid_read",
+      "mid_read_all",
+      "bank_consolidation_queues",
+      "bank_consolidation_status",
+      "bank_stale_spaces",
+      "long_query",
+      "long_status"
+    ],
+    "write": [
+      "system_about",
+      "system_health",
+      "system_whoami",
+      "space_list",
+      "space_info",
+      "space_rules",
+      "space_summary",
+      "short_read",
+      "short_search",
+      "mid_list",
+      "mid_read",
+      "mid_read_all",
+      "bank_consolidation_queues",
+      "bank_consolidation_status",
+      "bank_stale_spaces",
+      "long_query",
+      "long_status",
+      "short_note",
+      "long_push",
+      "mid_consolidate"
+    ],
+    "manage": [
+      "system_about",
+      "system_health",
+      "system_whoami",
+      "space_list",
+      "space_info",
+      "space_rules",
+      "space_summary",
+      "short_read",
+      "short_search",
+      "mid_list",
+      "mid_read",
+      "mid_read_all",
+      "bank_consolidation_queues",
+      "bank_consolidation_status",
+      "bank_stale_spaces",
+      "long_query",
+      "long_status",
+      "short_note",
+      "long_push",
+      "mid_consolidate",
+      "long_ingest",
+      "space_create",
+      "token_create",
+      "space_invite_token"
+    ],
+    "admin": [
+      "system_about",
+      "system_health",
+      "system_whoami",
+      "space_list",
+      "space_info",
+      "space_rules",
+      "space_summary",
+      "short_read",
+      "short_search",
+      "mid_list",
+      "mid_read",
+      "mid_read_all",
+      "bank_consolidation_queues",
+      "bank_consolidation_status",
+      "bank_stale_spaces",
+      "long_query",
+      "long_status",
+      "short_note",
+      "long_push",
+      "mid_consolidate",
+      "long_ingest",
+      "space_create",
+      "token_create",
+      "space_invite_token"
+    ]
+  },
+  "entries": [
+    {
+      "canonical_name": "system_about",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "public",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "system_health",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "public",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "system_whoami",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "space_list",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "space_info",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "space_rules",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "space_summary",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "short_read",
+      "aliases": [
+        "live_read"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "short_search",
+      "aliases": [
+        "live_search"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "mid_list",
+      "aliases": [
+        "bank_list"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "mid_read",
+      "aliases": [
+        "bank_read"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "mid_read_all",
+      "aliases": [
+        "bank_read_all"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "bank_consolidation_queues",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_ids"
+    },
+    {
+      "canonical_name": "bank_consolidation_status",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "bank_stale_spaces",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_ids"
+    },
+    {
+      "canonical_name": "long_query",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_status",
+      "aliases": [
+        "graph_status"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "short_note",
+      "aliases": [
+        "live_note"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_push",
+      "aliases": [
+        "graph_push"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "mid_consolidate",
+      "aliases": [
+        "bank_consolidate"
+      ],
+      "audience": "agent_core",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_ingest",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "space_create",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "token_create",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "space_invite_token",
+      "aliases": [],
+      "audience": "agent_core",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "space_update",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "space_update_rules",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "space_export",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "space_delete",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "mid_write",
+      "aliases": [
+        "bank_write"
+      ],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "mid_delete",
+      "aliases": [
+        "bank_delete"
+      ],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "bank_repair",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "bank_compact",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_connect",
+      "aliases": [
+        "graph_connect"
+      ],
+      "audience": "operator",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_disconnect",
+      "aliases": [
+        "graph_disconnect"
+      ],
+      "audience": "operator",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "backup_create",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "backup_list",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "backup_restore",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "backup_download",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "backup_delete",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_audit_recent",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_create_token",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_list_tokens",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "read",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_revoke_token",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_delete_token",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_purge_tokens",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_update_token",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_bulk_update_tokens",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "mutation",
+      "space_scope_argument": null
+    },
+    {
+      "canonical_name": "admin_gc_notes",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "admin",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    }
+  ]
+}

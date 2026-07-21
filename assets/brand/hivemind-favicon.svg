@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="48" height="48" fill="none" role="img" aria-label="Hivemind">
+  <title>Hivemind — favicon (5-node reduction, legible to 16px)</title>
+  <!-- Below 24px: drop the amber halo and the two side mid nodes, thicken the
+       joins, enlarge the remaining five nodes. The H, three rows and amber
+       centre survive. Source: Hivemind Brand Book. -->
+  <line x1="24" y1="26" x2="24" y2="70" stroke="#111827" stroke-width="4" stroke-linecap="round" opacity="0.3"/>
+  <line x1="72" y1="26" x2="72" y2="70" stroke="#111827" stroke-width="4" stroke-linecap="round" opacity="0.3"/>
+  <line x1="24" y1="48" x2="72" y2="48" stroke="#111827" stroke-width="4" stroke-linecap="round" opacity="0.3"/>
+  <circle cx="24" cy="26" r="9" fill="#00A7C7"/>
+  <circle cx="72" cy="26" r="9" fill="#00A7C7"/>
+  <circle cx="48" cy="48" r="11" fill="#F59E0B"/>
+  <circle cx="24" cy="70" r="9" fill="#111827"/>
+  <circle cx="72" cy="70" r="9" fill="#111827"/>
+</svg>

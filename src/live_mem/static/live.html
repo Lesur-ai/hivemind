@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hivemind — Shared Agent Memory</title>
+    <link rel="icon" href="/static/img/hivemind-mark-dark.svg">
+    <!-- LM2-06 fix : libs vendored localement (plus de dépendance CDN runtime).
+         LM2-19 fix : DOMPurify utilisé pour sanitiser le HTML produit par marked.
+         Voir static/vendor/README.md pour les versions et la procédure de mise à jour. -->
+    <script src="/static/vendor/marked.min.js"></script>
+    <script src="/static/vendor/purify.min.js"></script>
+    <link rel="stylesheet" href="/static/css/live.css">
+</head>
+<body>
+
+<!-- ═══════════════ ÉCRAN DE LOGIN ═══════════════ -->
+<div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+        <img src="/static/img/hivemind-mark-dark.svg" alt="Hivemind" class="login-logo">
+        <h2>Hivemind</h2>
+        <p class="login-subtitle">Vendor-neutral memory for AI agents</p>
+        <div class="login-form">
+            <label for="loginToken">🔑 Access Token</label>
+            <input type="password" id="loginToken" placeholder="Paste your token here…" autocomplete="off" spellcheck="false" data-1p-ignore data-lpignore="true">
+            <div class="login-error" id="loginError"></div>
+            <button id="loginBtn">Sign in</button>
+        </div>
+        <p class="login-hint">Your project memory stays in its Hivemind space.</p>
+    </div>
+</div>
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<div class="header">
+    <div class="header-brand">
+        <img src="/static/img/hivemind-mark-dark.svg" alt="Hivemind" class="header-logo">
+        <span class="header-separator">|</span>
+        <h1>Hivemind</h1>
+        <span class="header-version" id="headerVersion"></span>
+    </div>
+    <div class="controls">
+        <select id="spaceSelect"><option value="">-- Space --</option></select>
+        <span class="header-separator">|</span>
+        <label class="refresh-label">
+            🔄 <select id="refreshInterval" title="Auto-refresh">
+                <option value="0">Manual</option>
+                <option value="3">3s</option>
+                <option value="5" selected>5s</option>
+                <option value="10">10s</option>
+                <option value="30">30s</option>
+            </select>
+        </label>
+        <span class="col-status" id="globalStatus">
+            <span class="dot paused"></span>
+            <span class="status-text">—</span>
+            <div class="health-tooltip" id="healthTooltip">Loading…</div>
+        </span>
+        <button class="btn-logout" id="logoutBtn" title="Sign out">🔓</button>
+    </div>
+</div>
+
+<!-- ═══════════════ LAYOUT PRINCIPAL ═══════════════ -->
+<div class="main" id="mainLayout">
+
+    <!-- Placeholder (avant sélection) -->
+    <div class="placeholder" id="placeholder">
+        <div class="placeholder-icon">🧠</div>
+        <h2>Hivemind</h2>
+        <p>Select a memory space</p>
+    </div>
+
+    <!-- Dashboard (gauche) -->
+    <div class="panel-left" id="panelLeft" style="display:none">
+        <div class="panel-title">📊 Dashboard</div>
+        <div class="dashboard-content" id="dashboardContent"></div>
+    </div>
+
+    <!-- Contenu (droite) -->
+    <div class="panel-right" id="panelRight" style="display:none">
+
+        <!-- Zone Live (haut) -->
+        <div class="live-panel" id="livePanel">
+            <div class="panel-title">
+                🔴 Short <span class="live-count" id="liveCount"></span>
+            </div>
+            <div class="live-content" id="liveContent"></div>
+        </div>
+
+        <!-- Séparateur redimensionnable -->
+        <div class="resizer" id="resizer" title="Drag to resize"></div>
+
+        <!-- Zone Bank (bas) -->
+        <div class="bank-panel" id="bankPanel">
+            <div class="panel-title">📘 Mid Bank <span class="bank-count" id="bankCount"></span></div>
+            <div class="bank-tabs" id="bankTabs"></div>
+            <div class="bank-content" id="bankContent">
+                <div class="empty-state">No consolidated bank files</div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- ═══════════════ SCRIPTS ═══════════════ -->
+<script src="/static/js/config.js"></script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/sidebar.js"></script>
+<script src="/static/js/dashboard.js"></script>
+<script src="/static/js/timeline.js"></script>
+<script src="/static/js/bank.js"></script>
+<script src="/static/js/app.js"></script>
+
+</body>
+</html>

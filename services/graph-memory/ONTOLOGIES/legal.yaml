@@ -1,0 +1,412 @@
+# =============================================================================
+# Ontologie Juridique/Contractuelle
+# =============================================================================
+# Spécialisée pour l'extraction d'informations depuis des contrats,
+# avenants, NDA, conditions générales, conventions de services, etc.
+
+name: legal
+version: "1.0"
+description: |
+  Ontologie spécialisée pour les documents juridiques et contractuels.
+  Optimisée pour extraire les clauses, parties prenantes, engagements,
+  montants, durées et obligations contractuelles.
+
+# Instructions spécifiques pour le LLM
+context: |
+  Tu es un expert juridique spécialisé dans l'analyse de contrats et documents légaux.
+  
+  ⚠️ RÈGLES CRITIQUES D'EXTRACTION:
+  
+  1. UTILISE OBLIGATOIREMENT les types d'entités définis ci-dessous (pas "Other"!)
+  2. Pour chaque CERTIFICATION mentionnée (SecNumCloud, HDS, ISO, SOC, etc.) → type = "Certification"
+  3. Pour chaque DURÉE (36 mois, 6 mois, 30 jours, etc.) → type = "Duration"
+  4. Pour chaque MONTANT (EUR, euros, prix, TOTAL) → type = "Amount"
+  5. Pour chaque SLA/DISPONIBILITÉ (99.95%, GTI, GTR, etc.) → type = "SLA"
+  6. Pour chaque PERSONNE avec fonction → type = "LegalRepresentative"
+  7. Pour chaque ENTREPRISE/ORGANISATION → type = "Organization"
+  8. Pour chaque CLAUSE contractuelle → type = "Clause"
+  
+  ⚠️ MONTANTS - RÈGLES STRICTES:
+  1. Extrais CHAQUE montant mentionné avec son contexte
+  2. Quand tu vois "Total" ou "estimé" ou "récapitulatif" → C'EST UNE ENTITÉ PRIORITAIRE!
+  3. Format obligatoire pour les totaux: "X EUR HT (total mensuel/total annuel/total estimé)"
+  4. EXEMPLE: "Total mensuel estimé: 3 150 EUR HT" → OBLIGATOIRE créer: "3 150 EUR HT (total mensuel estimé)"
+  5. NE PAS calculer les totaux toi-même - extrais le montant EXACT du document
+  6. Les mots "Total", "Sous-total", "Estimé", "Global" signalent toujours un montant important
+  
+  ⚠️ CERTIFICATIONS - RÈGLES DE RELATIONS:
+  1. Quand une phrase dit "Le prestataire garantit/détient/possède [certification]"
+  2. → CRÉER une relation GUARANTEES entre l'organisation et la certification
+  3. EXEMPLE: "Cloud Temple garantit SecNumCloud, HDS, ISO 27001"
+     → Relations: Cloud Temple SAS → GUARANTEES → SecNumCloud
+                  Cloud Temple SAS → GUARANTEES → HDS
+                  Cloud Temple SAS → GUARANTEES → ISO 27001
+  4. Le mot "garantit" ou "garanties" signale TOUJOURS une relation GUARANTEES!
+  
+  ⚠️ NE JAMAIS utiliser le type "Other" sauf en dernier recours absolu!
+  
+  Le nom de l'entité doit être EXPLICITE et contenir la VALEUR:
+  - ✅ Bon: "SecNumCloud (certification ANSSI)"
+  - ❌ Mauvais: "Certification du prestataire"
+  - ✅ Bon: "36 mois (durée initiale)"
+  - ❌ Mauvais: "Durée du contrat"
+  - ✅ Bon: "99.95% disponibilité mensuelle"
+  - ❌ Mauvais: "SLA de disponibilité"
+
+# =============================================================================
+# Types d'entités spécifiques au domaine juridique
+# =============================================================================
+entity_types:
+  # Parties prenantes
+  - name: Party
+    description: Partie au contrat (client, prestataire, fournisseur)
+    examples:
+      - "Le Client"
+      - "Le Prestataire"
+      - "Cloud Temple SAS (ci-après 'le Fournisseur')"
+      - "TechCorp SARL (ci-après 'le Client')"
+
+  - name: LegalRepresentative
+    description: Représentant légal, signataire habilité
+    examples:
+      - "M. Jean Dupont, Directeur Général"
+      - "Mme Sophie Martin, dûment habilitée"
+      - "Le Président du Conseil d'Administration"
+
+  - name: Organization
+    description: Personne morale, entreprise, institution
+    examples:
+      - "Cloud Temple SAS"
+      - "ANSSI"
+      - "Commission Nationale de l'Informatique et des Libertés (CNIL)"
+
+  # Éléments contractuels
+  - name: Clause
+    description: Clause ou article du contrat
+    examples:
+      - "Clause de confidentialité"
+      - "Article 12 - Réversibilité"
+      - "Conditions de résiliation"
+      - "Clause de non-sollicitation"
+
+  - name: Obligation
+    description: Obligation ou engagement d'une partie
+    examples:
+      - "Obligation de moyens"
+      - "Engagement de confidentialité"
+      - "Garantie de disponibilité"
+      - "Obligation de conseil"
+
+  - name: ContractType
+    description: Type de contrat ou document
+    examples:
+      - "Contrat Cadre"
+      - "Avenant n°3"
+      - "NDA"
+      - "Convention de Services"
+      - "Conditions Générales de Vente"
+
+  # Valeurs et métriques
+  - name: Amount
+    description: Montant financier, tarification, TOTAL
+    priority: high
+    examples:
+      - "50 000 EUR HT"
+      - "2 500 EUR HT/mois"
+      - "Prix forfaitaire: 150 000 EUR"
+      - "Total mensuel estimé: 3 150 EUR HT"
+      - "Pénalité: 10% du montant mensuel"
+
+  - name: Duration
+    description: Durée contractuelle, délai, préavis
+    priority: high
+    examples:
+      - "Durée initiale: 36 mois"
+      - "Préavis de résiliation: 3 mois"
+      - "Période de renouvellement: 12 mois"
+      - "Délai de paiement: 30 jours"
+
+  - name: Date
+    description: Date d'effet, échéance, signature
+    priority: high
+    examples:
+      - "Date d'effet: 1er janvier 2026"
+      - "Signé le 15 décembre 2025"
+      - "Échéance: 31 décembre 2028"
+
+  - name: SLA
+    description: Engagement de niveau de service
+    priority: high
+    examples:
+      - "Disponibilité: 99.95%"
+      - "GTI: 15 minutes"
+      - "GTR: 4 heures"
+      - "Temps de réponse: 1 heure ouvrable"
+
+  # Certifications et conformités
+  - name: Certification
+    description: Certification, qualification, norme
+    priority: high
+    examples:
+      - "SecNumCloud"
+      - "HDS (Hébergeur de Données de Santé)"
+      - "ISO 27001:2022"
+      - "SOC 2 Type II"
+
+  - name: Regulation
+    description: Réglementation, loi applicable
+    examples:
+      - "RGPD"
+      - "DORA"
+      - "NIS2"
+      - "Loi Informatique et Libertés"
+      - "Code des Marchés Publics"
+
+  # Documents et références
+  - name: Annex
+    description: Annexe, pièce jointe au contrat
+    examples:
+      - "Annexe 1 - Convention de Services"
+      - "Annexe 3 - Conditions Financières"
+      - "Annexe 5 - Plan de Réversibilité"
+
+  - name: Service
+    description: Service ou prestation fournie
+    examples:
+      - "Hébergement SecNumCloud"
+      - "Infogérance"
+      - "Support 24/7"
+      - "Services de Cloud Computing"
+
+  - name: Product
+    description: Produit, logiciel ou technologie référencé dans le contrat
+    examples:
+      - "VMware vSphere"
+      - "Microsoft 365"
+      - "OpenShift"
+      - "Solution SaaS"
+
+  - name: Reference
+    description: Référence à un document externe
+    examples:
+      - "Certificat SecNumCloud n°2025-001"
+      - "Offre commerciale du 10/01/2026"
+      - "PV de recette du 15/12/2025"
+
+  # Personnes
+  - name: Person
+    description: Personne physique mentionnée
+    examples:
+      - "M. Jean Dupont"
+      - "Mme Marie Martin"
+      - "Le DPO de Cloud Temple"
+
+  # Lieux
+  - name: Jurisdiction
+    description: Juridiction, tribunal compétent
+    examples:
+      - "Tribunal de Commerce de Paris"
+      - "Juridiction française"
+      - "Loi française applicable"
+
+  - name: Location
+    description: Lieu d'exécution, siège social
+    examples:
+      - "215 avenue Georges Clemenceau, 92000 Nanterre"
+      - "France métropolitaine"
+      - "Datacenter de Paris"
+
+# =============================================================================
+# Types de relations spécifiques au domaine juridique
+# =============================================================================
+relation_types:
+  - name: PARTY_TO
+    description: Est partie au contrat
+    examples:
+      - "Cloud Temple SAS → PARTY_TO → Contrat Cadre"
+      - "TechCorp → PARTY_TO → Convention de Services"
+
+  - name: SIGNED_BY
+    description: Document signé par une personne
+    examples:
+      - "Contrat → SIGNED_BY → Jean Dupont"
+
+  - name: REPRESENTS
+    description: Représente une organisation
+    examples:
+      - "Jean Dupont → REPRESENTS → Cloud Temple SAS"
+
+  - name: INCLUDES_ANNEX
+    description: Le contrat inclut une annexe
+    examples:
+      - "Contrat Cadre → INCLUDES_ANNEX → Annexe 1"
+
+  - name: AMENDS
+    description: Avenant qui modifie un contrat
+    examples:
+      - "Avenant n°3 → AMENDS → Contrat Cadre"
+
+  - name: SUPERSEDES
+    description: Remplace un document précédent
+    examples:
+      - "CGV v2 → SUPERSEDES → CGV v1"
+
+  - name: HAS_DURATION
+    description: Associe une durée à un élément
+    examples:
+      - "Contrat → HAS_DURATION → 36 mois"
+
+  - name: HAS_AMOUNT
+    description: Associe un montant à un élément
+    examples:
+      - "Prestation → HAS_AMOUNT → 50 000 EUR"
+
+  - name: HAS_SLA
+    description: Définit un niveau de service
+    examples:
+      - "Service IaaS → HAS_SLA → Disponibilité 99.95%"
+
+  - name: REQUIRES_CERTIFICATION
+    description: Exige une certification
+    examples:
+      - "Hébergement HDS → REQUIRES_CERTIFICATION → HDS"
+
+  - name: GUARANTEES
+    description: Une partie garantit/détient une certification ou un niveau de service
+    priority: high
+    examples:
+      - "Cloud Temple SAS → GUARANTEES → SecNumCloud"
+      - "Prestataire → GUARANTEES → HDS"
+      - "Cloud Temple → GUARANTEES → ISO 27001"
+      - "Prestataire → GUARANTEES → 99.95% disponibilité"
+
+  - name: HAS_CERTIFICATION
+    description: Possède ou détient une certification
+    priority: high
+    examples:
+      - "Cloud Temple SAS → HAS_CERTIFICATION → SecNumCloud"
+      - "Prestataire → HAS_CERTIFICATION → HDS"
+      - "Cloud Temple → HAS_CERTIFICATION → SOC 2 Type II"
+
+  - name: GOVERNED_BY
+    description: Régi par une réglementation
+    examples:
+      - "Traitement données → GOVERNED_BY → RGPD"
+
+  - name: DEFINES
+    description: Définit ou précise un terme
+    examples:
+      - "Article 1 → DEFINES → Services"
+
+  - name: OBLIGATES
+    description: Crée une obligation pour une partie
+    examples:
+      - "Clause confidentialité → OBLIGATES → Client"
+
+  - name: LOCATED_AT
+    description: Lieu d'exécution ou siège
+    examples:
+      - "Cloud Temple → LOCATED_AT → Nanterre"
+
+  - name: EFFECTIVE_DATE
+    description: Date d'entrée en vigueur
+    examples:
+      - "Contrat → EFFECTIVE_DATE → 01/01/2026"
+
+  - name: REFERENCES
+    description: Référence à un autre article, document ou norme
+    examples:
+      - "Article 12 → REFERENCES → Article 5"
+      - "Contrat → REFERENCES → RGPD"
+
+  - name: JURISDICTION
+    description: Juridiction applicable
+    examples:
+      - "Contrat → JURISDICTION → Tribunal de Commerce de Paris"
+
+  - name: RELATED_TO
+    description: Relation générique (dernier recours si aucun type spécifique ne convient)
+    examples:
+      - "Concept A → RELATED_TO → Concept B"
+
+  - name: CONTAINS
+    description: Contient, inclut un élément (plus générique que INCLUDES_ANNEX)
+    examples:
+      - "Convention de Services → CONTAINS → Clause de confidentialité"
+      - "Article 5 → CONTAINS → Obligation de moyens"
+
+  - name: MENTIONS
+    description: Le document ou une clause mentionne une entité
+    examples:
+      - "Article 21 → MENTIONS → RGPD"
+      - "Préambule → MENTIONS → Cloud Temple SAS"
+
+  - name: CREATED_BY
+    description: Document rédigé ou créé par
+    examples:
+      - "CGA → CREATED_BY → Direction Juridique"
+
+# =============================================================================
+# Règles d'extraction spécifiques
+# =============================================================================
+extraction_rules:
+  max_entities: 60
+  max_relations: 80
+  include_metrics: true
+  include_durations: true
+  include_amounts: true
+  extract_implicit_relations: true
+  
+  # Entités prioritaires dans le domaine juridique
+  priority_entities:
+    - Party
+    - LegalRepresentative
+    - Amount
+    - Duration
+    - SLA
+    - Certification
+    - Clause
+
+  # Instructions supplémentaires
+  special_instructions: |
+    ⚠️ ARTICLES ET CLAUSES — EXHAUSTIVITÉ OBLIGATOIRE:
+    - Extrais CHAQUE article du document (Article 1, Article 2, ..., Article 23, etc.) comme entité Clause
+    - N'en omet AUCUN, même les articles courts ou de portée limitée
+    - Extrais aussi les sous-articles (ex: Article 23.2)
+    - Chaque article doit avoir un nom explicite incluant son numéro ET son titre
+    - Exemple: "Article 23.2 – Plan de réversibilité"
+    
+    Autres règles:
+    - Extrais TOUJOURS les montants avec leur devise et période (HT/TTC, /mois, /an)
+    - Extrais TOUJOURS les durées avec leur unité (jours, mois, années)
+    - Identifie TOUS les signataires et leur fonction
+    - Identifie le type exact de contrat (Cadre, Avenant, NDA, CGV, etc.)
+    - Les noms de clauses doivent être explicites
+    - Lie les montants aux prestations concernées
+    - Extrais TOUTES les annexes mentionnées (Annexe 1, Annexe 2, etc.)
+
+# =============================================================================
+# Exemples d'extraction
+# =============================================================================
+examples:
+  - input: |
+      CONTRAT CADRE D'HÉBERGEMENT SECNUMCLOUD
+      Entre Cloud Temple SAS, représentée par M. Jean Dupont, Directeur Général,
+      Et TechCorp SARL, représentée par Mme Sophie Martin, Présidente,
+      Pour une durée initiale de 36 mois, renouvelable par tacite reconduction.
+      Prix forfaitaire mensuel: 8 500 EUR HT.
+      SLA de disponibilité: 99.95%.
+    expected_entities:
+      - {name: "Cloud Temple SAS", type: "Party", description: "Prestataire"}
+      - {name: "TechCorp SARL", type: "Party", description: "Client"}
+      - {name: "Jean Dupont", type: "LegalRepresentative", description: "DG de Cloud Temple"}
+      - {name: "Sophie Martin", type: "LegalRepresentative", description: "Présidente de TechCorp"}
+      - {name: "Contrat Cadre d'Hébergement SecNumCloud", type: "ContractType"}
+      - {name: "36 mois", type: "Duration", description: "Durée initiale"}
+      - {name: "8 500 EUR HT/mois", type: "Amount", description: "Prix forfaitaire mensuel"}
+      - {name: "Disponibilité 99.95%", type: "SLA"}
+    expected_relations:
+      - {from: "Jean Dupont", to: "Cloud Temple SAS", type: "REPRESENTS"}
+      - {from: "Sophie Martin", to: "TechCorp SARL", type: "REPRESENTS"}
+      - {from: "Contrat", to: "36 mois", type: "HAS_DURATION"}
+      - {from: "Hébergement", to: "8 500 EUR HT/mois", type: "HAS_AMOUNT"}
