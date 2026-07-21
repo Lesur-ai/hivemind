@@ -21,6 +21,7 @@ jobs:
     outputs:
       version: ${{ steps.release_gate.outputs.version }}
       source_sha: ${{ steps.release_gate.outputs.source_sha }}
+      is_stable: ${{ steps.release_gate.outputs.is_stable }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,6 +66,10 @@ jobs:
           fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) printf 'is_stable=false\n' >> "$GITHUB_OUTPUT" ;;
+            *) printf 'is_stable=true\n' >> "$GITHUB_OUTPUT" ;;
+          esac
 
   publish:
     name: Publish public image and attestation
@@ -104,6 +109,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - id: image_tags
+        name: Select immutable and stable image tags
+        env:
+          IMAGE_NAME: ${{ env.PUBLIC_IMAGE }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          IS_STABLE: ${{ needs.verify.outputs.is_stable }}
+        run: |
+          set -euo pipefail
+          {
+            printf 'tags<<EOF\n'
+            printf '%s:%s\n' "$IMAGE_NAME" "$VERSION"
+            if [ "$IS_STABLE" = "true" ]; then
+              printf '%s:latest\n' "$IMAGE_NAME"
+            fi
+            printf 'EOF\n'
+          } >> "$GITHUB_OUTPUT"
+
       - id: image
         name: Build and publish public image from the verified tag commit
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -111,7 +133,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64/v8
           push: true
-          tags: ${{ env.PUBLIC_IMAGE }}:${{ needs.verify.outputs.version }}
+          tags: ${{ steps.image_tags.outputs.tags }}
           labels: |
             org.opencontainers.image.revision=${{ needs.verify.outputs.source_sha }}
             org.opencontainers.image.version=${{ needs.verify.outputs.version }}
@@ -124,6 +146,7 @@ jobs:
           SOURCE_SHA: ${{ needs.verify.outputs.source_sha }}
           VERSION: ${{ needs.verify.outputs.version }}
           IMAGE_NAME: ${{ env.PUBLIC_IMAGE }}
+          IS_STABLE: ${{ needs.verify.outputs.is_stable }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
@@ -141,6 +164,7 @@ jobs:
               "digest": os.environ["IMAGE_DIGEST"],
               "source_sha": os.environ["SOURCE_SHA"],
               "version": os.environ["VERSION"],
+              "latest": os.environ["IS_STABLE"] == "true",
           }
           Path("public-release-evidence.json").write_text(
               json.dumps(evidence, sort_keys=True, indent=2) + "\n",
@@ -152,6 +176,9 @@ jobs:
             printf '* Image: `%s@%s`\n' "$IMAGE_NAME" "$IMAGE_DIGEST"
             printf '* Source commit: `%s`\n' "$SOURCE_SHA"
             printf '* Version: `%s`\n' "$VERSION"
+            if [ "$IS_STABLE" = "true" ]; then
+              printf '* Moving alias: `%s:latest`\n' "$IMAGE_NAME"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload public release evidence

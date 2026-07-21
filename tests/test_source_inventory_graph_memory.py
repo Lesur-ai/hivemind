@@ -125,6 +125,13 @@ def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
     assert all("==" in line for line in requirement_starts)
 
     dockerfile = (_SVC / "Dockerfile").read_text(encoding="utf-8")
+    assert (
+        "FROM python:3.14.6-slim-bookworm@sha256:"
+        "86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30"
+    ) in dockerfile
+    assert "aiohttp==3.14.2" in lock
+    assert "boto3==1.43.52" in lock
+    assert "botocore==1.43.52" in lock
     assert "--require-hashes -r requirements.lock" in dockerfile
     assert "pip install --no-cache-dir --upgrade pip" not in dockerfile
     assert "apt-get" not in dockerfile
