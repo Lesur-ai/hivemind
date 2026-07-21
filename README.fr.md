@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.2.3-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.3.0-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -470,9 +470,9 @@ transformer les notes live `short` en bank `mid` structurée.
 | ------------------------- | ----------------- | ------------------------------- |
 | `LLMAAS_MODEL`            | `qwen3.5:27b`     | Nom du modèle LLM tel qu'exposé par le fournisseur |
 | `LLMAAS_CONTEXT_WINDOW`   | `131072`          | Context window TOTAL du modèle (input + output combinés, en tokens) |
-| `LLMAAS_MAX_TOKENS`       | `16384`           | Budget de SORTIE max par requête (en tokens). Le consolidateur l'ajuste dynamiquement : `output = min(MAX_TOKENS, CONTEXT_WINDOW - input)` |
+| `LLMAAS_MAX_TOKENS`       | `16384`           | Budget de SORTIE max par requête (en tokens). Doit rester **strictement inférieur** à `LLMAAS_CONTEXT_WINDOW`, sinon le démarrage échoue avec une erreur de configuration nommant les deux valeurs. Le consolidateur l'ajuste dynamiquement : `output = min(MAX_TOKENS, CONTEXT_WINDOW - input)` |
 | `LLMAAS_TEMPERATURE`      | `0.3`             | Créativité du LLM (0.0 = déterministe, 1.0 = très créatif) |
-| `PROXY_URL`               | _(aucun)_         | Proxy HTTP sortant (ex. `http://10.0.0.1:3128`). **Variable maison** (pas `HTTP_PROXY`) — injectée manuellement dans boto3 (S3) et httpx (LLM). Non supportée pour les connexions du tier `long`. |
+| `PROXY_URL`               | _(aucun)_         | Proxy HTTP sortant (ex. `http://10.0.0.1:3128`). **Variable maison** (pas `HTTP_PROXY`) — injectée manuellement dans boto3 (S3) et httpx (appels LLM de consolidation **et** sondes de santé LLM légères de `/health` et `system_health`). Non supportée pour les connexions du tier `long`. |
 
 ### Variables optionnelles — Consolidation et compaction
 

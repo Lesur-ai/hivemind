@@ -758,6 +758,39 @@ async def bank_consolidate(
 }
 ```
 
+**Job result contract (P12-1 — honest structured outcomes).** When the job
+finishes, its `result` carries a three-state status:
+
+- `status="ok"` — every selected operation completed successfully;
+- `status="error"` — a batch failed **before any durable mutation could have
+  started** and zero batches were applied (no bank file, note, or metadata was
+  modified);
+- `status="partial"` — work was already applied, a durable write started or
+  may have started, or durable state is ambiguous. Any failure raised from or
+  after the bank-write step stays `partial`, **including on the first batch**.
+
+Additional result fields:
+
+- `failed_batch` (optional, one-based) — present only for an identifiable
+  batch failure, including a batch whose bank integration was rejected or
+  incomplete (`batch_write_failed`). Exact-selection truncation,
+  metadata-only failure, and note-deletion failure stay `partial`
+  **without** a fabricated `failed_batch`; `note_delete_failed` is reserved
+  for a **completed** bank integration whose source-note deletion alone was
+  incomplete (the retained notes stay eligible for a controlled retry).
+- `failure_reason` — stable structured token: `batch_prompt_failed`,
+  `batch_llm_failed`, `batch_refresh_failed`, `batch_write_failed`,
+  `bank_compact_failed`, `note_delete_failed`, `exact_selection_truncated`,
+  or `metadata_update_failed`. A consolidation that crashes before
+  producing any result is reported by the queue as
+  `failure_reason="consolidation_crashed"`.
+- `message` — safe generic client text; raw provider/exception detail stays
+  server-side, including on the queue crash path.
+
+The queue marks every non-`ok` result as a `failed` job. The terminal
+progress `phase` is `failed` for `error` and `partial`, and `done` only for
+`ok`.
+
 ### `bank_consolidation_status` 🔑 — → no tiered alias (internal/ops)
 
 Returns the in-memory status for a consolidation job.
@@ -767,7 +800,7 @@ Returns the in-memory status for a consolidation job.
 async def bank_consolidation_status(job_id: str) -> dict:
 ```
 
-Returns `queued`, `running`, `succeeded`, `failed`, or `not_found`. The caller must have read access to the job's `space_id`. This tool is for explicit manual status checks only; clients must not call it automatically after every `bank_consolidate`.
+Returns `queued`, `running`, `succeeded`, `failed`, or `not_found`. The caller must have read access to the job's `space_id`. This tool is for explicit manual status checks only; clients must not call it automatically after every `bank_consolidate`. The embedded `result` follows the job result contract above (`ok`/`error`/`partial`, optional `failed_batch`, stable `failure_reason`, terminal progress phase `done` only for `ok`).
 
 ---
 

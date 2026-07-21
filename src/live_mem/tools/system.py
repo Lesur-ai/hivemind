@@ -67,23 +67,19 @@ def register(mcp: FastMCP) -> int:
         # ── Test LLMaaS ─────────────────────────────────────
         try:
             if settings.llmaas_api_url and settings.llmaas_api_key:
-                from openai import AsyncOpenAI
-
-                t0 = time.monotonic()
-                client = AsyncOpenAI(
-                    base_url=settings.llmaas_api_url,
-                    api_key=settings.llmaas_api_key,
-                    timeout=5,
-                )
                 # HM-12 fix : sonde LÉGÈRE (models.list) au lieu d'une complétion
                 # LLM réelle. L'ancien chat.completions.create dépensait des tokens
                 # LLMaaS à CHAQUE appel, sans check de permission → un token
                 # read-only pouvait boucler dessus et brûler le budget LLM
                 # (amplification de coût / DoS de facturation). Aligne system_health
                 # sur la sonde du endpoint public /health.
-                models = await client.models.list()
+                # P12-1 : la sonde honore PROXY_URL via le client possédé de
+                # list_llm_models, fermé sur tous les chemins.
+                from ..core.llm_probe import list_llm_models
+
+                t0 = time.monotonic()
+                model_ids = await list_llm_models(settings)
                 latency = round((time.monotonic() - t0) * 1000, 1)
-                model_ids = [m.id for m in models.data]
                 results["llmaas"] = {
                     "status": "ok",
                     "model": settings.llmaas_model,

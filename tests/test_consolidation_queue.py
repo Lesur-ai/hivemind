@@ -577,3 +577,158 @@ async def test_bank_consolidation_queues_returns_accessible_lane_summaries():
     assert result["parallelism_model"] == "one_worker_per_space"
     assert result["denied_spaces"][0]["space_id"] == "other-space"
     summary.assert_awaited_once_with("project")
+
+
+# ─────────────────────────────────────────────────────────────
+# P12-1 — Terminal queue status and progress phase honesty
+# ─────────────────────────────────────────────────────────────
+
+
+class _OutcomeConsolidator:
+    """Returns (or raises) a fixed consolidation outcome."""
+
+    def __init__(self, result=None, error=None):
+        self._result = result
+        self._error = error
+
+    async def consolidate(
+        self, space_id, agent="", enforce_cooldown=True, progress_callback=None
+    ):
+        if progress_callback:
+            await progress_callback(
+                {
+                    "phase": "batch_running",
+                    "batch_size": 1,
+                    "notes_total": 2,
+                    "notes_done": 1,
+                    "batches_total": 2,
+                    "batches_done": 1,
+                    "current_batch": 2,
+                }
+            )
+        if self._error is not None:
+            raise self._error
+        return dict(self._result)
+
+
+async def _terminal_status(queue, job_id, expected):
+    for _ in range(50):
+        status = await queue.get_job(job_id)
+        if status["status"] == expected:
+            return status
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"job {job_id} never reached {expected}: {status['status']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_result_marks_job_failed_with_terminal_failed_phase():
+    consolidator = _OutcomeConsolidator(
+        result={
+            "status": "partial",
+            "message": "Consolidation partielle",
+            "failure_reason": "batch_llm_failed",
+            "failed_batch": 2,
+            "notes_processed": 1,
+            "batch_size": 1,
+            "batches_total": 2,
+            "batches_completed": 1,
+        }
+    )
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("project", "agent-a", "agent-a")
+        status = await _terminal_status(queue, accepted["job_id"], "failed")
+
+    assert status["status"] == "failed"
+    assert status["progress"]["phase"] == "failed"
+    assert status["result"]["status"] == "partial"
+    assert status["result"]["failed_batch"] == 2
+    assert status["result"]["failure_reason"] == "batch_llm_failed"
+
+
+@pytest.mark.asyncio
+async def test_error_result_marks_job_failed_with_terminal_failed_phase():
+    consolidator = _OutcomeConsolidator(
+        result={
+            "status": "error",
+            "message": "La consolidation a échoué avant toute écriture durable",
+            "failure_reason": "batch_llm_failed",
+            "failed_batch": 1,
+            "notes_processed": 0,
+            "batch_size": 1,
+            "batches_total": 2,
+            "batches_completed": 0,
+        }
+    )
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("project", "agent-a", "agent-a")
+        status = await _terminal_status(queue, accepted["job_id"], "failed")
+
+    assert status["status"] == "failed"
+    assert status["progress"]["phase"] == "failed"
+    assert status["result"]["failed_batch"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ok_result_keeps_terminal_done_phase():
+    consolidator = _OutcomeConsolidator(
+        result={
+            "status": "ok",
+            "notes_processed": 2,
+            "batch_size": 1,
+            "batches_total": 2,
+            "batches_completed": 2,
+        }
+    )
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("project", "agent-a", "agent-a")
+        status = await _terminal_status(queue, accepted["job_id"], "succeeded")
+
+    assert status["status"] == "succeeded"
+    assert status["progress"]["phase"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_worker_crash_marks_job_failed_with_terminal_failed_phase():
+    # The injected detail mimics provider/storage diagnostics that must
+    # NEVER reach a read-authorized client through bank_consolidation_status.
+    secret_detail = (
+        "boto3 EndpointConnectionError https://sk-SECRET:token@s3.internal:9000"
+    )
+    consolidator = _OutcomeConsolidator(error=RuntimeError(secret_detail))
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("project", "agent-a", "agent-a")
+        status = await _terminal_status(queue, accepted["job_id"], "failed")
+
+    assert status["status"] == "failed"
+    assert status["progress"]["phase"] == "failed"
+    assert status["result"]["status"] == "error"
+    # P12-1 (Codex review): raw exception text stays server-side. The client
+    # payload carries only a generic message and a stable failure reason.
+    import json as _json
+
+    assert "sk-SECRET" not in _json.dumps(status)
+    assert "s3.internal" not in _json.dumps(status)
+    assert status["result"]["failure_reason"] == "consolidation_crashed"
+    assert "journaux serveur" in status["error"]

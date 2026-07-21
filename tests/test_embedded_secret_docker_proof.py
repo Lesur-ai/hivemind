@@ -120,8 +120,8 @@ def test_issue_183_docker_proof_is_blocking_and_complete() -> None:
 
 def test_mutation_red_runtime_job_removed_from_build_dependencies() -> None:
     workflow = _read(".github/workflows/build.yml").replace(
-        "needs: [test, audit, embedded_secret_runtime, public_tree]",
-        "needs: [test, audit, public_tree]",
+        "needs: [test, test_python314_arm64, audit, embedded_secret_runtime, public_tree]",
+        "needs: [test, test_python314_arm64, audit, public_tree]",
     )
     with pytest.raises(AssertionError):
         _assert_ci_gate(workflow)

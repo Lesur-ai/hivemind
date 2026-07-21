@@ -41,6 +41,22 @@ function renderBankTabs() {
 }
 
 async function selectBank(filename) {
+    // P12-2 fix: capture the requested space + filename identity, and a
+    // monotonically increasing request generation, before the async request
+    // starts. A later selectBank() call (tab click, refresh auto-select, or
+    // a space switch) mutates app.spaceId/app.currentBankFile synchronously,
+    // so comparing against those captured values after the await tells a
+    // stale response from the current one for cross-space/cross-file races.
+    // The generation additionally catches the same-target ABA case (e.g.
+    // alpha -> beta -> alpha): the space/filename identity alone can't tell
+    // the first alpha request from the second one, since both target the
+    // same (space, filename) pair — only the generation does.
+    const requestedSpaceId = app.spaceId;
+    const requestGeneration = ++app._bankRequestGeneration;
+    const isStale = () => app.spaceId !== requestedSpaceId
+        || app.currentBankFile !== filename
+        || app._bankRequestGeneration !== requestGeneration;
+
     app.currentBankFile = filename;
 
     // Mettre à jour les onglets actifs
@@ -52,7 +68,8 @@ async function selectBank(filename) {
     el.innerHTML = '<div class="empty-state">Loading…</div>';
 
     try {
-        const r = await apiLoadBankFile(app.spaceId, filename);
+        const r = await apiLoadBankFile(requestedSpaceId, filename);
+        if (isStale()) return;
         if (r.status === 'ok' && r.content) {
             el.innerHTML = `<div class="md-content">${md(r.content)}</div>`;
         } else {
@@ -60,6 +77,7 @@ async function selectBank(filename) {
         }
     } catch (e) {
         if (e.message !== 'Unauthorized') {
+            if (isStale()) return;
             el.innerHTML = `<div class="empty-state">❌ ${esc(e.message)}</div>`;
         }
     }

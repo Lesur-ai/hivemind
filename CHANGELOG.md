@@ -19,6 +19,36 @@ are not installation steps or public architecture contracts.
 
 ---
 
+## [1.3.0] — 2026-07-21
+
+> Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
+> boundary. Downstream extension seams are described in
+> `docs/EXTENSION_POINTS.md`.
+
+Upgrading from separate Live Memory and Graph Memory services is covered by the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### Changed
+
+- **Proxy-aware health probes and bounded LLM requests.** Public `/health` and
+  authenticated `system_health` model probes now honor `PROXY_URL`. Startup
+  rejects incoherent LLM output/context limits, and every consolidation
+  provider call recomputes a bounded output budget from its current prompt.
+- **Honest consolidation outcomes.** Consolidation results now distinguish
+  `ok`, `error`, and `partial`, identify a failed batch when possible, expose a
+  stable failure reason without leaking provider or storage diagnostics, and
+  mark queue progress as done only after a fully successful result.
+- **Race-safe `/live` bank selection.** The operator UI discards stale success
+  and error responses after a newer file selection, a space switch, or an
+  ABA re-selection, so an older request can no longer overwrite the current
+  bank view.
+
+- **Native CPython 3.14.6 arm64 CI gate.** Public CI now runs the complete Python
+  suite on a native Linux arm64 runner with the exact interpreter used by the
+  shipped images; image builds wait for that verification.
+
+---
+
 ## [1.2.3] — 2026-07-21
 
 > Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
