@@ -19,7 +19,7 @@
 # ─────────────────────────────────────────────────────────────
 # Registry indexes verified 2026-07-19. Keep the human-readable tag and the
 # multi-architecture digest together; review and build-test every bump.
-FROM ghcr.io/astral-sh/uv:0.7.22-python3.11-bookworm-slim@sha256:ab57624f560fe19a0581203516be05cae0b85cfdc43f29aaf892b44cd7a54b1f AS builder
+FROM ghcr.io/astral-sh/uv:0.9.30-python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36 AS builder
 
 WORKDIR /app
 
