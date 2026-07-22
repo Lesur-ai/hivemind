@@ -265,7 +265,17 @@ projection**, outside the commit path — see
 - **Python 3.11+** and [`uv`](https://docs.astral.sh/uv/) (for local CLI/tests)
 - A compatible **S3 storage** (Dell ECS, AWS, MinIO)
 - An OpenAI-API-compatible **LLM** (for `mid` consolidation and `long`
-  extraction, embeddings, and semantic queries)
+  extraction, embeddings, and semantic queries). The provider must expose
+  **both** `/chat/completions` **and** `/embeddings` on the **same**
+  `LLMAAS_API_URL` + `LLMAAS_API_KEY` — Hivemind uses one endpoint and key for
+  both. Chat-only gateways are therefore **not** sufficient on their own:
+  notably **Anthropic** and **OpenRouter** provide chat completions but no
+  `/embeddings` endpoint, so `long` (and any semantic query) fails. Use a
+  provider that serves both (e.g. OpenAI, a self-hosted vLLM/Ollama), or put a
+  proxy (e.g. LiteLLM) in front that routes chat and embeddings to different
+  backends behind a single endpoint. See
+  [Local evaluation with Ollama](#-local-evaluation-with-ollama-no-api-key) for
+  a zero-cost, no-key path.
 - No separate graph backend or graph token: Graph Memory + Neo4j + Qdrant are
   **embedded in the default compose stack** (ADR-0019). The embedded runtime
   still uses the configured LLM API for long ingestion and queries.
@@ -423,6 +433,35 @@ Edit `.env`. All variables are documented in `.env.example`.
 > provider profile only. Replace the model ids and dimension together. A wrong
 > dimension breaks long writes/search; changing it after ingestion requires a
 > reviewed Qdrant collection rebuild and re-ingestion.
+
+### 🦙 Local evaluation with Ollama (no API key)
+
+For a fully local evaluation with no external provider, API key, or billing,
+point Hivemind at [Ollama](https://ollama.com/). Ollama serves an
+OpenAI-compatible API with **both** chat and embedding models, which satisfies
+the single-endpoint requirement above.
+
+```bash
+# 1. Install and start Ollama, then pull a chat model and an embedding model
+ollama pull llama3.2:3b
+ollama pull nomic-embed-text
+
+# 2. Point the LLMAAS_* variables in .env at Ollama.
+#    From inside the compose containers, reach the host via host.docker.internal.
+#    The API key is required but ignored by Ollama — any non-empty string works.
+LLMAAS_API_URL=http://host.docker.internal:11434/v1
+LLMAAS_API_KEY=ollama
+LLMAAS_MODEL=llama3.2:3b
+LLMAAS_EMBEDDING_MODEL=nomic-embed-text
+LLMAAS_EMBEDDING_DIMENSIONS=768   # nomic-embed-text returns 768-dim vectors
+```
+
+Then `docker compose --profile dev up -d` to apply. `LLMAAS_EMBEDDING_DIMENSIONS`
+must match the embedding model exactly (768 for `nomic-embed-text`); a mismatch
+breaks `long` writes and search. Small local models are lower quality than a
+hosted provider for the structured extraction/consolidation `mid` and `long`
+perform — fine for verifying the plumbing, but expect weaker results than
+OpenAI-grade models.
 
 ### Embedded Long Runtime (mandatory, ADR-0019)
 
