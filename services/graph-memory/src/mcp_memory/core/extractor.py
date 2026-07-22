@@ -15,6 +15,13 @@ from openai import AsyncOpenAI
 from openai import APIError, APITimeoutError
 
 from ..config import get_settings
+from .egress import (
+    build_owned_async_http_client,
+    close_owned_client_from_sync,
+    display_proxy_url,
+    redact_proxy_errors_async,
+    redact_proxy_secrets,
+)
 from .models import (
     ExtractionResult, ExtractedEntity, ExtractedRelation,
     EntityType, RelationType
@@ -66,19 +73,59 @@ class ExtractorService:
     """
     
     def __init__(self):
-        """Initialise le client OpenAI compatible."""
+        """Initialise le client OpenAI compatible.
+
+        P12-3 (Hivemind #268) : quand ``PROXY_URL`` est configurée, un
+        ``httpx.AsyncClient`` POSSÉDÉ route toutes les requêtes (extraction,
+        Q&A, sonde provider-health) via le proxy. AsyncOpenAI ne prend pas
+        ownership du client injecté : le service le ferme sur échec du
+        constructeur et via ``close()`` au shutdown. Sans proxy, le transport
+        interne historique d'AsyncOpenAI est préservé à l'identique.
+        """
         settings = get_settings()
-        
-        self._client = AsyncOpenAI(
-            base_url=settings.llmaas_base_url,
-            api_key=settings.llmaas_api_key,
-            timeout=settings.extraction_timeout_seconds
-        )
+
+        self._owned_http_client = None
+        if settings.proxy_url:
+            self._owned_http_client = build_owned_async_http_client(
+                settings.proxy_url,
+                timeout=settings.extraction_timeout_seconds,
+            )
+            # Jamais l'URL brute (potentiellement porteuse de credentials).
+            print(
+                f"🔀 [Extractor] LLM egress via proxy "
+                f"{display_proxy_url(settings.proxy_url)}",
+                file=sys.stderr,
+            )
+        try:
+            self._client = AsyncOpenAI(
+                base_url=settings.llmaas_base_url,
+                api_key=settings.llmaas_api_key,
+                timeout=settings.extraction_timeout_seconds,
+                http_client=self._owned_http_client,
+            )
+        except BaseException:
+            # Échec du constructeur : ne pas fuiter le transport possédé.
+            if self._owned_http_client is not None:
+                close_owned_client_from_sync(self._owned_http_client)
+                self._owned_http_client = None
+            raise
         self._model = settings.llmaas_model
         self._max_tokens = settings.llmaas_max_tokens
         self._temperature = settings.llmaas_temperature
         self._max_text_length = settings.extraction_max_text_length
+
+    async def close(self) -> None:
+        """Ferme le transport proxy possédé (idempotent, référence conservée).
+
+        Appelé au shutdown du service (lifespan ASGI). Une annulation d'appel
+        en vol ne ferme JAMAIS ce transport partagé — seul close() le fait.
+        Sans proxy configuré c'est un no-op — AsyncOpenAI gère son transport
+        interne comme avant.
+        """
+        if self._owned_http_client is not None:
+            await self._owned_http_client.aclose()
     
+    @redact_proxy_errors_async
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -142,7 +189,7 @@ class ExtractorService:
             print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
             raise
         except APIError as e:
-            print(f"❌ [Extractor] Erreur API: {e}", file=sys.stderr)
+            print(f"❌ [Extractor] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
     
     def _parse_extraction(
@@ -274,6 +321,7 @@ class ExtractorService:
         
         return "RELATED_TO"
     
+    @redact_proxy_errors_async
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -355,13 +403,14 @@ class ExtractorService:
             print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
             raise
         except APIError as e:
-            print(f"❌ [Extractor] Erreur API: {e}", file=sys.stderr)
+            print(f"❌ [Extractor] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
 
     # =========================================================================
     # Extraction chunked (gros documents)
     # =========================================================================
 
+    @redact_proxy_errors_async
     async def extract_with_ontology_chunked(
         self,
         text: str,
@@ -523,7 +572,7 @@ class ExtractorService:
                 # On continue avec les chunks suivants au lieu de tout perdre
                 continue
             except APIError as e:
-                print(f"❌ [Extractor] Erreur API chunk {chunk_num}/{len(chunks)}: {e}", file=sys.stderr)
+                print(f"❌ [Extractor] Erreur API chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
                 raise
         
         # Fusionner les résultats
@@ -737,7 +786,8 @@ class ExtractorService:
             return {
                 "status": "error",
                 "model": self._model,
-                "message": f"Erreur LLMaaS: {str(e)}"
+                # P12-3 : jamais d'URL proxy brute dans la sortie santé.
+                "message": f"Erreur LLMaaS: {redact_proxy_secrets(str(e))}"
             }
 
 
@@ -773,8 +823,14 @@ class ExtractorService:
             return response.choices[0].message.content or "Pas de réponse générée."
             
         except Exception as e:
-            print(f"❌ [Extractor] Erreur génération réponse: {e}", file=sys.stderr)
-            return f"Erreur lors de la génération de la réponse: {str(e)}"
+            # P12-3 R1 : chemin récupéré retourné au client — redaction
+            # systématique (no-op sans secret proxy dans le message).
+            safe_message = redact_proxy_secrets(str(e))
+            print(
+                f"❌ [Extractor] Erreur génération réponse: {safe_message}",
+                file=sys.stderr,
+            )
+            return f"Erreur lors de la génération de la réponse: {safe_message}"
 
 
 # Singleton pour usage global
@@ -787,3 +843,16 @@ def get_extractor_service() -> ExtractorService:
     if _extractor_service is None:
         _extractor_service = ExtractorService()
     return _extractor_service
+
+
+async def close_extractor_service_if_initialized() -> None:
+    """Ferme le singleton s'il a été instancié (shutdown du service).
+
+    P12-3 : libère le transport proxy possédé injecté dans AsyncOpenAI quand
+    ``PROXY_URL`` est défini. Sans instanciation préalable, no-op.
+    """
+    global _extractor_service
+    if _extractor_service is not None:
+        service = _extractor_service
+        _extractor_service = None
+        await service.close()

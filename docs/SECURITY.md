@@ -135,6 +135,16 @@ defense-in-depth in a public deployment.
     for source documents and token validation, that LLMaaS endpoint for
     extraction/embeddings, and internal Neo4j/Qdrant. An additional external
     graph destination exists only under the advanced `graph_connect` override.
+  * Setting `PROXY_URL` routes the application-level Internet egress of both
+    services through one outbound HTTP proxy — the Hivemind core's S3 and
+    LLM traffic (consolidation and health probes) and the embedded Graph
+    Memory's extraction/embedding calls, provider-health probes,
+    document-storage S3, and shared token-store S3 reads — and fails closed
+    on proxy failure (no direct fallback). Internal traffic (the
+    Hivemind→graph-memory bridge, Neo4j, Qdrant, local health checks) always
+    stays direct. This concentrates outbound traffic on one enforcement
+    point but is **not** a sandbox: keep the network-layer controls below as
+    defense in depth.
   * On Compose: use a host firewall (iptables, nftables) or a sidecar
     egress proxy.
   * On Kubernetes: define a `NetworkPolicy` with explicit egress rules.

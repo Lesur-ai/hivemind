@@ -27,7 +27,7 @@ from .context import (
     request_token_info_snapshot,
     safe_error,
 )
-from ..config import get_settings
+from ..config import get_settings, redact_proxy_secrets as _redact_proxy_secrets
 from ..core.audit_ring import record_event
 from ..middleware import current_request_id
 
@@ -489,7 +489,9 @@ class StaticFilesMiddleware:
             storage = get_storage()
             services["s3"] = await storage.test_connection()
         except Exception as e:
-            logger.warning("/health: S3 probe failed: %s", e)
+            logger.warning(
+                "/health: S3 probe failed: %s", _redact_proxy_secrets(str(e))
+            )
             services["s3"] = {"status": "error", "message": "S3 unreachable"}
 
         # ── Probe LLMaaS ─────────────────────────────────────
@@ -522,7 +524,9 @@ class StaticFilesMiddleware:
         except Exception as e:
             # LM2-24 fix : pareil que S3 — ne pas exposer la stack openai
             # ou l'URL LLMaaS sur un endpoint public.
-            logger.warning("/health: LLMaaS probe failed: %s", e)
+            logger.warning(
+                "/health: LLMaaS probe failed: %s", _redact_proxy_secrets(str(e))
+            )
             services["llmaas"] = {"status": "error", "message": "LLMaaS unreachable"}
 
         # ── Global status ─────────────────────────────────────

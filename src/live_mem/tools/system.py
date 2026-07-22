@@ -12,6 +12,8 @@ Outil avec identité authentifiée explicite :
 
 import logging
 import time
+
+from ..config import redact_proxy_secrets as _redact_proxy_secrets
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -61,7 +63,10 @@ def register(mcp: FastMCP) -> int:
             storage = get_storage()
             results["s3"] = await storage.test_connection()
         except Exception as e:
-            _logger.warning("system_health: S3 probe failed: %s", e)
+            _logger.warning(
+                "system_health: S3 probe failed: %s",
+                _redact_proxy_secrets(str(e)),
+            )
             results["s3"] = {"status": "error", "message": "S3 unreachable"}
 
         # ── Test LLMaaS ─────────────────────────────────────
@@ -92,7 +97,10 @@ def register(mcp: FastMCP) -> int:
                     "message": "LLMaaS non configuré",
                 }
         except Exception as e:
-            _logger.warning("system_health: LLMaaS probe failed: %s", e)
+            _logger.warning(
+                "system_health: LLMaaS probe failed: %s",
+                _redact_proxy_secrets(str(e)),
+            )
             results["llmaas"] = {"status": "error", "message": "LLMaaS unreachable"}
 
         # ── Compteur d'espaces ───────────────────────────────

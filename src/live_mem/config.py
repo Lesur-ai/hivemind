@@ -13,6 +13,7 @@ Usage :
 """
 
 import logging
+import re
 from functools import lru_cache
 
 from pydantic import field_validator, model_validator
@@ -21,6 +22,60 @@ from pydantic_settings import BaseSettings
 from .core.models import EMBEDDED_TOKEN_SENTINEL
 
 _logger = logging.getLogger("live_mem.config")
+
+# P12-3 (#268) : PROXY_URL est potentiellement porteuse de credentials en
+# userinfo — aucune surface (logs, erreurs de démarrage) ne doit jamais
+# renvoyer la valeur brute. R5 : le délimiteur d'authority est le DERNIER
+# '@' (un mot de passe peut contenir des '@' bruts) — le greedy `[^/\s]+`
+# backtracke jusqu'au dernier '@' avant tout segment de chemin.
+_PROXY_USERINFO_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)?[^/\s]+@")
+
+
+def display_proxy_url(proxy_url: str) -> str:
+    """Rendu log-safe d'une URL proxy : scheme://host[:port] uniquement.
+
+    Le userinfo, le chemin, la query et le fragment ne sont jamais loggés.
+    Helper partagé par le consolidateur et le StorageService (P12-3, #268).
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(proxy_url)
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}"
+
+
+# URL http(s) dans un texte libre (bornée par espace/quote) et userinfo
+# jusqu'au DERNIER '@' de l'authority (R5) — miroir exact des helpers egress
+# du service graph-memory embarqué.
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\"'<>]+")
+_URL_USERINFO_RE = re.compile(r"^(https?://)[^/\s]*@")
+
+
+def _redact_one_url(match: "re.Match") -> str:
+    url = match.group(0)
+    url = re.split(r"[?#]", url, maxsplit=1)[0]
+    return _URL_USERINFO_RE.sub(r"\1", url)
+
+
+def redact_proxy_secrets(text: str) -> str:
+    """Retire credentials (userinfo), query et fragment de chaque URL http(s)
+    d'un message avant toute surface sortante (logs, santé, erreurs client).
+
+    Idempotent, no-op sans secret. Miroir du helper egress du service
+    graph-memory embarqué (P12-3, #268).
+    """
+    return _URL_IN_TEXT_RE.sub(_redact_one_url, text)
+
+
+def _strip_proxy_secrets_for_echo(value: str) -> str:
+    """Retire userinfo, query et fragment d'une valeur PROXY_URL invalide
+    avant de l'écho dans un message d'erreur de démarrage (R3 : une query
+    peut porter un ``access_token`` ; les valeurs invalides ne passent pas
+    par ``urlsplit`` de façon fiable). La query/fragment est coupée AVANT le
+    strip userinfo pour qu'un '@' dans la query ne dérègle pas le greedy."""
+    value = re.split(r"[?#]", value, maxsplit=1)[0]
+    return _PROXY_USERINFO_RE.sub(lambda m: m.group(1) or "", value)
 
 
 class Settings(BaseSettings):
@@ -103,18 +158,37 @@ class Settings(BaseSettings):
     # ─── Proxy HTTP sortant ───────────────────────────────────
     # Variable custom (pas HTTP_PROXY/HTTPS_PROXY) pour ne pas affecter
     # toutes les libs Python qui lisent automatiquement les vars d'env OS.
-    # Injecté manuellement dans boto3 (S3) et httpx (LLM).
-    # Non supporté pour les connexions Graph Memory (streamablehttp_client).
+    # Injecté manuellement dans boto3 (S3) et httpx (LLM). Le service
+    # graph-memory embarqué lit la MÊME variable pour son propre egress
+    # Internet (P12-3, #268). Le pont interne Hivemind→graph-memory
+    # (streamablehttp_client) reste toujours direct.
     proxy_url: str | None = None
 
     @field_validator("proxy_url", mode="before")
     @classmethod
     def _normalize_proxy_url(cls, v: str | None) -> str | None:
-        """Normalise proxy_url : strip whitespace, retourne None si vide."""
+        """Normalise proxy_url : strip whitespace, retourne None si vide.
+
+        R4 (P12-3, #268) : le schéma est validé ICI et l'échec lève une
+        RuntimeError — PAS un ValueError, que pydantic convertirait en
+        ValidationError dont le rendu (``input_value=...``) et la charge
+        structurée (``errors()[0]["input"]``) répètent la valeur BRUTE,
+        credentials userinfo/query/fragment compris. Une RuntimeError se
+        propage sans wrapping : seul notre message sanitisé existe, et le
+        démarrage reste fail-closed sur toutes les routes de construction
+        (get_settings, model_validate direct, env).
+        """
         if v is None:
             return None
         stripped = str(v).strip()
-        return stripped if stripped else None
+        if not stripped:
+            return None
+        if not stripped.startswith(("http://", "https://")):
+            raise RuntimeError(
+                f"PROXY_URL must start with http:// or https://, "
+                f"got '{_strip_proxy_secrets_for_echo(stripped)[:50]}'"
+            )
+        return stripped
 
     # ─── Rules par défaut ─────────────────────────────────────
     # Chemin vers le fichier Markdown utilisé comme rules par défaut
@@ -318,12 +392,9 @@ class Settings(BaseSettings):
                 "context window)"
             )
 
-        # Proxy URL format (optionnel — si renseigné doit être une URL valide)
-        if self.proxy_url and not self.proxy_url.startswith(("http://", "https://")):
-            errors.append(
-                f"PROXY_URL must start with http:// or https://, "
-                f"got '{self.proxy_url[:50]}'"
-            )
+        # Proxy URL : schéma validé au niveau CHAMP (_normalize_proxy_url,
+        # RuntimeError sans écho pydantic de la valeur brute — R4). Aucune
+        # valeur invalide ne peut donc atteindre ce point.
 
         # Response limit
         if self.response_max_bytes < 1024:

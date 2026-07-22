@@ -137,6 +137,36 @@ refreshed against a future upstream release:
     deletion), aligning it with the other mutating tools (`memory_ingest`,
     `memory_update`, ...). Read-only tokens can no longer delete documents.
 
+- **Outbound proxy (`PROXY_URL`) support (Hivemind P12-3, #268).** The
+  vendored baseline had no outbound-proxy support; the embedded service now
+  honors the same Hivemind `PROXY_URL` contract as the core, with a static
+  per-client classification (never runtime DNS/IP heuristics) and no
+  `HTTP_PROXY`/`HTTPS_PROXY` export that could reroute unclassified
+  libraries (Qdrant, Neo4j tooling, urllib healthchecks):
+  - **`src/mcp_memory/core/egress.py`** — NEW. Import-light egress helpers:
+    botocore proxies mapping, owned proxied `httpx.AsyncClient` factory,
+    log-safe proxy-origin rendering, and proxy-secret redaction (userinfo and
+    query strings stripped from outward messages).
+  - **`src/mcp_memory/config.py`** — added `proxy_url` with the core's exact
+    normalization (strip, empty → unset) and accepted schemes
+    (`http://`/`https://`); an invalid value refuses service startup
+    (fail-closed).
+  - **`src/mcp_memory/core/extractor.py`**, **`core/embedder.py`** — when
+    `PROXY_URL` is set, an owned proxied transport is injected into
+    `AsyncOpenAI` (extraction, Q&A, embeddings, provider-health probes,
+    including retry attempts); it is closed on constructor failure and at
+    service shutdown via `close()`; startup logs show only the proxy origin.
+  - **`src/mcp_memory/core/storage.py`** — both document-storage botocore
+    configs (SigV2 data / SigV4 metadata, and the single `sigv4`-mode client)
+    carry the proxies mapping; outward storage exceptions are redacted
+    (botocore `ProxyConnectionError` embeds the raw proxy URL).
+  - **`src/mcp_memory/auth/s3_token_validator.py`** — the per-call
+    token-store reader carries the same proxies mapping; a proxy outage keeps
+    the existing fail-closed deny.
+  - **`src/mcp_memory/server.py`** — `system_health` messages are redacted;
+    an outermost ASGI lifespan shim closes the owned inference transports on
+    service shutdown.
+
 ---
 
 ## Vendored fonts (Hivemind admin console) — `src/live_mem/static/fonts/`

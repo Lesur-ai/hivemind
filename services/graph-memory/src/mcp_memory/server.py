@@ -26,6 +26,7 @@ from .config import get_settings
 from .auth.middleware import AuthMiddleware, LoggingMiddleware, StaticFilesMiddleware
 from .auth.context import check_memory_access, check_write_permission, check_admin_permission, get_allowed_memory_ids, current_auth, DENY_ALL
 from .core.validators import validate_memory_id, validate_filename, validate_document_size, validate_entity_name, validate_backup_id as validate_backup_id_format, check_bootstrap_key_safety
+from .core.egress import redact_proxy_secrets
 
 
 # =============================================================================
@@ -2675,36 +2676,40 @@ async def system_health() -> dict:
         État de chaque service
     """
     results = {}
-    
+
+    # P12-3 (Hivemind #268) : les échecs proxy peuvent embarquer l'URL proxy
+    # brute (potentiellement porteuse de credentials) dans le message — chaque
+    # message sortant de santé est donc redacted (no-op sans secret).
+
     # Test S3
     try:
         results["s3"] = await get_storage().test_connection()
     except Exception as e:
-        results["s3"] = {"status": "error", "message": str(e)}
-    
+        results["s3"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
+
     # Test Neo4j
     try:
         results["neo4j"] = await get_graph().test_connection()
     except Exception as e:
-        results["neo4j"] = {"status": "error", "message": str(e)}
-    
+        results["neo4j"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
+
     # Test LLMaaS (génération)
     try:
         results["llmaas"] = await get_extractor().test_connection()
     except Exception as e:
-        results["llmaas"] = {"status": "error", "message": str(e)}
-    
+        results["llmaas"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
+
     # Test Qdrant
     try:
         results["qdrant"] = await get_vector_store().test_connection()
     except Exception as e:
-        results["qdrant"] = {"status": "error", "message": str(e)}
-    
+        results["qdrant"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
+
     # Test Embedding (LLMaaS endpoint)
     try:
         results["embedding"] = await get_embedder().test_connection()
     except Exception as e:
-        results["embedding"] = {"status": "error", "message": str(e)}
+        results["embedding"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
     
     # Statut global : TOUS doivent être OK (couplage strict)
     all_ok = all(r.get("status") == "ok" for r in results.values())
@@ -3109,6 +3114,72 @@ async def backup_restore_archive(
 
 
 # =============================================================================
+# Cycle de vie egress (P12-3, Hivemind #268)
+# =============================================================================
+
+async def _close_llm_singletons() -> None:
+    """Ferme et réinitialise les singletons d'inférence au shutdown.
+
+    Libère les transports proxy possédés (créés uniquement quand PROXY_URL
+    est définie) des services extracteur et embedder — les deux registres
+    (modules core et caches lazy de ce module) sont réinitialisés. Idempotent
+    et no-op quand rien n'a été instancié.
+    """
+    global _extractor_service, _embedding_service
+    from .core.embedder import close_embedding_service_if_initialized
+    from .core.extractor import close_extractor_service_if_initialized
+
+    local_extractor = _extractor_service
+    local_embedder = _embedding_service
+    _extractor_service = None
+    _embedding_service = None
+    await close_extractor_service_if_initialized()
+    await close_embedding_service_if_initialized()
+    # Les caches lazy de ce module peuvent référencer les mêmes instances que
+    # les singletons de module (déjà fermés ci-dessus) ou des instances
+    # injectées : fermer explicitement couvre les deux cas (close idempotent).
+    if local_extractor is not None:
+        await local_extractor.close()
+    if local_embedder is not None:
+        await local_embedder.close()
+
+
+class EgressLifecycleMiddleware:
+    """Shim ASGI : ferme les transports proxy possédés au lifespan.shutdown.
+
+    Posé en couche EXTERNE de la pile dans ``main()`` pour que l'arrêt réel
+    d'uvicorn (SIGTERM/SIGINT) atteigne toujours le chemin de fermeture,
+    quel que soit le comportement des couches internes. Les messages lifespan
+    sont transmis inchangés ; les scopes non-lifespan passent tels quels.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "lifespan":
+            return await self.app(scope, receive, send)
+
+        async def wrapped_receive():
+            message = await receive()
+            if message["type"] == "lifespan.shutdown":
+                try:
+                    await _close_llm_singletons()
+                except Exception as e:
+                    # Un échec de fermeture ne doit pas casser le shutdown
+                    # des couches internes ; message redacted (jamais d'URL
+                    # proxy brute).
+                    print(
+                        "⚠️ [Egress] close on shutdown failed: "
+                        f"{redact_proxy_secrets(str(e))}",
+                        file=sys.stderr,
+                    )
+            return message
+
+        await self.app(scope, wrapped_receive, send)
+
+
+# =============================================================================
 # Point d'entrée
 # =============================================================================
 
@@ -3126,10 +3197,14 @@ def main():
     base_app = mcp.streamable_http_app()
     
     # Empiler les middlewares (le dernier wrappé est le premier exécuté)
-    # Flux requête : AuthMiddleware → LoggingMiddleware → StaticFilesMiddleware → MCP Streamable HTTP app
+    # Flux requête : EgressLifecycleMiddleware (lifespan uniquement) →
+    # AuthMiddleware → LoggingMiddleware → StaticFilesMiddleware → MCP app
     app = StaticFilesMiddleware(base_app)
     app = LoggingMiddleware(app, debug=args.debug)
     app = AuthMiddleware(app, debug=args.debug)
+    # P12-3 : couche externe — ferme les transports proxy possédés des
+    # services d'inférence sur lifespan.shutdown (arrêt uvicorn).
+    app = EgressLifecycleMiddleware(app)
     
     # Sécurité v2.1.0 : vérifier la clé bootstrap au démarrage
     check_bootstrap_key_safety(settings.admin_bootstrap_key or "")

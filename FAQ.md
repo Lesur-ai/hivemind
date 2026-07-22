@@ -349,7 +349,16 @@ Yes. Supported since inherited Live Memory **v1.8.1**, set `PROXY_URL` in `.env`
 PROXY_URL=http://10.0.0.1:3128
 ```
 
-This routes S3 (boto3) and LLM (httpx) traffic through the proxy. It's a **custom variable** (not `HTTP_PROXY`) to avoid affecting other Python libraries. `long`-tier connections are not supported through the proxy.
+This routes every Internet-bound request through the proxy: S3 (boto3) and LLM
+(httpx) traffic of the core — consolidation calls and the `/health` /
+`system_health` probes — plus the embedded Graph Memory egress: extraction and
+embedding LLM calls (including their provider-health probes), document-storage
+S3, and the shared token-store S3 reads. It's a **custom variable** (not
+`HTTP_PROXY`) to avoid affecting other Python libraries: the internal
+Hivemind→graph-memory MCP bridge, Neo4j, Qdrant, and container-local health
+checks always stay direct, and the dev-profile MinIO stack, which does not set
+`PROXY_URL`, stays direct too. A proxy failure fails closed — requests are
+never silently retried over a direct connection.
 
 ---
 

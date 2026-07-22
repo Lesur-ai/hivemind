@@ -216,6 +216,160 @@ class TestConsolidatorServiceProxy:
             _mod._consolidator = original
 
 
+class TestStorageProxyLogRedaction:
+    """P12-3 R2 (#268, Codex round 2) — le log de démarrage du StorageService
+    cœur ne doit exposer que l'origine scheme://host:port du proxy, jamais le
+    userinfo (le chemin d'initialisation S3 est aussi atteignable que celui du
+    consolidateur)."""
+
+    def test_startup_log_is_display_safe(self, caplog):
+        import logging
+
+        settings = _make_settings(
+            proxy_url="http://svc-user:s3cr3t-pw@proxy.example.com:3128",
+        )
+        with (
+            patch("live_mem.core.storage.get_settings", return_value=settings),
+            patch("live_mem.core.storage.boto3.client", return_value=MagicMock()),
+            caplog.at_level(logging.INFO, logger="live_mem.storage"),
+        ):
+            from live_mem.core.storage import StorageService
+
+            StorageService()
+
+        joined = "\n".join(record.getMessage() for record in caplog.records)
+        assert "proxy.example.com:3128" in joined
+        assert "s3cr3t-pw" not in joined
+        assert "svc-user" not in joined
+
+
+class TestCoreStorageProxyErrorRedaction:
+    """P12-3 R8 (#268) — le StorageService du CŒUR reçoit la même frontière
+    de redaction que le service graph-memory embarqué : une erreur proxy
+    botocore ne doit atteindre ni les consommateurs de ``str(e)`` (outils
+    MCP, consolidateur, sondes) ni le payload récupéré de test_connection
+    (forwardé verbatim par /health public et system_health)."""
+
+    _SECRET = (
+        "http://svc-user:s3cr3t@pw@proxy.internal:3128"
+        "?access_token=qs3cr3t#fr4g"
+    )
+
+    def _make_core_storage(self, boom_method=None, boom=None):
+        settings = _make_settings(proxy_url="http://proxy.example.com:3128")
+        client = MagicMock()
+        if boom_method:
+            getattr(client, boom_method).side_effect = boom
+        with (
+            patch("live_mem.core.storage.get_settings", return_value=settings),
+            patch("live_mem.core.storage.boto3.client", return_value=client),
+        ):
+            from live_mem.core.storage import StorageService
+
+            return StorageService()
+
+    def _assert_clean(self, surface):
+        assert "s3cr3t" not in surface
+        assert "pw@" not in surface
+        assert "svc-user" not in surface
+        assert "qs3cr3t" not in surface
+        assert "fr4g" not in surface
+
+    def test_raised_proxy_error_is_redacted(self):
+        from botocore.exceptions import ProxyConnectionError
+
+        svc = self._make_core_storage(
+            "put_object", ProxyConnectionError(proxy_url=self._SECRET)
+        )
+        with pytest.raises(ProxyConnectionError) as excinfo:
+            asyncio.run(svc.put("spaces/x/_meta.json", "{}"))
+        self._assert_clean(str(excinfo.value))
+        assert "proxy.internal:3128" in str(excinfo.value)
+
+    def test_recovered_test_connection_payload_is_redacted(self):
+        from botocore.exceptions import ProxyConnectionError
+
+        svc = self._make_core_storage(
+            "head_bucket", ProxyConnectionError(proxy_url=self._SECRET)
+        )
+        result = asyncio.run(svc.test_connection())
+        assert result["status"] == "error"
+        self._assert_clean(result["message"])
+
+    def test_recovered_client_error_payload_is_redacted(self):
+        from botocore.exceptions import ClientError
+
+        err = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": f"via {self._SECRET}"}},
+            "HeadBucket",
+        )
+        svc = self._make_core_storage("head_bucket", err)
+        result = asyncio.run(svc.test_connection())
+        assert result["status"] == "error"
+        assert "AccessDenied" in result["message"]
+        self._assert_clean(result["message"])
+
+
+class TestProxyUrlErrorEchoRedaction:
+    """P12-3 R2/R3/R4 — une valeur PROXY_URL invalide ET porteuse de
+    credentials ne doit fuiter NI dans le message d'erreur de démarrage NI
+    dans une charge pydantic structurée (cœur)."""
+
+    def test_invalid_scheme_error_never_echoes_credentials(self):
+        """R3/R4 : userinfo ET query/fragment retirés ; l'erreur n'est PAS
+        une ValidationError pydantic (dont input_value / errors()[0]['input']
+        répéteraient la valeur brute) — RuntimeError propagée sans wrapping,
+        démarrage toujours fail-closed."""
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        with _pytest.raises(RuntimeError) as excinfo:
+            _make_settings(
+                proxy_url=(
+                    "socks5://svc-user:s3cr3t@pw@proxy.internal:1080"
+                    "?access_token=qs3cr3t#fr4g"
+                )
+            )
+        assert not isinstance(excinfo.value, ValidationError)
+        message = str(excinfo.value)
+        assert "PROXY_URL must start" in message
+        assert "s3cr3t" not in message
+        assert "pw@" not in message
+        assert "svc-user" not in message
+        assert "qs3cr3t" not in message
+        assert "access_token" not in message
+        assert "fr4g" not in message
+        assert "proxy.internal:1080" in message
+
+
+class TestConsolidatorProxyLogRedaction:
+    """P12-3 (#268) — PROXY_URL est potentiellement porteur de credentials :
+    le log de démarrage du consolidateur ne doit exposer que l'origine
+    scheme://host:port, jamais le userinfo ni la query."""
+
+    def test_startup_log_is_display_safe(self, caplog):
+        import logging
+
+        settings = _make_settings(
+            proxy_url="http://svc-user:s3cr3t-pw@proxy.example.com:3128",
+            llmaas_api_url="https://api.example.com/v1",
+            llmaas_api_key="sk-test",
+        )
+        with (
+            patch("live_mem.core.consolidator.get_settings", return_value=settings),
+            patch("live_mem.core.consolidator.AsyncOpenAI"),
+            caplog.at_level(logging.INFO, logger="live_mem.consolidator"),
+        ):
+            from live_mem.core.consolidator import ConsolidatorService
+
+            ConsolidatorService()
+
+        joined = "\n".join(record.getMessage() for record in caplog.records)
+        assert "proxy.example.com:3128" in joined
+        assert "s3cr3t-pw" not in joined
+        assert "svc-user" not in joined
+
+
 # ─────────────────────────────────────────────────────────────
 # P12-1 — LLM health probes honor PROXY_URL with an owned client
 # ─────────────────────────────────────────────────────────────

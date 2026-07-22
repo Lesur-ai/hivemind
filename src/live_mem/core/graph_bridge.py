@@ -247,10 +247,12 @@ class GraphMemoryClient:
             token: Bearer token pour l'authentification
             timeout: Timeout par appel d'outil en secondes
         """
-        # NOTE: PROXY_URL n'est pas supporté pour cette connexion.
-        # streamablehttp_client (SDK MCP officiel) n'expose pas de paramètre
-        # proxy ni http_client dans son API actuelle. Les appels vers
-        # graph-memory passent donc toujours en direct, même si PROXY_URL est défini.
+        # NOTE: ce pont Hivemind→graph-memory est du trafic INTERNE (réseau
+        # Compose) et reste TOUJOURS direct, même si PROXY_URL est défini —
+        # c'est la classification P12-3 (#268), et streamablehttp_client
+        # (SDK MCP officiel) n'expose de toute façon ni proxy ni http_client.
+        # L'egress Internet du service graph-memory lui-même (LLM, S3) honore
+        # PROXY_URL depuis P12-3 côté service embarqué.
 
         # Normaliser l'URL : retirer /sse ou /mcp si présent en fin
         self._base_url = base_url.rstrip("/")

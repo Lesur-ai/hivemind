@@ -38,13 +38,40 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.utils import determine_content_length
 
-from ..config import get_settings
+from ..config import display_proxy_url, get_settings, redact_proxy_secrets
 
 import logging
 
 logger = logging.getLogger("live_mem.storage")
 
 _EMPTY_CONTINUE_HANDLER_ID = "hivemind-no-empty-s3-expect-continue"
+
+
+def _redact_proxy_errors(func):
+    """P12-3 R8 (#268) : frontière de redaction des erreurs S3 sortantes.
+
+    Une ``ProxyConnectionError`` botocore embarque l'URL proxy BRUTE
+    (potentiellement porteuse de credentials). ``e.args`` n'est réécrit que
+    quand la redaction change le texte — type, traceback et attributs
+    (``ClientError.response``) préservés, chemin nominal inchangé, exception
+    toujours propagée (fail-closed). Tous les consommateurs aval de
+    ``str(e)`` (outils MCP, consolidateur, sondes /health et system_health,
+    logs) héritent du message assaini. Miroir du décorateur du service
+    graph-memory embarqué.
+    """
+    import functools
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            redacted = redact_proxy_secrets(str(e))
+            if redacted != str(e):
+                e.args = (redacted,)
+            raise
+
+    return wrapper
 
 
 def _remove_expect_header_for_empty_s3_body(model, params, **kwargs) -> None:
@@ -179,7 +206,12 @@ class StorageService:
             self.signature_mode,
         )
         if proxy_url:
-            logger.info("StorageService: S3 requests via proxy %s", proxy_url)
+            # P12-3 R2 (#268) : PROXY_URL est potentiellement porteuse de
+            # credentials — ne logguer que l'origine scheme://host:port.
+            logger.info(
+                "StorageService: S3 requests via proxy %s",
+                display_proxy_url(proxy_url),
+            )
 
     # ─────────────────────────────────────────────────────────────
     # Helpers async — wrappent les appels synchrones boto3
@@ -209,6 +241,7 @@ class StorageService:
             kwargs["SSEKMSKeyId"] = self._sse_kms_key_id
         return kwargs
 
+    @_redact_proxy_errors
     async def put(
         self, key: str, content: str, content_type: str = "text/plain; charset=utf-8"
     ) -> None:
@@ -229,6 +262,7 @@ class StorageService:
             **self._sse_kwargs(),
         )
 
+    @_redact_proxy_errors
     async def put_json(self, key: str, data: dict) -> None:
         """
         Écrit un objet JSON sur S3.
@@ -244,6 +278,7 @@ class StorageService:
     # GET — Lecture (data client)
     # ─────────────────────────────────────────────────────────────
 
+    @_redact_proxy_errors
     async def get(self, key: str) -> Optional[str]:
         """
         Lit un objet depuis S3.
@@ -268,6 +303,7 @@ class StorageService:
                 return None
             raise
 
+    @_redact_proxy_errors
     async def get_json(self, key: str) -> Optional[dict]:
         """
         Lit un objet JSON depuis S3.
@@ -287,6 +323,7 @@ class StorageService:
     # DELETE — Suppression (data client)
     # ─────────────────────────────────────────────────────────────
 
+    @_redact_proxy_errors
     async def delete(self, key: str) -> None:
         """
         Supprime un objet sur S3.
@@ -300,6 +337,7 @@ class StorageService:
             Key=key,
         )
 
+    @_redact_proxy_errors
     async def delete_many(self, keys: list[str]) -> int:
         """
         Supprime plusieurs objets un par un.
@@ -332,6 +370,7 @@ class StorageService:
     # LIST — Listage (meta client)
     # ─────────────────────────────────────────────────────────────
 
+    @_redact_proxy_errors
     async def list_objects(self, prefix: str, max_keys: int = 0) -> list[dict]:
         """
         Liste les objets sous un préfixe S3, avec pagination automatique.
@@ -381,6 +420,7 @@ class StorageService:
 
         return all_objects
 
+    @_redact_proxy_errors
     async def list_prefixes(self, prefix: str, delimiter: str = "/") -> list[str]:
         """
         Liste les "dossiers" (préfixes communs) sous un préfixe S3.
@@ -426,6 +466,7 @@ class StorageService:
     # HEAD — Existence (meta client)
     # ─────────────────────────────────────────────────────────────
 
+    @_redact_proxy_errors
     async def exists(self, key: str) -> bool:
         """
         Vérifie si un objet existe sur S3.
@@ -452,6 +493,7 @@ class StorageService:
     # Opérations composées
     # ─────────────────────────────────────────────────────────────
 
+    @_redact_proxy_errors
     async def list_and_get(self, prefix: str, exclude_keep: bool = True) -> list[dict]:
         """
         Liste et lit tous les objets sous un préfixe.
@@ -488,6 +530,7 @@ class StorageService:
 
         return results
 
+    @_redact_proxy_errors
     async def copy_object(self, source_key: str, dest_key: str) -> None:
         """
         Copie un objet S3 d'une clé à une autre (même bucket).
@@ -511,6 +554,7 @@ class StorageService:
     # Test de connexion
     # ─────────────────────────────────────────────────────────────
 
+    @_redact_proxy_errors
     async def test_connection(self) -> dict:
         """
         Teste la connexion au bucket S3.
@@ -539,14 +583,17 @@ class StorageService:
             return {
                 "status": "error",
                 "bucket": self.bucket,
-                "message": str(e),
+                # P12-3 R8 : chemin RÉCUPÉRÉ (jamais re-levé) forwardé
+                # verbatim par /health (public) et system_health — redaction
+                # locale obligatoire.
+                "message": redact_proxy_secrets(str(e)),
                 "latency_ms": latency,
             }
         except Exception as e:
             return {
                 "status": "error",
                 "bucket": self.bucket,
-                "message": str(e),
+                "message": redact_proxy_secrets(str(e)),
             }
 
 
