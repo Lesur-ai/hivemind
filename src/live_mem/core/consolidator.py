@@ -31,7 +31,7 @@ from typing import Awaitable, Callable, Optional
 import httpx
 from openai import AsyncOpenAI
 
-from ..config import get_settings
+from ..config import display_proxy_url, get_settings
 from .storage import get_storage, bank_relpath
 from .reservation_guard import assert_space_not_reserved
 from .live_note_format import split_live_note_front_matter
@@ -491,7 +491,13 @@ class ConsolidatorService:
             else None
         )
         if self._http_client:
-            logger.info("ConsolidatorService: LLM requests via proxy %s", proxy_url)
+            # P12-3 (#268) : PROXY_URL est potentiellement porteuse de
+            # credentials (http://user:pass@host:port) — ne logguer que
+            # l'origine scheme://host:port, jamais la valeur brute.
+            logger.info(
+                "ConsolidatorService: LLM requests via proxy %s",
+                display_proxy_url(proxy_url),
+            )
 
         self._client = AsyncOpenAI(
             base_url=settings.llmaas_api_url,

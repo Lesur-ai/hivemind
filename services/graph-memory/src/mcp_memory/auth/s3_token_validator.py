@@ -196,21 +196,35 @@ class S3TokenValidator:
         return data
 
     async def _read_tokens_json_from_s3(self) -> Optional[str]:
-        """Default production reader (lazy boto3) honouring the mirrored mode."""
+        """Default production reader (lazy boto3) honouring the mirrored mode.
+
+        P12-3 (Hivemind #268): this independent per-call reader is external S3
+        egress and follows the same uniform ``PROXY_URL`` rule as the
+        document-storage clients (static per-client classification, no DNS/IP
+        heuristics). Proxy failure keeps the existing fail-closed semantics:
+        the caller swallows every exception and denies — a proxy outage can
+        never widen authorization nor fall back to a direct connection.
+        """
         import boto3  # lazy
         from botocore.config import Config  # lazy
 
         from ..config import get_settings  # lazy
+        from ..core.egress import botocore_proxies  # lazy (import-light rule)
 
         settings = get_settings()
         sig = "s3" if self.signature_mode == "dual" else "s3v4"
+        _proxies = botocore_proxies(getattr(settings, "proxy_url", None))
         client = boto3.client(
             "s3",
             endpoint_url=settings.s3_endpoint_url,
             aws_access_key_id=settings.s3_access_key_id,
             aws_secret_access_key=settings.s3_secret_access_key,
             region_name=getattr(settings, "s3_region_name", "us-east-1"),
-            config=Config(signature_version=sig, s3={"addressing_style": "path"}),
+            config=Config(
+                signature_version=sig,
+                s3={"addressing_style": "path"},
+                **({"proxies": _proxies} if _proxies else {}),
+            ),
         )
         key = getattr(settings, "hivemind_tokens_s3_key", "_system/tokens.json")
         obj = client.get_object(Bucket=settings.s3_bucket_name, Key=key)

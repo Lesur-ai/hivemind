@@ -16,6 +16,15 @@ from botocore.config import Config
 from botocore.exceptions import ClientError, NoCredentialsError
 
 from ..config import get_settings
+from .egress import (
+    botocore_proxies,
+    redact_proxy_errors_async,
+    redact_proxy_secrets,
+)
+
+# P12-3 (Hivemind #268) : frontière de redaction partagée (voir egress.py) —
+# les erreurs botocore de connexion proxy embarquent l'URL proxy BRUTE.
+_redact_proxy_errors = redact_proxy_errors_async
 
 
 class StorageService:
@@ -50,13 +59,22 @@ class StorageService:
         #   sigv4           -> the SigV4 client serves EVERY operation.
         self.signature_mode = self._resolve_signature_mode()
 
+        # ── Proxy HTTP sortant (P12-3, Hivemind #268) ─────────
+        # Même règle uniforme que le StorageService du cœur Hivemind : quand
+        # PROXY_URL est définie, TOUS les clients S3 du service la suivent —
+        # classification statique par classe de client, jamais d'heuristique
+        # DNS/IP sur l'endpoint. La topologie dev (MinIO même-stack) ne
+        # définit pas PROXY_URL et reste donc directe.
+        _proxies = botocore_proxies(settings.proxy_url)
+
         # Client SigV4 — toujours instancié. HEAD/LIST (métadonnées) en mode
         # 'dual' ; TOUTES les opérations en mode 'sigv4'.
         config_v4 = Config(
             region_name=region,
             signature_version='s3v4',
             s3={'addressing_style': 'path', 'payload_signing_enabled': False},
-            retries={'max_attempts': 3, 'mode': 'adaptive'}
+            retries={'max_attempts': 3, 'mode': 'adaptive'},
+            **({"proxies": _proxies} if _proxies else {})
         )
 
         self._client_v4 = boto3.client(
@@ -75,7 +93,8 @@ class StorageService:
                 region_name=region,
                 signature_version='s3',  # SigV2 legacy
                 s3={'addressing_style': 'path'},
-                retries={'max_attempts': 3, 'mode': 'adaptive'}
+                retries={'max_attempts': 3, 'mode': 'adaptive'},
+                **({"proxies": _proxies} if _proxies else {})
             )
 
             self._client_v2 = boto3.client(
@@ -128,6 +147,7 @@ class StorageService:
         """Calcule le hash SHA256 d'un contenu."""
         return hashlib.sha256(content).hexdigest()
     
+    @_redact_proxy_errors
     async def upload_document(
         self,
         memory_id: str,
@@ -190,9 +210,10 @@ class StorageService:
             }
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur upload: {e}", file=sys.stderr)
+            print(f"❌ [S3] Erreur upload: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
     
+    @_redact_proxy_errors
     async def download_document(self, memory_id: str, key_or_uri: str) -> bytes:
         """
         Télécharge un document depuis S3.
@@ -222,6 +243,7 @@ class StorageService:
                 raise FileNotFoundError(f"Document non trouvé: {key}")
             raise
     
+    @_redact_proxy_errors
     async def delete_document(self, memory_id: str, key_or_uri: str) -> bool:
         """
         Supprime un document de S3.
@@ -245,9 +267,10 @@ class StorageService:
             return True
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur suppression: {e}", file=sys.stderr)
+            print(f"❌ [S3] Erreur suppression: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return False
     
+    @_redact_proxy_errors
     async def document_exists(self, key_or_uri: str) -> bool:
         """Vérifie si un document existe dans S3."""
         key = self._parse_key(key_or_uri)
@@ -258,6 +281,7 @@ class StorageService:
         except ClientError:
             return False
     
+    @_redact_proxy_errors
     async def get_signed_url(
         self,
         key_or_uri: str,
@@ -283,6 +307,7 @@ class StorageService:
         
         return url
     
+    @_redact_proxy_errors
     async def list_documents(self, memory_id: str, prefix: str = "") -> list:
         """
         Liste les documents d'une mémoire.
@@ -316,9 +341,10 @@ class StorageService:
             return objects
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur listing: {e}", file=sys.stderr)
+            print(f"❌ [S3] Erreur listing: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return []
     
+    @_redact_proxy_errors
     async def check_documents(self, uris: list) -> dict:
         """
         Vérifie l'accessibilité de documents S3 à partir d'une liste d'URIs.
@@ -378,7 +404,12 @@ class StorageService:
                         "key": key,
                         "status": "error",
                         "size_bytes": 0,
-                        "error": f"Erreur S3 [{error_code}]: {e.response.get('Error', {}).get('Message', str(e))}"
+                        # P12-3 R1 : chemin d'erreur RÉCUPÉRÉ (jamais re-levé),
+                        # donc hors de portée du décorateur — redaction locale.
+                        "error": redact_proxy_secrets(
+                            f"Erreur S3 [{error_code}]: "
+                            f"{e.response.get('Error', {}).get('Message', str(e))}"
+                        )
                     })
                     errors += 1
             except Exception as e:
@@ -387,7 +418,9 @@ class StorageService:
                     "key": key,
                     "status": "error",
                     "size_bytes": 0,
-                    "error": str(e)
+                    # P12-3 R1 : une ProxyConnectionError récupérée ici porte
+                    # l'URL proxy BRUTE (credentials) — jamais dans le payload.
+                    "error": redact_proxy_secrets(str(e))
                 })
                 errors += 1
         
@@ -400,6 +433,7 @@ class StorageService:
             "details": details
         }
     
+    @_redact_proxy_errors
     async def list_all_objects(self, prefix: str = "") -> list:
         """
         Liste TOUS les objets du bucket (avec pagination).
@@ -445,9 +479,10 @@ class StorageService:
             return objects
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur listing complet: {e}", file=sys.stderr)
+            print(f"❌ [S3] Erreur listing complet: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return []
     
+    @_redact_proxy_errors
     async def delete_prefix(self, prefix: str) -> dict:
         """
         Supprime tous les objets S3 sous un préfixe donné.
@@ -471,7 +506,7 @@ class StorageService:
                 print(f"🗑️ [S3] Supprimé: {obj['key']}", file=sys.stderr)
             except ClientError as e:
                 error_count += 1
-                print(f"❌ [S3] Erreur suppression {obj['key']}: {e}", file=sys.stderr)
+                print(f"❌ [S3] Erreur suppression {obj['key']}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
         
         return {
             "deleted_count": deleted_count,
@@ -479,6 +514,7 @@ class StorageService:
             "total_found": len(objects)
         }
     
+    @_redact_proxy_errors
     async def delete_objects(self, keys: list) -> dict:
         """
         Supprime une liste d'objets S3 par leurs clés.
@@ -500,13 +536,14 @@ class StorageService:
                 print(f"🗑️ [S3] Supprimé: {key}", file=sys.stderr)
             except ClientError as e:
                 error_count += 1
-                print(f"❌ [S3] Erreur suppression {key}: {e}", file=sys.stderr)
+                print(f"❌ [S3] Erreur suppression {key}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
         
         return {
             "deleted_count": deleted_count,
             "error_count": error_count
         }
     
+    @_redact_proxy_errors
     async def test_connection(self) -> dict:
         """
         Teste la connexion S3 en utilisant PUT/GET (compatible SigV2).
@@ -561,7 +598,12 @@ class StorageService:
                 "status": "error",
                 "bucket": self._bucket,
                 "endpoint": self._endpoint_url,
-                "message": f"Erreur S3 [{error_code}]: {error_msg}"
+                # P12-3 R7 : chemin RÉCUPÉRÉ (jamais re-levé) copié tel quel
+                # par system_health — hors de portée du décorateur, redaction
+                # locale du message serveur avant retour.
+                "message": redact_proxy_secrets(
+                    f"Erreur S3 [{error_code}]: {error_msg}"
+                )
             }
     
     def _parse_key(self, key_or_uri: str) -> str:

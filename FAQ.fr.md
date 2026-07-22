@@ -358,7 +358,17 @@ Oui. Supporté depuis Live Memory hérité **v1.8.1**, définissez `PROXY_URL` d
 PROXY_URL=http://10.0.0.1:3128
 ```
 
-Cela route le trafic S3 (boto3) et LLM (httpx) à travers le proxy. C'est une **variable maison** (pas `HTTP_PROXY`) pour éviter d'affecter d'autres bibliothèques Python. Les connexions du tier `long` ne sont pas supportées via le proxy.
+Cela route chaque requête à destination d'Internet à travers le proxy : le
+trafic S3 (boto3) et LLM (httpx) du cœur — appels de consolidation et sondes
+`/health` / `system_health` — plus l'egress du Graph Memory embarqué : appels
+LLM d'extraction et d'embeddings (avec leurs sondes provider-health), S3 des
+documents, et lectures S3 du token-store partagé. C'est une **variable
+maison** (pas `HTTP_PROXY`) pour éviter d'affecter d'autres bibliothèques
+Python : le pont MCP interne Hivemind→graph-memory, Neo4j, Qdrant et les
+healthchecks locaux des conteneurs restent toujours directs, et la stack MinIO
+du profil dev, qui ne définit pas `PROXY_URL`, reste directe elle aussi. Un
+échec proxy échoue fermé — les requêtes ne sont jamais rejouées en direct
+silencieusement.
 
 ---
 

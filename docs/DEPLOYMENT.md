@@ -374,7 +374,12 @@ change.
    the internal `graph-memory` service. Allow Graph Memory to reach the same S3
    and LLMaaS endpoints plus internal Neo4j/Qdrant. An additional external long
    destination exists only under the advanced `graph_connect` override. Block
-   everything else at the host or network firewall.
+   everything else at the host or network firewall. When outbound traffic must
+   go through a corporate proxy, set `PROXY_URL` in `.env`: both the Hivemind
+   core and the embedded Graph Memory then send their Internet-bound S3 and
+   LLM traffic through it and fail closed on proxy failure, while internal
+   bridge/Neo4j/Qdrant/health traffic stays direct — the firewall then only
+   needs to allow the proxy as the external destination.
 5. **Rotate `ADMIN_BOOTSTRAP_KEY`** before the first production start,
    then rotate again after the first admin token is issued.
 6. **Audit retention.** Persist Hivemind audit logs off-host. The

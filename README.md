@@ -16,7 +16,7 @@ Agents from any MCP-capable runtime notice what others are doing, inherit what
 others have learned, and understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.3.0-9CA3AF?style=flat-square)](#-license)
+[![version](https://img.shields.io/badge/version-1.3.1-9CA3AF?style=flat-square)](#-license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#-license)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-prerequisites)
@@ -451,7 +451,7 @@ The `mid`-tier consolidator uses an LLM (OpenAI-compatible API) to transform
 | `LLMAAS_CONTEXT_WINDOW`   | `131072`          | TOTAL context window of the model (input + output combined, in tokens) |
 | `LLMAAS_MAX_TOKENS`       | `16384`           | Max OUTPUT tokens per request. Must stay **strictly below** `LLMAAS_CONTEXT_WINDOW`, otherwise startup fails with a configuration error naming both values. The consolidator adjusts dynamically: `output = min(MAX_TOKENS, CONTEXT_WINDOW - input)` |
 | `LLMAAS_TEMPERATURE`      | `0.3`             | LLM creativity (0.0 = deterministic, 1.0 = very creative) |
-| `PROXY_URL`               | _(none)_          | Outbound HTTP proxy (e.g. `http://10.0.0.1:3128`). **Custom variable** (not `HTTP_PROXY`) — injected manually into boto3 (S3) and httpx (LLM consolidation calls **and** the lightweight LLM health probes of `/health` and `system_health`). Not supported for `long`-tier connections. |
+| `PROXY_URL`               | _(none)_          | Outbound HTTP proxy (e.g. `http://10.0.0.1:3128`). **Custom variable** (not `HTTP_PROXY`) — injected manually into boto3 (S3) and httpx (LLM consolidation calls, the lightweight LLM health probes of `/health` and `system_health`, and the embedded Graph Memory Internet egress: extraction/embedding LLM calls with their provider-health probes, document-storage S3, and shared token-store S3 reads). The internal Hivemind→graph-memory MCP bridge, Neo4j, Qdrant, and container-local health checks always stay direct. Proxy failure fails closed — no silent direct fallback. |
 
 ### Optional Variables — Consolidation and Compaction
 

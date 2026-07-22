@@ -19,6 +19,30 @@ are not installation steps or public architecture contracts.
 
 ---
 
+## [1.3.1] — 2026-07-22
+
+> Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
+> boundary. Downstream extension seams are described in
+> `docs/EXTENSION_POINTS.md`.
+
+Upgrading from separate Live Memory and Graph Memory services is covered by the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### Added
+
+- **Embedded Graph Memory Internet egress honors `PROXY_URL`.** When
+  `PROXY_URL` is set, every Graph Memory request that can leave the local
+  network uses the configured outbound proxy: extraction and embedding LLM
+  calls (including retries and provider-health probes), both document-storage
+  S3 clients, and the shared token-store S3 reader. Internal traffic — the
+  Hivemind→graph-memory bridge, Neo4j, Qdrant, and container-local health
+  checks — always stays direct, and no `HTTP_PROXY`/`HTTPS_PROXY` variable is
+  exported. Proxy failure fails closed with no silent direct fallback, an
+  invalid `PROXY_URL` refuses service startup, and logs, health output, and
+  errors only ever show the proxy `scheme://host:port` origin.
+
+---
+
 ## [1.3.0] — 2026-07-21
 
 > Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant

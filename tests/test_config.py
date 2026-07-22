@@ -192,11 +192,13 @@ class TestProxyValidation:
         assert s.proxy_url == "http://proxy:3128"
 
     def test_invalid_scheme_tcp_rejected(self):
-        with pytest.raises(ValueError, match="PROXY_URL must start"):
+        # P12-3 R4 : RuntimeError (pas ValueError) — pydantic convertirait un
+        # ValueError en ValidationError qui écho la valeur brute (credentials).
+        with pytest.raises(RuntimeError, match="PROXY_URL must start"):
             _make_settings(proxy_url="tcp://proxy:3128")
 
     def test_invalid_scheme_bare_host_rejected(self):
-        with pytest.raises(ValueError, match="PROXY_URL must start"):
+        with pytest.raises(RuntimeError, match="PROXY_URL must start"):
             _make_settings(proxy_url="proxy.example.com:3128")
 
 
