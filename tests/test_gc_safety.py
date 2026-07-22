@@ -1411,3 +1411,645 @@ async def test_only_exact_gc_selection_treats_max_notes_truncation_as_partial(
     assert result["notes_remaining"] == 1
     if expected_status == "partial":
         assert result["reason"] == "partial_consolidation"
+
+
+# ─────────────────────────────────────────────────────────────
+# P12-1 — Honest structured consolidation outcomes
+# ─────────────────────────────────────────────────────────────
+
+
+def _pipeline_service(
+    storage: GCStorage,
+    monkeypatch: pytest.MonkeyPatch,
+    notes: list[tuple[str, str]],
+    *,
+    batch_size: int = 1,
+    notes_remaining: int = 0,
+) -> ConsolidatorService:
+    """Consolidator with mocked internals over the GCStorage fake."""
+    from live_mem.core import consolidator as consolidator_module
+
+    monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
+    service = object.__new__(ConsolidatorService)
+    service._batch_size = batch_size
+    service._validation_enabled = False
+    service._collect_inputs = AsyncMock(
+        return_value={
+            "notes": [{"key": key, "content": content} for key, content in notes],
+            "notes_keys": [key for key, _ in notes],
+            "notes_remaining": notes_remaining,
+            "bank_files": [],
+            "rules": "",
+            "synthesis": "",
+        }
+    )
+    service._compact_bank_if_needed = AsyncMock(return_value={"compacted": False})
+    service._build_prompt = lambda **_kwargs: []
+    service._call_llm = AsyncMock(
+        return_value={"status": "ok", "data": {}, "usage": {}}
+    )
+    service._write_results = AsyncMock(
+        return_value={
+            "status": "ok",
+            "notes_processed": 1,
+            "notes_deleted": 1,
+            "notes_delete_failed": 0,
+        }
+    )
+    return service
+
+
+class _PhaseRecorder:
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+
+    async def __call__(self, payload: dict) -> None:
+        self.payloads.append(dict(payload))
+
+    @property
+    def last_phase(self) -> str:
+        assert self.payloads, "no progress payload emitted"
+        return self.payloads[-1]["phase"]
+
+
+async def test_consolidator_first_batch_llm_failure_is_error_with_no_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-first-batch-llm-error"
+    first = _old_key(sid, "first")
+    second = _old_key(sid, "second")
+    _seed_space(storage, sid, first, second)
+    service = _pipeline_service(
+        storage, monkeypatch, [(first, "first"), (second, "second")]
+    )
+    service._call_llm = AsyncMock(
+        return_value={"status": "error", "message": "sk-secret provider detail"}
+    )
+    phases = _PhaseRecorder()
+
+    result = await service.consolidate(
+        sid, enforce_cooldown=False, progress_callback=phases
+    )
+
+    assert result["status"] == "error"
+    assert result["failed_batch"] == 1
+    assert result["failure_reason"] == "batch_llm_failed"
+    assert result["notes_processed"] == 0
+    assert result["notes_deleted"] == 0
+    assert result["bank_files_created"] == 0
+    assert result["bank_files_updated"] == 0
+    assert result["batches_completed"] == 0
+    # No durable mutation: no write call, no metadata update, notes intact.
+    assert service._write_results.await_count == 0
+    assert storage.objects[f"{sid}/_meta.json"] == "{}"
+    assert first in storage.objects
+    assert second in storage.objects
+    # Raw provider detail stays server-side.
+    assert "sk-secret" not in str(result)
+    assert phases.last_phase == "failed"
+
+
+async def test_consolidator_first_batch_llm_exception_is_error_with_no_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-first-batch-llm-raise"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._call_llm = AsyncMock(
+        side_effect=RuntimeError("injected provider crash")
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "error"
+    assert result["failed_batch"] == 1
+    assert result["failure_reason"] == "batch_llm_failed"
+    assert service._write_results.await_count == 0
+    assert old in storage.objects
+
+
+async def test_consolidator_first_batch_prompt_failure_is_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-first-batch-prompt-error"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+
+    def _raise_prompt(**_kwargs):
+        raise RuntimeError("injected prompt failure")
+
+    service._build_prompt = _raise_prompt
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "error"
+    assert result["failed_batch"] == 1
+    assert result["failure_reason"] == "batch_prompt_failed"
+    assert service._call_llm.await_count == 0
+    assert service._write_results.await_count == 0
+    assert old in storage.objects
+
+
+async def test_consolidator_write_results_exception_stays_partial_on_first_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-first-batch-write-raise"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._write_results = AsyncMock(
+        side_effect=RuntimeError("injected ambiguous write crash")
+    )
+    phases = _PhaseRecorder()
+
+    result = await service.consolidate(
+        sid, enforce_cooldown=False, progress_callback=phases
+    )
+
+    # A durable write may have started: never report a clean `error`.
+    assert result["status"] == "partial"
+    assert result["failed_batch"] == 1
+    assert result["failure_reason"] == "batch_write_failed"
+    assert phases.last_phase == "failed"
+
+
+async def test_consolidator_write_results_error_status_stays_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-first-batch-write-error-status"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._write_results = AsyncMock(
+        return_value={"status": "error", "message": "unexpected sink refusal"}
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "partial"
+    assert result["failed_batch"] == 1
+    assert result["failure_reason"] == "batch_write_failed"
+
+
+async def test_consolidator_later_batch_failure_reports_exact_failed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-second-batch-llm-error"
+    first = _old_key(sid, "first")
+    second = _old_key(sid, "second")
+    _seed_space(storage, sid, first, second)
+    service = _pipeline_service(
+        storage, monkeypatch, [(first, "first"), (second, "second")]
+    )
+    service._call_llm = AsyncMock(
+        side_effect=[
+            {"status": "ok", "data": {}, "usage": {}},
+            {"status": "error", "message": "injected second-batch failure"},
+        ]
+    )
+    phases = _PhaseRecorder()
+
+    result = await service.consolidate(
+        sid, enforce_cooldown=False, progress_callback=phases
+    )
+
+    assert result["status"] == "partial"
+    assert result["failed_batch"] == 2
+    assert result["failure_reason"] == "batch_llm_failed"
+    # Applied metrics from the completed first batch are preserved.
+    assert result["batches_completed"] == 1
+    assert result["notes_processed"] == 1
+    assert phases.last_phase == "failed"
+
+
+async def test_consolidator_note_delete_partial_has_no_fabricated_failed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-delete-partial-no-batch"
+    first = _old_key(sid, "first")
+    second = _old_key(sid, "second")
+    _seed_space(storage, sid, first, second)
+    service = _pipeline_service(
+        storage, monkeypatch, [(first, "first"), (second, "second")]
+    )
+    service._write_results = AsyncMock(
+        return_value={
+            "status": "partial",
+            "reason": "partial_delete",
+            "notes_processed": 1,
+            "notes_deleted": 0,
+            "notes_delete_failed": 1,
+        }
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "partial"
+    assert "failed_batch" not in result
+    assert result["failure_reason"] == "note_delete_failed"
+
+
+async def test_consolidator_exact_selection_truncation_has_no_failed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-truncation-no-batch"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(
+        storage, monkeypatch, [(old, "old")], notes_remaining=3
+    )
+
+    result = await service.consolidate(
+        sid, enforce_cooldown=False, note_keys=[old]
+    )
+
+    assert result["status"] == "partial"
+    assert "failed_batch" not in result
+    assert result["failure_reason"] == "exact_selection_truncated"
+
+
+async def test_consolidator_metadata_only_failure_has_stable_reason_no_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-metadata-only-failure"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+
+    async def _fail_meta_put(key: str, data: dict) -> None:
+        if key.endswith("/_meta.json"):
+            raise RuntimeError("injected metadata failure")
+
+    monkeypatch.setattr(storage, "put_json", _fail_meta_put)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "partial"
+    assert result["metadata_update_failed"] is True
+    assert result["failure_reason"] == "metadata_update_failed"
+    assert "failed_batch" not in result
+
+
+async def test_consolidator_compaction_write_disqualifies_error_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-compacted-then-llm-error"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._compact_bank_if_needed = AsyncMock(
+        return_value={
+            "compacted": True,
+            "files_compacted": 1,
+            "size_before": 100,
+            "size_after": 50,
+        }
+    )
+    service._call_llm = AsyncMock(
+        return_value={"status": "error", "message": "injected failure"}
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    # The compaction already rewrote bank files durably: an honest outcome
+    # is `partial`, never `error`, even though the first batch failed
+    # before its own write.
+    assert result["status"] == "partial"
+    assert result["failed_batch"] == 1
+    assert result["failure_reason"] == "batch_llm_failed"
+
+
+async def test_consolidator_compaction_exception_is_partial_bank_compact_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-compaction-crash"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._compact_bank_if_needed = AsyncMock(
+        side_effect=RuntimeError("injected compaction crash")
+    )
+    phases = _PhaseRecorder()
+
+    result = await service.consolidate(
+        sid, enforce_cooldown=False, progress_callback=phases
+    )
+
+    # Compaction writes may have started: durable state is ambiguous.
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "bank_compact_failed"
+    assert "failed_batch" not in result
+    assert result["notes_processed"] == 0
+    assert service._call_llm.await_count == 0
+    assert service._write_results.await_count == 0
+    assert old in storage.objects
+    assert phases.last_phase == "failed"
+
+
+async def test_consolidator_full_success_keeps_ok_and_terminal_done_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-full-success"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    phases = _PhaseRecorder()
+
+    result = await service.consolidate(
+        sid, enforce_cooldown=False, progress_callback=phases
+    )
+
+    assert result["status"] == "ok"
+    assert "failed_batch" not in result
+    assert "failure_reason" not in result
+    assert phases.last_phase == "done"
+
+
+# ─────────────────────────────────────────────────────────────
+# P12-1 (Codex review) — output budget never exceeds either limit
+# ─────────────────────────────────────────────────────────────
+
+
+class _BudgetCaptureCompletions:
+    """chat.completions double capturing the requested max_tokens."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        from unittest.mock import MagicMock
+
+        message = MagicMock(content='{"file_edits": [], "synthesis": "ok"}')
+        choice = MagicMock(message=message, finish_reason="stop")
+        usage = MagicMock(prompt_tokens=5, completion_tokens=5, total_tokens=10)
+        return MagicMock(choices=[choice], usage=usage)
+
+
+def _budget_service(max_tokens: int, context_window: int) -> tuple:
+    from unittest.mock import MagicMock
+
+    service = object.__new__(ConsolidatorService)
+    service._model = "test-model"
+    service._temperature = 0.3
+    service._max_tokens = max_tokens
+    service._context_window = context_window
+    completions = _BudgetCaptureCompletions()
+    service._client = MagicMock(
+        chat=MagicMock(completions=completions)
+    )
+    return service, completions
+
+
+async def test_call_llm_never_requests_above_configured_output_budget() -> None:
+    # Valid small-context configuration accepted by the startup guard
+    # (1024 < 4096) must never see a provider request above its own cap.
+    service, completions = _budget_service(max_tokens=1024, context_window=4096)
+
+    result = await service._call_llm(
+        [{"role": "user", "content": "x" * 400}]
+    )
+
+    assert result["status"] == "ok"
+    assert len(completions.calls) == 1
+    assert completions.calls[0]["max_tokens"] == 1024
+
+
+async def test_call_llm_never_requests_above_remaining_window() -> None:
+    # A large input must shrink the request below the remaining window,
+    # never be floored back above it.
+    service, completions = _budget_service(
+        max_tokens=16384, context_window=4096
+    )
+
+    # ~3000 estimated input tokens on a 4096 window → at most 1096 output.
+    result = await service._call_llm(
+        [{"role": "user", "content": "x" * 12000}]
+    )
+
+    assert result["status"] == "ok"
+    assert len(completions.calls) == 1
+    requested = completions.calls[0]["max_tokens"]
+    assert requested <= 4096 - (12000 // 4)
+
+
+async def test_call_llm_exhausted_window_is_structured_error_without_call() -> None:
+    # Estimated input at/over the window: no positive output budget remains.
+    # Structured pre-write error, and the provider is never invoked.
+    service, completions = _budget_service(
+        max_tokens=1024, context_window=4096
+    )
+
+    result = await service._call_llm(
+        [{"role": "user", "content": "x" * (4 * 4096 + 400)}]
+    )
+
+    assert result["status"] == "error"
+    assert completions.calls == []
+
+
+class _SequenceCompletions:
+    """chat.completions double returning scripted contents per call."""
+
+    def __init__(self, contents: list[str]) -> None:
+        self.calls: list[dict] = []
+        self._contents = list(contents)
+
+    async def create(self, **kwargs):
+        # Snapshot the prompt at call time: the retry path mutates the live
+        # `messages` list, and a reference would retroactively inflate the
+        # first call's captured input.
+        snapshot = dict(kwargs)
+        snapshot["messages"] = [dict(m) for m in kwargs.get("messages", [])]
+        self.calls.append(snapshot)
+        from unittest.mock import MagicMock
+
+        content = self._contents[min(len(self.calls) - 1, len(self._contents) - 1)]
+        message = MagicMock(content=content)
+        choice = MagicMock(message=message, finish_reason="stop")
+        usage = MagicMock(prompt_tokens=5, completion_tokens=5, total_tokens=10)
+        return MagicMock(choices=[choice], usage=usage)
+
+
+def _sequence_service(
+    max_tokens: int, context_window: int, contents: list[str]
+) -> tuple:
+    from unittest.mock import MagicMock
+
+    service = object.__new__(ConsolidatorService)
+    service._model = "test-model"
+    service._temperature = 0.3
+    service._max_tokens = max_tokens
+    service._context_window = context_window
+    completions = _SequenceCompletions(contents)
+    service._client = MagicMock(chat=MagicMock(completions=completions))
+    return service, completions
+
+
+def _assert_call_fits_window(call: dict, context_window: int) -> None:
+    # Mirror of _call_llm's estimator: total chars // 4.
+    input_chars = sum(len(m.get("content", "")) for m in call["messages"])
+    estimated_input_tokens = input_chars // 4
+    assert estimated_input_tokens + call["max_tokens"] <= context_window, (
+        f"provider call exceeds the context window: input ~"
+        f"{estimated_input_tokens} + max_tokens {call['max_tokens']} > "
+        f"{context_window}"
+    )
+
+
+async def test_call_llm_invalid_json_retry_recomputes_budget() -> None:
+    # First response: large non-JSON garbage that the repair path cannot fix.
+    # The retry appends it (plus the correction) to the prompt: the budget
+    # must be recomputed from the GROWN messages so every provider request
+    # still fits the context window.
+    garbage = "this is definitely not json " * 500  # ~14000 chars ≈ 3500 tokens
+    service, completions = _sequence_service(
+        max_tokens=1024,
+        context_window=4096,
+        contents=[garbage, '{"file_edits": [], "synthesis": "ok"}'],
+    )
+
+    result = await service._call_llm(
+        [{"role": "user", "content": "x" * 400}]
+    )
+
+    assert result["status"] == "ok"
+    assert len(completions.calls) == 2
+    for call in completions.calls:
+        _assert_call_fits_window(call, 4096)
+
+
+async def test_call_llm_missing_fields_retry_recomputes_budget() -> None:
+    # First response: valid JSON without file_edits/synthesis → structure
+    # retry path. Same recompute requirement as the invalid-JSON path.
+    padded = '{"padding": "' + "y" * 14000 + '"}'
+    service, completions = _sequence_service(
+        max_tokens=1024,
+        context_window=4096,
+        contents=[padded, '{"file_edits": [], "synthesis": "ok"}'],
+    )
+
+    result = await service._call_llm(
+        [{"role": "user", "content": "x" * 400}]
+    )
+
+    assert result["status"] == "ok"
+    assert len(completions.calls) == 2
+    for call in completions.calls:
+        _assert_call_fits_window(call, 4096)
+
+
+async def test_call_llm_retry_with_exhausted_window_stops_without_second_call() -> None:
+    # The first oversized response leaves no positive output budget for a
+    # retry: return the structured error instead of a doomed provider call.
+    garbage = "still not json at all " * 900  # ~19800 chars ≈ 4950 tokens
+    service, completions = _sequence_service(
+        max_tokens=1024,
+        context_window=4096,
+        contents=[garbage, '{"file_edits": [], "synthesis": "ok"}'],
+    )
+
+    result = await service._call_llm(
+        [{"role": "user", "content": "x" * 400}]
+    )
+
+    assert result["status"] == "error"
+    assert len(completions.calls) == 1
+
+
+async def test_consolidator_rejected_bank_edit_is_batch_write_failure_not_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Codex round-3 finding: a rejected/invalid bank edit retains every
+    # source note (never-drop) and used to surface as
+    # failure_reason="note_delete_failed" — a token that suggests the bank
+    # integration succeeded and only cleanup failed. Acting on that signal
+    # (deleting the retained notes) would lose information. The REAL
+    # _write_results path must classify this as a batch write failure with
+    # its one-based failed_batch.
+    storage = GCStorage()
+    sid = "p12-rejected-edit-honest-reason"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    # Real write path (not the mocked default): the LLM output carries an
+    # unsupported action, which _write_results refuses while keeping notes.
+    service._write_results = ConsolidatorService._write_results.__get__(service)
+    service._call_llm = AsyncMock(
+        return_value={
+            "status": "ok",
+            "data": {
+                "file_edits": [
+                    {"filename": "facts.md", "action": "unsupported-action"}
+                ],
+                "synthesis": "Incomplete integration.",
+            },
+            "usage": {},
+        }
+    )
+    phases = _PhaseRecorder()
+
+    result = await service.consolidate(
+        sid, enforce_cooldown=False, progress_callback=phases
+    )
+
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "batch_write_failed"
+    assert result["failed_batch"] == 1
+    assert result["operations_failed"] == 1
+    assert result["notes_processed"] == 0
+    assert result["notes_deleted"] == 0
+    # Never-drop: the source note is still durable for a controlled retry.
+    assert old in storage.objects
+    # Codex round-4: a batch whose bank integration failed is NOT a
+    # completed batch — no contradictory metrics, no batch_done emission.
+    assert result["batches_completed"] == 0
+    assert all(p["phase"] != "batch_done" for p in phases.payloads)
+    assert phases.last_phase == "failed"
+
+
+async def test_consolidator_true_delete_only_partial_keeps_note_delete_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Counterpart guard: a COMPLETED bank integration whose source deletion
+    # alone failed keeps note_delete_failed with no fabricated failed_batch.
+    storage = GCStorage()
+    sid = "p12-true-delete-partial"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    storage.fail_delete.add(old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._write_results = ConsolidatorService._write_results.__get__(service)
+    service._call_llm = AsyncMock(
+        return_value={
+            "status": "ok",
+            "data": {"file_edits": [], "synthesis": "Integrated fine."},
+            "usage": {},
+        }
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "note_delete_failed"
+    assert "failed_batch" not in result
+    assert result["notes_processed"] == 1
+    assert result["notes_deleted"] == 0
+    assert old in storage.objects
+    # The bank integration itself fully succeeded: the batch stays counted
+    # as completed even though the source cleanup failed.
+    assert result["batches_completed"] == 1

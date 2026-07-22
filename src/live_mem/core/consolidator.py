@@ -551,7 +551,21 @@ class ConsolidatorService:
                 élargir un scan ancien aux notes fraîches du même agent.
 
         Returns:
-            Métriques de consolidation ou erreur
+            Métriques de consolidation avec un statut honnête (P12-1) :
+
+            - ``status="ok"`` : chaque opération sélectionnée a réussi ;
+            - ``status="error"`` : un lot a échoué AVANT que toute mutation
+              durable ait pu commencer et zéro lot a été appliqué ;
+            - ``status="partial"`` : du travail a été appliqué, une écriture
+              durable a commencé ou a pu commencer, ou l'état durable est
+              ambigu (inclut tout échec levé depuis ``_write_results``, même
+              au premier lot, et toute compaction déjà appliquée).
+
+            Champs additionnels : ``failed_batch`` (index 1-based, présent
+            uniquement pour un échec de lot identifiable), ``failure_reason``
+            (raison structurée stable), message client générique. La phase de
+            progression terminale est ``done`` pour ``ok`` uniquement,
+            ``failed`` pour ``error`` et ``partial``.
         """
         await assert_space_not_reserved(space_id)
         t0 = time.monotonic()
@@ -630,27 +644,55 @@ class ConsolidatorService:
                 "message": "No new notes to consolidate",
             }
 
+        # P12-1 : suivi d'issue honnête à trois états (ok/error/partial).
+        # `failed_batch` n'est renseigné que pour un échec de LOT identifiable
+        # (1-based). `durable_write_may_have_started` interdit le statut
+        # `error` dès qu'une mutation durable a pu commencer : compaction
+        # appliquée, ou entrée dans _write_results (même sur exception).
+        runtime_failure_reason: str | None = None
+        failed_batch: int | None = None
+        durable_write_may_have_started = False
+        compaction_failed = False
+
         # ── Étape 1b : Auto-compact de la bank si trop grosse ──
-        compact_result = await self._compact_bank_if_needed(
-            space_id, inputs["bank_files"], inputs["rules"]
-        )
-        if compact_result["compacted"]:
-            # Relire la bank compactée depuis S3
-            inputs["bank_files"] = await storage.list_and_get(f"{space_id}/bank/")
-            logger.info(
-                "Bank auto-compacted — %d files, %d→%d bytes",
-                compact_result["files_compacted"],
-                compact_result["size_before"],
-                compact_result["size_after"],
+        try:
+            compact_result = await self._compact_bank_if_needed(
+                space_id, inputs["bank_files"], inputs["rules"]
+            )
+            if compact_result["compacted"]:
+                # La compaction a réécrit des fichiers bank : une écriture
+                # durable a déjà eu lieu avant le premier lot.
+                durable_write_may_have_started = True
+                # Relire la bank compactée depuis S3
+                inputs["bank_files"] = await storage.list_and_get(
+                    f"{space_id}/bank/"
+                )
+                logger.info(
+                    "Bank auto-compacted — %d files, %d→%d bytes",
+                    compact_result["files_compacted"],
+                    compact_result["size_before"],
+                    compact_result["size_after"],
+                )
+        except Exception:
+            # Des écritures de compaction ont pu commencer : l'état durable
+            # est ambigu → issue `partial` fail-closed, jamais `error`, et
+            # aucun lot n'est tenté sur une bank potentiellement incohérente.
+            compaction_failed = True
+            runtime_failure_reason = "bank_compact_failed"
+            durable_write_may_have_started = True
+            logger.exception(
+                "Bank auto-compaction failed — space=%s, no batch attempted",
+                space_id,
             )
 
         # ── Étape 2 : Découper en lots ────────────────────
         batch_size = self._batch_size
         batches = []
-        for i in range(0, len(all_notes), batch_size):
-            batch_notes = all_notes[i : i + batch_size]
-            batch_keys = all_notes_keys[i : i + batch_size]
-            batches.append((batch_notes, batch_keys))
+        if not compaction_failed:
+            for i in range(0, len(all_notes), batch_size):
+                batch_notes = all_notes[i : i + batch_size]
+                batch_keys = all_notes_keys[i : i + batch_size]
+                batches.append((batch_notes, batch_keys))
 
         batch_count = len(batches)
         rules = inputs["rules"]
@@ -668,7 +710,6 @@ class ConsolidatorService:
         total_notes_delete_failed = 0
         batches_completed = 0
         last_synthesis_size = 0
-        runtime_failure_reason: str | None = None
         metadata_update_failed = False
         # Issue #17 — post-pass validation, accumulated over all batches
         validation_unattributed = 0
@@ -689,23 +730,24 @@ class ConsolidatorService:
             ]
         )
 
-        logger.info(
-            "Consolidation plan — %d notes in %d batch(es) of %d",
-            len(all_notes),
-            batch_count,
-            batch_size,
-        )
-        await emit_progress(
-            {
-                "phase": "planned",
-                "batch_size": batch_size,
-                "notes_total": len(all_notes),
-                "notes_done": 0,
-                "batches_total": batch_count,
-                "batches_done": 0,
-                "current_batch": 0,
-            }
-        )
+        if not compaction_failed:
+            logger.info(
+                "Consolidation plan — %d notes in %d batch(es) of %d",
+                len(all_notes),
+                batch_count,
+                batch_size,
+            )
+            await emit_progress(
+                {
+                    "phase": "planned",
+                    "batch_size": batch_size,
+                    "notes_total": len(all_notes),
+                    "notes_done": 0,
+                    "batches_total": batch_count,
+                    "batches_done": 0,
+                    "current_batch": 0,
+                }
+            )
 
         # ── Étape 3 : Traiter chaque lot ──────────────────
         for batch_idx, (batch_notes, batch_keys) in enumerate(batches, 1):
@@ -738,6 +780,7 @@ class ConsolidatorService:
                     )
                 except Exception:
                     runtime_failure_reason = "batch_refresh_failed"
+                    failed_batch = batch_idx
                     logger.exception(
                         "Batch %d/%d refresh failed after %d completed batch(es)",
                         batch_idx,
@@ -767,6 +810,7 @@ class ConsolidatorService:
                 )
             except Exception:
                 runtime_failure_reason = "batch_prompt_failed"
+                failed_batch = batch_idx
                 logger.exception(
                     "Batch %d/%d prompt construction failed", batch_idx, batch_count
                 )
@@ -777,12 +821,14 @@ class ConsolidatorService:
                 llm_result = await self._call_llm(messages)
             except Exception:
                 runtime_failure_reason = "batch_llm_failed"
+                failed_batch = batch_idx
                 logger.exception(
                     "Batch %d/%d LLM call raised unexpectedly", batch_idx, batch_count
                 )
                 break
             if llm_result.get("status") == "error":
                 runtime_failure_reason = "batch_llm_failed"
+                failed_batch = batch_idx
                 logger.error(
                     "Batch %d/%d LLM failed: %s — stopping (previous batches OK)",
                     batch_idx,
@@ -793,6 +839,10 @@ class ConsolidatorService:
 
             # Appliquer les éditions (bank + synthesis + delete notes)
             # skip_meta=True : on mettra à jour le meta une seule fois à la fin
+            # P12-1 : dès que _write_results est engagé, une écriture durable
+            # a PU commencer — toute défaillance à partir d'ici est `partial`,
+            # jamais `error`, même au premier lot.
+            durable_write_may_have_started = True
             try:
                 write_result = await self._write_results(
                     space_id=space_id,
@@ -805,6 +855,7 @@ class ConsolidatorService:
                 )
             except Exception:
                 runtime_failure_reason = "batch_write_failed"
+                failed_batch = batch_idx
                 logger.exception(
                     "Batch %d/%d write failed unexpectedly", batch_idx, batch_count
                 )
@@ -813,6 +864,7 @@ class ConsolidatorService:
             write_status = write_result.get("status")
             if write_status not in {"ok", "partial"}:
                 runtime_failure_reason = "batch_write_failed"
+                failed_batch = batch_idx
                 logger.error(
                     "Batch %d/%d write failed: %s — stopping",
                     batch_idx,
@@ -821,8 +873,39 @@ class ConsolidatorService:
                 )
                 break
 
-            # Accumuler les métriques
-            batches_completed += 1
+            # P12-1 (revue Codex rondes 3+4) : classer le partial AVANT toute
+            # comptabilité de complétion. Deux causes de partial dans
+            # _write_results —
+            # - operations_failed > 0 : l'intégration bank elle-même a échoué
+            #   ou été refusée (les notes sources sont TOUTES retenues,
+            #   never-drop). C'est un échec de LOT identifiable
+            #   (batch_write_failed + failed_batch), jamais un
+            #   note_delete_failed : ce token laisserait croire que la bank
+            #   est à jour et que supprimer les notes retenues est sûr. Un tel
+            #   lot n'est PAS complété : pas d'incrément batches_completed,
+            #   pas d'émission batch_done — sinon le résultat final pourrait
+            #   annoncer batches_completed == batches_total tout en portant
+            #   failed_batch, une contradiction pour la récupération/UI.
+            # - sinon : intégration complète, seule la suppression des notes
+            #   sources a échoué → lot complété, classé note_delete_failed
+            #   sans failed_batch par la chaîne d'agrégation finale.
+            write_partial = write_status == "partial"
+            write_integration_failed = (
+                write_partial and write_result.get("operations_failed", 0) > 0
+            )
+            if write_integration_failed:
+                runtime_failure_reason = "batch_write_failed"
+                failed_batch = batch_idx
+                logger.error(
+                    "Batch %d/%d bank integration incomplete "
+                    "(%d operation(s) failed) — sources retained",
+                    batch_idx,
+                    batch_count,
+                    write_result.get("operations_failed", 0),
+                )
+
+            # Accumuler les métriques (toujours, même pour un lot refusé :
+            # les compteurs reflètent les mutations réellement effectuées)
             total_notes += write_result.get("notes_processed", 0)
             total_created += write_result.get("bank_files_created", 0)
             total_updated += write_result.get("bank_files_updated", 0)
@@ -837,35 +920,41 @@ class ConsolidatorService:
             reported_total_bank = write_result.get("bank_files_total")
             if isinstance(reported_total_bank, int) and reported_total_bank >= 0:
                 total_bank = reported_total_bank
-            await emit_progress(
-                {
-                    "phase": "batch_done",
-                    "batch_size": batch_size,
-                    "notes_total": len(all_notes),
-                    "notes_done": total_notes,
-                    "batches_total": batch_count,
-                    "batches_done": batches_completed,
-                    "current_batch": batch_idx,
-                    "current_batch_notes": len(batch_notes),
-                }
-            )
 
-            logger.info(
-                "Batch %d/%d done — %d notes, %d created, %d updated, %d tokens",
-                batch_idx,
-                batch_count,
-                len(batch_notes),
-                write_result.get("bank_files_created", 0),
-                write_result.get("bank_files_updated", 0),
-                write_result.get("llm_tokens_used", 0),
-            )
+            if not write_integration_failed:
+                batches_completed += 1
+                await emit_progress(
+                    {
+                        "phase": "batch_done",
+                        "batch_size": batch_size,
+                        "notes_total": len(all_notes),
+                        "notes_done": total_notes,
+                        "batches_total": batch_count,
+                        "batches_done": batches_completed,
+                        "current_batch": batch_idx,
+                        "current_batch_notes": len(batch_notes),
+                    }
+                )
+
+                logger.info(
+                    "Batch %d/%d done — %d notes, %d created, %d updated, "
+                    "%d tokens",
+                    batch_idx,
+                    batch_count,
+                    len(batch_notes),
+                    write_result.get("bank_files_created", 0),
+                    write_result.get("bank_files_updated", 0),
+                    write_result.get("llm_tokens_used", 0),
+                )
 
             # Issue #17 — Post-batch validation pass (opt-in).
             # We re-read the current bank (state after _write_results) and
             # diff it against the snapshot taken before the batch. No LLM
             # call: deterministic, cheap, idempotent. The result is purely
-            # informative (does NOT block the consolidation).
-            if self._validation_enabled:
+            # informative (does NOT block the consolidation). Skipped for a
+            # batch whose bank integration failed (P12-1 ronde 4) : le lot
+            # n'est pas complété et le diff serait trompeur.
+            if self._validation_enabled and not write_integration_failed:
                 try:
                     bank_after_raw = await storage.list_and_get(
                         f"{space_id}/bank/"
@@ -916,10 +1005,11 @@ class ConsolidatorService:
                         e,
                     )
 
-            # The bank integration succeeded but one or more live-note deletes
-            # did not.  Stop before later batches and surface an honest partial
-            # result; continuing would compound duplicate-reprocessing risk.
-            if write_status == "partial":
+            # Stop before later batches on any partial write and surface an
+            # honest result; continuing would compound duplicate-reprocessing
+            # risk. La classification (batch_write_failed vs note_delete_failed)
+            # a déjà eu lieu AVANT la comptabilité de complétion ci-dessus.
+            if write_partial:
                 break
 
         # ── Étape 4 : Mettre à jour le meta (une seule fois) ─
@@ -975,15 +1065,45 @@ class ConsolidatorService:
         exact_selection_truncated = (
             note_keys is not None and inputs.get("notes_remaining", 0) > 0
         )
-        is_partial = (
+        # P12-1 : statut honnête à trois états.
+        # `error` garantit qu'un lot a échoué AVANT que toute mutation durable
+        # ait pu commencer et que zéro lot a été appliqué. Dès qu'un travail a
+        # été appliqué, qu'une écriture durable a commencé ou a pu commencer,
+        # ou que l'état durable est ambigu, l'issue est `partial`.
+        is_error = (
+            runtime_failure_reason is not None
+            and batches_completed == 0
+            and not durable_write_may_have_started
+        )
+        is_partial = not is_error and (
             batches_completed < batch_count
             or exact_selection_truncated
             or total_notes_delete_failed > 0
             or runtime_failure_reason is not None
             or metadata_update_failed
         )
+        if is_error:
+            status = "error"
+        elif is_partial:
+            status = "partial"
+        else:
+            status = "ok"
+        # Raison structurée STABLE de la défaillance (priorité : échec de lot
+        # identifiable, puis suppression de notes, troncature de sélection
+        # exacte, métadonnées). Les causes non-lot ne fabriquent jamais de
+        # `failed_batch`.
+        failure_reason: str | None = None
+        if status != "ok":
+            if runtime_failure_reason is not None:
+                failure_reason = runtime_failure_reason
+            elif total_notes_delete_failed > 0:
+                failure_reason = "note_delete_failed"
+            elif exact_selection_truncated:
+                failure_reason = "exact_selection_truncated"
+            elif metadata_update_failed:
+                failure_reason = "metadata_update_failed"
         result = {
-            "status": "partial" if is_partial else "ok",
+            "status": status,
             "space_id": space_id,
             "notes_processed": total_notes,
             "notes_deleted": total_notes_deleted,
@@ -1003,11 +1123,23 @@ class ConsolidatorService:
             "batch_size": batch_size,
             "duration_seconds": duration,
         }
-        if runtime_failure_reason is not None:
-            result["failure_reason"] = runtime_failure_reason
+        if failure_reason is not None:
+            result["failure_reason"] = failure_reason
+        if failed_batch is not None:
+            result["failed_batch"] = failed_batch
         if metadata_update_failed:
             result["metadata_update_failed"] = True
-        if is_partial:
+        if status == "error":
+            # Message client générique : le détail provider/exception reste
+            # dans les journaux serveur (LM2-24).
+            result["reason"] = "consolidation_failed"
+            result["message"] = (
+                "La consolidation a échoué avant toute écriture durable : "
+                "aucun fichier bank, note ou métadonnée n'a été modifié. "
+                "Les notes restent éligibles pour une nouvelle tentative ; "
+                "consultez les journaux serveur pour le détail."
+            )
+        elif status == "partial":
             result["reason"] = "partial_consolidation"
             if notes_remaining > 0:
                 result["message"] = (
@@ -1026,9 +1158,11 @@ class ConsolidatorService:
                     "Consolidation terminée avec un état partiel ; consultez "
                     "les compteurs et la raison d'échec."
                 )
+        # P12-1 : la phase terminale de progression est honnête — `done`
+        # UNIQUEMENT pour un succès complet, `failed` pour `error`/`partial`.
         await emit_progress(
             {
-                "phase": "done",
+                "phase": "done" if status == "ok" else "failed",
                 "batch_size": batch_size,
                 "notes_total": len(all_notes),
                 "notes_done": total_notes,
@@ -1341,42 +1475,89 @@ Retourne un JSON avec cette structure exacte :
             {"status": "ok", "data": {...}, "usage": {...}} ou erreur
         """
         # ── Calcul dynamique du budget de sortie ──────────────
-        # Estimer les tokens d'input (heuristique 1 token ≈ 4 chars)
-        input_chars = sum(len(m.get("content", "")) for m in messages)
-        estimated_input_tokens = input_chars // 4
-
         # Budget de sortie :
         # - Ne doit pas dépasser max_tokens (config : max output demandé à l'API)
         # - Ne doit pas dépasser context_window - input (sinon le modèle rejette)
-        # - Plancher : 8192 tokens (minimum pour du JSON chirurgical)
+        # P12-1 (revue Codex PR #256) : l'ancien plancher forçait 8192 tokens
+        # AU-DESSUS des deux limites — une config valide au démarrage
+        # (ex. MAX_TOKENS=1024 < CONTEXT_WINDOW=4096) était alors rejetée par
+        # le provider au runtime. La requête ne dépasse plus jamais ni le cap
+        # configuré ni la fenêtre restante ; le plancher ne sert plus que de
+        # seuil de diagnostic. Fenêtre épuisée → erreur structurée pré-écriture
+        # (le pipeline la classe batch_llm_failed sans mutation durable).
+        # Revue ronde 2 : le budget est recalculé sur les messages COURANTS
+        # avant CHAQUE appel provider — les chemins de retry (JSON invalide,
+        # structure invalide) apprennent la réponse brute + une correction au
+        # prompt, et un budget figé pouvait dépasser la fenêtre exactement
+        # quand le retry était nécessaire.
         _MIN_OUTPUT_TOKENS = 8192
-        remaining_in_window = self._context_window - estimated_input_tokens
-        output_budget = max(
-            _MIN_OUTPUT_TOKENS, min(self._max_tokens, remaining_in_window)
-        )
 
-        if estimated_input_tokens > self._context_window * 0.8:
-            logger.warning(
-                "LLM input très large : ~%d tokens estimés "
-                "(context_window=%d, max_tokens=%d). "
-                "Budget sortie réduit à %d tokens. "
-                "Considérez réduire la taille de la bank.",
+        def _compute_output_budget() -> int | None:
+            # Estimer les tokens d'input (heuristique 1 token ≈ 4 chars)
+            input_chars = sum(len(m.get("content", "")) for m in messages)
+            estimated_input_tokens = input_chars // 4
+            remaining_in_window = self._context_window - estimated_input_tokens
+            output_budget = min(self._max_tokens, remaining_in_window)
+
+            if output_budget <= 0:
+                logger.error(
+                    "LLM call refused — estimated input (~%d tokens) exhausts "
+                    "the context window (context_window=%d, max_tokens=%d): no "
+                    "positive output budget remains. Reduce the bank size or "
+                    "raise LLMAAS_CONTEXT_WINDOW.",
+                    estimated_input_tokens,
+                    self._context_window,
+                    self._max_tokens,
+                )
+                return None
+
+            if output_budget < _MIN_OUTPUT_TOKENS:
+                logger.warning(
+                    "LLM output budget très réduit : %d tokens "
+                    "(< %d recommandés pour du JSON chirurgical ; "
+                    "context_window=%d, max_tokens=%d, input ~%d tokens).",
+                    output_budget,
+                    _MIN_OUTPUT_TOKENS,
+                    self._context_window,
+                    self._max_tokens,
+                    estimated_input_tokens,
+                )
+
+            if estimated_input_tokens > self._context_window * 0.8:
+                logger.warning(
+                    "LLM input très large : ~%d tokens estimés "
+                    "(context_window=%d, max_tokens=%d). "
+                    "Budget sortie réduit à %d tokens. "
+                    "Considérez réduire la taille de la bank.",
+                    estimated_input_tokens,
+                    self._context_window,
+                    self._max_tokens,
+                    output_budget,
+                )
+
+            logger.info(
+                "LLM call — input ~%d tokens, context_window=%d, "
+                "output budget %d tokens (max_tokens=%d)",
                 estimated_input_tokens,
                 self._context_window,
-                self._max_tokens,
                 output_budget,
+                self._max_tokens,
             )
+            return output_budget
 
-        logger.info(
-            "LLM call — input ~%d tokens, context_window=%d, "
-            "output budget %d tokens (max_tokens=%d)",
-            estimated_input_tokens,
-            self._context_window,
-            output_budget,
-            self._max_tokens,
-        )
+        _WINDOW_EXHAUSTED_ERROR = {
+            "status": "error",
+            "message": (
+                "Le contexte estimé épuise la fenêtre du modèle : aucun "
+                "budget de sortie positif. Réduisez la taille de la bank "
+                "ou augmentez LLMAAS_CONTEXT_WINDOW."
+            ),
+        }
 
         for attempt in range(2):  # 1 essai + 1 retry
+            output_budget = _compute_output_budget()
+            if output_budget is None:
+                return dict(_WINDOW_EXHAUSTED_ERROR)
             try:
                 response = await self._client.chat.completions.create(
                     model=self._model,

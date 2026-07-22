@@ -32,6 +32,7 @@ const app = {
     refreshInterval: 5,
     _noteHash: '',
     _bankHash: '',
+    _bankRequestGeneration: 0,
 };
 
 function getAgentColor(name) {

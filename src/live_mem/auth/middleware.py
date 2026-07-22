@@ -498,15 +498,12 @@ class StaticFilesMiddleware:
 
             settings = get_settings()
             if settings.llmaas_api_url and settings.llmaas_api_key:
-                from openai import AsyncOpenAI
+                # P12-1 : la sonde honore PROXY_URL via le client possédé de
+                # list_llm_models, fermé sur tous les chemins.
+                from ..core.llm_probe import list_llm_models
 
                 t0 = time.monotonic()
-                client = AsyncOpenAI(
-                    base_url=settings.llmaas_api_url,
-                    api_key=settings.llmaas_api_key,
-                    timeout=5,
-                )
-                await client.models.list()
+                await list_llm_models(settings)
                 latency = round((time.monotonic() - t0) * 1000, 1)
                 # HM-18 fix : /health est PUBLIC (non authentifié). On ne divulgue
                 # PLUS le nom du modèle LLM configuré (ni la liste des modèles) —

@@ -198,3 +198,50 @@ class TestProxyValidation:
     def test_invalid_scheme_bare_host_rejected(self):
         with pytest.raises(ValueError, match="PROXY_URL must start"):
             _make_settings(proxy_url="proxy.example.com:3128")
+
+
+class TestLlmBudgetCoherence:
+    """P12-1 — LLMAAS_MAX_TOKENS must stay strictly below LLMAAS_CONTEXT_WINDOW."""
+
+    def test_default_budget_passes(self):
+        s = _make_settings()
+        assert s.llmaas_max_tokens < s.llmaas_context_window
+
+    def test_strictly_smaller_budget_passes(self):
+        s = _make_settings(
+            llmaas_max_tokens=131071, llmaas_context_window=131072
+        )
+        assert s.llmaas_max_tokens == 131071
+
+    def test_equal_budget_rejected(self):
+        with pytest.raises(ValueError, match="LLMAAS_MAX_TOKENS"):
+            _make_settings(
+                llmaas_max_tokens=131072, llmaas_context_window=131072
+            )
+
+    def test_greater_budget_rejected(self):
+        with pytest.raises(ValueError, match="LLMAAS_MAX_TOKENS"):
+            _make_settings(
+                llmaas_max_tokens=200000, llmaas_context_window=131072
+            )
+
+    def test_error_names_both_variables_and_effective_values(self):
+        with pytest.raises(ValueError) as exc_info:
+            _make_settings(
+                llmaas_max_tokens=200000, llmaas_context_window=131072
+            )
+        message = str(exc_info.value)
+        assert "LLMAAS_MAX_TOKENS=200000" in message
+        assert "LLMAAS_CONTEXT_WINDOW=131072" in message
+
+    def test_budget_error_is_aggregated_with_other_startup_errors(self):
+        with pytest.raises(ValueError) as exc_info:
+            _make_settings(
+                mcp_server_port=0,
+                llmaas_max_tokens=131072,
+                llmaas_context_window=131072,
+            )
+        message = str(exc_info.value)
+        assert "MCP_SERVER_PORT" in message
+        assert "LLMAAS_MAX_TOKENS=131072" in message
+        assert "LLMAAS_CONTEXT_WINDOW=131072" in message

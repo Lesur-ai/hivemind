@@ -304,6 +304,20 @@ class Settings(BaseSettings):
                 f"LLMAAS_TEMPERATURE={self.llmaas_temperature} out of range [0.0, 2.0]"
             )
 
+        # LLM budget coherence (P12-1) : le budget de SORTIE demandé doit
+        # laisser de la place à l'input dans la fenêtre de contexte, sinon
+        # chaque consolidation échoue au runtime côté provider. Fail-fast au
+        # démarrage avec les deux variables et leurs valeurs effectives.
+        # (La politique de positivité reste inchangée : seule la cohérence
+        # output < fenêtre totale est garantie ici.)
+        if self.llmaas_max_tokens >= self.llmaas_context_window:
+            errors.append(
+                f"LLMAAS_MAX_TOKENS={self.llmaas_max_tokens} must be strictly "
+                f"less than LLMAAS_CONTEXT_WINDOW={self.llmaas_context_window} "
+                "(output budget must leave room for input in the total "
+                "context window)"
+            )
+
         # Proxy URL format (optionnel — si renseigné doit être une URL valide)
         if self.proxy_url and not self.proxy_url.startswith(("http://", "https://")):
             errors.append(

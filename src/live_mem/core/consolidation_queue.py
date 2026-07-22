@@ -201,7 +201,12 @@ class ConsolidationQueueService:
                     job.result = result
                     job.progress.update(
                         {
-                            "phase": "done",
+                            # P12-1 : phase terminale honnête — `done` réservé
+                            # au succès complet ; `error` et `partial`
+                            # terminent en `failed`.
+                            "phase": (
+                                "done" if result.get("status") == "ok" else "failed"
+                            ),
                             "batch_size": result.get(
                                 "batch_size", job.progress.get("batch_size")
                             ),
@@ -225,12 +230,31 @@ class ConsolidationQueueService:
                     if job.status == "failed":
                         job.error = result.get("message", "Consolidation failed")
                     self._finish_active_locked(space_id, job.job_id)
-            except Exception as e:
+            except Exception:
                 logger.exception("Consolidation job failed — job=%s", job.job_id)
+                # P12-1 (revue Codex PR #256) : ne JAMAIS persister str(e)
+                # dans le payload du job — bank_consolidation_status le
+                # renvoie à tout appelant read et une exception provider/
+                # storage peut contenir endpoint et credentials. Message
+                # générique + raison stable ; le détail reste dans les
+                # journaux serveur (logger.exception ci-dessus).
+                generic_message = (
+                    "La consolidation a échoué de manière inattendue avant "
+                    "de produire un résultat ; consultez les journaux "
+                    "serveur pour le détail."
+                )
                 async with self._state_lock:
                     job.status = "failed"
-                    job.error = str(e)
-                    job.result = {"status": "error", "message": str(e)}
+                    job.error = generic_message
+                    job.result = {
+                        "status": "error",
+                        "message": generic_message,
+                        "failure_reason": "consolidation_crashed",
+                    }
+                    # P12-1 : même contrat de phase terminale sur le chemin
+                    # d'exception — le job ne reste jamais figé sur une phase
+                    # de progression intermédiaire.
+                    job.progress.update({"phase": "failed"})
                     job.finished_at = _now()
                     self._finish_active_locked(space_id, job.job_id)
 

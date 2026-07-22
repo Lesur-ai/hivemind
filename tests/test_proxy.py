@@ -5,9 +5,12 @@ Tests for PROXY_URL feature.
 Covers:
 - StorageService: proxy injected (or not) into boto3 Config objects
 - ConsolidatorService: _http_client lifecycle (create, close)
+- LLM health probes (public /health + authenticated system_health):
+  owned proxied client lifecycle on every success and exception path (P12-1)
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -211,3 +214,329 @@ class TestConsolidatorServiceProxy:
             asyncio.run(_mod.close_consolidator_if_initialized())  # Ne doit pas lever
         finally:
             _mod._consolidator = original
+
+
+# ─────────────────────────────────────────────────────────────
+# P12-1 — LLM health probes honor PROXY_URL with an owned client
+# ─────────────────────────────────────────────────────────────
+
+_PROXY = "http://proxy.example.com:3128"
+
+
+class _FakeModels:
+    """models.list() double returning a fixed model inventory."""
+
+    def __init__(self, model_ids, error=None):
+        self._model_ids = model_ids
+        self._error = error
+
+    async def list(self):
+        if self._error is not None:
+            raise self._error
+        data = [MagicMock(id=model_id) for model_id in self._model_ids]
+        return MagicMock(data=data)
+
+
+def _probe_settings(**overrides):
+    defaults = {
+        "llmaas_api_url": "https://api.example.com/v1",
+        "llmaas_api_key": "sk-test",
+        "llmaas_model": "test-model",
+    }
+    defaults.update(overrides)
+    return _make_settings(**defaults)
+
+
+def _probe_rig(monkeypatch_none=None, *, model_ids=("test-model",), list_error=None,
+               constructor_error=None):
+    """Patch the probe seams and return (patches, captured) for assertions.
+
+    ``captured`` records the constructed owned httpx client, its aclose mock,
+    the httpx.AsyncClient kwargs, and the AsyncOpenAI kwargs.
+    """
+    captured = {
+        "async_client_calls": [],
+        "owned_client": None,
+        "openai_kwargs": None,
+    }
+
+    def _fake_async_client(**kwargs):
+        captured["async_client_calls"].append(kwargs)
+        owned = MagicMock()
+        owned.aclose = AsyncMock()
+        captured["owned_client"] = owned
+        return owned
+
+    def _fake_openai(**kwargs):
+        captured["openai_kwargs"] = kwargs
+        if constructor_error is not None:
+            raise constructor_error
+        client = MagicMock()
+        client.models = _FakeModels(list(model_ids), error=list_error)
+        return client
+
+    patches = [
+        patch("live_mem.core.llm_probe.httpx.AsyncClient",
+              side_effect=_fake_async_client),
+        patch("live_mem.core.llm_probe.AsyncOpenAI", side_effect=_fake_openai),
+    ]
+    return patches, captured
+
+
+class TestLlmProbeOwnedClientLifecycle:
+    """Unit contract of the shared probe helper (list_llm_models)."""
+
+    def _run(self, settings, **rig_kwargs):
+        from live_mem.core.llm_probe import list_llm_models
+
+        patches, captured = _probe_rig(**rig_kwargs)
+        for p in patches:
+            p.start()
+        try:
+            outcome = {"error": None, "model_ids": None}
+
+            async def _invoke():
+                try:
+                    outcome["model_ids"] = await list_llm_models(settings)
+                except Exception as exc:  # noqa: BLE001 — test captures it
+                    outcome["error"] = exc
+
+            asyncio.run(_invoke())
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        return outcome, captured
+
+    def test_proxy_builds_owned_client_and_passes_it_to_openai(self):
+        import httpx
+
+        settings = _probe_settings(proxy_url=_PROXY)
+        outcome, captured = self._run(settings)
+
+        assert outcome["error"] is None
+        assert outcome["model_ids"] == ["test-model"]
+        assert len(captured["async_client_calls"]) == 1
+        kwargs = captured["async_client_calls"][0]
+        assert isinstance(kwargs["proxy"], httpx.Proxy)
+        assert kwargs["proxy"].url == httpx.URL(_PROXY)
+        assert kwargs["timeout"] == 5
+        assert captured["openai_kwargs"]["http_client"] is captured["owned_client"]
+        assert captured["openai_kwargs"]["timeout"] == 5
+
+    def test_no_proxy_keeps_direct_behavior_without_owned_client(self):
+        settings = _probe_settings(proxy_url=None)
+        outcome, captured = self._run(settings)
+
+        assert outcome["error"] is None
+        assert captured["async_client_calls"] == []
+        assert captured["openai_kwargs"]["http_client"] is None
+
+    def test_owned_client_closed_on_success(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        _, captured = self._run(settings)
+
+        captured["owned_client"].aclose.assert_awaited_once()
+
+    def test_owned_client_closed_when_provider_call_fails(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        outcome, captured = self._run(
+            settings, list_error=RuntimeError("injected provider failure")
+        )
+
+        assert isinstance(outcome["error"], RuntimeError)
+        captured["owned_client"].aclose.assert_awaited_once()
+
+    def test_owned_client_closed_when_provider_call_times_out(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        outcome, captured = self._run(
+            settings, list_error=asyncio.TimeoutError()
+        )
+
+        assert isinstance(outcome["error"], asyncio.TimeoutError)
+        captured["owned_client"].aclose.assert_awaited_once()
+
+    def test_owned_client_closed_when_openai_constructor_fails(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        outcome, captured = self._run(
+            settings, constructor_error=RuntimeError("injected constructor failure")
+        )
+
+        assert isinstance(outcome["error"], RuntimeError)
+        captured["owned_client"].aclose.assert_awaited_once()
+
+
+class _ProbeStorage:
+    """Offline storage double for the two health probes."""
+
+    def __init__(self, status="ok"):
+        self._status = status
+
+    async def test_connection(self):
+        return {"status": self._status}
+
+    async def list_prefixes(self, prefix):
+        return ["project/", "_system/"]
+
+
+class TestSystemHealthProbeProxy:
+    """system_health (authenticated MCP tool) probes through PROXY_URL."""
+
+    def _run_tool(self, settings, storage=None, **rig_kwargs):
+        from mcp.server.fastmcp import FastMCP
+
+        from live_mem.tools.system import register as register_system_tools
+
+        mcp = FastMCP(name="probe-test")
+        register_system_tools(mcp)
+        tool = mcp._tool_manager._tools["system_health"]
+        fn = None
+        for attr in ("fn", "func", "handler", "_fn", "run", "callback"):
+            candidate = getattr(tool, attr, None)
+            if callable(candidate):
+                fn = candidate
+                break
+        assert fn is not None, "system_health tool has no callable"
+
+        patches, captured = _probe_rig(**rig_kwargs)
+        patches.extend(
+            [
+                patch("live_mem.config.get_settings", return_value=settings),
+                patch(
+                    "live_mem.core.storage.get_storage",
+                    return_value=storage or _ProbeStorage(),
+                ),
+            ]
+        )
+        for p in patches:
+            p.start()
+        try:
+            result = asyncio.run(fn())
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        return result, captured
+
+    def test_probe_uses_proxy_and_reports_model_availability(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        result, captured = self._run_tool(settings)
+
+        assert result["services"]["llmaas"] == {
+            "status": "ok",
+            "model": "test-model",
+            "model_available": True,
+            "latency_ms": result["services"]["llmaas"]["latency_ms"],
+        }
+        assert captured["openai_kwargs"]["http_client"] is captured["owned_client"]
+        captured["owned_client"].aclose.assert_awaited_once()
+
+    def test_probe_without_proxy_stays_direct(self):
+        settings = _probe_settings(proxy_url=None)
+        result, captured = self._run_tool(settings)
+
+        assert result["services"]["llmaas"]["status"] == "ok"
+        assert captured["async_client_calls"] == []
+        assert captured["openai_kwargs"]["http_client"] is None
+
+    def test_probe_failure_closes_owned_client_and_stays_generic(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        result, captured = self._run_tool(
+            settings, list_error=RuntimeError("provider detail: sk-secret leaked")
+        )
+
+        assert result["services"]["llmaas"] == {
+            "status": "error",
+            "message": "LLMaaS unreachable",
+        }
+        captured["owned_client"].aclose.assert_awaited_once()
+
+    def test_model_unavailable_is_still_reported(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        result, _ = self._run_tool(settings, model_ids=("another-model",))
+
+        assert result["services"]["llmaas"]["model_available"] is False
+
+
+class _SendCollector:
+    """ASGI send collector for the /health handler."""
+
+    def __init__(self):
+        self.messages = []
+
+    async def __call__(self, message):
+        self.messages.append(message)
+
+    @property
+    def status(self):
+        return self.messages[0]["status"]
+
+    @property
+    def body(self):
+        return json.loads(self.messages[1]["body"].decode("utf-8"))
+
+
+class TestPublicHealthProbeProxy:
+    """Public /health endpoint probes through PROXY_URL with redaction."""
+
+    def _run_health(self, settings, storage=None, **rig_kwargs):
+        from live_mem.auth.middleware import StaticFilesMiddleware
+
+        middleware = object.__new__(StaticFilesMiddleware)
+        collector = _SendCollector()
+
+        patches, captured = _probe_rig(**rig_kwargs)
+        patches.extend(
+            [
+                patch("live_mem.config.get_settings", return_value=settings),
+                patch(
+                    "live_mem.core.storage.get_storage",
+                    return_value=storage or _ProbeStorage(),
+                ),
+            ]
+        )
+        for p in patches:
+            p.start()
+        try:
+            asyncio.run(middleware._handle_health(collector))
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        return collector, captured
+
+    def test_probe_uses_proxy_and_keeps_public_redaction(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        collector, captured = self._run_health(settings)
+
+        assert collector.status == 200
+        body = collector.body
+        assert body["status"] == "healthy"
+        # Public redaction: no model name, no model inventory — only
+        # status and latency may appear on the anonymous endpoint.
+        assert set(body["services"]["llmaas"].keys()) == {"status", "latency_ms"}
+        assert body["services"]["llmaas"]["status"] == "ok"
+        assert captured["openai_kwargs"]["http_client"] is captured["owned_client"]
+        captured["owned_client"].aclose.assert_awaited_once()
+
+    def test_probe_without_proxy_stays_direct(self):
+        settings = _probe_settings(proxy_url=None)
+        collector, captured = self._run_health(settings)
+
+        assert collector.status == 200
+        assert captured["async_client_calls"] == []
+        assert captured["openai_kwargs"]["http_client"] is None
+
+    def test_probe_failure_closes_owned_client_and_keeps_status_semantics(self):
+        settings = _probe_settings(proxy_url=_PROXY)
+        collector, captured = self._run_health(
+            settings, list_error=RuntimeError("provider detail must not leak")
+        )
+
+        # S3 ok + LLM down = degraded 200 (unchanged HTTP semantics),
+        # generic client message only.
+        assert collector.status == 200
+        body = collector.body
+        assert body["status"] == "degraded"
+        assert body["services"]["llmaas"] == {
+            "status": "error",
+            "message": "LLMaaS unreachable",
+        }
+        captured["owned_client"].aclose.assert_awaited_once()
