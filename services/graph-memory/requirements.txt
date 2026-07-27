@@ -52,7 +52,7 @@ beautifulsoup4==4.15.0
 # === CLI ===
 click==8.4.2               # Framework CLI
 rich==15.0.0               # Affichage CLI (tableaux, spinners, couleurs)
-aiohttp==3.14.2            # Client HTTP async pour le CLI
+aiohttp==3.14.3            # Client HTTP async pour le CLI
 
 # === Tests (optionnel, pour dev) ===
 # pytest>=7.0.0
