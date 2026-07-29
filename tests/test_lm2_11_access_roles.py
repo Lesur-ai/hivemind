@@ -919,7 +919,7 @@ async def test_asgi_lifespan_embedded_preflight_fails_before_serving(
         "resolve_embedded_token",
         lambda *_args, **_kwargs: None if failure == "secret" else "stable-token",
     )
-    with pytest.raises(RuntimeError, match="Secret|Token") as error:
+    with pytest.raises(RuntimeError, match="secret|token") as error:
         async with server._lifespan(None):
             pytest.fail("lifespan must not yield after embedded preflight failure")
     if failure == "secret":
@@ -970,7 +970,7 @@ async def test_asgi_lifespan_retry_reuses_persisted_plaintext(
     monkeypatch.setattr(embedded_secret_module, "resolve_embedded_token", _resolve)
     monkeypatch.setattr(consolidator_module, "close_consolidator_if_initialized", _close)
 
-    with pytest.raises(RuntimeError, match="Token"):
+    with pytest.raises(RuntimeError, match="token"):
         async with server._lifespan(None):
             pytest.fail("first registration attempt must block startup")
     async with server._lifespan(None):
@@ -1048,7 +1048,7 @@ async def test_invite_uses_exact_hash_and_one_opaque_ineligible_error(wired, cas
         space_id="alpha",
         target_token_hash=requested,
     )
-    assert result == {"status": "error", "message": "Token cible non invitable"}
+    assert result == {"status": "error", "message": "Target token cannot be invited"}
     assert storage.objects[TOKENS_KEY] == before
 
 

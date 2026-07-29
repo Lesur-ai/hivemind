@@ -271,11 +271,11 @@ async def run_ingest_pipeline(
         # Vérifier la mémoire + ontologie (nécessaire pour l'extraction)
         memory = await _graph().get_memory(memory_id)
         if not memory:
-            return {"status": "error", "message": f"Mémoire '{memory_id}' non trouvée"}
+            return {"status": "error", "message": f"Memory '{memory_id}' not found"}
         if not memory.ontology:
             return {
                 "status": "error",
-                "message": f"La mémoire '{memory_id}' n'a pas d'ontologie définie.",
+                "message": f"Memory '{memory_id}' has no ontology.",
             }
 
         # Remplacement : supprimer proprement l'ancien document d'abord.
@@ -298,7 +298,7 @@ async def run_ingest_pipeline(
                         pass
                 return {
                     "status": "error",
-                    "message": f"Remplacement abandonné : suppression de l'ancien document incomplète {del_res['errors']}",
+                    "message": f"Replacement abandoned: deletion of the old document was incomplete: {del_res['errors']}",
                     "steps": _steps_log,
                 }
 
@@ -323,7 +323,7 @@ async def run_ingest_pipeline(
                     await _storage().delete_document(memory_id, s3_uploaded_uri)
                 except Exception:
                     pass
-            return {"status": "warning", "message": "Document uploadé mais extraction texte impossible"}
+            return {"status": "warning", "message": "Document uploaded, but text extraction failed"}
 
         await _report("text_extract", 15, f"📄 Texte extrait : {len(text)} caractères")
         del content
@@ -425,8 +425,8 @@ async def run_ingest_pipeline(
         except IngestCancelled:
             raise  # laisser remonter pour le rollback (ne pas masquer en RuntimeError)
         except Exception as e:
-            print(f"❌ [Ingest] Erreur RAG vectoriel: {e}", file=sys.stderr)
-            raise RuntimeError(f"Échec vectorisation Qdrant (couplage strict): {e}")
+            print(f"❌ [Ingest] Vector RAG error: {e}", file=sys.stderr)
+            raise RuntimeError(f"Qdrant vectorization failed (strict coupling): {e}")
 
         # Dernière frontière avant de marquer le document comme succeeded
         _check_cancel("before_finalize")
@@ -469,13 +469,13 @@ async def run_ingest_pipeline(
     except IngestCancelled as c:
         # Annulation propre : nettoyer ce qui a pu être écrit
         cleanup = await _rollback(memory_id, doc_id, s3_uploaded_uri)
-        out = {"status": "cancelled", "message": f"Annulé ({c})", "steps": _steps_log}
+        out = {"status": "cancelled", "message": f"Cancelled ({c})", "steps": _steps_log}
         if cleanup.get("errors"):
             out["cleanup"] = cleanup
         return out
     except Exception as e:
         cleanup = await _rollback(memory_id, doc_id, s3_uploaded_uri)
-        print(f"❌ [Ingest] Erreur: {e}", file=sys.stderr)
+        print(f"❌ [Ingest] Error: {e}", file=sys.stderr)
         out = {"status": "error", "message": str(e), "steps": _steps_log}
         if cleanup.get("errors"):
             out["cleanup"] = cleanup

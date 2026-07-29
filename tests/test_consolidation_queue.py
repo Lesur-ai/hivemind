@@ -543,7 +543,7 @@ async def test_bank_consolidation_status_requires_space_read_access():
         current_token_info.reset(tok)
 
     assert result["status"] == "error"
-    assert "Accès refusé" in result["message"]
+    assert "Access denied" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -731,4 +731,4 @@ async def test_worker_crash_marks_job_failed_with_terminal_failed_phase():
     assert "sk-SECRET" not in _json.dumps(status)
     assert "s3.internal" not in _json.dumps(status)
     assert status["result"]["failure_reason"] == "consolidation_crashed"
-    assert "journaux serveur" in status["error"]
+    assert "server logs" in status["error"]

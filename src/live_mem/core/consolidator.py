@@ -123,10 +123,11 @@ def _parse_live_note_agent(raw_content: object) -> str | None:
 # Explicit marker produced by the LLM to signal an inference (SYSTEM_PROMPT
 # rule #8). Any line containing this token is considered explicitly
 # attributed as an inference and is NOT counted as an unsourced claim.
-# Note: the literal token is kept in French (`[inféré]`) because the
-# SYSTEM_PROMPT is in French (consistency with the 7 other anti-hallucination
-# rules already defined in French in v1.9.0).
-_INFERRED_MARKER_RE = re.compile(r"\[inféré(?:[,\s][^\]]*)?\]", re.IGNORECASE)
+# New consolidations use the English `[inferred]` marker. Continue recognizing
+# the legacy French marker so validation remains compatible with existing banks.
+_INFERRED_MARKER_RE = re.compile(
+    r"\[(?:inferred|inféré)(?:[,\s][^\]]*)?\]", re.IGNORECASE
+)
 
 # Detection of "risky" claims: lines containing at least one verifiable
 # fact (metric, date, strong status). We stay deliberately conservative
@@ -236,7 +237,7 @@ def _validate_unattributed_claims(
 ) -> dict:
     """
     Count the "claims" introduced by the consolidation that are neither
-    sourced in the batch notes nor explicitly marked `[inféré]`.
+    sourced in the batch notes nor explicitly marked `[inferred]`.
 
     Code-only approach (deterministic, zero LLM tokens):
     1. Per-file diff: only ADDED LINES are inspected (present in
@@ -244,7 +245,8 @@ def _validate_unattributed_claims(
     2. For each added line, extract verifiable tokens (metrics, dates,
        versions, refs).
     3. If the line carries a numeric claim OR a strong status:
-       - If it contains `[inféré]` → traced but not counted.
+       - If it contains `[inferred]` (or the legacy `[inféré]`) → traced
+         but not counted.
        - Otherwise, check that each verifiable token appears in the
          normalized notes corpus. If NO token is found in the notes,
          the line is unsourced.
@@ -297,8 +299,8 @@ def _validate_unattributed_claims(
 
             lines_scanned += 1
 
-            # Explicit `[inféré]` marker → traced but not counted as
-            # unsourced (the LLM explicitly flagged the inference).
+            # Explicit inference marker → traced but not counted as unsourced
+            # (the LLM explicitly flagged the inference).
             if _INFERRED_MARKER_RE.search(line):
                 inferred += 1
                 continue
@@ -341,126 +343,110 @@ def _validate_unattributed_claims(
 # Prompts
 # ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Tu es un assistant spécialisé dans la maintenance de Memory Banks pour des projets.
+SYSTEM_PROMPT = """You maintain structured project Memory Banks.
 
-Ta mission : intégrer des notes de travail dans des fichiers Markdown structurés via des ÉDITIONS CHIRURGICALES.
+Your mission is to integrate work notes into structured Markdown files through
+SURGICAL EDITS.
 
-## Ce que tu reçois :
-1. Les RULES qui définissent la structure de la memory bank
-2. La SYNTHÈSE PRÉCÉDENTE (contexte des consolidations antérieures)
-3. Les NOTES LIVE nouvelles à intégrer (avec leurs métadonnées : agent, catégorie, tags)
-4. Les FICHIERS BANK actuels (le contenu existant)
+## Input
+1. The RULES that define the Memory Bank structure
+2. The PREVIOUS SUMMARY (context from earlier consolidations)
+3. New LIVE NOTES to integrate (including agent, category, and tag metadata)
+4. The current BANK FILES
 
-## Ce que tu dois retourner :
-Un JSON avec des OPÉRATIONS D'ÉDITION par fichier — PAS le contenu complet des fichiers.
+## Output
+Return JSON containing EDIT OPERATIONS for each file, NOT complete file contents.
 
-## Principe fondamental : ÉDITER, NE PAS RÉÉCRIRE
+## Fundamental principle: EDIT, DO NOT REWRITE
 
-⚠️ Tu ne dois JAMAIS renvoyer le contenu complet d'un fichier sauf si :
-- C'est un nouveau fichier à créer (action "create")
-- Le fichier nécessite une restructuration majeure (action "rewrite" — exceptionnel, justification obligatoire)
+Never return a complete file unless:
+- It is a new file (action "create").
+- It requires major restructuring (action "rewrite"; exceptional and requires
+  justification).
 
-Pour les fichiers existants, tu produis des opérations d'édition par SECTION Markdown.
-Tout ce que tu ne touches pas explicitement reste INTACT — c'est le but.
+For existing files, return operations targeting Markdown SECTIONS. Anything not
+explicitly changed must remain intact.
 
-## Types d'opérations disponibles :
+## Available operations
 
-1. **replace_section** — Remplace le contenu d'une section (identifiée par son heading)
-   Le contenu SOUS le heading jusqu'au prochain heading de même niveau ou supérieur est remplacé.
+1. **replace_section** — Replace a section's content. The content below the
+   heading through the next heading at the same or a higher level is replaced.
+2. **append_to_section** — Append content to the end of an existing section.
+3. **prepend_to_section** — Add content at the start of an existing section,
+   immediately after its heading.
+4. **add_section** — Add a new heading and content at the end of the file, or
+   after a specified section when "after" is supplied. Never use add_section
+   for a heading that already exists; use replace_section instead. An
+   add_section operation with an existing heading is automatically converted
+   to replace_section.
+5. **delete_section** — Delete an entire section, including its heading.
 
-2. **append_to_section** — Ajoute du contenu à la FIN d'une section existante
-   Préserve tout le contenu existant, ajoute après.
+## CRITICAL ANTI-HALLUCINATION RULES
 
-3. **prepend_to_section** — Ajoute du contenu au DÉBUT d'une section (après le heading)
-   Préserve tout le contenu existant, ajoute avant.
+These rules are mandatory and take precedence over every other consideration:
 
-4. **add_section** — Crée une nouvelle section (heading + contenu) à la fin du fichier
-   Ou après une section spécifique si "after" est fourni.
-   ⚠️ N'utilise JAMAIS add_section pour une section qui EXISTE DÉJÀ — utilise replace_section à la place.
-   Si tu utilises add_section avec un heading déjà présent, il sera automatiquement converti en replace_section.
+1. **Strict source attribution**: Every factual statement written to the bank
+   must be derivable from at least one note in the batch. If the notes do not
+   provide information for a required section, leave it empty or write
+   "To be defined — not specified in the available notes." Never invent
+   content merely to complete a section.
+2. **Preserve domain vocabulary**: When a note defines a project-specific
+   concept, entity, or role, use the note's exact definition. Never reinterpret
+   project terminology using general knowledge.
+3. **Gate metrics and numbers**: Code-line counts, test counts, percentages,
+   durations, scores, and other numbers may appear in the bank only when a note
+   explicitly provides them. Never invent even approximate metrics. Put
+   sourced metrics in the appropriate file and section.
+4. **Do not invent structure**: Do not generate a file tree unless the notes
+   describe it. A mentioned stack may be recorded, but its conventional file
+   layout must not be invented.
+5. **Isolate agents and tasks**: When notes come from multiple agents or
+   independent tasks, never combine facts from different sources in one
+   sentence or paragraph. Keep separate agent/task paragraphs and do not
+   manufacture connections between independent notes.
 
-5. **delete_section** — Supprime une section entière (heading + contenu)
+## Inference and replacement rules
 
-## ⚠️ RÈGLES ANTI-HALLUCINATION (CRITIQUE)
+6. **Remove replaced material**: When a `decision` note explicitly replaces an
+   earlier plan, scope, or sequence, remove the old scope from the backlog or
+   roadmap. Do not retain it silently. When uncertain, mark it
+   "DEPRECATED — verify".
+7. **Transitive status inference**: If a `progress` note completes step N while
+   the bank still shows step N-1 in progress, mark N-1 complete by inference.
+   Likewise, if phase N+1 is in progress, phase N is complete.
+8. **`[inferred]` traceability markers**: Any statement that is not literally
+   present in a batch note and is produced through transitive inference or
+   logical deduction must end with `[inferred]`, optionally followed by a
+   short explanation inside the brackets. Examples:
+     - "Phase 3 started on 12/03 [inferred, follows completion of Phase 2]"
+     - "Migration complete [inferred]"
+   Directly sourced statements must never carry the marker. This traceability
+   lets operators distinguish source facts from deductions and supports
+   post-consolidation validation.
 
-Ces règles sont OBLIGATOIRES et prioritaires sur toute autre considération :
+## General rules
 
-1. **Attribution stricte aux sources** : TOUT fait factuel écrit dans la bank DOIT être
-   dérivable d'au moins une note du batch. Si les notes ne fournissent pas l'information
-   pour remplir une section attendue par les rules, laisse la section VIDE ou écris
-   "À définir — non spécifié dans les notes disponibles." N'invente JAMAIS de contenu
-   pour "compléter" une section.
-
-2. **Préservation du vocabulaire métier** : quand une note contient une définition
-   ou un terme métier spécifique au projet (ex: nom de concept, d'entité, de rôle),
-   utilise la définition EXACTE des notes. Ne ré-interprète JAMAIS un terme via tes
-   connaissances générales. Le vocabulaire du projet prime sur le vocabulaire commun.
-
-3. **Gating des métriques et chiffres** : les chiffres (lignes de code, nombre de tests,
-   pourcentages, temps, scores) ne doivent apparaître dans la bank QUE s'ils proviennent
-   explicitement d'une note. N'invente JAMAIS de métrique, même approximative.
-   Quand les notes fournissent des métriques, ASSURE-TOI de les reprendre dans le fichier
-   approprié (ex: nombre de tests → section Métriques de progress.md).
-
-4. **Pas de structure inventée** : si les notes ne décrivent pas l'arborescence des fichiers,
-   NE GÉNÈRE PAS d'arborescence. Si la stack est mentionnée (ex: "Rails 8"), tu peux
-   mentionner la stack mais PAS inventer l'arborescence correspondante.
-
-5. **Isolation par agent et tâche** : quand les notes proviennent de PLUSIEURS agents ou
-   portent sur des tâches INDÉPENDANTES (branches/tags différents), ne fusionne JAMAIS
-   des facts de sources différentes dans une même phrase ou paragraphe. Garde des
-   paragraphes séparés par agent/tâche. Ne forge JAMAIS de jointure entre des notes
-   indépendantes.
-
-## Règles d'inférence et de retrait :
-
-6. **Retrait d'éléments remplacés** : quand une note `decision` introduit explicitement
-   un nouveau plan/scope/séquence qui REMPLACE une version antérieure inscrite dans la bank,
-   RETIRE les éléments de l'ancien scope du backlog/roadmap. Ne les conserve pas
-   silencieusement. Si le doute persiste, marque "DÉPRÉCIÉ — à vérifier".
-
-7. **Inférence transitive sur les statuts** : si une note `progress` décrit l'achèvement
-   d'une étape N, et que la bank affiche encore "Étape N-1 en cours", marque N-1 comme
-   terminée par inférence. De même, si Phase N+1 est en cours → Phase N est terminée.
-
-8. **Markers de traçabilité `[inféré]`** : tout fait qui n'est pas LITTÉRALEMENT présent
-   dans une note du batch, mais que tu produis par INFÉRENCE TRANSITIVE (règle #7) ou
-   par déduction logique (ex: "Phase 3 en cours" → "Phase 2 terminée"), DOIT être
-   suivi du marker `[inféré]` à la fin de la phrase ou du bullet. Exemples :
-     - "Phase 3 démarrée le 12/03 [inféré, suite progress Phase 2 terminée]"
-     - "Migration terminée [inféré]"
-   Les faits DIRECTEMENT sourcés (présents en l'état dans une note) ne portent JAMAIS
-   le marker. Cette traçabilité permet à un opérateur de distinguer faits durs et
-   déductions, et facilite la validation post-consolidation.
-
-## Règles générales :
-
-- Respecte STRICTEMENT la structure définie dans les rules
-- Intègre les nouvelles informations des notes live
-- Préfère append_to_section et replace_section — ce sont les opérations les plus courantes
-- Pour les fichiers de CONTEXTE ACTUEL (focus, travail en cours) : replace_section le focus, append les éléments récents.
-  ⚠️ NETTOIE ACTIVEMENT : déplace les éléments terminés vers le fichier de suivi/historique,
-  supprime les détails de sessions anciennes (> 2 sessions), garde UNIQUEMENT
-  le focus actuel, le travail récent, les prochaines étapes et les décisions actives.
-  Ces fichiers doivent rester LÉGERS.
-- Pour les fichiers d'HISTORIQUE/PROGRESSION : append les nouvelles entrées, NE JAMAIS supprimer l'historique.
-  Résume les entrées anciennes (> 30 jours) en une ligne par jalon.
-  ⚠️ ANTI-DOUBLON SÉMANTIQUE : avant de créer une NOUVELLE section dans un fichier d'historique,
-  vérifie si un jalon couvrant le MÊME TRAVAIL (même date, même feature/phase) existe
-  déjà dans le fichier, même avec un heading différent ou un format plus court.
-  Exemples de doublons à éviter :
-    - "### Phase B — Service créé (10/04)" ET "### Session du 10/04 — Phase B COMPLÈTE"
-    - "### Phase 4.4x — Fix Mermaid (06/04)" ET "### Session du 06/04 — Fix complet diagrammes"
-  Si un jalon similaire existe → ENRICHIS-LE avec replace_section (en gardant le heading
-  existant et en ajoutant les détails manquants), au lieu de créer une section dupliquée.
-  Ceci est particulièrement important après une compaction où les sections ont été résumées.
-- Identifie le RÔLE de chaque fichier bank à partir des RULES fournies (pas à partir du nom de fichier).
-- Les headings doivent correspondre EXACTEMENT à ceux du fichier (avec les ## )
-- Si un fichier n'a pas besoin de modification, NE L'INCLUS PAS
-- La synthèse doit être concise mais couvrir les points clés des notes traitées
-- ⚠️ RÈGLE ANTI-ACCUMULATION : chaque consolidation doit NETTOYER l'obsolète,
-  pas seulement ajouter. Un fichier qui DÉPASSE SA LIMITE DE TAILLE et continue
-  de grossir est un problème — compacte les sections anciennes pour faire de la place."""
+- Follow the structure in the supplied RULES exactly.
+- Integrate the new live-note information.
+- Prefer append_to_section and replace_section.
+- For CURRENT CONTEXT files, replace the focus and append recent items.
+  Actively clean them: move completed items to tracking/history, remove details
+  from old sessions (more than two sessions ago), and retain only the current
+  focus, recent work, next steps, and active decisions. Keep these files small.
+- For HISTORY/PROGRESS files, append new entries and never delete history.
+  Summarize entries older than 30 days as one line per milestone.
+- Before adding a history section, check for a semantically equivalent
+  milestone covering the same date and work, even if its heading or format
+  differs. If one exists, enrich it with replace_section while retaining its
+  heading instead of adding a duplicate. This is especially important after
+  compaction has shortened existing sections.
+- Infer each bank file's role from the supplied RULES, not its filename.
+- Headings must exactly match those in the file, including `#` characters.
+- Omit files that do not need changes.
+- Keep the summary concise while covering the key points from processed notes.
+- Every consolidation must remove obsolete material, not merely append. If a
+  file exceeds its size limit and continues growing, compact older sections to
+  make room."""
 
 
 class ConsolidatorService:
@@ -609,10 +595,10 @@ class ConsolidatorService:
                     return {
                         "status": "error",
                         "message": (
-                            f"Consolidation cooldown actif sur '{space_id}' : "
-                            f"réessayez dans {remaining:.0f}s. Le cooldown "
-                            f"({self._cooldown_seconds}s) protège le budget "
-                            "LLM et évite la saturation du lock."
+                            f"Consolidation cooldown is active for '{space_id}': "
+                            f"retry in {remaining:.0f}s. The "
+                            f"{self._cooldown_seconds}s cooldown protects the "
+                            "LLM budget and prevents lock saturation."
                         ),
                     }
             _last_consolidation_started[space_id] = time.monotonic()
@@ -994,7 +980,8 @@ class ConsolidatorService:
                         logger.warning(
                             "Batch %d/%d validation — %d unsourced claim(s) "
                             "detected (over %d scanned lines, %d marked "
-                            "[inféré]). See `examples` in the MCP response.",
+                            "[inferred] or legacy [inféré]). See `examples` "
+                            "in the MCP response.",
                             batch_idx,
                             batch_count,
                             val["unattributed_claims_count"],
@@ -1140,29 +1127,26 @@ class ConsolidatorService:
             # dans les journaux serveur (LM2-24).
             result["reason"] = "consolidation_failed"
             result["message"] = (
-                "La consolidation a échoué avant toute écriture durable : "
-                "aucun fichier bank, note ou métadonnée n'a été modifié. "
-                "Les notes restent éligibles pour une nouvelle tentative ; "
-                "consultez les journaux serveur pour le détail."
+                "Consolidation failed before any durable write: no bank file, "
+                "note, or metadata was changed. The notes remain eligible for "
+                "a retry; consult server logs for details."
             )
         elif status == "partial":
             result["reason"] = "partial_consolidation"
             if notes_remaining > 0:
                 result["message"] = (
-                    "Consolidation partielle : certaines notes n'ont pas été "
-                    "intégrées ou supprimées. Elles restent éligibles pour une "
-                    "nouvelle tentative contrôlée."
+                    "Partial consolidation: some notes were not integrated or "
+                    "deleted. They remain eligible for a controlled retry."
                 )
             elif metadata_update_failed:
                 result["message"] = (
-                    "Les notes ont été intégrées et supprimées, mais la mise "
-                    "à jour des métadonnées de consolidation a échoué. "
-                    "Aucune note source ne reste à retraiter."
+                    "The notes were integrated and deleted, but consolidation "
+                    "metadata could not be updated. No source notes remain to retry."
                 )
             else:
                 result["message"] = (
-                    "Consolidation terminée avec un état partiel ; consultez "
-                    "les compteurs et la raison d'échec."
+                    "Consolidation completed with a partial outcome; inspect "
+                    "the counters and failure reason."
                 )
         # P12-1 : la phase terminale de progression est honnête — `done`
         # UNIQUEMENT pour un succès complet, `failed` pour `error`/`partial`.
@@ -1212,7 +1196,7 @@ class ConsolidatorService:
         # Vérifier l'existence de l'espace
         meta = await storage.get_json(f"{space_id}/_meta.json")
         if meta is None:
-            return {"status": "error", "message": f"Espace '{space_id}' introuvable"}
+            return {"status": "error", "message": f"Space '{space_id}' not found"}
 
         # Lire les rules (immuables)
         rules = await storage.get(f"{space_id}/_rules.md") or ""
@@ -1260,7 +1244,7 @@ class ConsolidatorService:
                 return {
                     "status": "error",
                     "reason": "invalid_selected_note_key",
-                    "message": "La sélection GC contient une clé live invalide.",
+                    "message": "The GC selection contains an invalid live-note key.",
                 }
             # Stable de-duplication preserves the caller's exact processing
             # order.  GC deliberately places its synthetic notice first so a
@@ -1274,8 +1258,8 @@ class ConsolidatorService:
                     "status": "conflict",
                     "reason": "selected_note_set_changed",
                     "message": (
-                        "L'ensemble exact des notes sélectionnées a changé avant "
-                        "la consolidation. Relancez le scan GC."
+                        "The exact selected-note set changed before consolidation. "
+                        "Run the GC scan again."
                     ),
                 }
             notes_by_key = {n["key"]: n for n in notes_raw}
@@ -1366,7 +1350,7 @@ class ConsolidatorService:
 
             notes_section += (
                 f"\n--- Note {i}/{len(notes)} "
-                f"[agent={agent_name}, catégorie={category}"
+                f"[agent={agent_name}, category={category}"
                 f"{', tags=' + tags if tags else ''}] ---\n"
                 f"{content_clean}\n"
             )
@@ -1381,31 +1365,31 @@ class ConsolidatorService:
                 raw_relpath = bank_relpath(bf["key"], space_id)
                 filename = _sanitize_filename(raw_relpath)
                 bank_section += (
-                    f"\n--- Fichier: {filename} ---\n"
+                    f"\n--- File: {filename} ---\n"
                     f"{bf['content']}\n"
-                    f"--- Fin fichier: {filename} ---\n"
+                    f"--- End file: {filename} ---\n"
                 )
         else:
             bank_section = (
-                "Aucun fichier bank — première consolidation. "
-                "Utilise l'action 'create' pour créer les fichiers selon les rules."
+                "No bank files exist; this is the first consolidation. "
+                "Use the 'create' action to create files according to the rules."
             )
 
         # Construire le prompt utilisateur
-        user_prompt = f"""=== RULES DE L'ESPACE "{space_id}" ===
+        user_prompt = f"""=== RULES FOR SPACE "{space_id}" ===
 {rules}
 
-=== SYNTHÈSE PRÉCÉDENTE ===
-{synthesis or "Aucune — première consolidation"}
+=== PREVIOUS SUMMARY ===
+{synthesis or "None; this is the first consolidation"}
 
-=== NOTES LIVE À INTÉGRER ({len(notes)} notes) ===
+=== LIVE NOTES TO INTEGRATE ({len(notes)} notes) ===
 {notes_section}
 
-=== FICHIERS BANK ACTUELS ===
+=== CURRENT BANK FILES ===
 {bank_section}
 
-=== FORMAT DE RÉPONSE ===
-Retourne un JSON avec cette structure exacte :
+=== RESPONSE FORMAT ===
+Return JSON with this exact structure:
 {{
   "file_edits": [
     {{
@@ -1414,51 +1398,51 @@ Retourne un JSON avec cette structure exacte :
       "operations": [
         {{
           "type": "replace_section",
-          "heading": "## Focus Actuel",
-          "content": "Nouveau contenu de la section..."
+          "heading": "## Current Focus",
+          "content": "New section content..."
         }},
         {{
           "type": "append_to_section",
-          "heading": "## Travail Récent",
-          "content": "- Nouvel élément ajouté\\n- Autre élément"
+          "heading": "## Recent Work",
+          "content": "- Newly added item\\n- Another item"
         }},
         {{
           "type": "add_section",
-          "heading": "## Nouvelle Section",
-          "content": "Contenu de la nouvelle section",
-          "after": "## Section Existante"
+          "heading": "## New Section",
+          "content": "Content of the new section",
+          "after": "## Existing Section"
         }},
         {{
           "type": "delete_section",
-          "heading": "## Section Obsolète"
+          "heading": "## Obsolete Section"
         }}
       ]
     }},
     {{
-      "filename": "nouveau_fichier.md",
+      "filename": "new_file.md",
       "action": "create",
-      "content": "# Titre\\n\\nContenu complet du nouveau fichier..."
+      "content": "# Title\\n\\nComplete content of the new file..."
     }},
     {{
-      "filename": "fichier_restructure.md",
+      "filename": "restructured_file.md",
       "action": "rewrite",
-      "content": "# Titre\\n\\nContenu complet réécrit...",
-      "reason": "Restructuration majeure nécessaire car..."
+      "content": "# Title\\n\\nComplete rewritten content...",
+      "reason": "Major restructuring is necessary because..."
     }}
   ],
-  "synthesis": "Résumé concis des notes traitées..."
+  "synthesis": "Concise summary of the processed notes..."
 }}
 
-=== CONSIGNES IMPORTANTES ===
-1. Pour les fichiers EXISTANTS, utilise action "edit" avec des opérations chirurgicales
-2. Pour les NOUVEAUX fichiers, utilise action "create" avec le contenu complet
-3. Action "rewrite" = réécriture COMPLÈTE — UNIQUEMENT si restructuration majeure nécessaire
-4. Les fichiers inchangés NE DOIVENT PAS apparaître dans file_edits
-5. Les headings dans les opérations doivent correspondre EXACTEMENT à ceux du fichier (ex: "## Focus Actuel")
-6. Préfère append_to_section pour AJOUTER de l'information sans rien perdre
-7. Préfère replace_section pour METTRE À JOUR une section dont le contenu change
-8. Pour les fichiers d'historique/progression : TOUJOURS append, JAMAIS supprimer l'historique
-9. La synthèse résiduelle doit résumer les notes traitées"""
+=== IMPORTANT INSTRUCTIONS ===
+1. For EXISTING files, use action "edit" with surgical operations.
+2. For NEW files, use action "create" with the complete content.
+3. Action "rewrite" means a COMPLETE rewrite; use it only for major restructuring.
+4. Do not include unchanged files in file_edits.
+5. Operation headings must exactly match the file's headings.
+6. Prefer append_to_section to add information without losing anything.
+7. Prefer replace_section to update a section whose content changed.
+8. For history/progress files, always append and never delete history.
+9. The residual summary must summarize the processed notes."""
 
         return [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -1643,9 +1627,8 @@ Retourne un JSON avec cette structure exacte :
                             {
                                 "role": "user",
                                 "content": (
-                                    "Ta réponse n'est pas du JSON valide. "
-                                    "Retourne UNIQUEMENT un objet JSON valide "
-                                    "avec file_edits et synthesis."
+                                    "Your response is not valid JSON. Return ONLY "
+                                    "a valid JSON object with file_edits and synthesis."
                                 ),
                             }
                         )
@@ -1672,8 +1655,8 @@ Retourne un JSON avec cette structure exacte :
                             {
                                 "role": "user",
                                 "content": (
-                                    "Ta réponse doit contenir 'file_edits' et 'synthesis'. "
-                                    "Retourne le JSON au format demandé."
+                                    "Your response must contain 'file_edits' and "
+                                    "'synthesis'. Return JSON in the requested format."
                                 ),
                             }
                         )
@@ -2168,18 +2151,18 @@ Retourne un JSON avec cette structure exacte :
         for i, v in enumerate(versions, 1):
             versions_text += f"\n--- VERSION {i} ---\n{v.strip()}\n"
 
-        prompt = f"""Tu reçois {len(versions)} versions d'une même section Markdown qui a été dupliquée par erreur.
+        prompt = f"""You receive {len(versions)} versions of the same Markdown section, duplicated by mistake.
 
-SECTION : {heading}
+SECTION: {heading}
 
 {versions_text}
 
-CONSIGNE : Fusionne ces versions en UNE SEULE version cohérente.
-- Garde toutes les informations PERTINENTES et À JOUR des deux versions
-- Si une version contient des données plus récentes (ex: "322 tests" vs "272 tests"), garde la plus récente
-- Supprime les doublons d'information
-- Conserve le format et le style Markdown
-- Retourne UNIQUEMENT le contenu fusionné (SANS le heading, SANS balises, SANS explication)"""
+INSTRUCTION: Merge these versions into ONE coherent version.
+- Keep all RELEVANT and CURRENT information from every version.
+- If one version has newer data (for example, "322 tests" versus "272 tests"), keep the newer data.
+- Remove duplicate information.
+- Preserve the Markdown format and style.
+- Return ONLY the merged content, WITHOUT the heading, tags, or an explanation."""
 
         try:
             response = await self._client.chat.completions.create(
@@ -2378,36 +2361,36 @@ CONSIGNE : Fusionne ces versions en UNE SEULE version cohérente.
         # Instructions de compaction génériques — les rules de l'espace
         # définissent la sémantique de chaque fichier, pas le serveur.
         specific = (
-            "Synthétise le contenu en gardant la structure des sections.\n"
-            "- Fusionne les informations redondantes\n"
-            "- Supprime les détails obsolètes ou trop granulaires\n"
-            "- Conserve les décisions architecturales et les informations structurantes\n"
-            "- Résume les entrées anciennes en une ligne par jalon\n"
-            "- Réfère-toi aux RULES DE RÉFÉRENCE ci-dessus pour comprendre le rôle de ce fichier"
+            "Summarize the content while preserving the section structure.\n"
+            "- Merge redundant information\n"
+            "- Remove obsolete or overly granular details\n"
+            "- Preserve architectural decisions and structural information\n"
+            "- Summarize old entries as one line per milestone\n"
+            "- Use the REFERENCE RULES above to understand this file's role"
         )
 
-        prompt = f"""Tu reçois un fichier bank "{filename}" qui fait {len(content)} bytes
-(limite : {max_size} bytes). Tu dois le COMPACTER pour le ramener sous cette limite.
+        prompt = f"""You receive a bank file named "{filename}" containing {len(content)} bytes
+(limit: {max_size} bytes). COMPACT it below that limit.
 
-=== RULES DE RÉFÉRENCE ===
+=== REFERENCE RULES ===
 {rules[:2000]}
 
-=== INSTRUCTIONS SPÉCIFIQUES ===
+=== FILE-SPECIFIC INSTRUCTIONS ===
 {specific}
 
-=== RÈGLES DE COMPACTION ===
-- Garde le heading principal (# titre) et la structure des sections (##, ###)
-- Résume les blocs redondants ou trop détaillés
-- Supprime les éléments terminés/obsolètes
-- Fusionne les entrées similaires
-- Conserve les dates des jalons importants
-- NE PERDS AUCUNE information structurante (décisions, architecture, stack)
-- Objectif : ramener SOUS {max_size} bytes
+=== COMPACTION RULES ===
+- Preserve the main heading and section structure.
+- Summarize redundant or overly detailed blocks.
+- Remove completed or obsolete items.
+- Merge similar entries.
+- Preserve important milestone dates.
+- Do not lose structural information such as decisions, architecture, or stack.
+- The result must be under {max_size} bytes.
 
-=== CONTENU ACTUEL ===
+=== CURRENT CONTENT ===
 {content}
 
-Retourne UNIQUEMENT le contenu compacté (Markdown pur, pas de JSON, pas de balises, pas d'explication)."""
+Return ONLY the compacted content as plain Markdown, without JSON, tags, or an explanation."""
 
         try:
             # Estimer le budget de sortie : on veut ~max_size bytes en sortie
@@ -2453,7 +2436,7 @@ Retourne UNIQUEMENT le contenu compacté (Markdown pur, pas de JSON, pas de bali
         # Vérifier l'existence de l'espace
         meta = await storage.get_json(f"{space_id}/_meta.json")
         if meta is None:
-            return {"status": "error", "message": f"Espace '{space_id}' introuvable"}
+            return {"status": "error", "message": f"Space '{space_id}' not found"}
 
         # Lire la bank et les rules
         bank_files = await storage.list_and_get(f"{space_id}/bank/")
@@ -2799,7 +2782,7 @@ def _apply_operation(content: str, operation: dict) -> str:
     elif op_type == "delete_section":
         return _op_delete_section(content, heading)
     else:
-        raise ValueError(f"Type d'opération inconnu: {op_type}")
+        raise ValueError(f"Unknown operation type: {op_type}")
 
 
 def _op_replace_section(content: str, heading: str, new_content: str) -> str:
@@ -2813,7 +2796,7 @@ def _op_replace_section(content: str, heading: str, new_content: str) -> str:
     idx = _find_section_index(sections, heading)
 
     if idx == -1:
-        raise ValueError(f"Section non trouvée: {heading}")
+        raise ValueError(f"Section not found: {heading}")
 
     # Remplacer le contenu de la section
     # S'assurer que le nouveau contenu commence et finit proprement
@@ -2836,7 +2819,7 @@ def _op_append_to_section(content: str, heading: str, new_content: str) -> str:
     idx = _find_section_index(sections, heading)
 
     if idx == -1:
-        raise ValueError(f"Section non trouvée: {heading}")
+        raise ValueError(f"Section not found: {heading}")
 
     existing = sections[idx]["content"]
 
@@ -2858,7 +2841,7 @@ def _op_prepend_to_section(content: str, heading: str, new_content: str) -> str:
     idx = _find_section_index(sections, heading)
 
     if idx == -1:
-        raise ValueError(f"Section non trouvée: {heading}")
+        raise ValueError(f"Section not found: {heading}")
 
     existing = sections[idx]["content"]
 
@@ -2999,7 +2982,7 @@ def _op_delete_section(content: str, heading: str) -> str:
     idx = _find_section_index(sections, heading)
 
     if idx == -1:
-        raise ValueError(f"Section non trouvée pour suppression: {heading}")
+        raise ValueError(f"Section not found for deletion: {heading}")
 
     # Supprimer la section
     sections.pop(idx)

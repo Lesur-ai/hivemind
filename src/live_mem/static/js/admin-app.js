@@ -407,11 +407,11 @@ function stateUnavailable(reason) {
     return `<div class="state state-unavailable"><span class="micro-label">NOT AVAILABLE</span><p>${text}</p></div>`;
 }
 
-// Verbatim server text (French included) — never parsed, never rendered as
+// Verbatim server text — never parsed, never rendered as
 // HTML/markdown (R4). msg is escaped once here at the sink.
 function serverMessage(msg) {
     if (!msg) return '';
-    return `<div class="server-msg"><span class="server-msg-label">SERVER MESSAGE</span><span class="server-msg-text" lang="fr">${esc(String(msg))}</span></div>`;
+    return `<div class="server-msg"><span class="server-msg-label">SERVER MESSAGE</span><span class="server-msg-text" lang="en">${esc(String(msg))}</span></div>`;
 }
 
 // ═══════════════ SHELL LAYOUT COMPONENTS (contract §2.3.4) ═══════════════

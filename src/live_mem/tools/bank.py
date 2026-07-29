@@ -74,23 +74,23 @@ def _validate_bank_filename(filename: str) -> dict | None:
     Retourne None si OK, sinon un dict d'erreur prêt à être renvoyé.
     """
     if not filename or not filename.strip():
-        return {"status": "error", "message": "Nom de fichier requis"}
+        return {"status": "error", "message": "Filename is required"}
     if ".." in filename:
         return {
             "status": "error",
-            "message": "Nom de fichier invalide : '..' interdit",
+            "message": "Invalid filename: '..' is not allowed",
         }
     if filename.startswith("/"):
         return {
             "status": "error",
-            "message": "Nom de fichier invalide : ne peut pas commencer par '/'",
+            "message": "Invalid filename: it cannot start with '/'",
         }
     if _BANK_FILENAME_DANGEROUS.search(filename):
         return {
             "status": "error",
             "message": (
-                "Caractères dangereux dans le nom de fichier "
-                "(< > \" ' \\ ou caractères de contrôle interdits)"
+                "The filename contains unsafe characters "
+                "(< > \" ' \\ or control characters are not allowed)"
             ),
         }
     return None
@@ -178,7 +178,7 @@ def register(mcp: FastMCP) -> int:
 
                 return {
                     "status": "not_found",
-                    "message": f"Fichier '{filename}' introuvable dans '{space_id}'",
+                    "message": f"File '{filename}' not found in '{space_id}'",
                 }
 
             return {
@@ -223,7 +223,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Lire tous les fichiers bank
@@ -281,7 +281,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Lister les objets bank (sans les .keep)
@@ -395,8 +395,8 @@ def register(mcp: FastMCP) -> int:
                 return {
                     "status": "error",
                     "message": (
-                        "Identité client_name non vide requise pour "
-                        "consolider des notes"
+                        "A non-empty client_name identity is required to "
+                        "consolidate notes"
                     ),
                 }
 
@@ -414,10 +414,10 @@ def register(mcp: FastMCP) -> int:
                     return {
                         "status": "error",
                         "message": (
-                            f"Permission 'manage' requise pour consolider "
-                            f"les notes de l'agent '{agent}'. "
-                            f"Vous pouvez consolider vos propres notes "
-                            f"en omettant agent ou avec agent='{caller}'."
+                            f"The 'manage' permission is required to consolidate "
+                            f"agent '{agent}' notes. "
+                            f"You can consolidate your own notes by omitting "
+                            f"agent or by using agent='{caller}'."
                         ),
                     }
 
@@ -536,7 +536,7 @@ def register(mcp: FastMCP) -> int:
         try:
             token_info = _get_effective_token_info()
             if token_info is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             requested_ids = [
                 sid.strip() for sid in space_ids.split(",") if sid.strip()
@@ -665,7 +665,7 @@ def register(mcp: FastMCP) -> int:
         try:
             token_info = _get_effective_token_info()
             if token_info is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             requested_ids = [
                 sid.strip() for sid in space_ids.split(",") if sid.strip()
@@ -778,13 +778,13 @@ def register(mcp: FastMCP) -> int:
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
     async def bank_repair(
         space_id: Annotated[
-            str, Field(description="Identifiant de l'espace à réparer")
+            str, Field(description="Identifier of the space to repair")
         ],
         dry_run: Annotated[
             bool,
             Field(
                 default=True,
-                description="True = scan seul (liste les fichiers à réparer), False = applique les corrections",
+                description="True = scan only (list files to repair); False = apply the repairs",
             ),
         ] = True,
     ) -> dict:
@@ -835,7 +835,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Lister les vrais fichiers bank sur S3 (READ — stays on storage)
@@ -959,20 +959,20 @@ def register(mcp: FastMCP) -> int:
                 "repairs": repairs,
                 "duplicates": duplicates,
                 "message": (
-                    f"{len(repairs)} fichier(s) à déplacer, "
-                    f"{len(duplicates)} doublon(s) à supprimer "
-                    f"sur {len(groups)} fichiers uniques. "
+                    f"{len(repairs)} file(s) to move, "
+                    f"{len(duplicates)} duplicate(s) to delete "
+                    f"across {len(groups)} unique files. "
                     + (
-                        "Passez dry_run=False pour appliquer."
+                        "Set dry_run=False to apply the repairs."
                         if dry_run and total_issues > 0
                         else ""
                     )
                     + (
-                        "Corrections appliquées."
+                        "Repairs applied."
                         if not dry_run and total_issues > 0
                         else ""
                     )
-                    + ("Tous les fichiers sont OK." if total_issues == 0 else "")
+                    + ("All files are OK." if total_issues == 0 else "")
                 ),
             }
         except Exception as e:
@@ -982,12 +982,12 @@ def register(mcp: FastMCP) -> int:
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
     async def bank_write(
-        space_id: Annotated[str, Field(description="Identifiant de l'espace")],
+        space_id: Annotated[str, Field(description="Space identifier")],
         filename: Annotated[
-            str, Field(description="Nom du fichier bank (ex: 'activeContext.md')")
+            str, Field(description="Bank filename (for example, 'activeContext.md')")
         ],
         content: Annotated[
-            str, Field(description="Contenu Markdown complet du fichier")
+            str, Field(description="Complete Markdown file content")
         ],
     ) -> dict:
         """
@@ -1035,7 +1035,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Sanitiser le filename
@@ -1043,7 +1043,7 @@ def register(mcp: FastMCP) -> int:
             if not sanitized:
                 return {
                     "status": "error",
-                    "message": f"Nom de fichier invalide : '{filename}'",
+                    "message": f"Invalid filename: '{filename}'",
                 }
 
             # Re-valider après sanitisation Unicode (défense en profondeur :
@@ -1155,8 +1155,8 @@ def register(mcp: FastMCP) -> int:
                 return {
                     "status": "error",
                     "message": (
-                        "Suppression refusée : confirm=True requis pour "
-                        "supprimer un fichier bank (sécurité, irréversible)."
+                        "Deletion refused: confirm=True is required to delete "
+                        "a bank file (this action is irreversible)."
                     ),
                 }
 
@@ -1166,7 +1166,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             sanitized = _sanitize_filename(filename)
@@ -1186,7 +1186,7 @@ def register(mcp: FastMCP) -> int:
             if not keys_to_delete:
                 return {
                     "status": "not_found",
-                    "message": f"Fichier '{filename}' introuvable dans '{space_id}'",
+                    "message": f"File '{filename}' not found in '{space_id}'",
                 }
 
             # P3-7 ROUTE-FIRST: resolve the per-space WriteSink BEFORE the
@@ -1225,7 +1225,7 @@ def register(mcp: FastMCP) -> int:
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
     async def bank_compact(
         space_id: Annotated[
-            str, Field(description="Identifiant de l'espace à compacter")
+            str, Field(description="Identifier of the space to compact")
         ],
         dry_run: Annotated[
             bool,
@@ -1306,8 +1306,8 @@ def register(mcp: FastMCP) -> int:
                     return {
                         "status": "conflict",
                         "message": (
-                            f"Consolidation en cours pour '{space_id}'. "
-                            "Réessayez dans quelques minutes."
+                            f"Consolidation is in progress for '{space_id}'. "
+                            "Try again in a few minutes."
                         ),
                     }
                 async with lock:

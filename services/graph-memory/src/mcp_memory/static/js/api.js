@@ -45,7 +45,7 @@ async function authFetch(url, options = {}) {
 
     if (response.status === 401) {
         clearAuthToken();
-        showLoginScreen('Session expirée ou token invalide.');
+        showLoginScreen('Session expired or token invalid.');
         throw new Error('Unauthorized');
     }
 

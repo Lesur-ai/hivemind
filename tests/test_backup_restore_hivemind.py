@@ -788,8 +788,8 @@ async def test_restore_over_local_only_space_unchanged_passthrough(monkeypatch):
     result = await BackupService().restore(BACKUP_ID, unsafe_recovery=False)
 
     assert result["status"] == "error"
-    # Message hérité (PAS hive-aware) : « espace existe déjà »
-    assert "existe déjà" in result["message"]
+    # Legacy (non-hive-aware) message: the space already exists.
+    assert "already exists" in result["message"]
     assert "unsafe_recovery" not in result["message"]
 
 

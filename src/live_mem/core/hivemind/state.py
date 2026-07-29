@@ -93,7 +93,7 @@ class HivemindStateStore:
 
     def __init__(self, storage: StorageService, space_id: str) -> None:
         if not space_id:
-            raise ValueError("space_id requis")
+            raise ValueError("space_id is required")
         self._storage = storage
         self._space_id = space_id
 

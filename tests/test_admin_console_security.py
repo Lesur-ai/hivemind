@@ -804,7 +804,7 @@ class TestG3SafeErrorApiLogin:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/login leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -846,7 +846,7 @@ class TestG3SafeErrorApiSpaces:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/spaces leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -889,7 +889,7 @@ class TestG3SafeErrorApiSpaceInfo:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/space/<id> leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -932,7 +932,7 @@ class TestG3SafeErrorApiLiveNotes:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/live_notes leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -975,7 +975,7 @@ class TestG3SafeErrorApiBankList:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/bank_list leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -1018,7 +1018,7 @@ class TestG3SafeErrorApiBankFile:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/bank_file leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -1057,7 +1057,7 @@ class TestG3SafeErrorCallToolDirect:
             tools._mcp_ref = original
 
         assert result.get("status") == "error"
-        assert result.get("message") == "Erreur interne du serveur", (
+        assert result.get("message") == "Internal server error", (
             f"G3 BROKEN: call_tool_direct leaked non-generic message: {result!r}"
         )
         assert "SECRET-DETAIL" not in json.dumps(result), (

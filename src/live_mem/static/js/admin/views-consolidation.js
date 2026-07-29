@@ -10,7 +10,7 @@
  *
  * Escaping (contract §7.3.3 R1–R6): every dynamic value passes through the
  * shell esc() at its interpolation site; dataset values re-escaped when reused
- * in HTML; data-* JSON payloads are JSON.stringify then esc; server French text
+ * in HTML; data-* JSON payloads are JSON.stringify then esc; server text
  * renders only through serverMessage()/textContent, never parsed. All actions
  * flow through the shell [data-action] delegate (no inline handlers, CSP-safe).
  */

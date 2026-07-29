@@ -49,12 +49,12 @@ function getCatIcon(c) { return CATEGORY_ICONS[c] || '📝'; }
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmtTime(iso) {
     if (!iso) return '';
-    try { return new Date(iso).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+    try { return new Date(iso).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
     catch { return iso; }
 }
 function fmtDate(iso) {
     if (!iso) return '';
-    try { return new Date(iso).toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}); }
+    try { return new Date(iso).toLocaleDateString('en-US',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}); }
     catch { return iso; }
 }
 function fmtSize(b) {

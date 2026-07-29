@@ -69,7 +69,7 @@ function buildEntityTypeFilters(nodes) {
 
     const types = Object.keys(typeCounts).sort();
     if (types.length === 0) {
-        body.innerHTML = '<div class="filter-empty">Aucune entité</div>';
+        body.innerHTML = '<div class="filter-empty">No entities</div>';
         return;
     }
 
@@ -165,7 +165,7 @@ function buildEdgeTypeFilters(edges) {
 
     const types = Object.keys(typeCounts).sort();
     if (types.length === 0) {
-        body.innerHTML = '<div class="filter-empty">Aucune relation</div>';
+        body.innerHTML = '<div class="filter-empty">No relations</div>';
         return;
     }
 
@@ -254,7 +254,7 @@ function buildDocumentFilters(documents) {
     const body = document.getElementById('body-documents');
 
     if (!documents || documents.length === 0) {
-        body.innerHTML = '<div class="filter-empty">Aucun document</div>';
+        body.innerHTML = '<div class="filter-empty">No documents</div>';
         return;
     }
 
@@ -331,7 +331,7 @@ function updateEntityList(nodes) {
     }).join('');
 
     if (sorted.length > 80) {
-        list.innerHTML += `<div class="entity-overflow">… +${sorted.length - 80} entités</div>`;
+        list.innerHTML += `<div class="entity-overflow">… +${sorted.length - 80} entities</div>`;
     }
 
     // Appliquer les couleurs dynamiques (border-left)

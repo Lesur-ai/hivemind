@@ -27,7 +27,7 @@ async function doLogin() {
         // POST /api/login → émet le cookie HttpOnly côté serveur.
         const loginResult = await loginWithToken(token);
         if (loginResult.status !== 'ok') {
-            err.textContent = `❌ ${loginResult.message || 'Token invalide'}`;
+            err.textContent = `❌ ${loginResult.message || 'Invalid token'}`;
             return;
         }
 

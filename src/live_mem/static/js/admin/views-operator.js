@@ -12,7 +12,7 @@
  * only cross-links to it.
  *
  * Real data only; no polling (D8). Escaping per §7.3.3 R1–R6: every dynamic
- * value through esc() at the sink; server French text only via serverMessage();
+ * value through esc() at the sink; server text only via serverMessage();
  * all actions via the shell [data-action] delegate (CSP-safe). Permission gates
  * read the cached identity (never a fresh probe); the server stays authoritative.
  *
@@ -345,7 +345,7 @@
                     return false;
                 }
                 // UNIFORM fail-closed for EVERY restore error (§5(a)/D7: never
-                // parse the French message to pick cause-specific copy). The
+                // parse the server message to pick cause-specific copy). The
                 // verbatim message states the real cause; the static note is
                 // general, non-causal doctrine.
                 showModal('Restore failed', restoreErrorHtml(data));

@@ -121,7 +121,7 @@ class TokenManager:
                 expires_at=expires_at.isoformat() if expires_at else None
             )
         
-        print(f"🔑 [Auth] Token créé pour client '{client_name}'", file=sys.stderr)
+        print(f"🔑 [Auth] Token created for client '{client_name}'", file=sys.stderr)
         
         # Retourner le token en clair (seule fois où il est accessible)
         return token
@@ -160,7 +160,7 @@ class TokenManager:
                 try:
                     expires_at = datetime.fromisoformat(node["expires_at"])
                     if expires_at < datetime.utcnow():
-                        print(f"⚠️ [Auth] Token expiré pour '{node['client_name']}'", file=sys.stderr)
+                        print(f"⚠️ [Auth] Token expired for '{node['client_name']}'", file=sys.stderr)
                         return None
                 except:
                     pass

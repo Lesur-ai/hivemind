@@ -73,7 +73,7 @@ class BackupService:
             ValueError si le format est invalide ou contient des caractères dangereux
         """
         if not backup_id or not isinstance(backup_id, str):
-            raise ValueError("backup_id requis")
+            raise ValueError("backup_id is required")
         
         parts = backup_id.split("/", 1)
         if len(parts) != 2:
@@ -146,7 +146,7 @@ class BackupService:
         # Vérifier que la mémoire existe
         memory = await self._graph.get_memory(memory_id)
         if not memory:
-            raise ValueError(f"Mémoire '{memory_id}' non trouvée")
+            raise ValueError(f"Memory '{memory_id}' not found")
         
         timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
         backup_prefix = self._backup_s3_prefix(memory_id, timestamp)
@@ -323,7 +323,7 @@ class BackupService:
                     manifest["s3_size"] = obj["size"]
                     manifests.append(manifest)
                 except Exception as e:
-                    print(f"⚠️ [Backup] Erreur lecture manifest {obj['key']}: {e}",
+                    print(f"⚠️ [Backup] Error reading manifest {obj['key']}: {e}",
                           file=sys.stderr)
         
         # Trier par date décroissante
@@ -625,7 +625,7 @@ class BackupService:
         try:
             tar = tarfile.open(fileobj=buf, mode='r:gz')
         except Exception as e:
-            raise ValueError(f"Archive tar.gz invalide: {e}")
+            raise ValueError(f"Invalid tar.gz archive: {e}")
         
         # Trouver les fichiers dans l'archive (peut être dans un sous-dossier)
         members = tar.getnames()
@@ -641,14 +641,14 @@ class BackupService:
             """Lit le contenu d'un membre de l'archive."""
             f = tar.extractfile(member_name)
             if f is None:
-                raise ValueError(f"Impossible de lire '{member_name}' dans l'archive")
+                raise ValueError(f"Unable to read '{member_name}' from the archive")
             return f.read()
         
         # === 2. Lire et vérifier le manifest ===
         manifest_path = _find_member("manifest.json")
         if not manifest_path:
             tar.close()
-            raise ValueError("manifest.json introuvable dans l'archive")
+            raise ValueError("manifest.json not found in the archive")
         
         manifest = json.loads(_read_member(manifest_path).decode("utf-8"))
         
@@ -662,7 +662,7 @@ class BackupService:
         memory_id = manifest.get("memory_id")
         if not memory_id:
             tar.close()
-            raise ValueError("memory_id manquant dans le manifest")
+            raise ValueError("memory_id is missing from the manifest")
         
         await _log(f"✅ Manifest OK: mémoire '{memory_id}' "
                     f"({manifest['stats']['entities']} entités, "
@@ -681,7 +681,7 @@ class BackupService:
         graph_path = _find_member("graph_data.json")
         if not graph_path:
             tar.close()
-            raise ValueError("graph_data.json introuvable dans l'archive")
+            raise ValueError("graph_data.json not found in the archive")
         
         graph_data = json.loads(_read_member(graph_path).decode("utf-8"))
         
@@ -691,7 +691,7 @@ class BackupService:
         expected_hash = manifest.get("checksums", {}).get("graph_data")
         if expected_hash and actual_hash != expected_hash:
             tar.close()
-            raise ValueError("Checksum graphe invalide ! Archive corrompue ?")
+            raise ValueError("Invalid graph checksum; the archive may be corrupted")
         
         await _log("✅ Données graphe vérifiées (checksum OK)")
         
@@ -699,7 +699,7 @@ class BackupService:
         qdrant_path = _find_member("qdrant_vectors.jsonl")
         if not qdrant_path:
             tar.close()
-            raise ValueError("qdrant_vectors.jsonl introuvable dans l'archive")
+            raise ValueError("qdrant_vectors.jsonl not found in the archive")
         
         qdrant_jsonl = _read_member(qdrant_path).decode("utf-8")
         qdrant_points = []
@@ -713,7 +713,7 @@ class BackupService:
         expected_hash = manifest.get("checksums", {}).get("qdrant_vectors")
         if expected_hash and actual_hash != expected_hash:
             tar.close()
-            raise ValueError("Checksum vecteurs invalide ! Archive corrompue ?")
+            raise ValueError("Invalid vector checksum; the archive may be corrupted")
         
         await _log(f"✅ {len(qdrant_points)} vecteurs chargés (checksum OK)")
         
@@ -749,7 +749,7 @@ class BackupService:
             # === SÉCURITÉ : anti path-traversal ===
             # Rejeter les noms contenant ../ ou commençant par /
             if ".." in doc_filename or doc_filename.startswith("/"):
-                print(f"🔒 [RestoreArchive] Nom de fichier rejeté (path traversal): "
+                print(f"🔒 [RestoreArchive] Filename rejected (path traversal): "
                       f"'{doc_filename}'", file=sys.stderr)
                 docs_skipped += 1
                 continue
@@ -895,7 +895,7 @@ class BackupService:
                     await self.delete_backup(bid)
                     deleted_ids.append(bid)
                 except Exception as e:
-                    print(f"⚠️ [Retention] Erreur suppression {bid}: {e}",
+                    print(f"⚠️ [Retention] Error deleting {bid}: {e}",
                           file=sys.stderr)
         
         return deleted_ids
@@ -918,7 +918,7 @@ class BackupService:
             )
             return response["Body"].read().decode("utf-8")
         except Exception as e:
-            raise FileNotFoundError(f"Fichier S3 non trouvé: {key} ({e})")
+            raise FileNotFoundError(f"S3 file not found: {key} ({e})")
     
     @staticmethod
     def _human_size(size_bytes: int) -> str:

@@ -799,7 +799,7 @@ class MembershipService:
                 "(confirm=True)"
             )
         if not operator:
-            raise BootstrapError("éviction refusée : identité opérateur requise")
+            raise BootstrapError("Eviction refused: operator identity is required")
 
         async with self._space_lock():
             return await self._evict_member_locked(
@@ -953,7 +953,7 @@ class MembershipService:
         activation_pair_id: Optional[str] = None,
     ) -> MembershipView:
         if not candidate.node_id:
-            raise BootstrapError("admit_pending refusé : node_id vide")
+            raise BootstrapError("admit_pending refused: node_id is empty")
         if not candidate.public_key:
             raise BootstrapError(
                 f"admit_pending exige une public_key pour {candidate.node_id!r}"
@@ -1114,9 +1114,9 @@ class MembershipService:
         sort du candidate set par un bump d'epoch. Ne retire QUE des PENDING.
         """
         if not confirm:
-            raise BootstrapError("retrait candidat refusé : confirmation requise")
+            raise BootstrapError("Candidate removal refused: confirmation is required")
         if not operator:
-            raise BootstrapError("retrait candidat refusé : identité opérateur requise")
+            raise BootstrapError("Candidate removal refused: operator identity is required")
         async with self._space_lock():
             return await self._remove_pending_candidate_locked(
                 node_id,

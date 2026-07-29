@@ -125,7 +125,7 @@ class SpaceService:
         if len(rules) > MAX_RULES_SIZE:
             return {
                 "status": "error",
-                "message": f"Rules trop longues ({len(rules)} chars, max {MAX_RULES_SIZE})",
+                "message": f"Rules are too long ({len(rules)} characters, maximum {MAX_RULES_SIZE})",
             }
         if description and len(description) > MAX_DESCRIPTION_SIZE:
             return {
@@ -156,7 +156,7 @@ class SpaceService:
                     if actor is None:
                         return {
                             "status": "error",
-                            "message": "Token S3 manage ou admin actif requis",
+                            "message": "An active S3 manage or admin token is required",
                         }
                 return await self._create_locked(
                     storage,
@@ -292,7 +292,7 @@ class SpaceService:
         if committed_state == "committed":
             return {
                 "status": "already_exists",
-                "message": f"L'espace '{space_id}' existe déjà",
+                "message": f"Space '{space_id}' already exists",
             }
 
         try:
@@ -528,7 +528,7 @@ class SpaceService:
         if meta is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Appliquer les modifications
@@ -544,7 +544,7 @@ class SpaceService:
             return {
                 "status": "ok",
                 "space_id": space_id,
-                "message": "Aucun champ à modifier",
+                "message": "No fields to update",
                 "updated_fields": [],
             }
 
@@ -600,13 +600,13 @@ class SpaceService:
         if len(rules) > MAX_RULES_SIZE:
             return {
                 "status": "error",
-                "message": f"Rules trop longues ({len(rules)} chars, max {MAX_RULES_SIZE})",
+                "message": f"Rules are too long ({len(rules)} characters, maximum {MAX_RULES_SIZE})",
             }
 
         if not rules.strip():
             return {
                 "status": "error",
-                "message": "Le contenu des rules ne peut pas être vide",
+                "message": "Rules content cannot be empty",
             }
 
         storage = get_storage()
@@ -615,7 +615,7 @@ class SpaceService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # P5-8 (#16) ROUTE-FIRST: resolve the per-space WriteSink BEFORE the
@@ -639,7 +639,7 @@ class SpaceService:
             "status": "ok",
             "space_id": space_id,
             "rules_size": len(rules.encode("utf-8")),
-            "message": f"Rules mises à jour ({len(rules.encode('utf-8'))} octets)",
+            "message": f"Rules updated ({len(rules.encode('utf-8'))} bytes)",
         }
 
     async def list_spaces(self, allowed_space_ids: Optional[list[str]] = None) -> dict:
@@ -719,7 +719,7 @@ class SpaceService:
         if meta is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Stats des notes live
@@ -781,7 +781,7 @@ class SpaceService:
         if rules is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         return {"status": "ok", "space_id": space_id, "rules": rules}
@@ -803,7 +803,7 @@ class SpaceService:
         if meta is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         rules = await storage.get(f"{space_id}/_rules.md") or ""
@@ -859,7 +859,7 @@ class SpaceService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Lire tous les fichiers de l'espace
@@ -1038,7 +1038,7 @@ class SpaceService:
                 )
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # ── Garde Hivemind refus-par-défaut (HM-10, symétrique de restore) ──

@@ -265,12 +265,12 @@ async def test_non_hivemind_info_local_only_and_golden(patched_storage, stub_con
 
 
 async def test_not_found_early_return_shape_unchanged(patched_storage):
-    # Verrou de la décision « champ uniquement sur le chemin succès » : le
-    # not_found garde EXACTEMENT sa forme 2-clés, sans hive_status_label.
+    # Lock the decision that the field exists only on the success path:
+    # not_found keeps its exact two-key shape without hive_status_label.
     resp = await space_module.SpaceService().get_summary("does-not-exist")
     assert resp == {
         "status": "not_found",
-        "message": "Espace 'does-not-exist' introuvable",
+        "message": "Space 'does-not-exist' not found",
     }
     assert "hive_status_label" not in resp
 

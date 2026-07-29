@@ -155,11 +155,11 @@ async def test_restore_over_orphan_hive_without_flag_is_refused_and_unmutated(
     result = await BackupService().restore(BACKUP_ID)  # unsafe_recovery défaut False
 
     assert result["status"] == "error"
-    # Message hive-aware (≠ refus hérité « espace existe déjà »).
+    # Hive-aware message, distinct from the inherited "space already exists" refusal.
     msg = result["message"]
     assert "unsafe" in msg
     assert "unsafe_recovery" in msg
-    assert "existe déjà" not in msg
+    assert "already exists" not in msg
     # Pas un succès : aucun fichier restauré.
     assert "files_restored" not in result
     # Aucune nouvelle clé sous {SPACE}/ ; stockage strictement intact.
@@ -210,8 +210,8 @@ async def test_restore_over_local_only_space_still_refused_existing_behavior(
     result = await BackupService().restore(BACKUP_ID)
 
     assert result["status"] == "error"
-    # C'est le refus HÉRITÉ « espace existe déjà », PAS le message hive-aware.
-    assert "existe déjà" in result["message"]
+    # This is the inherited "space already exists" refusal, not the hive-aware message.
+    assert "already exists" in result["message"]
     assert "unsafe_recovery" not in result["message"]
 
 
@@ -231,7 +231,7 @@ async def test_restore_over_local_only_with_unsafe_recovery_still_hits_inherited
     result = await BackupService().restore(BACKUP_ID, unsafe_recovery=True)
 
     assert result["status"] == "error"
-    assert "existe déjà" in result["message"]
+    assert "already exists" in result["message"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

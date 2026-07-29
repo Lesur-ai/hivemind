@@ -108,9 +108,9 @@ class EnrollmentPeer(_HivemindBase):
     @classmethod
     def _validate_node_id(cls, v: str) -> str:
         if not v:
-            raise ValueError("node_id ne peut pas être vide")
+            raise ValueError("node_id cannot be empty")
         if "/" in v:
-            raise ValueError("node_id ne doit pas contenir '/'")
+            raise ValueError("node_id must not contain '/'")
         return v
 
     @field_validator("scopes")

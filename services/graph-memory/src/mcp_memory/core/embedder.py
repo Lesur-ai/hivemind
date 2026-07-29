@@ -134,7 +134,7 @@ class EmbeddingService:
             print(f"⏰ [Embedder] Timeout — trop de textes ou textes trop longs", file=sys.stderr)
             raise
         except APIError as e:
-            print(f"❌ [Embedder] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [Embedder] API error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
     
     @redact_proxy_errors_async
@@ -168,7 +168,7 @@ class EmbeddingService:
             print(f"⏰ [Embedder] Timeout sur la requête", file=sys.stderr)
             raise
         except APIError as e:
-            print(f"❌ [Embedder] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [Embedder] API error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
     
     async def test_connection(self) -> dict:
@@ -193,7 +193,7 @@ class EmbeddingService:
                 "status": "error",
                 "model": self._model,
                 # P12-3 : jamais d'URL proxy brute dans la sortie santé.
-                "message": f"Erreur embedding: {redact_proxy_secrets(str(e))}"
+                "message": f"Embedding error: {redact_proxy_secrets(str(e))}"
             }
 
 

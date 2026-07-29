@@ -192,8 +192,8 @@ def register(mcp: FastMCP) -> int:
             Field(
                 default=50,
                 description=(
-                    "Nombre d'événements récents (1..500, défaut 50). "
-                    "La valeur est bornée côté serveur."
+                    "Number of recent events (1..500, default 50). "
+                    "The value is bounded server-side."
                 ),
             ),
         ] = 50,
@@ -232,9 +232,9 @@ def register(mcp: FastMCP) -> int:
             str,
             Field(
                 description=(
-                    "Hash du token à révoquer (obtenu via admin_list_tokens). "
-                    "Préfixe 'sha256:' optionnel — accepte 'sha256:abc...' ou juste 'abc...'. "
-                    "Min 16 caractères hex requis."
+                    "Hash of the token to revoke (from admin_list_tokens). "
+                    "The 'sha256:' prefix is optional; accepts either "
+                    "'sha256:abc...' or 'abc...'. At least 16 hex characters."
                 )
             ),
         ],
@@ -268,8 +268,8 @@ def register(mcp: FastMCP) -> int:
             str,
             Field(
                 description=(
-                    "Hash du token à supprimer (obtenu via admin_list_tokens). "
-                    "Préfixe 'sha256:' optionnel. Min 16 caractères hex requis."
+                    "Hash of the token to delete (from admin_list_tokens). "
+                    "The 'sha256:' prefix is optional. At least 16 hex characters."
                 )
             ),
         ],
@@ -356,11 +356,11 @@ def register(mcp: FastMCP) -> int:
                 return {
                     "status": "error",
                     "message": (
-                        "Purge totale refusée : confirm=True requis quand "
-                        "revoked_only=False. Cette opération supprime TOUS les "
-                        "tokens et laisserait le serveur accessible uniquement "
-                        "via la bootstrap_key. Si c'est bien votre intention, "
-                        "rappelez l'outil avec confirm=True."
+                        "Full purge refused: confirm=True is required when "
+                        "revoked_only=False. This operation deletes ALL tokens "
+                        "and leaves the server accessible only through the "
+                        "bootstrap_key. If this is intended, call the tool "
+                        "again with confirm=True."
                     ),
                 }
 
@@ -620,7 +620,7 @@ def register(mcp: FastMCP) -> int:
         space_id: Annotated[
             str,
             Field(
-                default="", description="Espace cible (vide = scanner TOUS les espaces)"
+                default="", description="Target space (empty = scan ALL spaces)"
             ),
         ] = "",
         max_age_days: Annotated[
@@ -628,21 +628,21 @@ def register(mcp: FastMCP) -> int:
             Field(
                 default=7,
                 ge=0,
-                description="Seuil d'âge en jours pour considérer une note comme orpheline (défaut 7)",
+                description="Age threshold in days for considering a note orphaned (default 7)",
             ),
         ] = 7,
         confirm: Annotated[
             bool,
             Field(
                 default=False,
-                description="False = dry-run (scan seul), True = exécution réelle",
+                description="False = dry run (scan only); True = execute",
             ),
         ] = False,
         delete_only: Annotated[
             bool,
             Field(
                 default=False,
-                description="Si True + confirm=True : supprime SANS consolider (perte de données)",
+                description="With confirm=True, delete WITHOUT consolidating (data loss)",
             ),
         ] = False,
         expected_eligible_set_token: Annotated[
@@ -650,8 +650,8 @@ def register(mcp: FastMCP) -> int:
             Field(
                 default="",
                 description=(
-                    "Précondition opaque renvoyée par le dry-run précédent ; "
-                    "obligatoire avec confirm=True + delete_only=True"
+                    "Opaque precondition returned by the previous dry run; "
+                    "required with confirm=True + delete_only=True"
                 ),
             ),
         ] = "",
@@ -698,7 +698,7 @@ def register(mcp: FastMCP) -> int:
                 return {
                     "status": "error",
                     "reason": "invalid_max_age_days",
-                    "message": "max_age_days doit être supérieur ou égal à 0.",
+                    "message": "max_age_days must be greater than or equal to 0.",
                 }
 
             gc = get_gc_service()
@@ -729,10 +729,10 @@ def register(mcp: FastMCP) -> int:
                         result["spaces"][sid]["keys_count"] = count
                 result["mode"] = "dry-run"
                 result["message"] = (
-                    f"Dry-run : {result['total_old_notes']} notes orphelines "
-                    f"trouvées. confirm=True pour consolider, "
-                    f"confirm=True+delete_only=True avec "
-                    f"expected_eligible_set_token pour supprimer."
+                    f"Dry run: {result['total_old_notes']} orphaned notes "
+                    f"found. Use confirm=True to consolidate, or "
+                    f"confirm=True+delete_only=True with "
+                    f"expected_eligible_set_token to delete."
                 )
                 return result
 
@@ -741,8 +741,8 @@ def register(mcp: FastMCP) -> int:
                 "status": "error",
                 "reason": "route_staged_not_implemented",
                 "message": (
-                    "GC refusé : les écritures Hivemind staged ne sont pas "
-                    "prises en charge pour cette opération."
+                    "GC refused: staged Hivemind writes are not supported "
+                    "for this operation."
                 ),
             }
         except RegistryRefused:
@@ -750,8 +750,8 @@ def register(mcp: FastMCP) -> int:
                 "status": "error",
                 "reason": "route_refused",
                 "message": (
-                    "GC refusé : l'espace ne peut pas être modifié dans son "
-                    "état Hivemind actuel."
+                    "GC refused: the space cannot be modified in its current "
+                    "Hivemind state."
                 ),
             }
         except CorruptedStateError:
@@ -759,8 +759,8 @@ def register(mcp: FastMCP) -> int:
                 "status": "error",
                 "reason": "state_corrupt",
                 "message": (
-                    "GC refusé : l'état Hivemind critique de l'espace est "
-                    "corrompu."
+                    "GC refused: the space's critical Hivemind state is "
+                    "corrupted."
                 ),
             }
         except Exception as e:

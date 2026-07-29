@@ -128,11 +128,14 @@ class TestNormalizeForMatch:
 
 
 class TestInferredMarkerRegex:
-    """The `[inféré]` regex must recognize LLM variants."""
+    """The inference-marker regex recognizes English and legacy French variants."""
 
     @pytest.mark.parametrize(
         "line",
         [
+            "Phase 2 complete [inferred]",
+            "Phase 2 complete [inferred, follows Phase 3 progress]",
+            "Phase 2 complete [INFERRED]",
             "Phase 2 terminée [inféré]",
             "Phase 2 terminée [inféré, suite progress Phase 3]",
             "Phase 2 terminée [INFÉRÉ]",
@@ -310,15 +313,15 @@ class TestValidateUnattributedClaims_DiffOnly:
 
 
 # =============================================================================
-# SYSTEM_PROMPT — rule #8 [inféré]
+# SYSTEM_PROMPT — rule #8 [inferred]
 # =============================================================================
 
 
 class TestSystemPromptRule8:
-    """SYSTEM_PROMPT must contain the `[inféré]` rule."""
+    """SYSTEM_PROMPT must contain the `[inferred]` rule."""
 
     def test_rule_8_present_in_system_prompt(self):
-        assert "[inféré]" in SYSTEM_PROMPT, (
+        assert "[inferred]" in SYSTEM_PROMPT, (
             "Without rule #8 the LLM will never flag its inferences, "
             "and the validation pass will report false positives."
         )
@@ -326,16 +329,14 @@ class TestSystemPromptRule8:
     def test_rule_8_mentions_inference_transitive(self):
         # Rule #8 must reference transitive inference or logical deduction,
         # so the LLM knows WHEN to apply the marker.
-        assert (
-            "INFÉRENCE TRANSITIVE" in SYSTEM_PROMPT
-            or "déduction logique" in SYSTEM_PROMPT
-        )
+        assert "transitive inference" in SYSTEM_PROMPT.lower()
+        assert "logical deduction" in SYSTEM_PROMPT.lower()
 
     def test_rule_8_provides_examples(self):
         # Check that at least one literal example from the rule is present.
         # This protects against prompt regressions that would strip the
         # examples (crucial for smaller models).
-        assert "Migration terminée [inféré]" in SYSTEM_PROMPT
+        assert "Migration complete [inferred]" in SYSTEM_PROMPT
 
 
 # =============================================================================

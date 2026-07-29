@@ -54,7 +54,7 @@ def check_memory_access(memory_id: str) -> Optional[dict]:
     # credential is denied before any other work.
     auth = current_auth.get()
     if auth is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "message": "Authentication required"}
 
     # Sécurité v2.1.0 : valider le format de memory_id avant tout accès
     # Empêche les injections Cypher/S3/Qdrant via memory_id malveillant
@@ -79,13 +79,12 @@ def check_memory_access(memory_id: str) -> Optional[dict]:
     
     # Vérifier que la mémoire est dans la liste autorisée
     if memory_id not in memory_ids:
-        client = auth.get("client_name", "inconnu")
+        client = auth.get("client_name", "unknown")
         return {
             "status": "error",
             "message": (
-                f"Accès refusé: le token du client '{client}' "
-                f"n'est pas autorisé pour la mémoire '{memory_id}'. "
-                f"Mémoires autorisées: {memory_ids}"
+                f"Access denied: token for client '{client}' is not allowed "
+                f"to access memory '{memory_id}'. Allowed memories: {memory_ids}"
             )
         }
     
@@ -109,7 +108,7 @@ def check_admin_permission() -> Optional[dict]:
     
     # P7-4 (ADR-0019, Hivemind): fail-closed — no auth context => DENY (was: allow).
     if auth is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "message": "Authentication required"}
 
     # Bootstrap = admin
     if auth.get("type") == "bootstrap":
@@ -119,13 +118,13 @@ def check_admin_permission() -> Optional[dict]:
     if "admin" in permissions:
         return None
     
-    client = auth.get("client_name", "inconnu")
+    client = auth.get("client_name", "unknown")
     return {
         "status": "error",
         "message": (
-            f"Accès refusé: le token du client '{client}' "
-            f"n'a pas la permission 'admin'. "
-            f"Cette opération est réservée aux administrateurs."
+            f"Access denied: token for client '{client}' "
+            "does not have the 'admin' permission. "
+            "This operation is restricted to administrators."
         )
     }
 
@@ -174,7 +173,7 @@ def check_write_permission() -> Optional[dict]:
     
     # P7-4 (ADR-0019, Hivemind): fail-closed — no auth context => DENY (was: allow).
     if auth is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "message": "Authentication required"}
 
     # Admin ou bootstrap = accès total
     if auth.get("type") == "bootstrap":
@@ -184,12 +183,12 @@ def check_write_permission() -> Optional[dict]:
     if "admin" in permissions or "write" in permissions:
         return None
     
-    client = auth.get("client_name", "inconnu")
+    client = auth.get("client_name", "unknown")
     return {
         "status": "error",
         "message": (
-            f"Accès refusé: le token du client '{client}' "
-            f"n'a pas la permission 'write'. "
-            f"Permissions actuelles: {permissions}"
+            f"Access denied: token for client '{client}' "
+            "does not have the 'write' permission. "
+            f"Current permissions: {permissions}"
         )
     }

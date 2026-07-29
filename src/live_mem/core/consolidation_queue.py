@@ -121,7 +121,7 @@ class ConsolidationQueueService:
             if not job:
                 return {
                     "status": "not_found",
-                    "message": f"Consolidation job '{job_id}' introuvable",
+                    "message": f"Consolidation job '{job_id}' not found",
                 }
             return self._job_payload(job)
 
@@ -239,9 +239,8 @@ class ConsolidationQueueService:
                 # générique + raison stable ; le détail reste dans les
                 # journaux serveur (logger.exception ci-dessus).
                 generic_message = (
-                    "La consolidation a échoué de manière inattendue avant "
-                    "de produire un résultat ; consultez les journaux "
-                    "serveur pour le détail."
+                    "Consolidation failed unexpectedly before producing a "
+                    "result; check the server logs for details."
                 )
                 async with self._state_lock:
                     job.status = "failed"

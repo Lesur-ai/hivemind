@@ -245,9 +245,9 @@ class NodeIdentity(_HivemindBase):
     @classmethod
     def _validate_node_id(cls, v: str) -> str:
         if not v:
-            raise ValueError("node_id ne peut pas être vide")
+            raise ValueError("node_id cannot be empty")
         if "/" in v:
-            raise ValueError("node_id ne doit pas contenir '/'")
+            raise ValueError("node_id must not contain '/'")
         return v
 
 
@@ -349,7 +349,7 @@ class MembershipView(_HivemindBase):
     @classmethod
     def _validate_epoch(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"epoch doit être >= 0, reçu {v}")
+            raise ValueError(f"epoch must be >= 0, received {v}")
         return v
 
 
@@ -402,7 +402,7 @@ class TermState(_HivemindBase):
     @classmethod
     def _validate_term(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"term doit être >= 0, reçu {v}")
+            raise ValueError(f"term must be >= 0, received {v}")
         return v
 
 
@@ -442,7 +442,7 @@ class TokenLeaseState(_HivemindBase):
     @classmethod
     def _validate_fencing(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"fencing_token doit être >= 0, reçu {v}")
+            raise ValueError(f"fencing_token must be >= 0, received {v}")
         return v
 
     def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
@@ -487,7 +487,7 @@ class QueueEntry(_HivemindBase):
     @classmethod
     def _validate_sequence(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"sequence doit être >= 0, reçu {v}")
+            raise ValueError(f"sequence must be >= 0, received {v}")
         return v
 
 
@@ -533,7 +533,7 @@ class BankCommitManifestEntry(_HivemindBase):
     @classmethod
     def _validate_size(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"size doit être >= 0, reçu {v}")
+            raise ValueError(f"size must be >= 0, received {v}")
         return v
 
 
@@ -563,14 +563,14 @@ class BankCommit(_HivemindBase):
     @classmethod
     def _validate_bank_version(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"bank_version doit être >= 0, reçu {v}")
+            raise ValueError(f"bank_version must be >= 0, received {v}")
         return v
 
     @field_validator("term")
     @classmethod
     def _validate_term(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"term doit être >= 0, reçu {v}")
+            raise ValueError(f"term must be >= 0, received {v}")
         return v
 
 
@@ -679,9 +679,9 @@ class EventEnvelope(_HivemindBase):
     @classmethod
     def _validate_event_id(cls, v: str) -> str:
         if not v:
-            raise ValueError("event_id ne peut pas être vide")
+            raise ValueError("event_id cannot be empty")
         if "/" in v:
-            raise ValueError("event_id ne doit pas contenir '/'")
+            raise ValueError("event_id must not contain '/'")
         return v
 
 
@@ -713,23 +713,23 @@ class BootstrapManifestEntry(_HivemindBase):
     @classmethod
     def _validate_path(cls, v: str) -> str:
         if not v:
-            raise ValueError("path ne peut pas être vide")
+            raise ValueError("path cannot be empty")
         if v.startswith("/") or ".." in v.split("/"):
-            raise ValueError(f"path de manifest invalide: {v!r}")
+            raise ValueError(f"Invalid manifest path: {v!r}")
         return v
 
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, v: str) -> str:
         if not v:
-            raise ValueError("sha256 ne peut pas être vide")
+            raise ValueError("sha256 cannot be empty")
         return v
 
     @field_validator("size")
     @classmethod
     def _validate_size(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"size doit être >= 0, reçu {v}")
+            raise ValueError(f"size must be >= 0, received {v}")
         return v
 
 
@@ -764,14 +764,14 @@ class BootstrapManifest(_HivemindBase):
     @classmethod
     def _validate_epoch(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"membership_epoch doit être >= 0, reçu {v}")
+            raise ValueError(f"membership_epoch must be >= 0, received {v}")
         return v
 
     @field_validator("bank_version")
     @classmethod
     def _validate_bank_version(cls, v: int) -> int:
         if v < -1:
-            raise ValueError(f"bank_version doit être >= -1, reçu {v}")
+            raise ValueError(f"bank_version must be >= -1, received {v}")
         return v
 
 

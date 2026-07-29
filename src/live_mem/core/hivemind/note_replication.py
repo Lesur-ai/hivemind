@@ -100,7 +100,7 @@ def note_id_from_filename(filename: str) -> str:
         )
     stem = filename[:-3]
     if not stem or "/" in stem:
-        raise ValueError(f"filename invalide pour un note_id: {filename!r}")
+        raise ValueError(f"Invalid filename for a note_id: {filename!r}")
     return stem
 
 
@@ -112,7 +112,7 @@ def note_id_from_key(s3_key: str) -> str:
     ``/`` après strip de ``.md``).
     """
     if "/" not in s3_key:
-        raise ValueError(f"clé S3 invalide (pas de '/'): {s3_key!r}")
+        raise ValueError(f"Invalid S3 key (no '/'): {s3_key!r}")
     basename = s3_key.rsplit("/", 1)[-1]
     return note_id_from_filename(basename)
 
@@ -699,7 +699,7 @@ class NoteReplicationRuntime:
     def _live_key(self, filename: str) -> str:
         """Clé S3 d'une note live VIVANTE (``{space}/live/{filename}``)."""
         if not filename or "/" in filename:
-            raise ValueError(f"filename invalide: {filename!r}")
+            raise ValueError(f"Invalid filename: {filename!r}")
         return f"{self._space_id}/live/{filename}"
 
 
