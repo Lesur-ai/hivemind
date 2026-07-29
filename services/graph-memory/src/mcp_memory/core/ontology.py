@@ -73,24 +73,24 @@ class Ontology:
         priority_entities = [et for et in self.entity_types if et.priority == "high"]
         other_entities = [et for et in self.entity_types if et.priority != "high"]
         
-        # Section entités prioritaires (extraction OBLIGATOIRE)
+        # Priority-entity section (mandatory extraction)
         priority_str = ""
         if priority_entities or self.extraction_rules.priority_entities:
             priority_types = priority_entities or [et for et in self.entity_types if et.name in self.extraction_rules.priority_entities]
-            priority_str = "\n🔴 ENTITÉS PRIORITAIRES - EXTRACTION OBLIGATOIRE:\n"
+            priority_str = "\n🔴 PRIORITY ENTITIES — MANDATORY EXTRACTION:\n"
             for et in priority_types:
-                priority_str += f"- **{et.name}**: {et.description}\n  Exemples: {', '.join(et.examples[:3])}\n"
-            priority_str += "\n⚠️ TU DOIS EXTRAIRE TOUTES CES ENTITÉS SI ELLES SONT PRÉSENTES DANS LE DOCUMENT!\n"
+                priority_str += f"- **{et.name}**: {et.description}\n  Examples: {', '.join(et.examples[:3])}\n"
+            priority_str += "\nExtract every priority entity that appears in the document.\n"
         
         # Construction des autres types d'entités
         entity_types_str = "\n".join([
-            f"- {et.name}: {et.description}\n  Exemples: {', '.join(et.examples[:3])}"
+            f"- {et.name}: {et.description}\n  Examples: {', '.join(et.examples[:3])}"
             for et in other_entities
         ])
         
         # Construction des types de relations
         relation_types_str = "\n".join([
-            f"- {rt.name}: {rt.description}\n  Exemples: {', '.join(rt.examples[:2])}"
+            f"- {rt.name}: {rt.description}\n  Examples: {', '.join(rt.examples[:2])}"
             for rt in self.relation_types
         ])
         
@@ -98,7 +98,7 @@ class Ontology:
         special_instructions = ""
         if self.extraction_rules.special_instructions:
             special_instructions = f"""
-📋 INSTRUCTIONS SPÉCIALES (OBLIGATOIRES):
+📋 SPECIAL INSTRUCTIONS (MANDATORY):
 {self.extraction_rules.special_instructions}
 """
         
@@ -106,60 +106,60 @@ class Ontology:
         cumulative_section = ""
         if cumulative_context:
             cumulative_section = f"""
-🔗 CONTEXTE CUMULATIF — ENTITÉS ET RELATIONS DÉJÀ IDENTIFIÉES DANS LES SECTIONS PRÉCÉDENTES:
+🔗 CUMULATIVE CONTEXT — ENTITIES AND RELATIONS IDENTIFIED IN EARLIER SECTIONS:
 {cumulative_context}
 
-⚠️ INSTRUCTIONS CONTEXTE CUMULATIF:
-- NE PAS re-déclarer les entités déjà listées ci-dessus (sauf pour enrichir leur description)
-- Tu PEUX créer des relations VERS ces entités existantes depuis de nouvelles entités
-- Concentre-toi sur les NOUVELLES entités et relations de cette section
-- Si une entité déjà connue apparaît avec plus de détails, enrichis sa description dans le JSON
+CUMULATIVE-CONTEXT INSTRUCTIONS:
+- Do not redeclare entities listed above unless enriching their descriptions.
+- You may create relations from new entities to existing entities.
+- Focus on new entities and relations in this section.
+- When a known entity appears with more detail, enrich its description in the JSON.
 """
         
         prompt = f"""{self.context}
 
-📄 DOCUMENT À ANALYSER:
+📄 DOCUMENT TO ANALYZE:
 ---
 {document_text}
 ---
 {cumulative_section}{priority_str}
-AUTRES TYPES D'ENTITÉS:
+OTHER ENTITY TYPES:
 {entity_types_str}
 
-TYPES DE RELATIONS:
+RELATION TYPES:
 {relation_types_str}
 {special_instructions}
-RÈGLES STRICTES:
-1. Maximum {self.extraction_rules.max_entities} entités
-2. Maximum {self.extraction_rules.max_relations} relations
-3. EXTRAIT CHAQUE DURÉE MENTIONNÉE (ex: "36 mois", "6 mois de préavis", "12 mois")
-4. EXTRAIT CHAQUE MONTANT avec devise (ex: "8 500 EUR HT", "3 150 EUR/mois")
-5. ⚠️ TOTAUX PRIORITAIRES: Si tu vois "Total", "estimé", "global" → créer entité OBLIGATOIRE!
-6. EXTRAIT CHAQUE CERTIFICATION/NORME LISTÉE (ex: SecNumCloud, HDS, ISO 27001, SOC 2)
-7. EXTRAIT CHAQUE SLA/MÉTRIQUE (ex: "99.95%", "GTI 15 min", "GTR 4h")
-8. Les noms d'entités doivent être explicites et inclure les valeurs
+STRICT RULES:
+1. At most {self.extraction_rules.max_entities} entities.
+2. At most {self.extraction_rules.max_relations} relations.
+3. Extract every mentioned duration.
+4. Extract every monetary amount with its currency.
+5. Treat totals as priority entities: create an entity for every total, estimate, or global amount.
+6. Extract every listed certification and standard.
+7. Extract every SLA and metric.
+8. Entity names must be explicit and include their values.
 
-⚠️ RÈGLES ANTI-HUB (TRÈS IMPORTANT):
-9. NE PAS relier toutes les entités à l'organisation principale!
-   ❌ MAUVAIS: "Cloud Temple → RELATED_TO → Article 1", "Cloud Temple → RELATED_TO → Article 2", etc.
-   ✅ BON: "Article 1 → DEFINES → Services", "Clause confidentialité → HAS_DURATION → 5 ans"
-10. Crée des relations ENTRE les entités les plus spécifiques (clause→durée, article→obligation)
-11. L'organisation ne doit avoir que des relations STRUCTURELLES: SIGNED_BY, PARTY_TO, LOCATED_AT, HAS_CERTIFICATION, GUARANTEES
-12. Les articles/clauses doivent être reliés à leurs CONTENUS (durées, montants, obligations), PAS à l'organisation
-13. Utilise les types de relations SPÉCIFIQUES (HAS_DURATION, HAS_AMOUNT, OBLIGATES, DEFINES) plutôt que RELATED_TO
-14. RELATED_TO est un DERNIER RECOURS — privilégie toujours un type plus précis
+ANTI-HUB RULES:
+9. Do not connect every entity to the primary organization.
+10. Create relations between the most specific entities.
+11. The organization should have only structural relations such as SIGNED_BY,
+    PARTY_TO, LOCATED_AT, HAS_CERTIFICATION, and GUARANTEES.
+12. Connect articles and clauses to their content, not to the organization.
+13. Prefer specific relation types such as HAS_DURATION, HAS_AMOUNT, OBLIGATES,
+    and DEFINES over RELATED_TO.
+14. Use RELATED_TO only as a last resort.
 
-Réponds UNIQUEMENT avec un JSON valide:
+Return ONLY valid JSON:
 ```json
 {{
   "entities": [
-    {{"name": "Nom de l'entité AVEC VALEUR", "type": "TypeEntité", "description": "Description courte"}}
+    {{"name": "Entity name including value", "type": "EntityType", "description": "Short description"}}
   ],
   "relations": [
-    {{"from_entity": "Nom entité source", "to_entity": "Nom entité cible", "type": "TYPE_RELATION", "description": "Description"}}
+    {{"from_entity": "Source entity", "to_entity": "Target entity", "type": "RELATION_TYPE", "description": "Description"}}
   ],
-  "summary": "Résumé du document en 2-3 phrases",
-  "key_topics": ["sujet1", "sujet2", "sujet3"]
+  "summary": "A 2-3 sentence document summary",
+  "key_topics": ["topic1", "topic2", "topic3"]
 }}
 ```
 """
@@ -193,7 +193,7 @@ class OntologyManager:
         if self._ontology_path:
             self._load_all_ontologies()
         else:
-            print("⚠️ [Ontology] Aucun dossier ONTOLOGIES trouvé", file=sys.stderr)
+            print("⚠️ [Ontology] No ONTOLOGIES directory found", file=sys.stderr)
     
     def _find_ontology_path(self, custom_path: Optional[str]) -> Optional[str]:
         """Trouve le chemin du dossier d'ontologies."""
@@ -220,7 +220,7 @@ class OntologyManager:
                         self._ontologies[ontology.name] = ontology
                         print(f"✅ [Ontology] Chargée: {ontology.name} (v{ontology.version})", file=sys.stderr)
                 except Exception as e:
-                    print(f"❌ [Ontology] Erreur chargement {filename}: {e}", file=sys.stderr)
+                    print(f"❌ [Ontology] Error loading {filename}: {e}", file=sys.stderr)
     
     def _load_ontology_file(self, filepath: str) -> Optional[Ontology]:
         """Charge une ontologie depuis un fichier YAML."""

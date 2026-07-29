@@ -105,7 +105,7 @@ def register(mcp: FastMCP) -> int:
                 return manage_err
             actor = get_effective_token_info()
             if actor is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             # Si rules vide, charger les rules par défaut
             effective_rules = rules
@@ -118,14 +118,14 @@ def register(mcp: FastMCP) -> int:
                     else:
                         return {
                             "status": "error",
-                            "message": f"Fichier de rules par défaut introuvable : {settings.default_rules_file}",
+                            "message": f"Default rules file not found: {settings.default_rules_file}",
                         }
                 else:
                     return {
                         "status": "error",
                         "message": (
-                            "Paramètre 'rules' requis. "
-                            "Aucun fichier de rules par défaut configuré (DEFAULT_RULES_FILE)."
+                            "The 'rules' parameter is required. "
+                            "No default rules file is configured (DEFAULT_RULES_FILE)."
                         ),
                     }
 
@@ -148,20 +148,20 @@ def register(mcp: FastMCP) -> int:
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
     async def space_update(
         space_id: Annotated[
-            str, Field(description="Identifiant de l'espace à modifier")
+            str, Field(description="Identifier of the space to update")
         ],
         description: Annotated[
             str,
             Field(
                 default="",
-                description="Nouvelle description (vide = pas de changement)",
+                description="New description (empty means no change)",
             ),
         ] = "",
         owner: Annotated[
             str,
             Field(
                 default="",
-                description="Nouveau propriétaire (vide = pas de changement)",
+                description="New owner (empty means no change)",
             ),
         ] = "",
     ) -> dict:
@@ -261,7 +261,7 @@ def register(mcp: FastMCP) -> int:
             # Récupérer les space_ids autorisés depuis le token (données fraîches)
             token_info = _get_effective_token_info()
             if token_info is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             permissions = token_info.get("permissions", [])
             allowed = token_info.get("allowed_resources", [])
@@ -374,7 +374,7 @@ def register(mcp: FastMCP) -> int:
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def space_export(
         space_id: Annotated[
-            str, Field(description="Identifiant de l'espace à exporter")
+            str, Field(description="Identifier of the space to export")
         ],
     ) -> dict:
         """
@@ -406,13 +406,13 @@ def register(mcp: FastMCP) -> int:
     @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=False))
     async def space_delete(
         space_id: Annotated[
-            str, Field(description="Identifiant de l'espace à supprimer")
+            str, Field(description="Identifier of the space to delete")
         ],
         confirm: Annotated[
             bool,
             Field(
                 default=False,
-                description="Doit être True pour confirmer la suppression (sécurité)",
+                description="Must be true to confirm deletion",
             ),
         ] = False,
         unsafe_recovery: Annotated[
@@ -467,8 +467,8 @@ def register(mcp: FastMCP) -> int:
                 return {
                     "status": "error",
                     "message": (
-                        "Suppression refusée : confirm=True requis. "
-                        "⚠️ Cette opération est irréversible !"
+                        "Deletion refused: confirm=True is required. "
+                        "This operation cannot be undone."
                     ),
                 }
 

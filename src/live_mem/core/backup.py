@@ -94,7 +94,7 @@ class BackupService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Générer le timestamp pour le backup
@@ -169,7 +169,7 @@ class BackupService:
         if not space_ids:
             return {
                 "status": "ok",
-                "message": "Aucun espace trouvé",
+                "message": "No spaces found",
                 "spaces_backed_up": 0,
                 "spaces_failed": 0,
                 "details": [],
@@ -336,7 +336,7 @@ class BackupService:
         if len(parts) != 2:
             return {
                 "status": "error",
-                "message": "backup_id invalide (format: space_id/timestamp)",
+                "message": "Invalid backup_id (format: space_id/timestamp)",
             }
 
         space_id, timestamp = parts
@@ -348,7 +348,7 @@ class BackupService:
         if not backup_objects:
             return {
                 "status": "not_found",
-                "message": f"Backup '{backup_id}' introuvable",
+                "message": f"Backup '{backup_id}' not found",
             }
 
         # ── Garde Hivemind refus-par-défaut (P2-5 / #37 ; ADR-0014 Accepted) ──
@@ -414,7 +414,7 @@ class BackupService:
         if await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "error",
-                "message": f"L'espace '{space_id}' existe déjà. Supprimez-le d'abord.",
+                "message": f"Space '{space_id}' already exists. Delete it first.",
             }
 
         # Copier tous les fichiers du backup vers l'espace
@@ -1317,7 +1317,7 @@ class BackupService:
 
         parts = backup_id.split("/", 1)
         if len(parts) != 2:
-            return {"status": "error", "message": "backup_id invalide"}
+            return {"status": "error", "message": "Invalid backup_id"}
 
         space_id, timestamp = parts
         backup_prefix = f"_backups/{space_id}/{timestamp}/"
@@ -1326,7 +1326,7 @@ class BackupService:
         if not all_objects:
             return {
                 "status": "not_found",
-                "message": f"Backup '{backup_id}' introuvable",
+                "message": f"Backup '{backup_id}' not found",
             }
 
         # Créer l'archive tar.gz
@@ -1379,7 +1379,7 @@ class BackupService:
 
         parts = backup_id.split("/", 1)
         if len(parts) != 2:
-            return {"status": "error", "message": "backup_id invalide"}
+            return {"status": "error", "message": "Invalid backup_id"}
 
         space_id, timestamp = parts
         backup_prefix = f"_backups/{space_id}/{timestamp}/"
@@ -1388,7 +1388,7 @@ class BackupService:
         if not objects:
             return {
                 "status": "not_found",
-                "message": f"Backup '{backup_id}' introuvable",
+                "message": f"Backup '{backup_id}' not found",
             }
 
         keys = [o["Key"] for o in objects]

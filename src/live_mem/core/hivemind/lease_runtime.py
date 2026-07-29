@@ -120,7 +120,7 @@ def compute_lease_until(now: datetime, ttl_seconds: int) -> str:
     ``ttl_seconds <= 0`` (une lease à TTL nul/négatif serait expirée d'emblée).
     """
     if ttl_seconds <= 0:
-        raise ValueError(f"ttl_seconds doit être > 0, reçu {ttl_seconds}")
+        raise ValueError(f"ttl_seconds must be > 0, received {ttl_seconds}")
     base = now.replace(microsecond=0)
     return (base + timedelta(seconds=ttl_seconds)).isoformat()
 
@@ -603,7 +603,7 @@ class LeaseRuntime:
                 f"queue.space_id={queue.space_id!r}"
             )
         if ttl_seconds <= 0:
-            raise ValueError(f"ttl_seconds doit être > 0, reçu {ttl_seconds}")
+            raise ValueError(f"ttl_seconds must be > 0, received {ttl_seconds}")
         self._store = store
         self._space_id = space_id
         self._queue = queue

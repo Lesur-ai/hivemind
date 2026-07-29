@@ -98,7 +98,7 @@ class VectorStoreService:
             return False
             
         except Exception as e:
-            print(f"❌ [Qdrant] Erreur création collection {name}: {e}", file=sys.stderr)
+            print(f"❌ [Qdrant] Error creating collection {name}: {e}", file=sys.stderr)
             raise
     
     async def delete_collection(self, memory_id: str) -> bool:
@@ -125,7 +125,7 @@ class VectorStoreService:
                 return False
             raise
         except Exception as e:
-            print(f"❌ [Qdrant] Erreur suppression collection {name}: {e}", file=sys.stderr)
+            print(f"❌ [Qdrant] Error deleting collection {name}: {e}", file=sys.stderr)
             raise
     
     # =========================================================================
@@ -197,11 +197,11 @@ class VectorStoreService:
                 points=points
             )
             
-            print(f"📦 [Qdrant] {len(points)} chunks stockés pour {filename} (collection: {name})", file=sys.stderr)
+            print(f"📦 [Qdrant] {len(points)} chunks stored for {filename} (collection: {name})", file=sys.stderr)
             return len(points)
             
         except Exception as e:
-            print(f"❌ [Qdrant] Erreur stockage chunks: {e}", file=sys.stderr)
+            print(f"❌ [Qdrant] Error storing chunks: {e}", file=sys.stderr)
             raise
     
     # =========================================================================
@@ -285,7 +285,7 @@ class VectorStoreService:
                 return []
             raise
         except Exception as e:
-            print(f"❌ [Qdrant] Erreur recherche: {e}", file=sys.stderr)
+            print(f"❌ [Qdrant] Search error: {e}", file=sys.stderr)
             raise
     
     # =========================================================================
@@ -340,7 +340,7 @@ class VectorStoreService:
                 )
             )
             
-            print(f"🗑️ [Qdrant] {count} chunks supprimés pour doc {doc_id}", file=sys.stderr)
+            print(f"🗑️ [Qdrant] {count} chunks deleted for document {doc_id}", file=sys.stderr)
             return count
             
         except UnexpectedResponse as e:
@@ -348,7 +348,7 @@ class VectorStoreService:
                 return 0
             raise
         except Exception as e:
-            print(f"❌ [Qdrant] Erreur suppression chunks: {e}", file=sys.stderr)
+            print(f"❌ [Qdrant] Error deleting chunks: {e}", file=sys.stderr)
             raise
     
     async def count_document_chunks(self, memory_id: str, doc_id: str) -> int:
@@ -461,7 +461,7 @@ class VectorStoreService:
             return all_points
             
         except Exception as e:
-            print(f"❌ [Qdrant Export] Erreur export {name}: {e}", file=sys.stderr)
+            print(f"❌ [Qdrant Export] Error exporting {name}: {e}", file=sys.stderr)
             raise
     
     async def import_collection(
@@ -533,7 +533,7 @@ class VectorStoreService:
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Erreur Qdrant: {str(e)}"
+                "message": f"Qdrant error: {str(e)}"
             }
     
     async def get_collection_info(self, memory_id: str) -> Optional[dict]:

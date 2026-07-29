@@ -172,7 +172,7 @@ class SignedPeerEvent(_PeerBase):
         if self.event_id != self.event.event_id:
             raise ValueError("event_id top-level et event.event_id divergent")
         if self.signer_node_id != self.event.origin_node_id:
-            raise ValueError("signer_node_id doit correspondre a event.origin_node_id")
+            raise ValueError("signer_node_id must match event.origin_node_id")
         if self.protocol_version != self.event.protocol_version:
             raise ValueError(
                 "protocol_version top-level et event.protocol_version divergent"
@@ -352,7 +352,7 @@ class HivemindPeerChannel:
         clock: Callable[[], datetime] = _now_utc,
     ) -> None:
         if replay_window_seconds <= 0:
-            raise ValueError("replay_window_seconds doit etre > 0")
+            raise ValueError("replay_window_seconds must be > 0")
         self._state = state
         self._local_node_id = local_node_id
         self._private_key = private_key

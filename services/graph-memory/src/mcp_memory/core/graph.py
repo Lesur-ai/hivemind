@@ -112,14 +112,14 @@ class GraphService:
                     "database": self._database,
                     "node_count": stats["nodeCount"] if stats else 0,
                     "rel_count": stats["relCount"] if stats else 0,
-                    "message": "Connexion Neo4j réussie"
+                    "message": "Neo4j connection succeeded"
                 }
                 
         except AuthError:
             return {
                 "status": "error",
                 "database": self._database,
-                "message": "Authentification Neo4j échouée"
+                "message": "Neo4j authentication failed"
             }
         except ServiceUnavailable:
             return {
@@ -131,7 +131,7 @@ class GraphService:
             return {
                 "status": "error",
                 "database": self._database,
-                "message": f"Erreur Neo4j: {str(e)}"
+                "message": f"Neo4j error: {str(e)}"
             }
     
     # =========================================================================
@@ -164,7 +164,7 @@ class GraphService:
             existing = await check.single()
             
             if existing:
-                raise ValueError(f"La mémoire '{memory_id}' existe déjà")
+                raise ValueError(f"Memory '{memory_id}' already exists")
             
             # Créer la mémoire avec l'URI de l'ontologie
             result = await session.run(
@@ -193,7 +193,7 @@ class GraphService:
             record = await result.single()
             node = record["m"]
             
-            print(f"🧠 [Graph] Mémoire créée: {memory_id} (ns: {ns}, ontology: {ontology}, uri: {ontology_uri})", file=sys.stderr)
+            print(f"🧠 [Graph] Memory created: {memory_id} (ns: {ns}, ontology: {ontology}, uri: {ontology_uri})", file=sys.stderr)
             
             return Memory(
                 id=memory_id,
@@ -270,7 +270,7 @@ class GraphService:
                 return None
             
             node = record["m"]
-            print(f"✏️ [Graph] Mémoire mise à jour: {memory_id} ({', '.join(set_parts)})", file=sys.stderr)
+            print(f"✏️ [Graph] Memory updated: {memory_id} ({', '.join(set_parts)})", file=sys.stderr)
             return Memory(
                 id=node["id"],
                 name=node["name"],
@@ -314,7 +314,7 @@ class GraphService:
             deleted = record["deleted"] > 0 if record else False
             
             if deleted:
-                print(f"🗑️ [Graph] Mémoire supprimée: {memory_id}", file=sys.stderr)
+                print(f"🗑️ [Graph] Memory deleted: {memory_id}", file=sys.stderr)
             
             return deleted
     
@@ -395,7 +395,7 @@ class GraphService:
                     """
                 )
         except Exception as e:
-            print(f"⚠️ [Graph] Index (memory_id, id) non créé: {e}", file=sys.stderr)
+            print(f"⚠️ [Graph] Index (memory_id, id) was not created: {e}", file=sys.stderr)
 
         try:
             async with self.session() as session:
@@ -418,7 +418,7 @@ class GraphService:
             # NE PAS marquer _doc_constraints_ready : on retentera au prochain add_document.
             print(f"⚠️ [Graph] Contrainte source_path NON créée (doublons legacy à résoudre ?): {e}", file=sys.stderr)
             print("   ⚠️ L'unicité n'est PAS garantie par la base tant que la contrainte n'existe pas.", file=sys.stderr)
-            print("   → Résoudre les doublons (memory_id, source_path) puis relancer pour activer la contrainte.", file=sys.stderr)
+            print("   → Resolve duplicate (memory_id, source_path) pairs, then restart to enable the constraint.", file=sys.stderr)
 
     async def add_document(
         self,
@@ -960,9 +960,9 @@ class GraphService:
                     """
                 )
                 self._fulltext_index_ready = True
-                print("🔍 [Graph] Index fulltext 'entity_fulltext' créé/vérifié (standard-folding)", file=sys.stderr)
+                print("🔍 [Graph] Full-text index 'entity_fulltext' created/verified (standard-folding)", file=sys.stderr)
         except Exception as e:
-            print(f"⚠️ [Graph] Impossible de créer l'index fulltext: {e}", file=sys.stderr)
+            print(f"⚠️ [Graph] Unable to create the full-text index: {e}", file=sys.stderr)
             print(f"   La recherche utilisera le mode CONTAINS (dégradé)", file=sys.stderr)
     
     @staticmethod
@@ -1031,7 +1031,7 @@ class GraphService:
                     })
                 return entities
         except Exception as e:
-            print(f"⚠️ [Search] Erreur fulltext: {e}", file=sys.stderr)
+            print(f"⚠️ [Search] Full-text search error: {e}", file=sys.stderr)
             return []
     
     async def _search_contains(
@@ -1133,7 +1133,7 @@ class GraphService:
         print(f"🔤 [Search] Tokenisation: '{search_query}' → raw={meaningful_raw}, normalized={meaningful_normalized}", file=sys.stderr)
         
         if not meaningful_raw:
-            print(f"⚠️ [Search] Aucun token significatif → résultat vide", file=sys.stderr)
+            print("⚠️ [Search] No significant token found → empty result", file=sys.stderr)
             return []
         
         # === Stratégie 1: Fulltext index (accent-insensitive, scoring Lucene) ===
@@ -1453,7 +1453,7 @@ class GraphService:
             )
             mem_record = await mem_result.single()
             if not mem_record:
-                raise ValueError(f"Mémoire '{memory_id}' non trouvée")
+                raise ValueError(f"Memory '{memory_id}' not found")
             
             memory_props = dict(mem_record["m"])
             # Convertir les types Neo4j en types sérialisables

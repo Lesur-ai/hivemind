@@ -12,7 +12,7 @@ const esc = value => String(value ?? '')
 
 const fmtDate = iso => {
     if (!iso) return '';
-    try { return new Date(iso).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }); }
+    try { return new Date(iso).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' }); }
     catch { return iso; }
 };
 
@@ -26,7 +26,7 @@ const fmtSize = bytes => {
 
 const fmtInt = value => {
     const n = Number(value || 0);
-    return Number.isFinite(n) ? n.toLocaleString('fr-FR') : '0';
+    return Number.isFinite(n) ? n.toLocaleString('en-US') : '0';
 };
 
 const attrJson = obj => esc(JSON.stringify(obj));
@@ -81,7 +81,7 @@ function querySummaryHtml(result) {
             return `<tr><td>${esc(d.filename || '?')}</td><td class="mono">${esc(path || '—')}</td><td>${esc(status)}</td></tr>`;
         }).join('');
         html += `<h4 class="result-section-title">📄 Documents sources (${docs.length})</h4>`
-            + `<table class="result-summary-table"><thead><tr><th>Fichier</th><th>source_path / repo_path</th><th>Statut</th></tr></thead><tbody>${rows}</tbody></table>`;
+            + `<table class="result-summary-table"><thead><tr><th>File</th><th>source_path / repo_path</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
 
     const chunks = Array.isArray(result.rag_chunks) ? result.rag_chunks : [];
@@ -854,7 +854,7 @@ async function loadIngestJobs() {
         <div class="job-summary">${jobs.length} job(s) — <strong>${running}</strong> en cours/attente
             <span class="text-muted">· garantie: ${esc(result.guarantee || 'in_memory_best_effort')}</span></div>
         <table class="data-table"><thead><tr>
-            <th>Statut</th><th>Étape</th><th>Progression</th><th>source_path / fichier</th>
+            <th>Status</th><th>Step</th><th>Progress</th><th>source_path / file</th>
             <th>E / R</th><th>MAJ</th><th>Actions</th>
         </tr></thead><tbody>${
             jobs.map(j => {
@@ -884,7 +884,7 @@ function toggleJobsAutoRefresh() {
         stopJobsPolling();
         if (btn) { btn.textContent = '▶ Auto'; btn.classList.remove('active'); }
     } else {
-        if (!gv('jobsMemory')) { alert('Choisissez d\'abord une mémoire.'); return; }
+        if (!gv('jobsMemory')) { alert('Choose a memory first.'); return; }
         loadIngestJobs();
         jobsPollTimer = setInterval(() => { if (activeCat === 'jobs') loadIngestJobs(); else stopJobsPolling(); }, 3000);
         if (btn) { btn.textContent = '⏸ Auto (3s)'; btn.classList.add('active'); }
@@ -897,7 +897,7 @@ async function viewIngestJob(jobId) {
 }
 
 async function cancelIngestJob(jobId) {
-    if (!confirm(`Annuler le job ${jobId} ? (best-effort, sans corrompre le graphe)`)) return;
+    if (!confirm(`Cancel job ${jobId}? (best effort, without corrupting the graph)`)) return;
     const result = await callTool('ingest_job_cancel', { job_id: jobId });
     if (result.status === 'error') alert(result.message || 'Cancel failed.');
     await loadIngestJobs();
@@ -912,8 +912,8 @@ function showIngestAsync() {
     showModal('Ingest (async)', `
         <div class="form-group"><label class="form-label">Memory</label>${memorySelect('iaMemory')}</div>
         <div class="form-group"><label class="form-label">File</label><input class="form-input" id="iaFile" type="file"></div>
-        <div class="form-group"><label class="form-label">Source path (clé métier)</label><input class="form-input" id="iaSourcePath" placeholder="ex: docs/produit/iaas.md — défaut: nom du fichier" data-1p-ignore></div>
-        <label class="form-check"><input type="checkbox" id="iaReplace"> replace_existing (remplacer si le checksum a changé)</label>
+        <div class="form-group"><label class="form-label">Source path (stable business key)</label><input class="form-input" id="iaSourcePath" placeholder="for example, docs/product/iaas.md — defaults to the filename" data-1p-ignore></div>
+        <label class="form-check"><input type="checkbox" id="iaReplace"> replace_existing (replace when the checksum changed)</label>
         <div id="iaStatus" class="text-muted"></div>
     `, 'Submit', async () => { await ingestAsyncSubmit(); return false; });
 }
@@ -922,7 +922,7 @@ async function ingestAsyncSubmit() {
     const status = document.getElementById('iaStatus');
     const memoryId = gv('iaMemory');
     const file = document.getElementById('iaFile')?.files?.[0];
-    if (!memoryId || !file) { if (status) status.textContent = 'Choisissez une mémoire et un fichier.'; return; }
+    if (!memoryId || !file) { if (status) status.textContent = 'Choose a memory and a file.'; return; }
     if (status) status.textContent = `Lecture de ${file.name} (${fmtSize(file.size)})...`;
     const buffer = await file.arrayBuffer();
     const contentBase64 = arrayBufferToBase64(buffer);

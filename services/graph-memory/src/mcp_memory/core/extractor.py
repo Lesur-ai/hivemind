@@ -29,10 +29,10 @@ from .models import (
 from .ontology import Ontology, get_ontology_manager
 
 
-# Prompt d'extraction MINIMAL (fallback sans ontologie).
-# Toute la logique métier (types d'entités, relations, règles) vient de l'ontologie.
-# Ce prompt n'est utilisé que par extract_from_text() quand aucune ontologie n'est chargée.
-EXTRACTION_PROMPT = """Tu es un expert en extraction d'information structurée. Analyse le document suivant et extrait les entités et relations importantes.
+# Minimal extraction prompt used as a fallback without an ontology.
+# Domain logic (entity types, relations, and rules) comes from the ontology.
+# This prompt is used only by extract_from_text() when no ontology is loaded.
+EXTRACTION_PROMPT = """You are an expert in structured information extraction. Analyze the following document and extract important entities and relations.
 
 DOCUMENT:
 ---
@@ -40,25 +40,26 @@ DOCUMENT:
 ---
 
 INSTRUCTIONS:
-1. Identifie les entités nommées (personnes, organisations, lieux, concepts, valeurs)
-2. Identifie les relations entre ces entités
-3. Fournis un bref résumé
+1. Identify named entities such as people, organizations, places, concepts, and values.
+2. Identify relations between those entities.
+3. Provide a short summary.
 
-Les noms d'entités doivent être explicites et inclure les valeurs quand pertinent.
-Crée des relations ENTRE les entités les plus spécifiques, pas tout vers une entité centrale.
-Utilise des types de relations descriptifs (SIGNED_BY, HAS_DURATION, DEFINES, etc.) plutôt que RELATED_TO.
+Entity names must be explicit and include values when relevant.
+Create relations between the most specific entities instead of connecting
+everything to a central entity. Prefer descriptive relation types such as
+SIGNED_BY, HAS_DURATION, and DEFINES over RELATED_TO.
 
-Réponds UNIQUEMENT avec un JSON valide:
+Return ONLY valid JSON:
 ```json
 {{
   "entities": [
-    {{"name": "Nom de l'entité", "type": "Person|Organization|Concept|Other", "description": "Description courte"}}
+    {{"name": "Entity name", "type": "Person|Organization|Concept|Other", "description": "Short description"}}
   ],
   "relations": [
-    {{"from_entity": "Nom entité source", "to_entity": "Nom entité cible", "type": "TYPE_RELATION", "description": "Description"}}
+    {{"from_entity": "Source entity", "to_entity": "Target entity", "type": "RELATION_TYPE", "description": "Description"}}
   ],
-  "summary": "Résumé du document en 2-3 phrases",
-  "key_topics": ["sujet1", "sujet2"]
+  "summary": "A 2-3 sentence document summary",
+  "key_topics": ["topic1", "topic2"]
 }}
 ```
 """
@@ -154,7 +155,7 @@ class ExtractorService:
                 messages=[
                     {
                         "role": "system",
-                        "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
+                        "content": "You specialize in structured information extraction. Return only valid JSON."
                     },
                     {
                         "role": "user",
@@ -175,7 +176,7 @@ class ExtractorService:
             
             content = response.choices[0].message.content
             if content is None:
-                print(f"⚠️ [Extractor] Réponse LLM vide - message complet: {response.choices[0].message}", file=sys.stderr)
+                print(f"⚠️ [Extractor] Empty LLM response - full message: {response.choices[0].message}", file=sys.stderr)
                 return ExtractionResult(summary=None)
             
             print(f"🔍 [Extractor] DEBUG content length: {len(content)}", file=sys.stderr)
@@ -186,10 +187,10 @@ class ExtractorService:
             return result
             
         except APITimeoutError:
-            print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
+            print("⏰ [Extractor] Timeout - the document may be too long", file=sys.stderr)
             raise
         except APIError as e:
-            print(f"❌ [Extractor] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [Extractor] API error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
     
     def _parse_extraction(
@@ -255,7 +256,7 @@ class ExtractorService:
             )
             
         except json.JSONDecodeError as e:
-            print(f"⚠️ [Extractor] Erreur parsing JSON: {e}", file=sys.stderr)
+            print(f"⚠️ [Extractor] JSON parsing error: {e}", file=sys.stderr)
             print(f"   Contenu reçu: {content[:200]}...", file=sys.stderr)
             # Retourner un résultat vide plutôt que crasher
             return ExtractionResult(summary=None)
@@ -349,23 +350,23 @@ class ExtractorService:
         if not ontology:
             available = [o["name"] for o in ontology_manager.list_ontologies()]
             raise ValueError(
-                f"Ontologie '{ontology_name}' introuvable. "
-                f"Ontologies disponibles: {available}. "
-                f"Chaque mémoire DOIT avoir une ontologie valide."
+                f"Ontology '{ontology_name}' not found. "
+                f"Available ontologies: {available}. "
+                f"Every memory must have a valid ontology."
             )
         
         # Construire le prompt avec l'ontologie
         prompt = ontology.build_prompt(text)
         
         try:
-            print(f"🔍 [Extractor] Extraction avec ontologie '{ontology.name}' ({len(text)} chars)...", file=sys.stderr)
+            print(f"🔍 [Extractor] Extraction with ontology '{ontology.name}' ({len(text)} chars)...", file=sys.stderr)
             
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[
                     {
                         "role": "system",
-                        "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
+                        "content": "You specialize in structured information extraction. Return only valid JSON."
                     },
                     {
                         "role": "user",
@@ -378,7 +379,7 @@ class ExtractorService:
             
             content = response.choices[0].message.content
             if content is None:
-                print(f"⚠️ [Extractor] Réponse LLM vide", file=sys.stderr)
+                print("⚠️ [Extractor] Empty LLM response", file=sys.stderr)
                 return ExtractionResult(summary=None)
             
             # Extraire les types depuis l'ontologie chargée
@@ -400,10 +401,10 @@ class ExtractorService:
             return result
             
         except APITimeoutError:
-            print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
+            print("⏰ [Extractor] Timeout - the document may be too long", file=sys.stderr)
             raise
         except APIError as e:
-            print(f"❌ [Extractor] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [Extractor] API error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
 
     # =========================================================================
@@ -524,7 +525,7 @@ class ExtractorService:
                     messages=[
                         {
                             "role": "system",
-                            "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
+                            "content": "You specialize in structured information extraction. Return only valid JSON."
                         },
                         {
                             "role": "user",
@@ -537,7 +538,7 @@ class ExtractorService:
                 
                 content = response.choices[0].message.content
                 if content is None:
-                    print(f"⚠️ [Extractor] Chunk {chunk_num}: réponse LLM vide", file=sys.stderr)
+                    print(f"⚠️ [Extractor] Chunk {chunk_num}: empty LLM response", file=sys.stderr)
                     continue
                 
                 result = self._parse_extraction(
@@ -572,7 +573,7 @@ class ExtractorService:
                 # On continue avec les chunks suivants au lieu de tout perdre
                 continue
             except APIError as e:
-                print(f"❌ [Extractor] Erreur API chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [Extractor] API error for chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
                 raise
         
         # Fusionner les résultats
@@ -772,14 +773,14 @@ class ExtractorService:
         try:
             response = await self._client.chat.completions.create(
                 model=self._model,
-                messages=[{"role": "user", "content": "Réponds juste 'OK'"}],
+                messages=[{"role": "user", "content": "Reply only with 'OK'"}],
                 max_tokens=10
             )
             
             return {
                 "status": "ok",
                 "model": self._model,
-                "message": "Connexion LLMaaS réussie"
+                "message": "LLMaaS connection succeeded"
             }
             
         except APIError as e:
@@ -787,7 +788,7 @@ class ExtractorService:
                 "status": "error",
                 "model": self._model,
                 # P12-3 : jamais d'URL proxy brute dans la sortie santé.
-                "message": f"Erreur LLMaaS: {redact_proxy_secrets(str(e))}"
+                "message": f"LLMaaS error: {redact_proxy_secrets(str(e))}"
             }
 
 
@@ -809,7 +810,7 @@ class ExtractorService:
                 messages=[
                     {
                         "role": "system",
-                        "content": "Tu es un assistant expert qui répond à des questions basées sur un graphe de connaissances. Réponds de manière concise et précise."
+                        "content": "You answer questions using a knowledge graph. Be concise and precise."
                     },
                     {
                         "role": "user",
@@ -820,7 +821,7 @@ class ExtractorService:
                 max_tokens=self._max_tokens
             )
             
-            return response.choices[0].message.content or "Pas de réponse générée."
+            return response.choices[0].message.content or "No answer was generated."
             
         except Exception as e:
             # P12-3 R1 : chemin récupéré retourné au client — redaction
@@ -830,7 +831,7 @@ class ExtractorService:
                 f"❌ [Extractor] Erreur génération réponse: {safe_message}",
                 file=sys.stderr,
             )
-            return f"Erreur lors de la génération de la réponse: {safe_message}"
+            return f"Error generating the answer: {safe_message}"
 
 
 # Singleton pour usage global

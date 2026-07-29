@@ -125,7 +125,7 @@ class SemanticChunker:
         sections = self._detect_sections(text)
         
         total_chars = sum(len(s.content) for s in sections)
-        print(f"📐 [Chunker] PASSE 1/3 — {len(sections)} sections détectées dans '{filename}' ({total_chars} chars)", file=sys.stderr)
+        print(f"📐 [Chunker] PASS 1/3 — {len(sections)} sections detected in '{filename}' ({total_chars} chars)", file=sys.stderr)
         sys.stderr.flush()
         for i, s in enumerate(sections):
             art = f" (Art. {s.article_number})" if s.article_number else ""
@@ -133,18 +133,18 @@ class SemanticChunker:
         sys.stderr.flush()
         
         # === PASSE 2 : Découper chaque section en phrases ===
-        print(f"📐 [Chunker] PASSE 2/3 — Découpage en phrases...", file=sys.stderr)
+        print("📐 [Chunker] PASS 2/3 — Splitting into sentences...", file=sys.stderr)
         sys.stderr.flush()
         sentence_groups = self._sections_to_sentence_groups(sections)
         total_sentences = sum(len(g.sentences) for g in sentence_groups)
-        print(f"📐 [Chunker] PASSE 2/3 — {total_sentences} phrases dans {len(sentence_groups)} groupes", file=sys.stderr)
+        print(f"📐 [Chunker] PASS 2/3 — {total_sentences} sentences in {len(sentence_groups)} groups", file=sys.stderr)
         sys.stderr.flush()
         
         # === PASSE 3 : Regrouper les phrases en chunks avec overlap ===
-        print(f"📐 [Chunker] PASSE 3/3 — Fusion en chunks (cible: {self._chunk_size} tokens, overlap: {self._chunk_overlap})...", file=sys.stderr)
+        print(f"📐 [Chunker] PASS 3/3 — Merging into chunks (target: {self._chunk_size} tokens, overlap: {self._chunk_overlap})...", file=sys.stderr)
         sys.stderr.flush()
         raw_chunks = self._merge_into_chunks(sentence_groups)
-        print(f"📐 [Chunker] PASSE 3/3 — {len(raw_chunks)} chunks bruts générés", file=sys.stderr)
+        print(f"📐 [Chunker] PASS 3/3 — {len(raw_chunks)} raw chunks generated", file=sys.stderr)
         sys.stderr.flush()
         
         # === Finaliser les Chunk avec métadonnées ===

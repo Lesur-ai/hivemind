@@ -17,6 +17,16 @@ are not installation steps or public architecture contracts.
 > boundary. Downstream extension seams are described in
 > `docs/EXTENSION_POINTS.md`.
 
+### Changed
+
+- **English is now the consistent default across public product surfaces.**
+  Consolidation and extraction prompts, MCP tool metadata and client-facing
+  messages, the Hivemind operator UI, and the embedded Graph Memory UI now use
+  English. Existing French documentation remains available in `*.fr.md`
+  guides, French-aware claim validation remains backward compatible, and
+  locale-specific UI support can be added later through a dedicated
+  localization layer rather than scattered hard-coded strings.
+
 ---
 
 ## [1.3.1] — 2026-07-22

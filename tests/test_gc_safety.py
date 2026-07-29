@@ -932,7 +932,7 @@ def test_consolidator_prompt_preserves_body_with_inline_delimiter_in_identity() 
     )
     user_prompt = messages[1]["content"]
 
-    assert "[agent=a.b---c, catégorie=decision, tags=[\"identity\"]]" in user_prompt
+    assert "[agent=a.b---c, category=decision, tags=[\"identity\"]]" in user_prompt
     assert body in user_prompt
     assert 'agent: "a.b---c"' not in user_prompt
 
@@ -1299,7 +1299,7 @@ async def test_consolidator_preserves_delete_counts_when_metadata_update_fails(
     assert result["notes_processed"] == 1
     assert result["notes_deleted"] == 1
     assert result["notes_remaining"] == 0
-    assert "Aucune note source ne reste" in result["message"]
+    assert "No source notes remain" in result["message"]
     assert old not in storage.objects
 
 

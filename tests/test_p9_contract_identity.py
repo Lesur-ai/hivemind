@@ -214,7 +214,7 @@ def test_deployment_bootstrap_curl_uses_the_exported_credential() -> None:
 
 @pytest.mark.parametrize("key", ["", "admin", "not-long-enough", "x" * 31])
 def test_bootstrap_gate_rejects_every_key_shorter_than_32(key: str) -> None:
-    with pytest.raises(RuntimeError, match="≥32"):
+    with pytest.raises(RuntimeError, match="at least 32"):
         live_mem_server._reject_weak_bootstrap_key(key)
 
 

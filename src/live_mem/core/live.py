@@ -112,7 +112,7 @@ class LiveService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Agent = client_name du token (toujours, jamais de paramètre libre)
@@ -122,7 +122,7 @@ class LiveService:
         if not isinstance(agent, str) or agent == "":
             return {
                 "status": "error",
-                "message": "Identité client_name non vide requise pour écrire une note",
+                "message": "A non-empty client_name identity is required to write a note",
             }
 
         # Construire le nom de fichier unique
@@ -193,7 +193,7 @@ class LiveService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Gate Hivemind unique (fail-closed : corruption propage). Le skip du
@@ -263,7 +263,7 @@ class LiveService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Gate Hivemind unique (fail-closed) : skip du sidecar uniquement sur un

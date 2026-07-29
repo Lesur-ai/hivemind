@@ -156,7 +156,7 @@ async def test_create_token_rejects_empty_agent_identity_before_store_access():
     with patch.object(svc, "_load_store", new=AsyncMock()) as load_store:
         result = await svc.create_token(name="", permissions="read,write")
 
-    assert result == {"status": "error", "message": "Nom du token requis"}
+    assert result == {"status": "error", "message": "Token name is required"}
     load_store.assert_not_awaited()
 
 

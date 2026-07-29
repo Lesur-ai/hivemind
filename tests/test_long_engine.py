@@ -334,10 +334,10 @@ async def test_ingest_uses_180s_timeout() -> None:
 @pytest.mark.parametrize(
     "method, url, needle",
     [
-        ("ingest", "http://10.0.0.1", "privée"),
+        ("ingest", "http://10.0.0.1", "Private IP address"),
         ("query", "http://127.0.0.1", "loopback"),
         ("list_ontologies", "http://169.254.169.254", "link-local"),
-        ("search", "file:///etc/passwd", "Scheme"),
+        ("search", "file:///etc/passwd", "scheme"),
     ],
 )
 async def test_typed_methods_reject_unsafe_url_before_client_built(

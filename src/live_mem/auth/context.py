@@ -266,14 +266,14 @@ def _evaluate_access(
     """
     # Pas de token → accès refusé
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "message": "Authentication required"}
 
     # VULN-08 fix : valider le format du space_id AVANT de vérifier les permissions
     # Empêche les tentatives de path traversal via _system, _backups, etc.
     if not _SPACE_ID_REGEX.match(resource_id):
         return {
             "status": "error",
-            "message": f"Identifiant d'espace invalide : '{resource_id}'",
+            "message": f"Invalid space identifier: '{resource_id}'",
         }
 
     # Admin → accès total (pas de restriction par espace)
@@ -288,7 +288,7 @@ def _evaluate_access(
     if not allowed or resource_id not in allowed:
         return {
             "status": "error",
-            "message": f"Accès refusé à l'espace '{resource_id}'",
+            "message": f"Access denied to space '{resource_id}'",
         }
 
     return None  # OK
@@ -331,7 +331,7 @@ def check_write_permission() -> Optional[dict]:
     token_info = _get_effective_token_info()
 
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "message": "Authentication required"}
 
     permissions = token_info.get("permissions", [])
     if "write" in permissions or "manage" in permissions or "admin" in permissions:
@@ -339,7 +339,7 @@ def check_write_permission() -> Optional[dict]:
 
     return {
         "status": "error",
-        "message": "Permission 'write' requise pour cette opération",
+        "message": "The 'write' permission is required for this operation",
     }
 
 
@@ -359,7 +359,7 @@ def check_manage_permission() -> Optional[dict]:
     token_info = _get_effective_token_info()
 
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "message": "Authentication required"}
 
     permissions = token_info.get("permissions", [])
     if "manage" in permissions or "admin" in permissions:
@@ -367,7 +367,7 @@ def check_manage_permission() -> Optional[dict]:
 
     return {
         "status": "error",
-        "message": "Permission 'manage' requise pour cette opération",
+        "message": "The 'manage' permission is required for this operation",
     }
 
 
@@ -385,7 +385,7 @@ def check_admin_permission() -> Optional[dict]:
     token_info = _get_effective_token_info()
 
     if token_info is None:
-        return {"status": "error", "message": "Authentification requise"}
+        return {"status": "error", "message": "Authentication required"}
 
     permissions = token_info.get("permissions", [])
     if "admin" in permissions:
@@ -393,7 +393,7 @@ def check_admin_permission() -> Optional[dict]:
 
     return {
         "status": "error",
-        "message": "Permission 'admin' requise pour cette opération",
+        "message": "The 'admin' permission is required for this operation",
     }
 
 
@@ -420,7 +420,7 @@ def safe_error(exception: Exception, context: str = "") -> dict:
     if get_settings().mcp_server_debug:
         return {"status": "error", "message": str(exception)}
 
-    return {"status": "error", "message": "Erreur interne du serveur"}
+    return {"status": "error", "message": "Internal server error"}
 
 
 # ─────────────────────────────────────────────────────────────

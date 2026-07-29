@@ -519,7 +519,7 @@ class StaticFilesMiddleware:
             else:
                 services["llmaas"] = {
                     "status": "warning",
-                    "message": "LLMaaS non configuré",
+                    "message": "LLMaaS is not configured",
                 }
         except Exception as e:
             # LM2-24 fix : pareil que S3 — ne pas exposer la stack openai
@@ -705,7 +705,7 @@ class StaticFilesMiddleware:
             except (json.JSONDecodeError, UnicodeDecodeError):
                 await self._send_json(
                     send,
-                    {"status": "error", "message": "Body JSON invalide"},
+                    {"status": "error", "message": "Invalid JSON body"},
                     400,
                 )
                 return
@@ -714,7 +714,7 @@ class StaticFilesMiddleware:
             if not token:
                 await self._send_json(
                     send,
-                    {"status": "error", "message": "Champ 'token' requis"},
+                    {"status": "error", "message": "The 'token' field is required"},
                     400,
                 )
                 return
@@ -742,7 +742,7 @@ class StaticFilesMiddleware:
                 record_event(event="login_failed")
                 await self._send_json(
                     send,
-                    {"status": "error", "message": "Token invalide"},
+                    {"status": "error", "message": "Invalid token"},
                     401,
                 )
                 return
@@ -854,7 +854,7 @@ class StaticFilesMiddleware:
             if token_info is None:
                 await self._send_json(
                     send,
-                    {"status": "error", "message": "Authentification requise"},
+                    {"status": "error", "message": "Authentication required"},
                     401,
                 )
                 return
@@ -961,7 +961,7 @@ class StaticFilesMiddleware:
                     send,
                     {
                         "status": "not_found",
-                        "message": f"Espace '{space_id}' introuvable",
+                        "message": f"Space '{space_id}' not found",
                     },
                 )
                 return
@@ -1018,7 +1018,7 @@ class StaticFilesMiddleware:
             # VULN-09 fix : valider le filename contre path traversal
             if ".." in filename or filename.startswith("/"):
                 await self._send_json(
-                    send, {"status": "error", "message": "Nom de fichier invalide"}, 400
+                    send, {"status": "error", "message": "Invalid filename"}, 400
                 )
                 return
 
@@ -1029,7 +1029,7 @@ class StaticFilesMiddleware:
                     send,
                     {
                         "status": "not_found",
-                        "message": f"Fichier '{filename}' introuvable",
+                        "message": f"File '{filename}' not found",
                     },
                 )
                 return

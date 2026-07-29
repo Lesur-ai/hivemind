@@ -87,18 +87,18 @@ _WEAK_BOOTSTRAP_KEYS = {"change_me_in_production", "changeme", "admin", "passwor
 
 
 def _reject_weak_bootstrap_key(key: str) -> None:
-    """Lève RuntimeError si ``ADMIN_BOOTSTRAP_KEY`` est par défaut/faible.
+    """Raise RuntimeError when ``ADMIN_BOOTSTRAP_KEY`` is default or weak.
 
-    HM-01 fix : appelé depuis ``create_app()`` (chokepoint de TOUS les
-    entrypoints de service), pas seulement depuis ``main()``. Sans ça, un
-    lancement par factory ASGI (``uvicorn --factory``) démarrait avec la clé
-    publique du repo → admin total sans connaissance préalable.
+    HM-01: called from ``create_app()`` (the chokepoint for every service
+    entrypoint), not only from ``main()``. Otherwise an ASGI factory launch
+    (``uvicorn --factory``) could start with the repository's public key and
+    grant full admin access without prior knowledge.
     """
     if key in _WEAK_BOOTSTRAP_KEYS or len(key) < 32:
         raise RuntimeError(
-            "ADMIN_BOOTSTRAP_KEY non configurée ou trop faible. Définissez une "
-            "clé de ≥32 caractères aléatoires dans .env avant de démarrer le "
-            "service (voir .env.example)."
+            "ADMIN_BOOTSTRAP_KEY is missing or too weak. Set a random key of "
+            "at least 32 characters in .env before starting the "
+            "service (see .env.example)."
         )
 
 
@@ -127,7 +127,7 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
 
     spaces_result = await get_space_service().list_spaces()
     if spaces_result.get("status") != "ok":
-        raise RuntimeError("Impossible de lister les espaces pour migrer tokens v1")
+        raise RuntimeError("Unable to list spaces for the v1 token migration")
     all_ids = [s["space_id"] for s in spaces_result.get("spaces", [])]
     token_service = get_token_service()
     migration = await token_service.migrate_empty_space_ids(all_ids)
@@ -145,8 +145,8 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
     embedded_token = resolve_embedded_token(settings, generate=True)
     if not embedded_token:
         raise RuntimeError(
-            "Secret local du runtime long embarqué indisponible; définir "
-            "LONG_EMBEDDED_TOKEN ou réparer /data/secrets selon "
+            "The local embedded long-runtime secret is unavailable; set "
+            "LONG_EMBEDDED_TOKEN or repair /data/secrets according to "
             "docs/DEPLOYMENT.md"
         )
     registration = await token_service.register_internal_long_token(embedded_token)
@@ -154,7 +154,7 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
         registration.get("status") != "ok"
         or registration.get("current_active") is not True
     ):
-        raise RuntimeError("Token interne du runtime long inactif ou non enregistré")
+        raise RuntimeError("Internal long-runtime token is inactive or unregistered")
     logger.info(
         "Embedded long credential startup preflight: registered=%s rotated_out=%d",
         registration.get("registered", False),

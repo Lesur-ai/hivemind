@@ -95,7 +95,7 @@ class AuthMiddleware:
 
         if not token:
             if self.debug:
-                print(f"❌ [Auth] Header Authorization manquant pour {path}", file=sys.stderr)
+                print(f"❌ [Auth] Missing Authorization header for {path}", file=sys.stderr)
             await self._send_error(send, 401, "Authorization header required")
             return
         
@@ -104,7 +104,7 @@ class AuthMiddleware:
         bootstrap_key = self._settings.admin_bootstrap_key
         if bootstrap_key and hmac.compare_digest(token, bootstrap_key):
             if self.debug:
-                print(f"✅ [Auth] Authentification avec clé bootstrap admin", file=sys.stderr)
+                print("✅ [Auth] Authenticated with the admin bootstrap key", file=sys.stderr)
             # Ajouter info d'auth au scope
             scope["auth"] = {
                 "type": "bootstrap",
@@ -131,7 +131,7 @@ class AuthMiddleware:
             
             if not token_info:
                 if self.debug:
-                    print(f"❌ [Auth] Token invalide ou expiré", file=sys.stderr)
+                    print("❌ [Auth] Invalid or expired token", file=sys.stderr)
                 await self._send_error(send, 401, "Invalid or expired token")
                 return
             
@@ -157,7 +157,7 @@ class AuthMiddleware:
 
         except Exception as e:
             if self.debug:
-                print(f"❌ [Auth] Erreur validation: {e}", file=sys.stderr)
+                print(f"❌ [Auth] Validation error: {e}", file=sys.stderr)
             await self._send_error(send, 500, "Authentication error")
 
     def _extract_token(self, scope) -> Optional[str]:
@@ -398,12 +398,12 @@ class StaticFilesMiddleware:
             try:
                 payload = json.loads(body.decode("utf-8")) if body else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
-                await self._send_json(send, {"status": "error", "message": "Body JSON invalide"}, 400)
+                await self._send_json(send, {"status": "error", "message": "Invalid JSON body"}, 400)
                 return
 
             token = (payload.get("token") or "").strip()
             if not token:
-                await self._send_json(send, {"status": "error", "message": "Champ 'token' requis"}, 400)
+                await self._send_json(send, {"status": "error", "message": "The 'token' field is required"}, 400)
                 return
 
             token_info = None
@@ -433,7 +433,7 @@ class StaticFilesMiddleware:
                     token_info = None
 
             if token_info is None:
-                await self._send_json(send, {"status": "error", "message": "Token invalide"}, 401)
+                await self._send_json(send, {"status": "error", "message": "Invalid token"}, 401)
                 return
 
             headers = dict(scope.get("headers", []))
@@ -507,16 +507,16 @@ class StaticFilesMiddleware:
             try:
                 payload = json.loads(body.decode("utf-8")) if body else {}
             except (json.JSONDecodeError, UnicodeDecodeError):
-                await self._send_json(send, {"status": "error", "message": "Body JSON invalide"}, 400)
+                await self._send_json(send, {"status": "error", "message": "Invalid JSON body"}, 400)
                 return
 
             tool_name = (payload.get("tool") or "").strip()
             arguments = payload.get("arguments") or {}
             if not tool_name:
-                await self._send_json(send, {"status": "error", "message": "Champ 'tool' requis"}, 400)
+                await self._send_json(send, {"status": "error", "message": "The 'tool' field is required"}, 400)
                 return
             if not isinstance(arguments, dict):
-                await self._send_json(send, {"status": "error", "message": "'arguments' doit être un objet"}, 400)
+                await self._send_json(send, {"status": "error", "message": "'arguments' must be an object"}, 400)
                 return
 
             result = await self._call_tool_direct(tool_name, arguments)
@@ -525,7 +525,7 @@ class StaticFilesMiddleware:
             await self._send_json(send, {"status": "error", "message": str(e)}, 413)
         except Exception as e:
             print(f"❌ [/api/tool] {e}", file=sys.stderr)
-            await self._send_json(send, {"status": "error", "message": "Erreur interne /api/tool"}, 500)
+            await self._send_json(send, {"status": "error", "message": "Internal /api/tool error"}, 500)
 
     async def _call_tool_direct(self, tool_name: str, arguments: dict) -> dict:
         """Appelle directement un outil enregistré dans FastMCP."""
@@ -534,7 +534,7 @@ class StaticFilesMiddleware:
         tool_manager = mcp._tool_manager
         tools = getattr(tool_manager, "_tools", {})
         if tool_name not in tools:
-            return {"status": "error", "message": f"Outil inconnu: {tool_name}"}
+            return {"status": "error", "message": f"Unknown tool: {tool_name}"}
 
         tool_obj = tools[tool_name]
         fn = None
@@ -545,7 +545,7 @@ class StaticFilesMiddleware:
                 break
 
         if fn is None:
-            return {"status": "error", "message": f"Outil {tool_name}: handler introuvable"}
+            return {"status": "error", "message": f"Tool {tool_name}: handler not found"}
 
         result = await fn(**arguments)
         return result if isinstance(result, dict) else {"status": "ok", "data": result}
@@ -646,7 +646,7 @@ class StaticFilesMiddleware:
             if not memory_id or not question:
                 await self._send_json(send, {
                     "status": "error",
-                    "message": "memory_id et question sont requis"
+                    "message": "memory_id and question are required"
                 }, 400)
                 return
             
@@ -664,10 +664,10 @@ class StaticFilesMiddleware:
         except json.JSONDecodeError:
             await self._send_json(send, {
                 "status": "error",
-                "message": "JSON invalide dans le body"
+                "message": "Invalid JSON in request body"
             }, 400)
         except Exception as e:
-            print(f"❌ [ASK] Erreur: {e}", file=sys.stderr)
+            print(f"❌ [ASK] Error: {e}", file=sys.stderr)
             await self._send_json(send, {
                 "status": "error",
                 "message": str(e)
@@ -691,7 +691,7 @@ class StaticFilesMiddleware:
             if not memory_id or not query:
                 await self._send_json(send, {
                     "status": "error",
-                    "message": "memory_id et query sont requis"
+                    "message": "memory_id and query are required"
                 }, 400)
                 return
             
@@ -705,10 +705,10 @@ class StaticFilesMiddleware:
         except json.JSONDecodeError:
             await self._send_json(send, {
                 "status": "error",
-                "message": "JSON invalide dans le body"
+                "message": "Invalid JSON in request body"
             }, 400)
         except Exception as e:
-            print(f"❌ [Query] Erreur: {e}", file=sys.stderr)
+            print(f"❌ [Query] Error: {e}", file=sys.stderr)
             await self._send_json(send, {
                 "status": "error",
                 "message": str(e)
