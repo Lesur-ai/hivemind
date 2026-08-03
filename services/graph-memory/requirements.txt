@@ -9,7 +9,7 @@
 # =============================================================================
 
 # === MCP SDK (Streamable HTTP transport) ===
-mcp==1.28.1
+mcp==2.0.0
 
 # === Web Framework (pour FastMCP Streamable HTTP) ===
 fastapi==0.139.2
