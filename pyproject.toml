@@ -24,7 +24,7 @@ dependencies = [
     "boto3>=1.40",
     "openai>=1.50",
     "python-dotenv>=1.0",
-    "cryptography>=48.0.1",   # Ed25519 signatures ; HM-06 : >=48.0.1 corrige
+    "cryptography>=50.0.0",   # Ed25519 signatures ; HM-06 : >=48.0.1 corrige
                               # GHSA-537c-gmf6-5ccf (OpenSSL statiquement lié).
 ]
 
