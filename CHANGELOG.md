@@ -17,6 +17,113 @@ are not installation steps or public architecture contracts.
 > boundary. Downstream extension seams are described in
 > `docs/EXTENSION_POINTS.md`.
 
+### Added
+
+- **v1.4.0 release preparation.** Runtime identity now reports `1.4.0` for the
+  pending release train. This is not a tag, image publication, deployment,
+  GitHub Release, or provider-certification claim; the four required
+  exact-SHA protected proofs remain a release gate.
+
+- **Certification-budget enforcement compatibility.** The public
+  OpenAI-compatible adapter honors the strict shared request/token counter when
+  an authorized private certification runner activates it; ordinary runtime
+  behavior is unchanged when that mode is absent. The public distribution does
+  not ship the private workflow, runner, promotion schema, credentials, or live
+  evidence. This code change itself performs no provider call and creates no
+  certification or release claim.
+- **Exact v1.4.0 inference matrix and bounded readiness check.** Hivemind now
+  publishes one operator matrix for Cloud Temple, OpenAI, native Anthropic chat
+  with Cloud Temple embeddings, and Gemini across consolidation, extraction,
+  embeddings/query, health, proxy, safe errors, observability, and evidence.
+  The hidden, authenticated `inference_self_test` is `manage`-only,
+  single-flight per serving event loop and exact role-profile fingerprint,
+  cached for five minutes, and limited to one zero-retry request per role with
+  an eight-token chat ceiling. It is never invoked by public health checks. The
+  accompanying guide provides an all-or-nothing `LLMAAS_*`
+  migration and the bounded embedding-identity reindex journey. Deterministic
+  conformance establishes `compatible`. The schema-v3 primary evaluator stops
+  before credential reads, discovery, Compose startup, or provider egress with
+  `certification-contract-incomplete` and `token-ceiling-unproven`; the
+  separately gated P13-4 successor above leaves that non-promotable schema
+  unchanged. Declared retention, usage, token-ceiling, and incomplete-contract
+  blockers mechanically prevent schema-v3 promotion; no paid, protected-live,
+  or release-ready claim is made by this entry.
+
+### Removed
+
+- **Obsolete compaction utility (TQ-2, #286).** Retired
+  `scripts/test_bank_compact.py`, an uncollected harness whose mocks no longer
+  satisfied the production proxy contract. Its unique behavior now runs in the
+  collected `tests/test_consolidator_compaction.py` suite.
+
+### Fixed
+
+- **Derived Graph/reindex convergence guards.** Legacy Neo4j `Document`
+  records with an empty `source_path` are normalized in consumed, bounded
+  startup batches before the composite uniqueness constraint is installed. A
+  consumed versioned marker skips later graph rescans while each process still
+  consumes a catalog read and verifies the exact semantic constraint after
+  DDL; name conflicts without exact semantic enforcement, malformed state, and
+  deadlines fail closed, exact legacy constraint names remain compatible, and
+  backup imports cannot reintroduce legacy empty paths;
+  reindex preflight errors use the canonical internal envelope; source reads
+  are locally bounded; an AST-derived test requires every public async vector
+  entry point that reaches the memory lock to use the reindex front gate; and
+  cleanup failures poison later admissions without replacing task
+  cancellation. These safeguards
+  retain old targets and abandoned shadows and do not introduce online HA,
+  crash resume, or general long-data lifecycle recovery.
+- **Deleting a space now revokes its token access grants.** A successful
+  `space_delete` removes the deleted ID from every active, revoked, and expired
+  token allowlist, confirms zero references, and returns `deleted`; recreating
+  the ID restores no previous access. An empty prefix with scopes remains
+  non-destructive `not_found` by default because it may be an intentional
+  future pre-grant. Only an explicit `recover_access_grants=True` retry for a
+  known older or interrupted deletion performs grants-only recovery and returns
+  `grants_cleaned`. Partial cleanup and concurrent or later grants continue to
+  block reuse fail closed. Backup restoration copies data only, never token
+  access; a global/bootstrap administrator must restore and explicitly
+  re-grant intended tokens. Grant-removal audit events include the sorted
+  canonical hashes of affected tokens.
+
+### Changed
+
+- **Bounded embedding reindex maintenance.** The hidden, `manage`-only,
+  synchronous and non-idempotent `long_reindex(space_id)` operation can rebuild
+  an embedded `reindex_required` projection from verified Neo4j/S3 source
+  documents into an exhaustively validated Qdrant shadow. A process-local
+  per-memory gate excludes mutations, and activation is one final atomic alias
+  batch followed only by reads. Existing vectors are never source truth; old
+  targets and abandoned shadows remain retained. Ambiguous transport or
+  post-switch outcomes report possible activation and are never safe to retry
+  automatically. Online reindex, HA fencing, crash resume, cleanup, and general
+  long-data lifecycle remain out of scope.
+- **Mid-memory consolidation prompts are English by default.** The main
+  consolidation, duplicate-section merge, and compaction paths now use English
+  server-owned instructions. Set
+  `CONSOLIDATION_LEGACY_FRENCH_PROMPTS=true` and restart before the next
+  consolidation to retain the historical French prompts; this is recommended
+  when upgrading an established French-language bank. The switch does not
+  translate untouched bank content or space rules. A general language selector
+  remains planned for v1.6.0.
+- **Process-scoped ASGI lifecycle is now explicit and fail-closed.** Hivemind
+  Core and the embedded Graph Memory service use one shared outer lifespan
+  guard with sticky startup/shutdown failures and exhaustive cleanup. Core no
+  longer closes its process consolidator when an individual MCP session
+  disconnects. A Graph Memory close failure is reported as
+  `lifespan.shutdown.failed` (the already-started Uvicorn process still exits
+  zero), and deployments that disable ASGI lifespan now refuse every request,
+  including health and metrics. If an inner lifespan task dies after startup,
+  the process fails closed but may remain listening; operators must recycle it
+  through a health-aware supervisor or an explicit restart.
+
+### Security
+
+- **Patched Python runtime dependencies.** The core runtime now requires
+  `cryptography` 50.0.0 or later, and the embedded Graph Memory image pins
+  `cryptography` 50.0.0 plus `aiohttp` 3.14.3. These floors exclude
+  CVE-2026-69247 and CVE-2026-69244 from the shipped dependency locks.
+
 ---
 
 ## [1.3.1] — 2026-07-22
@@ -228,11 +335,14 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   state—never destructive automatic rollback. Matching retry is allowed only
   before any persisted scope reference is durable; afterward admin inspection
   and explicit cleanup are required first, including for the creating actor.
-  Reusing a deleted identifier now fails closed while any historical
-  reference remains (including admin/revoked/expired tokens), preventing an ABA
-  recreation or later admin downgrade from silently restoring access; an admin
-  must explicitly clean stale references first. Deletion now reprobes payload and removes `_meta.json`
-  last, returning count-honest `partial` on uncertainty. It requires
+  Reusing an identifier fails closed while any token reference remains
+  (including admin/revoked/expired entries), preventing an ABA recreation or
+  later admin downgrade from silently restoring access. A successful deletion
+  now removes those references itself; an absent prefix preserves possible
+  intentional pre-grants unless an authorized operator explicitly resumes a
+  known older/interrupted deletion with `recover_access_grants=True`. Deletion
+  reprobes payload and removes `_meta.json` last, returning count-honest
+  `partial` on uncertainty. It requires
   same-space writer/job quiescence because its lifecycle lock is not a
   universal mutation barrier.
   Managers gain two narrowly scoped direct MCP tools: `token_create` creates

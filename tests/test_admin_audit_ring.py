@@ -305,14 +305,13 @@ def test_settings_default_and_fail_closed_capacity_validation():
     assert Settings.model_validate({"admin_audit_ring_size": 500}).admin_audit_ring_size == 500
 
 
-def test_policy_allowed_actions_exactly_match_frozen_registered_surface():
+def test_policy_allowed_actions_match_canonical_surface_projection():
     fixture = json.loads(
         (ROOT / "tests/fixtures/tool_surface.json").read_text(encoding="utf-8")
     )
     registered_names = set(fixture["historical"]) | set(
         fixture["alias_map"].values()
     )
-    assert len(registered_names) == fixture["total"] == 61
     assert (
         set(MonoTenantSpaceAllowlistProvider.ALLOWED_ACTIONS)
         == registered_names

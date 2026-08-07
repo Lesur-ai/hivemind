@@ -112,10 +112,11 @@ async function routeConsole(page, { createToken = false } = {}) {
             case 'backup_list': return json(route, { status: 'ok', backups: [] });
             case 'space_list': return json(route, { status: 'ok', spaces: [{ space_id: 'demo' }] });
             case 'admin_list_tokens': return json(route, {
-                status: 'ok', total: 3, tokens: [
+                status: 'ok', total: 4, tokens: [
                     { name: 'internal-long', hash: 'sha256:' + '1'.repeat(64), permissions: ['read', 'write'], space_ids: ['demo'], revoked: false },
-                    { name: 'wide-agent', hash: 'sha256:' + '2'.repeat(64), permissions: ['read'], space_ids: ['demo', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'], revoked: false },
+                    { name: 'wide-agent', hash: 'sha256:' + '2'.repeat(64), permissions: ['write', 'read'], space_ids: ['demo', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'], email: 'wide-agent-with-a-deliberately-long-owner-address@example.invalid', revoked: false },
                     { name: 'admin-agent', hash: 'sha256:' + '3'.repeat(64), permissions: ['read', 'write', 'manage', 'admin'], space_ids: [], revoked: false },
+                    { name: 'revoked-agent', hash: 'sha256:' + '4'.repeat(64), permissions: ['read'], space_ids: ['demo'], revoked: true },
                 ],
             });
             case 'admin_create_token':
@@ -127,6 +128,7 @@ async function routeConsole(page, { createToken = false } = {}) {
                     warning: 'Avertissement serveur à ne pas afficher',
                     info: 'Instantané de deux espaces',
                 });
+            case 'admin_delete_token': return json(route, { status: 'deleted', message: 'Token deleted' });
             default: return json(route, { status: 'error', message: 'unexpected tool ' + body.tool });
             }
         }
@@ -175,13 +177,99 @@ test('space detail is a clean Markdown reader with lazy graph exploration and si
     await expect(page.locator('#modalConfirmBtn')).toBeEnabled();
 });
 
-test('Access caps allowlists, hides internal-long, and explains snapshot plus Token ID in English', async ({ page }) => {
-    await routeConsole(page, { createToken: true });
+test('Access row menus target the selected token and expose honest lifecycle capabilities', async ({ page }) => {
+    const state = await routeConsole(page, { createToken: true });
     await page.goto(`${ORIGIN}/admin.html#/access`);
 
     await expect(page.locator('#accessTable')).not.toContainText('internal-long');
     await expect(page.locator('#accessTable')).toContainText('+3 more');
-    await expect(page.locator('#accessCount')).toHaveText('2');
+    await expect(page.locator('#accessCount')).toHaveText('3');
+
+    const wideRow = page.locator('#accessTable tbody tr').filter({ hasText: 'wide-agent' });
+    const wideMenu = wideRow.locator('.row-action-menu');
+    const wideTrigger = wideRow.getByLabel('Actions for token wide-agent');
+    const actionPanel = page.locator('.row-action-menu[open] .row-action-menu-panel');
+    const bodyPanels = page.locator('body > .row-action-menu-panel');
+    await wideTrigger.focus();
+    expect(await wideTrigger.evaluate(el => getComputedStyle(el).outlineStyle)).not.toBe('none');
+    await wideTrigger.press('Enter');
+    await page.keyboard.press('Tab');
+    const editAction = actionPanel.getByRole('button', { name: /^Edit token/ });
+    await expect(editAction).toBeFocused();
+    expect(await editAction.evaluate(el => getComputedStyle(el).outlineStyle)).not.toBe('none');
+    await page.keyboard.press('Escape');
+    await expect(wideMenu).not.toHaveAttribute('open', '');
+    await expect(wideTrigger).toBeFocused();
+    await wideTrigger.click();
+    await page.getByRole('heading', { name: 'Access' }).click();
+    await expect(wideMenu).not.toHaveAttribute('open', '');
+
+    await wideTrigger.click();
+    await page.getByRole('button', { name: 'Refresh' }).click();
+    await expect(page.locator('#accessCount')).toHaveText('3');
+    await expect(bodyPanels).toHaveCount(0);
+    await expect(page.locator('.row-action-menu-panel:visible')).toHaveCount(0);
+
+    await wideTrigger.click();
+    await page.evaluate(() => { location.hash = '#/dashboard'; });
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+    await expect(bodyPanels).toHaveCount(0);
+    await expect(page.locator('.row-action-menu-panel:visible')).toHaveCount(0);
+    await page.evaluate(() => { location.hash = '#/access'; });
+    await expect(page.locator('#accessCount')).toHaveText('3');
+
+    await page.setViewportSize({ width: 1150, height: 800 });
+    expect(await page.locator('.access-token-table .table-scroll').evaluate(el => getComputedStyle(el).overflowX)).toBe('auto');
+    await wideTrigger.click();
+    await expect(bodyPanels).toHaveCount(0);
+    await expect.poll(() => actionPanel.evaluate(
+        el => el.getBoundingClientRect().right,
+    )).toBeLessThanOrEqual(1150);
+    const desktopPanel = await actionPanel.boundingBox();
+    expect(desktopPanel).not.toBeNull();
+    expect(desktopPanel.x).toBeGreaterThanOrEqual(0);
+    expect(desktopPanel.x + desktopPanel.width).toBeLessThanOrEqual(1150);
+    await page.keyboard.press('Escape');
+
+    await page.setViewportSize({ width: 1000, height: 800 });
+    await wideTrigger.click();
+    await actionPanel.getByRole('button', { name: /^Close menu/ }).click();
+    await expect(wideMenu).not.toHaveAttribute('open', '');
+    await page.setViewportSize({ width: 1280, height: 800 });
+
+    await wideTrigger.click();
+    await actionPanel.getByRole('button', { name: /^Edit token/ }).click();
+    await expect(page.getByRole('heading', { name: 'Edit token' })).toBeVisible();
+    await expect(page.locator('.mono-block')).toContainText('wide-agent');
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    await wideTrigger.click();
+    await actionPanel.getByRole('button', { name: /^Create replacement/ }).click();
+    await expect(page.getByRole('heading', { name: 'Replace token safely' })).toBeVisible();
+    await expect(page.locator('#adminModal')).toContainText('does not expose an atomic regenerate-or-replace operation');
+    await page.locator('#modalConfirmBtn').click();
+    await expect(page.locator('#ctName')).toHaveValue('wide-agent-replacement');
+    await expect(page.locator('#ctPerms')).toHaveValue('write,read');
+    await expect(page.locator('#ctSpaces')).toHaveValue('demo, bravo, charlie, delta, echo, foxtrot');
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    const revokedRow = page.locator('#accessTable tbody tr').filter({ hasText: 'revoked-agent' });
+    await revokedRow.getByLabel('Actions for token revoked-agent').click();
+    await expect(actionPanel.getByRole('button', { name: /^Reactivate token/ })).toBeDisabled();
+    await actionPanel.getByRole('button', { name: /^Delete permanently/ }).click();
+    await expect(page.getByRole('heading', { name: 'Delete token permanently' })).toBeVisible();
+    await expect(page.locator('#adminModal')).toContainText('permanently deletes the revoked token');
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    await wideTrigger.click();
+    await actionPanel.getByRole('button', { name: /^Delete permanently/ }).click();
+    await expect(page.locator('#adminModal')).toContainText('immediately invalidates');
+    expect(state.calls.some(call => call.tool === 'admin_delete_token')).toBe(false);
+    await page.locator('#adminModal').getByRole('button', { name: 'Delete permanently' }).click();
+    await expect.poll(() => state.calls.find(call => call.tool === 'admin_delete_token')).toEqual({
+        tool: 'admin_delete_token',
+        arguments: { token_hash: 'sha256:' + '2'.repeat(64) },
+    });
 
     await page.getByRole('button', { name: 'Create token' }).click();
     await expect(page.locator('#ctSpacesHint')).toContainText('New spaces are not added automatically.');

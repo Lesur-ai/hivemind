@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.3.1-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.4.0-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -58,10 +58,9 @@ English · [README.md](README.md)
 aux agents IA une **mémoire partagée vendor-neutral sur trois horizons** —
 `short`, `mid`, `long` — auxquels s'ajoute **Project Mesh**, sa feature de
 synchronisation au niveau projet : plusieurs agents et équipes peuvent partager
-un même space mémoire projet logique, et les administrateurs peuvent activer le
-flux de fédération Mesh Sync V1 implémenté depuis la console protégée par
-capacités — voir [Project Mesh](#project-mesh) pour sa frontière full-mesh
-all-ACK exacte.
+un même space mémoire projet logique, et les administrateurs peuvent appairer
+des instances via le flux Mesh Sync V1 depuis la console protégée par capacités
+— voir [Project Mesh](#project-mesh) pour sa frontière full-mesh all-ACK exacte.
 
 Hivemind transforme le contexte d'agent isolé en un space partagé où les
 agents **perçoivent** ce que font les autres, **héritent** de ce qu'ils ont
@@ -101,21 +100,27 @@ synchronisation au niveau projet de Hivemind. En V1, elle est livrée en deux
   runtimes MCP-compatibles à un même `space_id` unifié sur un déploiement
   Hivemind — un space possède ses notes `short`, sa bank `mid`, sa projection
   `long` et son état de coordination Project Mesh.
-- **Disponible comme fédération d'instances opt-in.** Deux administrateurs
-  appairent une cible vierge en trois actions : créer une invitation opaque à
-  usage unique (valable **3 600 secondes**), la coller puis l'accepter sur la
-  cible, puis la vérifier et l'approuver à la source. L'échange pair signé
-  réalise la transition de membership pending, l'import bootstrap borné, l'ACK
-  final et l'activation ; une panne après mutation reste en recovery explicite,
-  sans rollback silencieux. Ce workflow d'appairage V1 provisionne exactement
-  un **mesh à deux nœuds** depuis une source dont le space ne compte qu'un
-  membre actif. Il refuse une source qui compte déjà plus d'un membre actif ;
-  l'ajout d'un troisième nœud par ce workflow n'est pas supporté en V1. Après
-  le bootstrap, les deux pairs opèrent symétriquement. Les
-  opérateurs utilisent les routes `/admin`
-  `#/mesh` protégées par capacité. Mesh reste une surface HTTP admin/pair : la
-  découverte agent plafonnée à 24 outils et la surface MCP complète n'exposent
-  **aucun outil MCP `mesh_*`**.
+- **Project Mesh est actif par défaut ; l'appairage d'instances reste une action
+  explicite de l'administrateur.** Il est actif au démarrage, sauf si
+  l'opérateur définit explicitement `HIVEMIND_MESH_ENABLED=false`. Deux
+  administrateurs appairent une cible vierge en trois actions : créer une
+  invitation opaque à usage unique (valable **3 600 secondes**), la coller puis
+  l'accepter sur la cible, puis la vérifier et l'approuver à la source.
+  L'échange pair signé réalise la transition de membership pending, l'import
+  bootstrap borné, l'ACK final et l'activation ; une panne après mutation reste
+  en recovery explicite, sans rollback silencieux. Ce workflow d'appairage V1
+  provisionne exactement un **mesh à deux nœuds** depuis une source dont le
+  space ne compte qu'un membre actif. Il refuse une source qui compte déjà plus
+  d'un membre actif ; l'ajout d'un troisième nœud par ce workflow n'est pas
+  supporté en V1. Après le bootstrap, les deux pairs opèrent symétriquement. Les
+  opérateurs utilisent les routes `/admin` `#/mesh` protégées par capacité. Mesh
+  reste une surface HTTP admin/pair : la découverte agent plafonnée à 24 outils
+  et la surface MCP complète n'exposent **aucun outil MCP `mesh_*`**.
+
+Mesh actif par défaut exige une identité Ed25519 complète, une URL HTTPS
+publique et un nom d'affichage. Le démarrage échoue de manière fermée si l'une
+de ces valeurs est absente ou invalide ; un déploiement volontairement non-Mesh
+doit explicitement définir `HIVEMIND_MESH_ENABLED=false`.
 
 Le cas d'usage est l'accélération du développement logiciel : plusieurs
 contributeurs peuvent travailler en parallèle avec leurs propres agents
@@ -284,8 +289,9 @@ graphe de connaissances `long`, lié au space en interne. C'est une
 - **Docker** >= 24.0 + **Docker Compose** >= 2.17.0 (`up --wait` est utilisé)
 - **Python 3.11+** et [`uv`](https://docs.astral.sh/uv/) (CLI/tests locaux)
 - Un **stockage S3-compatible** (Dell ECS, AWS, MinIO)
-- Un **LLM** compatible API OpenAI (pour la consolidation `mid`, l'extraction,
-  les embeddings et les requêtes sémantiques `long`)
+- Une paire de rôles **chat + embeddings** configurée pour la consolidation
+  `mid`, l'extraction et les requêtes `long`. La matrice v1.4 couvre des rôles
+  OpenAI-compatibles et le chat Anthropic natif avec embeddings séparés.
 - Aucun backend graphe ni token graphe séparé : Graph Memory + Neo4j + Qdrant
   sont **embarqués dans la stack compose par défaut** (ADR-0019). Le runtime
   embarqué utilise néanmoins l'API LLM configurée pour l'ingestion et les
@@ -329,14 +335,16 @@ python scripts/configure_dev_env.py
 Le helper crée `.env` en mode `0600`, avec des credentials bootstrap/MinIO/
 Neo4j aléatoires, `sigv4` et Mesh désactivé pour une évaluation locale
 mono-nœud délibérée. Il refuse d'écraser un fichier existant et n'affiche
-jamais les secrets générés. Avant de tester `mid` ou `long`, configurez
-`LLMAAS_API_URL`, `LLMAAS_API_KEY`, `LLMAAS_MODEL`,
-`LLMAAS_EMBEDDING_MODEL` et la dimension exacte du modèle dans
-`LLMAAS_EMBEDDING_DIMENSIONS`. Le fournisseur doit exposer des endpoints
-compatibles `/chat/completions` et `/embeddings` ; les modèles du template sont
-des exemples, pas des defaults portables. En production, copiez plutôt
-`.env.example`, fournissez votre S3 et vos secrets, et configurez une identité
-Mesh complète si vous activez Mesh.
+jamais les secrets générés. Avant de tester `mid` ou `long`, configurez les
+deux familles complètes `INFERENCE_CHAT_*` et `INFERENCE_EMBEDDING_*`. Les
+déploiements 1.x existants peuvent conserver la famille unifiée `LLMAAS_*`,
+mais les deux familles ne doivent jamais coexister. Suivez la matrice exacte à
+quatre profils, la migration stricte des huit variables, le test de readiness
+borné et la procédure identité/reindex dans le
+[guide opérateur des fournisseurs](docs/INFERENCE_PROVIDER_PROFILES.md). En
+production, copiez `.env.example`, fournissez votre S3 et vos secrets, et
+configurez une identité Mesh complète. Un déploiement de production
+volontairement non-Mesh doit définir explicitement `HIVEMIND_MESH_ENABLED=false`.
 
 ### 3a. Démarrage Docker (recommandé)
 
@@ -427,22 +435,28 @@ uv run python scripts/test_recette.py
 | `S3_SECRET_ACCESS_KEY` | Clé secrète S3                    | `wJal...`                            |
 | `S3_BUCKET_NAME`       | Nom du bucket                     | `hivemind`                           |
 | `S3_REGION_NAME`       | Région S3                         | `eu-west-1`                          |
-| `LLMAAS_API_URL`       | URL de l'API LLM (avec `/v1`)     | `https://llm.example.com/v1`         |
-| `LLMAAS_API_KEY`       | Clé d'API LLM                     | `sk-...`                             |
-| `LLMAAS_MODEL`         | Identifiant exact du modèle chat accepté par `/chat/completions` | `modele-chat-fournisseur` |
-| `LLMAAS_EMBEDDING_MODEL` | Identifiant exact du modèle embeddings accepté par `/embeddings` | `modele-embedding-fournisseur` |
-| `LLMAAS_EMBEDDING_DIMENSIONS` | Longueur exacte des vecteurs retournés | `1024` |
+| `INFERENCE_CHAT_*` | Famille chat complète : fournisseur, URL, clé, modèle exact, limites contexte/sortie | voir `.env.example` |
+| `INFERENCE_EMBEDDING_*` | Famille embeddings complète : fournisseur, URL, clé, modèle exact et dimensions | voir `.env.example` |
 | `ADMIN_BOOTSTRAP_KEY`  | Clé bootstrap admin (≥ 32 caractères aléatoires) | générée par `configure_dev_env.py` |
 
 > Le préfixe de variables d'environnement `LLMAAS_*` est hérité de
-> l'intégration LLM-as-a-Service amont et est conservé tel quel dans la
-> release publique — les noms de ces tables sont ceux que le service lit
-> réellement.
-> Les valeurs `qwen3.5:27b`, `bge-m3:567m` et `1024` du template décrivent un
-> seul profil fournisseur. Remplacez ensemble les identifiants et la dimension.
-> Une dimension erronée casse les écritures/recherches long ; la changer après
-> ingestion exige une reconstruction revue de la collection Qdrant et une
-> réingestion.
+> l'intégration LLM-as-a-Service amont et reste pleinement supporté sur toute
+> la ligne 1.x comme profil unifié historique : un seul endpoint
+> OpenAI-compatible pour les deux rôles, avec un avertissement de dépréciation
+> journalisé une fois au démarrage.
+> Les nouveaux déploiements utilisent les familles de rôles séparées
+> `INFERENCE_CHAT_*` et `INFERENCE_EMBEDDING_*` pour
+> configurer chat et embeddings indépendamment, y compris avec un fournisseur
+> différent par rôle. Les deux familles ne doivent JAMAIS être mélangées :
+> toute coexistence refuse le démarrage, sans repli champ par champ. Le service
+> Hivemind et le runtime long embarqué résolvent les mêmes profils depuis le
+> même fichier.
+> Le `qwen3.5:27b` historique du template n'est pas le profil Cloud Temple v1.4
+> nommé `Qwen/Qwen3.6-27B-FP8`. L'identité fournisseur, l'endpoint, le modèle et les
+> dimensions participent à l'identité vectorielle. Toute dérive bloque les
+> lectures/écritures jusqu'au `long_reindex` borné explicite ; voir le
+> [guide opérateur](docs/INFERENCE_PROVIDER_PROFILES.md). Hivemind ne tronque,
+> complète, adopte ni ne reconstruit jamais automatiquement les vecteurs.
 
 ### Runtime long embarqué (obligatoire, ADR-0019)
 
@@ -452,7 +466,7 @@ opérateur `url` / `token` / `memory_id` à configurer. Ses réglages `.env` :
 
 | Variable | Défaut | Description |
 | -------- | ------ | ----------- |
-| `NEO4J_PASSWORD` | _(requis)_ | Mot de passe du graph store Neo4j embarqué — la stack refuse de démarrer sans |
+| `NEO4J_PASSWORD` | _(requis)_ | Mot de passe du graph store Neo4j embarqué — la stack refuse de démarrer sans ; le premier caractère doit être alphanumérique (le helper de configuration le garantit) |
 | `LONG_EMBEDDED_URL` | `http://graph-memory:8002` | URL réseau-interne du runtime long embarqué |
 | `LONG_EMBEDDED_TOKEN` | _(vide = créé au démarrage)_ | Token scopé `read,write` local uniquement ; si vide, Hivemind le persiste atomiquement et l'enregistre avant la readiness, sans fallback volatil ni réactivation après révocation |
 
@@ -483,6 +497,7 @@ transformer les notes live `short` en bank `mid` structurée.
 | `CONSOLIDATION_TIMEOUT`   | `600`             | Timeout par appel LLM (secondes) |
 | `CONSOLIDATION_MAX_NOTES` | `200`             | Max de notes par consolidation  |
 | `CONSOLIDATION_BATCH_SIZE`| `5`               | Notes par batch LLM (petit = précis, grand = plus rapide) |
+| `CONSOLIDATION_LEGACY_FRENCH_PROMPTS` | `false` | `false` utilise les nouveaux prompts Hivemind en anglais ; `true` conserve les prompts français historiques. Redémarrez après modification ; le mode choisi s'applique à la consolidation suivante sans traduire les sections bank non touchées. Pour une bank existante en français, activez `true` avant la mise à niveau afin d'éviter une prose générée multilingue |
 | `CONSOLIDATION_COOLDOWN_SECONDS` | `60`      | Cooldown anti-spam par space pour `bank_consolidate` (`0` désactive) |
 | `CONSOLIDATION_VALIDATION_ENABLED` | `false` | Vérification optionnelle post-consolidation des claims non sourcés |
 | `CONSOLIDATION_VALIDATION_MAX_EXAMPLES` | `20` | Nombre max d'exemples retournés par la validation |
@@ -499,8 +514,9 @@ transformer les notes live `short` en bank `mid` structurée.
 Voici le parcours local copiable. Il utilise des secrets locaux générés, MinIO
 et le credential bootstrap uniquement pour l'évaluation initiale. Avant
 `mid`, configurez dans `.env` l'URL, la clé, l'identifiant exact du modèle
-chat, celui du modèle embeddings et la dimension retournée ; le fournisseur
-doit exposer `/chat/completions` et `/embeddings`. `short` n'a pas besoin de
+chat, celui du modèle embeddings et la dimension retournée ; sur ce chemin
+legacy unifié le fournisseur doit exposer `/chat/completions` et `/embeddings`
+(avec les familles `INFERENCE_*` séparées, l'exigence est par rôle). `short` n'a pas besoin de
 LLM. Le runtime `long` embarqué démarre avec la stack et s'auto-lie à sa
 première écriture, mais l'ingestion et la requête sémantique long utilisent
 également ce fournisseur.
@@ -588,12 +604,12 @@ pour les détails opérateur complets.
 
 Hivemind expose l'ensemble canonique documenté dans
 [tests/fixtures/tool_surface.json](tests/fixtures/tool_surface.json)
-(**61 noms enregistrés = 48 enregistrements directs + 13 alias de tier**,
+(**63 noms enregistrés = 50 enregistrements directs + 13 alias de tier**,
 totaux suivis par la fixture de surface) via le protocole MCP
 (Streamable HTTP) : outils historiques + alias canoniques de tier
 `short_*`/`mid_*`/`long_*` (les deux jeux restent appelables). Les tiers `short`/`mid`/`long`
 portent la grammaire publique ; `space_*`, `token_*`, `system_*`, `backup_*` et
-`admin_*` sont **transverses** et conservent leurs noms. Il existe 35 outils
+`admin_*` sont **transverses** et conservent leurs noms. Il existe 37 outils
 directs sans alias ; les 13 alias de tier restent inchangés. Voir le mapping
 stable dans
 [`docs/TOOL_MAPPING.md`](docs/TOOL_MAPPING.md)
@@ -606,6 +622,7 @@ pour la spécification complète.
 | Outil           | Paramètres | Description                                              |
 | --------------- | ---------- | -------------------------------------------------------- |
 | `system_health` | —          | Statut de santé (S3, LLM, nombre de spaces)              |
+| `inference_self_test` | —    | Test borné caché de readiness chat/embeddings, réservé à **manage** |
 | `system_whoami` | —          | Identité du token courant (nom, permissions, spaces)     |
 | `system_about`  | —          | Identité du service (version, outils, capacités)         |
 
@@ -621,7 +638,7 @@ pour la spécification complète.
 | `space_rules`        | `space_id`                                   | Lit les rules courantes du space                             |
 | `space_summary`      | `space_id`                                   | Résumé complet : rules + bank + stats (démarrage agent)      |
 | `space_export`       | `space_id`                                   | Export tar.gz en base64                                      |
-| `space_delete`       | `space_id`, `confirm`, `unsafe_recovery?`    | Supprime le space (⚠️ irréversible, manage ; flag avancé pour recovery Hivemind partagé/unsafe classifiable, jamais un état corrompu) |
+| `space_delete`       | `space_id`, `confirm`, `unsafe_recovery?`, `recover_access_grants?` | Supprime le space et ses grants d'allowlist token (⚠️ irréversible, manage ; flags avancés pour recovery Hivemind partagé/unsafe classifiable ou nettoyage des grants d'un space dont la suppression antérieure est connue) |
 | `space_invite_token` | `space_id`, `token_hash`                     | **manage + accès** : hash canonique exact, add-only/idempotent ; distinct de l'enrollment Project Mesh |
 
 ### Token
@@ -638,12 +655,19 @@ admin uniquement.
 
 La réutilisation d'identité est fail-closed : toute référence persistée vers un
 identifiant absent ou partiellement préparé — y compris sur un admin, le manager
-créateur ou des tokens révoqués/expirés — bloque `space_create` jusqu'au
-nettoyage admin explicite. `space_delete` supprime/reprobe le payload puis
-`_meta.json` en dernier, mais l'opérateur doit mettre en quiescence toutes les
-mutations et tâches de fond du space : le verrou lifecycle n'est pas une
-barrière universelle. Une suppression `partial` exige une recovery et n'est
-jamais un succès.
+créateur ou des tokens révoqués/expirés — bloque `space_create`. Une
+`space_delete` réussie supprime/reprobe le payload, retire `_meta.json` en
+dernier, puis retire ce `space_id` de toutes les allowlists et confirme zéro
+référence avant de retourner `deleted`. Un préfixe vide avec des scopes retourne
+`not_found` sans mutation par défaut, car il peut s'agir de pré-grants
+intentionnels. Pour une ancienne suppression connue ou interrompue seulement,
+`recover_access_grants=True` termine le nettoyage et retourne
+`grants_cleaned`, jamais `deleted`. L'opérateur doit toujours mettre en
+quiescence toutes les mutations et tâches de fond du space : le verrou lifecycle
+n'est pas une barrière universelle. Une suppression `partial` exige une
+recovery, maintient le blocage de réutilisation et n'est jamais un succès. Un
+grant concurrent ou ultérieur peut réintroduire la barrière fail-closed et doit
+être résolu explicitement.
 
 ### `short` — notes live (historiquement `live_*`)
 
@@ -679,6 +703,13 @@ jamais un succès.
 | `graph_disconnect` | `space_id`, `use_embedded?`                          | Détache le moteur `long`, ou revient au runtime embarqué avec `use_embedded=true` (**manage**) ; les données restent intactes. Alias `long_disconnect`. |
 | `long_ingest`      | `space_id`, `documents`, `mode?`, `include_volatile?` | Planifie l'ingestion de documents canoniques ; `apply` reste différé en V1. Outil direct, sans jumeau `graph_*`. |
 | `long_query`       | `space_id`, `query`, `limit?`                        | Requête sémantique read-only sur le moteur long dérivé. Outil direct, sans jumeau `graph_*`.                |
+| `long_reindex`     | `space_id`                                             | Opération **manage** cachée et non idempotente : reconstruit explicitement une projection embarquée `reindex_required` pendant une fenêtre de maintenance. |
+
+`long_reindex` reste appelable par son nom exact mais n'apparaît pas dans la
+découverte normale. Il refuse les bindings `graph_connect` externes et ne doit
+jamais être relancé automatiquement après un timeout ambigu. Une erreur avec
+`phase="activated"` signifie que l'activation ne peut plus être exclue ; voir le
+[runbook de déploiement](docs/DEPLOYMENT.md#bounded-embedding-reindex).
 
 ### Backup
 

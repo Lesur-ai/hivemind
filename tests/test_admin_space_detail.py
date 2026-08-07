@@ -257,6 +257,7 @@ def test_destructive_calls_use_typed_exact_identifiers_and_server_confirm() -> N
     source = _source()
     backup = _function("confirmBackupDelete", source)
     space = _function("confirmSpaceDelete", source)
+    actions = _function("renderSpaceActions", source)
     assert "confirmBankDelete" not in source
     assert "callTool('bank_delete'" not in source
     assert "sd-confirm-bank-delete" not in source
@@ -268,8 +269,23 @@ def test_destructive_calls_use_typed_exact_identifiers_and_server_confirm() -> N
     assert "Normal deletion is refused by the server" in space
     assert "Advanced unsafe recovery is MCP-only" in space
     assert "unsafe_recovery" not in space
+    assert (
+        "callTool('space_delete', { space_id: view.spaceId, confirm: true })"
+        in space
+    )
+    assert "recover_access_grants:" not in space
+    assert "If grant recovery is required, it is MCP/CLI-only" in space
+    assert "this console never sends recover_access_grants" in space
     assert "Quiescence required before deletion" not in space
-    assert "Access grants for this space remain on tokens" in space
+    assert "removes the space from every token allowlist" in space
+    assert "never restores previous access" in space
+    assert "Existing token grants must be removed" not in actions
+    assert "removes the space from every token allowlist" in actions
+    assert "never restores previous access" in actions
+    assert "result.files_deleted" in space
+    assert "result.access_grants_removed" in space
+    assert "result.status === 'grants_cleaned'" in space
+    assert "The space was not deleted by this result." in space
 
 
 def test_rules_and_mid_are_sanitized_markdown_readers() -> None:
@@ -334,12 +350,15 @@ def test_space_delete_partial_is_a_typed_non_success_branch() -> None:
         "result.files_deleted",
         "result.failed_keys",
         "result.marker_preserved",
+        "result.access_grants_pending",
         "recovery.retry_safe",
         "recovery.action",
     ):
         assert field in renderer
     assert 'data-recovery-required="true"' in renderer
     assert "No automatic retry" in renderer
+    assert "Grant-recovery retry is MCP/CLI-only" in renderer
+    assert "This console never sends recover_access_grants" in renderer
 
 
 def test_space_delete_partial_runtime_keeps_modal_and_never_auto_retries(
@@ -373,6 +392,25 @@ def test_space_delete_partial_runtime_keeps_modal_and_never_auto_retries(
     mutant_path.write_text(source.replace(branch, "", 1), encoding="utf-8")
     mutant = run(mutant_path)
     assert mutant.returncode != 0, "runtime must kill removal of the partial branch"
+
+    deleted_branch = """                if (result.status === 'deleted' || result.status === 'ok') {
+                    const filesDeleted = Number(result.files_deleted || 0);
+                    const grantsRemoved = Number(result.access_grants_removed || 0);
+                    showToast('ok', `Space deleted (${filesDeleted} files, ${grantsRemoved} token grants removed).`);
+                    AdminRouter.go('/spaces');
+                    return true;
+                }
+"""
+    assert source.count(deleted_branch) == 1
+    deleted_mutant_path = tmp_path / "views-space-detail-without-deleted-branch.js"
+    deleted_mutant_path.write_text(
+        source.replace(deleted_branch, "", 1),
+        encoding="utf-8",
+    )
+    deleted_mutant = run(deleted_mutant_path)
+    assert deleted_mutant.returncode != 0, (
+        "runtime must kill removal of the successful deletion branch"
+    )
 
 
 def test_every_tool_await_has_a_captured_epoch_guard() -> None:

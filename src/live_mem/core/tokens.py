@@ -325,11 +325,12 @@ class TokenService:
         caller: str,
         details: dict,
     ) -> None:
-        """Émet un audit minimal après persistance confirmée.
+        """Émet un audit minimal pour une mutation d'accès durable.
 
         Les hashes canoniques complets servent d'identifiants d'audit ; le
-        secret plaintext n'est jamais inclus. Le logger reste best-effort car
-        l'état durable est déjà écrit.
+        secret plaintext n'est jamais inclus. Le callsite nomme explicitement
+        les tentatives dont la confirmation durable est illisible ; le logger
+        reste best-effort et ne décide jamais du résultat de la mutation.
         """
         try:
             from ..middleware import current_request_id

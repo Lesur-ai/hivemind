@@ -74,6 +74,7 @@ def test_compose_propagates_only_the_strict_mesh_feature_flag_to_waf() -> None:
     )
 
 
+@pytest.mark.optional
 @pytest.mark.skipif(
     not os.environ.get("HIVEMIND_TEST_CADDY_BIN"),
     reason="set HIVEMIND_TEST_CADDY_BIN to a Caddy+Coraza+ratelimit binary",

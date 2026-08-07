@@ -151,8 +151,9 @@ update explicitly assigns a new non-admin scope. Bulk updates use the same rule.
 Admin compatibility tools accept canonical explicit IDs on non-admin targets even when a space does
 not yet exist. Do not use that as a reservation: any such non-admin pre-grant
 blocks later `space_create` for the same ID (including a matching partial
-preparation) until an admin removes the grant. Prefer create first, assign
-second.
+preparation) until a global admin or an active manager already scoped to that ID
+deliberately removes the grant with `recover_access_grants=True`. This removes
+peer pre-grants too, so prefer create first, assign second.
 
 A manager uses the narrower flow instead:
 
@@ -187,9 +188,13 @@ to that manager's `space_ids`. Admin/bootstrap already have global access and
 need no grant. `_meta.json` is written last; a partial/recovery-required result
 is never treated as success or automatically rolled back. Retry the exact same
 inputs only when `recovery.retry_safe` is true. Otherwise follow
-`recovery.action`: in particular, deleting a space leaves historical token
-allowlists intact, so reuse of that ID is blocked until an admin explicitly
-removes every stale scope reference (including admin/revoked/expired tokens).
+`recovery.action`. A successful deletion removes the ID from every token
+allowlist, including revoked and expired entries, before returning `deleted`.
+An absent prefix that still has scopes is ambiguous because it can be an
+intentional future pre-grant. Normal deletion preserves those scopes. Only for
+a known older or interrupted deletion may an authorized admin or scoped manager
+explicitly retry with `recover_access_grants=True`; that destructive
+grants-only recovery returns `grants_cleaned`, never `deleted`.
 
 ### What must I do before deleting or reusing a space ID?
 
@@ -198,10 +203,26 @@ consolidation, graph operations, restore/GC, and Hivemind activity. Deletion
 reprobes each payload object and removes `_meta.json` last, but its lifecycle
 lock does not fence every writer. A `partial` result is not success: follow its
 counts, failed keys, marker state, and `recovery.action` without automatic
-retry. Even after a clean deletion, `space_create` refuses reuse until an admin
-removes that ID from every token carrying it, including admin/revoked/expired
-entries. Admin entries normally carry `[]` under v2; counting them remains a
-defense-in-depth barrier for legacy or pre-migration objects.
+retry. A successful deletion removes the ID from every token allowlist and
+confirms zero references before returning `deleted`, so normal reuse needs no
+manual rescoping and restores no previous access. If the prefix is already
+absent but scopes survive, normal deletion preserves the possible intentional
+future pre-grant. Use `recover_access_grants=True` only for a known older or
+interrupted deletion; a `partial` cleanup or a concurrent/later grant can still
+keep reuse blocked and must be resolved explicitly.
+Cleanup converges at the registry level but is not caller-idempotent: after its
+own scope is removed, a manager retry is denied. The same is true after a
+successful ordinary deletion; a global admin or bootstrap identity can inspect
+the terminal state.
+
+Restoring a backup copies space objects only; it never restores token
+allowlists. Because successful deletion removes every scope for that ID, a
+global/bootstrap administrator must perform the restore and then call
+the appropriate re-grant tool for each intended non-admin token. A persisted
+global admin calls `space_invite_token`; bootstrap has no persisted actor hash
+and uses `admin_update_token` or `admin_bulk_update_tokens` with
+`space_ids_add`. Never delete and recreate the restored space to repair access:
+that destroys the restored data.
 
 ### How to add the `manage` permission to a token?
 

@@ -314,7 +314,7 @@ class StaticFilesMiddleware:
         
         # Health check
         if path in ("/health", "/healthz", "/ready"):
-            await self._api_health(send)
+            await self._api_health(send, require_readiness=path == "/ready")
             return
 
         # API REST - Login admin web
@@ -565,25 +565,34 @@ class StaticFilesMiddleware:
             pass
         return "unknown"
 
-    async def _api_health(self, send):
-        """Retourne l'état de santé du serveur (format compact)."""
-        import json
+    async def _api_health(self, send, *, require_readiness: bool = False):
+        """Return stable liveness or the value-free mutation readiness gate."""
         version = self._read_version()
         try:
+            ready = True
+            if require_readiness:
+                from ..core.maintenance import get_maintenance_coordinator
+
+                schema = self.graph_service.document_schema_status()
+                maintenance = get_maintenance_coordinator().health_status()
+                ready = (
+                    schema.get("status") == "ok"
+                    and maintenance.get("status") == "ok"
+                )
             data = {
-                "status": "healthy",
+                "status": "healthy" if ready else "error",
                 "service": "graph-memory",
                 "version": version,
                 "transport": "streamable-http",
             }
-            await self._send_json(send, data)
-        except Exception as e:
+            await self._send_json(send, data, 200 if ready else 503)
+        except Exception:
             await self._send_json(send, {
                 "status": "error",
                 "service": "graph-memory",
                 "version": version,
                 "transport": "streamable-http",
-            }, 500)
+            }, 503 if require_readiness else 500)
     
     async def _api_memories(self, send):
         """Retourne la liste des mémoires en JSON."""

@@ -1,4 +1,7 @@
 import { defineConfig } from '@playwright/test';
+import { claimPlaywrightRunner } from './runner-guard.mjs';
+
+claimPlaywrightRunner();
 
 // Headless chromium, no web server (each spec intercepts every request via
 // page.route and serves the real static bundle + controlled API from disk).

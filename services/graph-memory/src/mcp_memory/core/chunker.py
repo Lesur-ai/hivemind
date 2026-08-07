@@ -103,6 +103,10 @@ class SemanticChunker:
         settings = get_settings()
         self._chunk_size = settings.chunk_size  # tokens
         self._chunk_overlap = settings.chunk_overlap  # tokens
+
+    def configuration_signature(self) -> tuple[int, int]:
+        """Return the immutable values that determine chunk accounting."""
+        return (self._chunk_size, self._chunk_overlap)
     
     def chunk_document(self, text: str, filename: str) -> List[Chunk]:
         """

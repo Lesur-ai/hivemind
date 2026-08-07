@@ -33,9 +33,9 @@ tests/js/admin_audit_state_runtime.mjs via test_admin_ui_p8_6).
 
 A node:vm harness stubs the shell, so it cannot prove behaviours the real shell
 owns (e.g. single in-flight create — the shell disables the confirm button before
-awaiting onConfirm). That real-shell layer is proved by the complementary
-Playwright integration test in tests/test_admin_ui_p8_5_e2e.py
-(tests/e2e/admin_access_create.spec.mjs), added per the Terra PR #167 review.
+awaiting onConfirm). That real-shell layer is proved directly by the dedicated
+Playwright CI job through tests/e2e/admin_access_create.spec.mjs, added per the
+Terra PR #167 review.
 
 Contract: DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §3.1.4, §3.3.2, §4.4, §5.0,
 §5.7, §6.4, §6.5, §7.1, §7.4, §8.
@@ -172,15 +172,15 @@ class TestDataHonesty:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Rotate honesty (D-rotate §6.4): documented, never a control
+# Replacement honesty (D-rotate §6.4): guided create, never fake rotation
 # ═══════════════════════════════════════════════════════════════
 
 
 class TestRotateHonesty:
-    def test_no_rotate_tool_or_control(self):
+    def test_no_atomic_rotate_tool_but_guided_replacement_exists(self):
         src = _access()
         assert "admin_rotate_token" not in src
-        assert "rotate-token" not in src  # no data-action rotate control
+        assert "rotate-token" not in src
         # No data-action whose name implies a rotate operation.
         actions = set(re.findall(r"data-action=\"([a-z-]+)\"", src))
         actions |= set(re.findall(r"registerAction\(\s*'([a-z-]+)'", src))
@@ -188,8 +188,13 @@ class TestRotateHonesty:
             f"A rotate control is wired: {sorted(a for a in actions if 'rotate' in a)}. "
             "D-rotate §6.4 forbids any rotate control."
         )
+        assert "access-replace" in actions
+        replacement = _fn_body(src, "openReplacementModal")
+        assert "does not expose an atomic regenerate-or-replace operation" in replacement
+        assert "openCreateModal(replacementPrefill(token))" in replacement
+        assert "admin_revoke_token" not in replacement
 
-    def test_verbose_rotation_guidance_is_not_persistent_page_slop(self):
+    def test_replacement_guidance_is_contextual_not_persistent_page_slop(self):
         src = _access()
         assert "Rotating a token:" not in src
         assert "access-rotate" not in src
@@ -312,6 +317,21 @@ class TestDestructiveUX:
         # ... and are NOT wired as typed challenges (frozen §7.4.1 baseline).
         assert "typedConfirmation: 'revoke" not in src
         assert "typedConfirmation: 'delete" not in src
+
+    def test_active_and_revoked_rows_offer_permanent_delete_with_state_specific_copy(self):
+        src = _access()
+        row = _fn_body(src, "renderRow")
+        delete_modal = _fn_body(src, "openDeleteModal")
+        assert "Delete permanently" in row
+        assert "if (token.revoked)" in delete_modal
+        assert "immediately invalidates" in delete_modal
+        assert "permanently deletes the revoked token" in delete_modal
+
+    def test_revoked_rows_do_not_claim_reactivation(self):
+        row = _fn_body(_access(), "renderRow")
+        assert "Reactivate token" in row
+        assert "Revocation is permanent" in row
+        assert "disabled aria-disabled=\"true\"" in row
 
     def test_internal_long_is_hidden_from_list_but_purge_warning_remains(self):
         src = _access()

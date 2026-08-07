@@ -269,6 +269,15 @@ class TestRestoreFailClosed:
         assert "restoreErrorHtml" in oper
         assert "unsafe-recovery path is an MCP-client operation" in oper
 
+    def test_restore_discloses_data_only_and_bootstrap_regrant_boundary(self, oper):
+        restore = _extract_fn(oper, "function confirmRestore(")
+        assert restore.count("restore never restores token allowlists") == 1
+        assert restore.count("Access was not restored.") == 1
+        assert restore.count("space_invite_token") == 2
+        assert restore.count("admin_update_token") == 2
+        assert restore.count("admin_bulk_update_tokens") == 2
+        assert restore.count("Never delete and recreate") == 2
+
 
 # ─────────────────────────── token purge lives in Access only (§4.8 M6) ───────────────────────────
 

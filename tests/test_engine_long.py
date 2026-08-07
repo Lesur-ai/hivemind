@@ -13,9 +13,9 @@ Surfaces verified (ADR-0006 + ADR-0010 long-authority invariant):
 - Calls are forwarded with exact args / kwargs and no reordering.
 - The default-None constructor lazily resolves get_graph_bridge() (monkeypatched
   to a sentinel) — no real MCP/network client is built at def/import time.
-- The public async surface is EXACTLY {connect, push, status, disconnect}: there
-  is NO commit/rollback/audit/tombstone/watermark/recovery/assert_commit_allowed
-  method (reviewer-verifiable no-commit-path AC).
+- The four original bridge methods remain exact pass-throughs. The current
+  ten-member public async surface and the no-authority name set have one
+  canonical assertion in ``test_long_engine.py``.
 - The constructor accepts NO write_sink param and the module never imports/uses
   WriteSink (LongEngine never writes _hivemind/).
 - Grep the long_engine.py source: no neo4j / qdrant / mcp client / new Graph
@@ -434,49 +434,8 @@ def test_long_engine_injected_bridge_skips_singleton(monkeypatch) -> None:
 
 
 # =============================================================================
-# Surface / authority — no commit-path method, no WriteSink.
+# Constructor / authority boundary — no WriteSink.
 # =============================================================================
-
-
-def test_long_engine_surface_is_only_legacy_graph_methods() -> None:
-    public_async = {
-        name
-        for name, member in inspect.getmembers(
-            LongEngine, predicate=inspect.iscoroutinefunction
-        )
-        if not name.startswith("_")
-    }
-    assert public_async == {
-        "connect",
-        "push",
-        "status",
-        "disconnect",
-        # P4-4 typed downstream projection / read methods.
-        "ingest",
-        "list_ontologies",
-        "query",
-        "search",
-        # P4-7 PLAN-ONLY ingestion planner (dry-run / check-remote / apply-deferred).
-        "plan_ingest",
-    }
-
-    # No commit/rollback/audit/tombstone/watermark/recovery authority method.
-    # ``plan_ingest`` is a planner only — it contains no forbidden substring.
-    forbidden = (
-        "assert_commit_allowed",
-        "commit",
-        "rollback",
-        "audit",
-        "tombstone",
-        "watermark",
-        "recover",
-        "recovery",
-        "apply_commit",
-        "validate_commit",
-    )
-    all_names = {name for name, _ in inspect.getmembers(LongEngine)}
-    for bad in forbidden:
-        assert bad not in all_names, f"LongEngine must not expose '{bad}'"
 
 
 def test_long_engine_takes_no_writesink() -> None:

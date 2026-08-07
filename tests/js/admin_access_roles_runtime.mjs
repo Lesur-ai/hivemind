@@ -74,6 +74,7 @@ function accessHarness(identity, overrides = {}) {
         ['ctNameErr', node()],
         ['ctNameHint', node()],
         ['ctPerms', node('read,write')],
+        ['ctPermsErr', node()],
         ['ctSpaces', node('')],
         ['ctSpacesHint', node()],
         ['ctExpires', node('0')],
@@ -102,6 +103,8 @@ function accessHarness(identity, overrides = {}) {
         if (tool === 'space_list') return { status: 'ok', spaces: [{ space_id: 'fresh-space' }] };
         if (tool === 'space_invite_token') return { status: 'ok', space_id: args.space_id, added: true };
         if (tool === 'admin_update_token') return { status: 'ok', message: 'Token updated' };
+        if (tool === 'admin_revoke_token') return { status: 'ok', message: 'Token revoked' };
+        if (tool === 'admin_delete_token') return { status: 'deleted', message: 'Token deleted' };
         if (tool === 'admin_create_token') {
             return {
                 status: 'created', name: 'manager-child', token: 'lm_legacy_admin_secret',
@@ -123,6 +126,7 @@ function accessHarness(identity, overrides = {}) {
         cache,
         document: {
             body: { appendChild() {}, removeChild() {} },
+            addEventListener() {},
             getElementById(id) { return elements.get(id) || null; },
             querySelectorAll(selector) { return selector === '.et-space' ? editBoxes : []; },
             createElement() { return node(); },
@@ -189,13 +193,19 @@ async function proveAdminEditPromotionAndDowngradeScopeTransitions() {
         token_hash: 'sha256:' + '4'.repeat(64),
     };
 
-    const promoted = accessHarness(identity);
+    const promotedHash = 'sha256:' + '5'.repeat(64);
+    const promoted = accessHarness(identity, {
+        admin_list_tokens: async () => ({
+            status: 'ok',
+            tokens: [{ name: 'writer', hash: promotedHash, permissions: ['read', 'write'], space_ids: ['alpha'] }],
+            total: 1,
+        }),
+    });
     promoted.render();
     await flush();
     promoted.elements.get('etPerms').value = 'read,write';
     promoted.actions['access-edit']({
-        hash: 'sha256:' + '5'.repeat(64), name: 'writer',
-        perms: 'read,write', spaces: 'alpha', email: '',
+        hash: promotedHash,
     });
     await flush();
     promoted.editBoxes[0].checked = false;
@@ -210,13 +220,19 @@ async function proveAdminEditPromotionAndDowngradeScopeTransitions() {
     assert.equal(Object.hasOwn(promotion.args, 'space_ids_add'), false);
     assert.equal(Object.hasOwn(promotion.args, 'space_ids_remove'), false);
 
-    const downgraded = accessHarness(identity);
+    const downgradedHash = 'sha256:' + '6'.repeat(64);
+    const downgraded = accessHarness(identity, {
+        admin_list_tokens: async () => ({
+            status: 'ok',
+            tokens: [{ name: 'former-admin', hash: downgradedHash, permissions: ['read', 'write', 'manage', 'admin'], space_ids: [] }],
+            total: 1,
+        }),
+    });
     downgraded.render();
     await flush();
     downgraded.elements.get('etPerms').value = 'read,write,manage,admin';
     downgraded.actions['access-edit']({
-        hash: 'sha256:' + '6'.repeat(64), name: 'former-admin',
-        perms: 'read,write,manage,admin', spaces: '', email: '',
+        hash: downgradedHash,
     });
     await flush();
     assert.ok(downgraded.editBoxes.every(box => box.disabled), 'current admin starts with disabled scope controls');
@@ -232,9 +248,10 @@ async function proveAdminEditPromotionAndDowngradeScopeTransitions() {
     assert.equal(Object.hasOwn(downgrade.args, 'space_ids_remove'), false);
 }
 
-async function proveHeaderEditPickerOpensExistingEditor() {
+async function proveRowMenuTargetsExactTokenAndGuidesReplacement() {
     const firstHash = 'sha256:' + '7'.repeat(64);
     const selectedHash = 'sha256:' + '8'.repeat(64);
+    const emptyPermissionsHash = 'sha256:' + '6'.repeat(64);
     const identity = {
         client_name: 'admin', auth_type: 'token',
         permissions: ['read', 'write', 'manage', 'admin'],
@@ -245,7 +262,8 @@ async function proveHeaderEditPickerOpensExistingEditor() {
             status: 'ok',
             tokens: [
                 { name: 'duplicate-name', hash: firstHash, permissions: ['read'], space_ids: [] },
-                { name: 'duplicate-name', hash: selectedHash, permissions: ['read', 'write', 'manage'], space_ids: ['alpha'] },
+                { name: 'duplicate-name', hash: selectedHash, permissions: ['write', 'read'], space_ids: ['alpha'], expires_at: 'malformed' },
+                { name: 'empty-profile', hash: emptyPermissionsHash, permissions: [], space_ids: [] },
                 { name: 'internal-long', hash: 'sha256:' + '9'.repeat(64), permissions: ['read'], space_ids: [] },
                 { name: 'revoked', hash: 'sha256:' + 'a'.repeat(64), permissions: ['read'], space_ids: [], revoked: true },
             ],
@@ -254,19 +272,53 @@ async function proveHeaderEditPickerOpensExistingEditor() {
     });
     h.render();
     await flush();
-    assert.match(h.content.innerHTML, /access-open-edit/);
+    const tableHtml = h.elements.get('accessTable').innerHTML;
+    assert.match(tableHtml, /row-action-menu/);
+    assert.doesNotMatch(h.content.innerHTML, /access-open-edit/);
+    assert.match(tableHtml, /Edit token/);
+    assert.match(tableHtml, /Create replacement/);
+    assert.match(tableHtml, /Disable token/);
+    assert.match(tableHtml, /Reactivate token/);
+    assert.match(tableHtml, /Delete permanently/);
 
-    h.actions['access-open-edit']();
-    assert.equal(h.modal.title, 'Choose a token to edit');
-    assert.match(h.modal.body, new RegExp(firstHash));
-    assert.match(h.modal.body, new RegExp(selectedHash));
-    assert.doesNotMatch(h.modal.body, /internal-long/);
-    assert.doesNotMatch(h.modal.body, /revoked/);
-
-    h.elements.get('editTokenPicker').value = selectedHash;
-    assert.equal(await h.modal.onConfirm(), false);
+    h.actions['access-edit']({ hash: selectedHash });
+    await flush();
     assert.equal(h.modal.title, 'Edit token');
-    assert.match(h.modal.body, /value="read,write,manage" selected/);
+    assert.match(h.modal.body, /<option value="">— no change —<\/option>/);
+    assert.doesNotMatch(h.modal.body, /<option[^>]+selected/);
+
+    h.actions['access-replace']({ hash: selectedHash });
+    assert.equal(h.modal.title, 'Replace token safely');
+    assert.match(h.modal.body, /does not expose an atomic regenerate-or-replace operation/);
+    assert.match(h.modal.body, /old token stays active/i);
+    assert.equal(await h.modal.onConfirm(), false);
+    assert.equal(h.modal.title, 'Create replacement token');
+    assert.match(h.modal.body, /value="duplicate-name-replacement"/);
+    assert.match(h.modal.body, /value="write,read" selected/);
+    assert.doesNotMatch(h.modal.body, /value="read" selected/);
+    assert.match(h.modal.body, /stored permission profile/i);
+    assert.match(h.modal.body, /value="alpha"/);
+    assert.match(h.modal.body, /id="ctExpires"[^>]*value="1"/);
+
+    h.actions['access-replace']({ hash: emptyPermissionsHash });
+    assert.equal(await h.modal.onConfirm(), false);
+    assert.equal(h.modal.title, 'Create replacement token');
+    assert.match(h.modal.body, /<option value="" selected disabled>Stored permission profile unavailable/);
+    assert.match(h.modal.body, /cannot be copied safely/i);
+    assert.doesNotMatch(h.modal.body, /value="read,write" selected/);
+    h.elements.get('ctPerms').value = '';
+    const beforeUnavailableSubmit = h.calls.length;
+    assert.equal(await h.modal.onConfirm(), false);
+    assert.equal(h.calls.length, beforeUnavailableSubmit, 'unavailable permissions must fail before the network');
+    assert.equal(h.elements.get('ctPermsErr').hidden, false);
+    assert.match(h.elements.get('ctPermsErr').textContent, /Select a permission profile/);
+
+    h.actions['access-delete']({ hash: firstHash });
+    assert.equal(h.modal.title, 'Delete token permanently');
+    assert.match(h.modal.body, /immediately invalidates/);
+    await h.actions['access-delete-do']({ hash: firstHash });
+    assert.equal(h.calls.at(-1).tool, 'admin_delete_token');
+    assert.equal(h.calls.at(-1).args.token_hash, firstHash);
 }
 
 async function proveManagerNeverCallsAdmin() {
@@ -302,7 +354,10 @@ async function proveManagerNeverCallsAdmin() {
     await h.modal.onConfirm();
     assert.equal(h.calls.at(-1).tool, 'space_invite_token');
 
-    for (const forged of ['access-open-edit', 'access-edit', 'access-revoke', 'access-delete', 'access-purge']) {
+    for (const forged of [
+        'access-edit', 'access-replace', 'access-revoke', 'access-delete', 'access-purge',
+        'access-revoke-do', 'access-delete-do',
+    ]) {
         h.actions[forged]({ hash: 'sha256:' + '2'.repeat(64), mode: 'all' });
     }
     assert.equal(h.calls.some(call => call.tool.startsWith('admin_')), false);
@@ -549,7 +604,7 @@ async function proveRetrySafeSpacePartialAllowsOnlyManualIdenticalRetry() {
 await proveManagerNeverCallsAdmin();
 await proveAdminAndBootstrapKeepLegacyCreate();
 await proveAdminEditPromotionAndDowngradeScopeTransitions();
-await proveHeaderEditPickerOpensExistingEditor();
+await proveRowMenuTargetsExactTokenAndGuidesReplacement();
 await provePartialCredentialIsNeverHidden();
 await proveSpaceCreateGate();
 await proveSpacePartialKeepsExactValuesAndNeverSucceeds();

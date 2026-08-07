@@ -8,12 +8,14 @@ Gère toutes les opérations sur le graphe de connaissances :
 - Statistiques
 """
 
+import asyncio
 import sys
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from contextlib import asynccontextmanager
+from functools import wraps
 
-from neo4j import AsyncGraphDatabase, AsyncDriver, AsyncSession
+from neo4j import AsyncGraphDatabase, AsyncDriver, AsyncSession, Query
 from neo4j.exceptions import ServiceUnavailable, AuthError
 
 from ..config import get_settings
@@ -22,6 +24,22 @@ from .models import (
     ExtractedEntity, ExtractedRelation, ExtractionResult,
     SearchResult, GraphContext, SearchMode
 )
+from .maintenance import (
+    MAX_REINDEX_SOURCE_DOCUMENTS,
+    ReindexSourceLimitExceeded,
+)
+
+
+_DOCUMENT_SOURCE_NORMALIZATION_BATCH_SIZE = 1_000
+_DOCUMENT_SCHEMA_MIGRATION_ID = "document-source-path-empty-to-null-v1"
+_DOCUMENT_SCHEMA_MIGRATION_VERSION = 1
+
+
+class DocumentSchemaUnavailable(RuntimeError):
+    """Fixed refusal while the global Document schema is unverified."""
+
+    def __init__(self) -> None:
+        super().__init__("document schema initialization is unavailable")
 
 
 def _iso(v):
@@ -41,6 +59,50 @@ def _iso(v):
     return str(v)
 
 
+def _guard_graph_mutation(method):
+    """Guard one memory-scoped Neo4j mutation before opening a session."""
+
+    @wraps(method)
+    async def guarded(self, memory_id: str, *args, **kwargs):
+        from .maintenance import get_maintenance_coordinator
+
+        async with get_maintenance_coordinator().ordinary(memory_id):
+            return await method(self, memory_id, *args, **kwargs)
+
+    return guarded
+
+
+def _guard_graph_import(method):
+    """Derive the exact backup namespace before any graph import effect."""
+
+    @wraps(method)
+    async def guarded(self, data: Dict[str, Any], *args, **kwargs):
+        memory = data.get("memory") if type(data) is dict else None
+        memory_id = memory.get("id") if type(memory) is dict else None
+        if type(memory_id) is not str or not memory_id:
+            raise ValueError("backup memory id is invalid")
+        for collection_name in (
+            "documents",
+            "entities",
+            "relations",
+            "mentions",
+        ):
+            collection = data.get(collection_name, [])
+            if type(collection) is not list or any(
+                type(item) is not dict for item in collection
+            ):
+                raise ValueError("backup graph data is invalid")
+        for item in data.get("documents", []) + data.get("entities", []):
+            if "memory_id" in item and item["memory_id"] != memory_id:
+                raise ValueError("backup graph namespace mismatch")
+        from .maintenance import get_maintenance_coordinator
+
+        async with get_maintenance_coordinator().ordinary(memory_id):
+            return await method(self, data, *args, **kwargs)
+
+    return guarded
+
+
 class GraphService:
     """
     Service de gestion du Knowledge Graph (Neo4j).
@@ -54,6 +116,8 @@ class GraphService:
     
     # Nom de l'index fulltext dans Neo4j
     FULLTEXT_INDEX_NAME = "entity_fulltext"
+    _schema_query_timeout_seconds = 30
+    _doc_migration_marker_ready = False
     
     def __init__(self):
         """Initialise la connexion Neo4j."""
@@ -67,8 +131,15 @@ class GraphService:
             connection_acquisition_timeout=60
         )
         self._database = settings.neo4j_database
+        self._schema_query_timeout_seconds = settings.neo4j_query_timeout_seconds
         self._fulltext_index_ready = False  # Lazy init de l'index fulltext
-        self._doc_constraints_ready = False  # Lazy init contrainte unicité source_path
+        self._doc_constraints_ready = False
+        self._doc_source_normalization_done = False
+        self._doc_migration_marker_ready = False
+        # The composite constraint and its legacy normalization are GLOBAL
+        # Neo4j schema lifecycle.  Per-memory mutation gates cannot serialize
+        # two namespaces that concurrently discover the schema as absent.
+        self._doc_constraints_lock = asyncio.Lock()
 
     async def close(self):
         """Ferme la connexion Neo4j."""
@@ -78,10 +149,52 @@ class GraphService:
     async def session(self) -> AsyncSession:
         """Context manager pour obtenir une session Neo4j."""
         session = self._driver.session(database=self._database)
+        cancelled = False
         try:
             yield session
+        except asyncio.CancelledError:
+            # Neo4j's async driver documents cancel() as the cancellation
+            # escape hatch. Awaiting close() here can try to consume an
+            # unanswered auto-result and defeat the outer startup deadline.
+            cancelled = True
+            try:
+                session.cancel()
+            except Exception:
+                pass
+            raise
         finally:
-            await session.close()
+            if not cancelled:
+                try:
+                    await session.close()
+                except asyncio.CancelledError:
+                    try:
+                        session.cancel()
+                    except Exception:
+                        pass
+                    raise
+
+    @staticmethod
+    async def _run_consumed(session: AsyncSession, query, **params) -> None:
+        """Run one write/DDL and observe its deferred PULL/commit outcome."""
+
+        result = await session.run(query, **params)
+        await result.consume()
+
+    def _document_schema_is_ready(self) -> bool:
+        return (
+            self._doc_source_normalization_done
+            and self._doc_constraints_ready
+            and self._doc_migration_marker_ready
+        )
+
+    def document_schema_status(self) -> dict[str, object]:
+        """Return the process startup invariant without touching Neo4j."""
+
+        ready = self._document_schema_is_ready()
+        return {
+            "status": "ok" if ready else "error",
+            "ready": ready,
+        }
     
     def _ns(self, memory_id: str) -> str:
         """Retourne le préfixe namespace pour les labels."""
@@ -138,6 +251,7 @@ class GraphService:
     # Gestion des Mémoires
     # =========================================================================
     
+    @_guard_graph_mutation
     async def create_memory(
         self,
         memory_id: str,
@@ -226,6 +340,7 @@ class GraphService:
                 created_at=node["created_at"].to_native() if node.get("created_at") else datetime.utcnow()
             )
     
+    @_guard_graph_mutation
     async def update_memory(
         self,
         memory_id: str,
@@ -279,6 +394,7 @@ class GraphService:
                 created_at=node["created_at"].to_native() if node.get("created_at") else datetime.utcnow()
             )
     
+    @_guard_graph_mutation
     async def delete_memory(self, memory_id: str) -> bool:
         """
         Supprime une mémoire et tous ses nœuds associés.
@@ -291,7 +407,8 @@ class GraphService:
             # Supprimer tous les nœuds du namespace
             # Les labels dynamiques ne sont pas supportés directement,
             # donc on utilise apoc ou on supprime par propriété memory_id
-            await session.run(
+            await self._run_consumed(
+                session,
                 """
                 MATCH (n)
                 WHERE n.memory_id = $memory_id
@@ -371,55 +488,331 @@ class GraphService:
             return norm[len("repo/"):] or None
         return None
 
-    async def ensure_document_constraints(self):
-        """
-        Crée la contrainte d'unicité (memory_id, source_path) sur les documents.
+    async def ensure_document_lookup_index(self) -> None:
+        """Attempt the optional lookup index within its own small budget."""
 
-        Idempotent et best-effort : si des doublons legacy existent déjà, la
-        création de contrainte échoue → on log un avertissement sans planter
-        (la sérialisation par worker/mémoire garantit déjà l'unicité applicative).
+        timeout_seconds = min(
+            2.0,
+            max(0.1, self._schema_query_timeout_seconds / 10),
+        )
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async with self.session() as session:
+                    result = await session.run(
+                        Query(
+                            """
+                        CREATE INDEX document_memory_id_id IF NOT EXISTS
+                        FOR (d:Document) ON (d.memory_id, d.id)
+                            """,
+                            timeout=timeout_seconds,
+                        )
+                    )
+                    await result.consume()
+        except Exception:
+            print(
+                "⚠️ [Graph] Index (memory_id, id) non créé",
+                file=sys.stderr,
+            )
 
-        Normalise au passage les anciens source_path == "" en null pour ne pas
-        faire échouer la contrainte (Neo4j ignore les propriétés null).
-        """
-        # Index (memory_id, id) — créé AVANT la contrainte et dans un try séparé :
-        # des doublons legacy sur source_path peuvent faire échouer la contrainte,
-        # ce qui ne doit PAS empêcher la création de cet index (lookups get_document /
-        # get_documents_meta, sinon scan de tous les Documents de la mémoire).
+    async def _ensure_document_migration_marker_constraint_locked(self) -> None:
+        """Require uniqueness for the durable global migration marker."""
+
         try:
             async with self.session() as session:
-                await session.run(
-                    """
-                    CREATE INDEX document_memory_id_id IF NOT EXISTS
-                    FOR (d:Document) ON (d.memory_id, d.id)
-                    """
+                await self._run_consumed(
+                    session,
+                    Query(
+                        """
+                    CREATE CONSTRAINT hivemind_schema_migration_id_unique
+                    IF NOT EXISTS
+                    FOR (m:HivemindSchemaMigration) REQUIRE m.id IS UNIQUE
+                        """,
+                        timeout=self._schema_query_timeout_seconds,
+                    ),
                 )
-        except Exception as e:
-            print(f"⚠️ [Graph] Index (memory_id, id) non créé: {e}", file=sys.stderr)
+            await self._verify_node_uniqueness_constraint_locked(
+                label="HivemindSchemaMigration",
+                properties=("id",),
+            )
+        except Exception:
+            print(
+                "⚠️ [Graph] Contrainte de migration documentaire NON vérifiée",
+                file=sys.stderr,
+            )
+            raise DocumentSchemaUnavailable() from None
+
+    async def _verify_node_uniqueness_constraint_locked(
+        self,
+        *,
+        label: str,
+        properties: tuple[str, ...],
+    ) -> None:
+        """Verify the consumed DDL left the exact semantic node constraint.
+
+        ``IF NOT EXISTS`` is also a no-op when an unrelated constraint or index
+        already owns the requested name, or when an equivalent constraint has a
+        legacy name. Consuming the DDL alone therefore cannot publish a schema
+        invariant; read the catalog and compare every semantic field. The name
+        is deliberately not authoritative when an exact equivalent constraint
+        already enforces the invariant.
+        """
 
         try:
             async with self.session() as session:
-                # Migration : "" → null (sinon tous les docs legacy violent l'unicité)
-                await session.run(
-                    """
-                    MATCH (d:Document) WHERE d.source_path = ''
-                    SET d.source_path = null
-                    """
+                result = await session.run(
+                    Query(
+                        """
+                    SHOW CONSTRAINTS
+                    YIELD name, type, entityType, labelsOrTypes, properties
+                    WHERE entityType = 'NODE'
+                      AND type IN ['UNIQUENESS', 'NODE_PROPERTY_UNIQUENESS']
+                      AND labelsOrTypes = $labels_or_types
+                      AND properties = $constraint_properties
+                    RETURN name, type, entityType, labelsOrTypes, properties
+                    LIMIT 2
+                        """,
+                        timeout=self._schema_query_timeout_seconds,
+                    ),
+                    labels_or_types=[label],
+                    constraint_properties=list(properties),
                 )
-                await session.run(
-                    """
+                records = [record async for record in result]
+                await result.consume()
+        except Exception:
+            raise DocumentSchemaUnavailable() from None
+
+        record = records[0] if len(records) == 1 else None
+        try:
+            actual = {
+                "name": record["name"],
+                "type": record["type"],
+                "entity_type": record["entityType"],
+                "labels_or_types": record["labelsOrTypes"],
+                "properties": record["properties"],
+            }
+        except Exception:
+            raise DocumentSchemaUnavailable() from None
+        if (
+            type(actual["name"]) is not str
+            or not actual["name"]
+            or actual["type"]
+            not in {"UNIQUENESS", "NODE_PROPERTY_UNIQUENESS"}
+            or actual["entity_type"] != "NODE"
+            or type(actual["labels_or_types"]) is not list
+            or actual["labels_or_types"] != [label]
+            or type(actual["properties"]) is not list
+            or actual["properties"] != list(properties)
+        ):
+            raise DocumentSchemaUnavailable()
+
+    async def _read_document_migration_marker_locked(self) -> bool:
+        """Consume and validate the versioned completion marker, if present."""
+
+        try:
+            async with self.session() as session:
+                result = await session.run(
+                    Query(
+                        """
+                    MATCH (m:HivemindSchemaMigration {id: $migration_id})
+                    RETURN properties(m) AS marker
+                    LIMIT 2
+                        """,
+                        timeout=self._schema_query_timeout_seconds,
+                    ),
+                    migration_id=_DOCUMENT_SCHEMA_MIGRATION_ID,
+                )
+                records = [record async for record in result]
+                await result.consume()
+        except Exception:
+            print(
+                "⚠️ [Graph] Marqueur de migration documentaire NON vérifié",
+                file=sys.stderr,
+            )
+            raise DocumentSchemaUnavailable() from None
+
+        if not records:
+            return False
+        marker = None
+        if len(records) == 1:
+            try:
+                marker = records[0]["marker"]
+            except Exception:
+                pass
+        if (
+            len(records) != 1
+            or type(marker) is not dict
+            or marker.get("id") != _DOCUMENT_SCHEMA_MIGRATION_ID
+            or type(marker.get("version")) is not int
+            or marker["version"] != _DOCUMENT_SCHEMA_MIGRATION_VERSION
+        ):
+            print(
+                "⚠️ [Graph] Marqueur de migration documentaire invalide",
+                file=sys.stderr,
+            )
+            raise DocumentSchemaUnavailable()
+        return True
+
+    async def _write_document_migration_marker_locked(self) -> None:
+        """Publish durable completion only after migration and DDL succeeded."""
+
+        try:
+            async with self.session() as session:
+                result = await session.run(
+                    Query(
+                        """
+                    MERGE (m:HivemindSchemaMigration {id: $migration_id})
+                    ON CREATE SET m.version = $migration_version
+                    RETURN m.id AS migration_id, m.version AS version
+                        """,
+                        timeout=self._schema_query_timeout_seconds,
+                    ),
+                    migration_id=_DOCUMENT_SCHEMA_MIGRATION_ID,
+                    migration_version=_DOCUMENT_SCHEMA_MIGRATION_VERSION,
+                )
+                record = await result.single()
+                await result.consume()
+        except Exception:
+            print(
+                "⚠️ [Graph] Marqueur de migration documentaire NON publié",
+                file=sys.stderr,
+            )
+            raise DocumentSchemaUnavailable() from None
+
+        marker_id = None
+        marker_version = None
+        if record is not None:
+            try:
+                marker_id = record["migration_id"]
+                marker_version = record["version"]
+            except Exception:
+                pass
+        if (
+            marker_id != _DOCUMENT_SCHEMA_MIGRATION_ID
+            or type(marker_version) is not int
+            or marker_version != _DOCUMENT_SCHEMA_MIGRATION_VERSION
+        ):
+            print(
+                "⚠️ [Graph] Marqueur de migration documentaire invalide",
+                file=sys.stderr,
+            )
+            raise DocumentSchemaUnavailable()
+        self._doc_migration_marker_ready = True
+
+    async def _ensure_document_constraint_locked(self) -> None:
+        """Require the global DDL after startup data migration."""
+
+        if self._doc_constraints_ready or not self._doc_source_normalization_done:
+            return
+        try:
+            async with self.session() as session:
+                result = await session.run(
+                    Query(
+                        """
                     CREATE CONSTRAINT document_source_path_unique IF NOT EXISTS
                     FOR (d:Document) REQUIRE (d.memory_id, d.source_path) IS UNIQUE
-                    """
+                        """,
+                        timeout=self._schema_query_timeout_seconds,
+                    )
                 )
-                self._doc_constraints_ready = True
-                print("🔒 [Graph] Contrainte d'unicité (memory_id, source_path) créée/vérifiée", file=sys.stderr)
-        except Exception as e:
-            # NE PAS marquer _doc_constraints_ready : on retentera au prochain add_document.
-            print(f"⚠️ [Graph] Contrainte source_path NON créée (doublons legacy à résoudre ?): {e}", file=sys.stderr)
+                await result.consume()
+            await self._verify_node_uniqueness_constraint_locked(
+                label="Document",
+                properties=("memory_id", "source_path"),
+            )
+        except Exception:
+            print("⚠️ [Graph] Contrainte source_path NON créée (doublons legacy à résoudre ?)", file=sys.stderr)
             print("   ⚠️ L'unicité n'est PAS garantie par la base tant que la contrainte n'existe pas.", file=sys.stderr)
             print("   → Résoudre les doublons (memory_id, source_path) puis relancer pour activer la contrainte.", file=sys.stderr)
+            raise DocumentSchemaUnavailable() from None
+        else:
+            # Neo4j may defer data/constraint errors until PULL/commit. Publish
+            # readiness only after the result was explicitly consumed; the
+            # driver's implicit session close can suppress those failures.
+            self._doc_constraints_ready = True
+            print("🔒 [Graph] Contrainte d'unicité (memory_id, source_path) créée/vérifiée", file=sys.stderr)
 
+    async def initialize_document_schema(self) -> None:
+        """Run the one global legacy-data migration during ASGI startup.
+
+        The data query intentionally has no per-memory namespace. It therefore
+        belongs to the process startup boundary, before request admission, and
+        never to an ordinary ``add_document(memory_id)`` call. Initialization
+        fails closed before request admission when normalization or the
+        uniqueness constraint cannot be verified. Legacy non-empty duplicates
+        remain untouched and require explicit repair.
+        """
+
+        async with self._doc_constraints_lock:
+            if self._document_schema_is_ready():
+                return
+            await self._ensure_document_migration_marker_constraint_locked()
+            marker_ready = await self._read_document_migration_marker_locked()
+            if marker_ready:
+                self._doc_source_normalization_done = True
+                self._doc_migration_marker_ready = True
+            if not self._doc_source_normalization_done:
+                try:
+                    async with self.session() as session:
+                        while True:
+                            result = await session.run(
+                                Query(
+                                    """
+                                MATCH (d:Document)
+                                WHERE d.source_path = ''
+                                WITH d LIMIT $batch_size
+                                SET d.source_path = null
+                                RETURN count(d) AS normalized
+                                    """,
+                                    timeout=self._schema_query_timeout_seconds,
+                                ),
+                                batch_size=_DOCUMENT_SOURCE_NORMALIZATION_BATCH_SIZE,
+                            )
+                            record = await result.single()
+                            await result.consume()
+                            normalized = (
+                                record["normalized"] if record is not None else None
+                            )
+                            if (
+                                type(normalized) is not int
+                                or normalized < 0
+                                or normalized
+                                > _DOCUMENT_SOURCE_NORMALIZATION_BATCH_SIZE
+                            ):
+                                raise DocumentSchemaUnavailable()
+                            if normalized == 0:
+                                break
+                except Exception:
+                    print(
+                        "⚠️ [Graph] Normalisation source_path NON vérifiée",
+                        file=sys.stderr,
+                    )
+                    raise DocumentSchemaUnavailable() from None
+                else:
+                    # Every bounded write and its terminating empty batch were
+                    # explicitly consumed before this process flag is visible.
+                    self._doc_source_normalization_done = True
+            await self._ensure_document_constraint_locked()
+            if not self._doc_migration_marker_ready:
+                await self._write_document_migration_marker_locked()
+
+    async def ensure_document_constraints(self) -> None:
+        """Retry admission-safe schema DDL, never the global data migration."""
+
+        if self._document_schema_is_ready():
+            return
+        # Acquire even when normalization is not yet marked done: a request
+        # racing startup must wait for the same global owner, then re-check.
+        async with self._doc_constraints_lock:
+            if self._document_schema_is_ready():
+                return
+            if (
+                not self._doc_source_normalization_done
+                or not self._doc_migration_marker_ready
+            ):
+                raise DocumentSchemaUnavailable()
+            await self._ensure_document_constraint_locked()
+
+    @_guard_graph_mutation
     async def add_document(
         self,
         memory_id: str,
@@ -458,9 +851,9 @@ class GraphService:
         """
         import json
 
-        # Garantir la contrainte d'unicité (memory_id, source_path) — couvre les
-        # DEUX chemins (memory_ingest synchrone ET ingestion asynchrone).
-        if not self._doc_constraints_ready:
+        # Retry only admission-safe DDL. The global legacy-data migration is a
+        # startup hook and can never be triggered by this per-memory operation.
+        if not self._document_schema_is_ready():
             await self.ensure_document_constraints()
 
         async with self.session() as session:
@@ -524,6 +917,7 @@ class GraphService:
                 )
             )
 
+    @_guard_graph_mutation
     async def update_document_ingestion(
         self,
         memory_id: str,
@@ -725,6 +1119,69 @@ class GraphService:
                 }
             return out
 
+    async def list_reindex_documents(self, memory_id: str) -> List[Dict[str, Any]]:
+        """Return the exact retained-source fields used by maintenance reindex.
+
+        Values are intentionally not coerced or defaulted here. The reindex
+        boundary validates native types and fails closed on legacy/partial rows.
+        """
+        async with self.session() as session:
+            result = await session.run(
+                """
+                MATCH (d:Document {memory_id: $memory_id})
+                RETURN d.memory_id as memory_id,
+                       d.id as document_id,
+                       d.filename as filename,
+                       d.uri as uri,
+                       d.hash as sha256,
+                       d.size_bytes as size_bytes,
+                       d.ingestion_status as status,
+                       d.chunk_count as chunk_count
+                LIMIT $limit
+                """,
+                memory_id=memory_id,
+                limit=MAX_REINDEX_SOURCE_DOCUMENTS + 1,
+            )
+            documents: List[Dict[str, Any]] = []
+            async for record in result:
+                # The query asks for MAX+1 rows precisely so the first excess
+                # row is observable. Refuse it before appending: checking for
+                # MAX+1 here would require the driver to violate its own LIMIT
+                # and return MAX+2 rows before this local guard fired.
+                if len(documents) >= MAX_REINDEX_SOURCE_DOCUMENTS:
+                    raise ReindexSourceLimitExceeded(
+                        "source inventory limit exceeded"
+                    )
+                documents.append(
+                    {
+                        "memory_id": record["memory_id"],
+                        "document_id": record["document_id"],
+                        "filename": record["filename"],
+                        "uri": record["uri"],
+                        "sha256": record["sha256"],
+                        "size_bytes": record["size_bytes"],
+                        "status": record["status"],
+                        "chunk_count": record["chunk_count"],
+                    }
+                )
+            return documents
+
+    async def get_reindex_ontology_uri(self, memory_id: str) -> Optional[str]:
+        """Return the exact configured ontology object URI without coercion."""
+        async with self.session() as session:
+            result = await session.run(
+                """
+                MATCH (m:Memory {id: $memory_id})
+                RETURN m.ontology_uri as ontology_uri
+                """,
+                memory_id=memory_id,
+            )
+            record = await result.single()
+            if record is None:
+                return None
+            return record["ontology_uri"]
+
+    @_guard_graph_mutation
     async def delete_document(self, memory_id: str, doc_id: str) -> Dict[str, Any]:
         """
         Supprime un document et nettoie le graphe.
@@ -810,6 +1267,7 @@ class GraphService:
     # Gestion des Entités et Relations
     # =========================================================================
     
+    @_guard_graph_mutation
     async def add_entities_and_relations(
         self,
         memory_id: str,
@@ -952,18 +1410,25 @@ class GraphService:
         """
         try:
             async with self.session() as session:
-                await session.run(
-                    """
-                    CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS
-                    FOR (n:Entity) ON EACH [n.name, n.description, n.type]
-                    OPTIONS {indexConfig: {`fulltext.analyzer`: 'standard-folding'}}
-                    """
+                await self._run_consumed(
+                    session,
+                    Query(
+                        """
+                        CREATE FULLTEXT INDEX entity_fulltext IF NOT EXISTS
+                        FOR (n:Entity) ON EACH [n.name, n.description, n.type]
+                        OPTIONS {indexConfig: {`fulltext.analyzer`: 'standard-folding'}}
+                        """,
+                        timeout=self._schema_query_timeout_seconds,
+                    ),
                 )
                 self._fulltext_index_ready = True
                 print("🔍 [Graph] Index fulltext 'entity_fulltext' créé/vérifié (standard-folding)", file=sys.stderr)
-        except Exception as e:
-            print(f"⚠️ [Graph] Impossible de créer l'index fulltext: {e}", file=sys.stderr)
-            print(f"   La recherche utilisera le mode CONTAINS (dégradé)", file=sys.stderr)
+        except Exception:
+            print(
+                "⚠️ [Graph] Impossible de créer l'index fulltext",
+                file=sys.stderr,
+            )
+            print("   La recherche utilisera le mode CONTAINS (dégradé)", file=sys.stderr)
     
     @staticmethod
     def _escape_lucene(text: str) -> str:
@@ -1550,6 +2015,7 @@ class GraphService:
                 "mentions": mentions
             }
     
+    @_guard_graph_import
     async def import_memory_data(self, data: Dict[str, Any]) -> Dict[str, int]:
         """
         Importe les données d'une mémoire depuis un backup.
@@ -1584,7 +2050,8 @@ class GraphService:
         
         async with self.session() as session:
             # 1. Recréer le nœud Memory
-            await session.run(
+            await self._run_consumed(
+                session,
                 """
                 CREATE (m:Memory {
                     id: $id,
@@ -1610,7 +2077,8 @@ class GraphService:
             
             # 2. Recréer les Documents
             for doc in data.get("documents", []):
-                await session.run(
+                await self._run_consumed(
+                    session,
                     """
                     CREATE (d:Document {
                         id: $id,
@@ -1628,13 +2096,13 @@ class GraphService:
                     })
                     """,
                     id=doc["id"],
-                    memory_id=doc.get("memory_id", memory_id),
+                    memory_id=memory_id,
                     uri=doc.get("uri", ""),
                     filename=doc.get("filename", ""),
                     hash=doc.get("hash", ""),
                     ingested_at=doc.get("ingested_at", datetime.utcnow().isoformat()),
                     metadata_json=doc.get("metadata_json", "{}"),
-                    source_path=doc.get("source_path", ""),
+                    source_path=self.normalize_source_path(doc.get("source_path")),
                     source_modified_at=doc.get("source_modified_at", ""),
                     size_bytes=doc.get("size_bytes", 0),
                     text_length=doc.get("text_length", 0),
@@ -1644,7 +2112,8 @@ class GraphService:
             
             # 3. Recréer les Entities
             for entity in data.get("entities", []):
-                await session.run(
+                await self._run_consumed(
+                    session,
                     """
                     CREATE (e:Entity {
                         name: $name,
@@ -1658,7 +2127,7 @@ class GraphService:
                     })
                     """,
                     name=entity["name"],
-                    memory_id=entity.get("memory_id", memory_id),
+                    memory_id=memory_id,
                     type=entity.get("type", "Other"),
                     description=entity.get("description"),
                     source_docs=entity.get("source_docs", []),
@@ -1670,7 +2139,8 @@ class GraphService:
             
             # 4. Recréer les relations RELATED_TO
             for rel in data.get("relations", []):
-                await session.run(
+                await self._run_consumed(
+                    session,
                     """
                     MATCH (from:Entity {name: $from_name, memory_id: $memory_id})
                     MATCH (to:Entity {name: $to_name, memory_id: $memory_id})
@@ -1693,7 +2163,8 @@ class GraphService:
             
             # 5. Recréer les relations MENTIONS
             for mention in data.get("mentions", []):
-                await session.run(
+                await self._run_consumed(
+                    session,
                     """
                     MATCH (d:Document {id: $doc_id, memory_id: $memory_id})
                     MATCH (e:Entity {name: $entity_name, memory_id: $memory_id})

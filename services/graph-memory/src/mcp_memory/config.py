@@ -76,22 +76,34 @@ class Settings(BaseSettings):
     hivemind_tokens_s3_key: str = "_system/tokens.json"
 
     # =========================================================================
-    # LLMaaS Cloud Temple
+    # Inférence (P13-1C, ADR-0027 — MODIFICATION LOCALE, voir
+    # THIRD_PARTY_NOTICES.md)
     # =========================================================================
-    llmaas_api_url: str = "https://api.ai.cloud-temple.com"
-    llmaas_api_key: str
-    llmaas_model: str = "gpt-oss:120b"
-    llmaas_max_tokens: int = 60000  # gpt-oss:120b fait du chain-of-thought qui consomme beaucoup de tokens
-    llmaas_temperature: float = 1.0  # gpt-oss:120b fonctionne mieux à température 1.0
+    # Les profils chat/embedding sont désormais résolus par le package partagé
+    # ``hivemind_inference`` : MÊMES familles INFERENCE_* / chemin legacy
+    # LLMAAS_* strict que le cœur Hivemind, donc plus de vue Graph Memory qui
+    # dérive (ce bloc portait ses propres défauts : autre modèle, 60000 tokens
+    # de sortie, température 1.0). Les champs legacy ci-dessous restent
+    # déclarés UNIQUEMENT pour que pydantic n'EXIGE plus LLMAAS_API_KEY au
+    # démarrage — un déploiement configuré en INFERENCE_* n'en définit aucun —
+    # et pour que les valeurs héritées d'un `.env` legacy restent parsables.
+    # AUCUN client provider, aucune surface de santé et aucun dimensionnement
+    # de collection ne les lit : le profil résolu est la seule autorité.
+    llmaas_api_url: str = ""
+    llmaas_api_key: str = ""
+    llmaas_model: str = ""
+    llmaas_max_tokens: int = 0
+    llmaas_temperature: float = 0.0
     extraction_max_text_length: int = 950000  # Max chars du texte envoyé au LLM (défaut ~950K)
     extraction_chunk_size: int = 25000  # Max chars par chunk d'extraction graph (~6K tokens, laisse marge pour prompt+réponse)
-    
+
     # =========================================================================
-    # Embedding (LLMaaS)
+    # Embedding (compatibilité `.env` legacy uniquement — la taille de vecteur
+    # effective vient du profil résolu, cf. core/inference_runtime.py)
     # =========================================================================
-    llmaas_embedding_model: str = "bge-m3:567m"
-    llmaas_embedding_dimensions: int = 1024  # Dimension des vecteurs BGE-M3
-    
+    llmaas_embedding_model: str = ""
+    llmaas_embedding_dimensions: int = 1024
+
     # =========================================================================
     # Qdrant (base vectorielle)
     # =========================================================================
@@ -197,6 +209,13 @@ class Settings(BaseSettings):
     extraction_timeout_seconds: int = 600  # 10 min par appel LLM (gros docs avec chain-of-thought)
     s3_upload_timeout_seconds: int = 60
     neo4j_query_timeout_seconds: int = 30
+
+    @field_validator("neo4j_query_timeout_seconds")
+    @classmethod
+    def _validate_neo4j_query_timeout(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("NEO4J_QUERY_TIMEOUT_SECONDS must be positive")
+        return value
 
     # =========================================================================
     # Ingestion asynchrone (file de jobs in-memory best-effort)

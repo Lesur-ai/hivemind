@@ -296,6 +296,28 @@ Use this sequence:
 6. Run the representative queries saved in phase 1 with `long_query`. Re-read
    the referenced canonical files before accepting the result.
 
+If an already-persisted **embedded** binding instead reports
+`embedding_collection.state="reindex_required"`, stop the phase before any new
+write and keep all same-space writers quiesced. A trusted manager may make one
+explicit, synchronous `long_reindex(space_id="<space-id>")` call, then must
+require `phase="verified"`, `activated=true`, `active_state="ready"`, and
+`0 < source_documents <= source_chunks == vectors_written`, plus a fresh
+`long_status` and representative queries before continuing. The tool is hidden
+from normal discovery and non-idempotent; never
+automatically retry an ambiguous response. An error with `phase="activated"`
+means internal dispatch began and the final alias batch may already have
+committed, even when the operation id is null; inspect status and do not roll
+back, retry, or clean collections automatically. A pre-dispatch failure instead
+uses `phase="admission"` and `activated=false`.
+
+This maintenance call is not a legacy graph import. It refuses custom/external
+bindings and rebuilds only from the embedded memory's verified Neo4j document
+inventory and retained S3 source bytes; old vectors, graph-only entities, and
+the legacy Graph Memory service are never source truth. If those canonical
+sources are missing or do not match exactly, preserve the old service and mark
+the migration partial rather than bypassing validation. See the
+[bounded reindex runbook](DEPLOYMENT.md#bounded-embedding-reindex).
+
 `long_push` is allowed here only as an explicit one-off migration/bootstrap of
 a stabilized bank. It is not a session-end synchronization channel. After
 cutover, ingest stable canonical repository documents through an approved,

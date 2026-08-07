@@ -326,37 +326,49 @@ class SpaceService:
                     "Préfixe non committé en conflit avec la requête.",
                 )
 
-        # ABA delete→recreate : un scope de token survit à space_delete. Sans
+        # ABA delete→recreate : une suppression ancienne/interrompue ou un
+        # pre-grant futur peut laisser un scope sur un préfixe absent. Sans
         # cette barrière, recréer le même identifiant réactiverait en silence
-        # tous les anciens droits. Toute référence persistée compte, y compris
-        # sur un token admin/révoqué/expiré : un downgrade, une réactivation ou
-        # une correction d'expiration pourrait la rendre effective plus tard.
+        # tous ces droits. Toute référence persistée compte, y compris sur un
+        # token révoqué/expiré : un
+        # downgrade, une réactivation ou une correction d'expiration pourrait
+        # la rendre effective plus tard.
         scoped_tokens = [
             token
             for token in token_store.tokens
             if space_id in token.space_ids
         ]
-        stale_scope_recovery = (
-            f"Un admin doit retirer explicitement '{space_id}' des space_ids "
-            "de tous les tokens signalés, y compris admin, révoqués ou "
-            "expirés, puis retenter exactement la même création. "
-            "Aucun rollback automatique."
-        )
         if scoped_tokens:
             if existing_keys:
                 message = (
                     "Reprise refusée : la préparation compatible porte encore "
                     "au moins une référence de scope persistée."
                 )
+                recovery_action = (
+                    f"Un admin doit retirer explicitement '{space_id}' des "
+                    "space_ids de tous les tokens signalés, y compris admin, "
+                    "révoqués ou expirés, puis retenter exactement la même "
+                    "création. Aucun rollback automatique."
+                )
             else:
                 message = (
-                    "Création refusée : des références de scope historiques "
-                    "survivraient à une suppression/recréation de cet identifiant."
+                    "Création refusée : un préfixe absent porte encore des "
+                    "références de scope persistées."
+                )
+                recovery_action = (
+                    "Cet état ambigu peut être un pré-grant intentionnel ou le "
+                    "résidu d'une suppression connue. Pour une suppression "
+                    f"connue de '{space_id}', un manager encore autorisé ou un "
+                    "admin appelle space_delete(confirm=True, "
+                    "recover_access_grants=True). Pour un pré-grant "
+                    "intentionnel, un admin modifie ou retire explicitement les "
+                    "space_ids de tous les tokens concernés. Retentez ensuite "
+                    "exactement la même création."
                 )
             return self._partial_create(
                 space_id,
                 message,
-                recovery_action=stale_scope_recovery,
+                recovery_action=recovery_action,
             )
 
         post_grant_recovery = (
@@ -910,15 +922,65 @@ class SpaceService:
             "hive_status_label": hive_label,
         }
 
-    async def delete(self, space_id: str, unsafe_recovery: bool = False) -> dict:
-        """Sérialise la suppression avec la création/reprise du même espace."""
-        async with get_lock_manager().space_lifecycle(space_id):
-            return await self._delete_locked(
-                space_id, unsafe_recovery=unsafe_recovery
-            )
+    async def delete(
+        self,
+        space_id: str,
+        unsafe_recovery: bool = False,
+        recover_access_grants: bool = False,
+        *,
+        actor_token_hash: str = "",
+        bootstrap_admin: bool = False,
+    ) -> dict:
+        """Supprime un espace et ses grants sous l'ordre lifecycle → tokens.
+
+        Le check d'autorisation du handler MCP est seulement un early deny.
+        Puisque la suppression réécrit désormais ``tokens.json``, le caller
+        stocké est revalidé sous le verrou tokens avant la première mutation du
+        préfixe. Le verrou reste tenu jusqu'à la confirmation que tous les
+        ``space_ids`` correspondants ont disparu.
+        """
+        locks = get_lock_manager()
+        async with locks.space_lifecycle(space_id):
+            from .tokens import get_token_service
+
+            token_service = get_token_service()
+            async with locks.tokens:
+                token_store = await token_service._load_store()
+                actor = None
+                if not bootstrap_admin:
+                    actor = token_service._authorize_stored_manager(
+                        token_store,
+                        actor_token_hash,
+                        space_id=space_id,
+                    )
+                    if actor is None:
+                        return {
+                            "status": "error",
+                            "message": (
+                                "Token S3 manage ou admin actif et autorisé "
+                                "sur ce space requis"
+                            ),
+                        }
+                return await self._delete_locked(
+                    space_id,
+                    unsafe_recovery=unsafe_recovery,
+                    recover_access_grants=recover_access_grants,
+                    token_service=token_service,
+                    token_store=token_store,
+                    actor=actor,
+                    bootstrap_admin=bootstrap_admin,
+                )
 
     async def _delete_locked(
-        self, space_id: str, unsafe_recovery: bool = False
+        self,
+        space_id: str,
+        unsafe_recovery: bool = False,
+        recover_access_grants: bool = False,
+        *,
+        token_service,
+        token_store,
+        actor=None,
+        bootstrap_admin: bool = False,
     ) -> dict:
         """
         Supprime un espace et TOUTES ses données (irréversible).
@@ -936,20 +998,40 @@ class SpaceService:
             space_id: Identifiant de l'espace
             unsafe_recovery: autorise la suppression d'un space Hivemind
                 partagé/unsafe (refus par défaut ; voir ADR-0014)
+            recover_access_grants: autorise explicitement le nettoyage des
+                scopes d'un identifiant dont le préfixe est déjà vide. Sans ce
+                flag, l'absence ambiguë conserve les pré-grants intentionnels.
 
         Le commit marker ``_meta.json`` est supprimé EN DERNIER. Chaque objet
         est reprobed après DELETE ; une suppression non confirmée retourne un
         ``partial/recovery_required`` honnête et le marker reste en place tant
-        qu'un payload subsiste.
+        qu'un payload subsiste. Après disparition confirmée du marker, chaque
+        référence ``space_ids`` est retirée du registre tokens. Toute réécriture
+        exige une relecture validée prouvant zéro référence ; une ambiguïté
+        conserve la barrière ABA et retourne ``partial``.
 
         Returns:
             ``{"status": "deleted", "files_deleted": N}`` si chaque clé est
-            confirmée absente, sinon un retour ``partial`` avec les clés non
-            confirmées et une action de reprise explicite.
+            confirmée absente, ``{"status": "grants_cleaned"}`` pour une
+            récupération explicite sans préfixe, sinon un retour ``partial``
+            avec les clés non confirmées et une action de reprise explicite.
         """
+        if not bootstrap_admin and actor is None:
+            return {
+                "status": "error",
+                "message": (
+                    "Identité stockée du manager requise avant toute "
+                    "suppression"
+                ),
+            }
+
         await assert_space_not_reserved(space_id)
         storage = get_storage()
         meta_key = f"{space_id}/_meta.json"
+        from .tokens import TOKENS_KEY
+
+        caller = "bootstrap_admin" if bootstrap_admin else actor.name
+        actor_hash = None if bootstrap_admin else actor.hash
 
         def partial_delete(
             message: str,
@@ -1004,6 +1086,164 @@ class SpaceService:
             except Exception:
                 return None
 
+        async def finish_access_cleanup(
+            *,
+            files_total: int,
+            files_deleted: int,
+            recovered: bool = False,
+        ) -> dict:
+            """Retire et confirme tous les grants après commit de suppression.
+
+            Le caller tient déjà ``space_lifecycle(space_id)`` puis
+            ``tokens``. Aucun autre mutateur supporté ne peut donc intercaler
+            une réécriture du registre dans cette fenêtre.
+            """
+            scoped_tokens = [
+                token
+                for token in token_store.tokens
+                if space_id in token.space_ids
+            ]
+            changed_hashes = sorted(token.hash for token in scoped_tokens)
+            if not scoped_tokens:
+                return {
+                    "status": "deleted",
+                    "space_id": space_id,
+                    "files_deleted": files_deleted,
+                    "files_total": files_total,
+                    "access_grants_removed": 0,
+                }
+
+            for token in scoped_tokens:
+                token.space_ids = [
+                    scoped
+                    for scoped in token.space_ids
+                    if scoped != space_id
+                ]
+
+            try:
+                await token_service._save_store(token_store)
+            except Exception:
+                # Timeout post-PUT possible : seule la relecture validée
+                # ci-dessous décide si la révocation est committée.
+                pass
+
+            try:
+                persisted = await token_service._load_store()
+            except Exception:
+                # Le PUT peut avoir committé malgré une erreur ou une relecture
+                # impossible. Invalider fail-closed les anciennes projections
+                # empêche alors un cache local de conserver un grant peut-être
+                # révoqué. La requête suivante reconstruira l'autorité depuis
+                # le registre durable.
+                if changed_hashes:
+                    token_service._invalidate_in_fresh_store(changed_hashes)
+                token_service._emit_delegated_access_audit(
+                    "space_delete_grants_unconfirmed",
+                    caller=caller,
+                    details={
+                        "actor_token_hash": actor_hash,
+                        "space_id": space_id,
+                        "target_token_hashes": changed_hashes,
+                        "recovered": recovered,
+                        "confirmation": "unreadable",
+                    },
+                )
+                return {
+                    "status": "partial",
+                    "space_id": space_id,
+                    "recovery_required": True,
+                    "message": (
+                        "Données du space supprimées, mais confirmation de la "
+                        "révocation des droits impossible."
+                    ),
+                    "files_total": files_total,
+                    "files_deleted": files_deleted,
+                    "failed_keys": [TOKENS_KEY],
+                    "marker_preserved": False,
+                    "access_grants_pending": None,
+                    "recovery": {
+                        "retry_safe": None,
+                        "action": (
+                            "Un admin doit inspecter puis retenter space_delete "
+                            "avec recover_access_grants=True pour "
+                            f"'{space_id}'. Ne recréez pas cet identifiant "
+                            "avant d'avoir confirmé zéro référence dans "
+                            "_system/tokens.json."
+                        ),
+                    },
+                }
+
+            pending = [
+                token
+                for token in persisted.tokens
+                if space_id in token.space_ids
+            ]
+            if pending:
+                if bootstrap_admin:
+                    actor_can_retry = True
+                else:
+                    actor_can_retry = (
+                        token_service._authorize_stored_manager(
+                            persisted, actor.hash, space_id=space_id
+                        )
+                        is not None
+                    )
+                if actor_can_retry:
+                    action = (
+                        "Retentez space_delete avec le même space_id et "
+                        "recover_access_grants=True : le préfixe est déjà vide "
+                        "et seule la révocation des droits restants sera reprise."
+                    )
+                else:
+                    action = (
+                        "Le caller ne possède plus une autorité réessayable. "
+                        "Un admin doit retenter space_delete avec "
+                        "recover_access_grants=True pour terminer la révocation "
+                        "des droits."
+                    )
+                return {
+                    "status": "partial",
+                    "space_id": space_id,
+                    "recovery_required": True,
+                    "message": (
+                        "Données du space supprimées, mais révocation des "
+                        "droits incomplète."
+                    ),
+                    "files_total": files_total,
+                    "files_deleted": files_deleted,
+                    "failed_keys": [TOKENS_KEY],
+                    "marker_preserved": False,
+                    "access_grants_pending": len(pending),
+                    "recovery": {
+                        "retry_safe": actor_can_retry,
+                        "action": action,
+                    },
+                }
+
+            token_service._invalidate_in_fresh_store(changed_hashes)
+            token_service._emit_delegated_access_audit(
+                "space_delete_grants",
+                caller=caller,
+                details={
+                    "actor_token_hash": actor_hash,
+                    "space_id": space_id,
+                    "grants_removed": len(changed_hashes),
+                    "target_token_hashes": changed_hashes,
+                    "recovered": recovered,
+                },
+            )
+
+            result = {
+                "status": "grants_cleaned" if recovered else "deleted",
+                "space_id": space_id,
+                "files_deleted": files_deleted,
+                "files_total": files_total,
+                "access_grants_removed": len(changed_hashes),
+            }
+            if recovered:
+                result["recovered"] = True
+            return result
+
         # Vérifier l'existence
         try:
             marker_exists = await storage.exists(meta_key)
@@ -1036,8 +1276,30 @@ class SpaceService:
                     failed_keys=residual_keys,
                     marker_preserved=False,
                 )
+            if any(
+                space_id in token.space_ids
+                for token in token_store.tokens
+            ):
+                if not recover_access_grants:
+                    return {
+                        "status": "not_found",
+                        "space_id": space_id,
+                        "message": (
+                            f"Espace '{space_id}' introuvable. Les droits "
+                            "existants sont conservés car ils peuvent être des "
+                            "pré-grants intentionnels. Pour reprendre une "
+                            "suppression antérieure connue, retentez avec "
+                            "recover_access_grants=True."
+                        ),
+                    }
+                return await finish_access_cleanup(
+                    files_total=0,
+                    files_deleted=0,
+                    recovered=True,
+                )
             return {
                 "status": "not_found",
+                "space_id": space_id,
                 "message": f"Espace '{space_id}' introuvable",
             }
 
@@ -1150,12 +1412,10 @@ class SpaceService:
             )
         files_deleted += 1
 
-        return {
-            "status": "deleted",
-            "space_id": space_id,
-            "files_deleted": files_deleted,
-            "files_total": files_total,
-        }
+        return await finish_access_cleanup(
+            files_total=files_total,
+            files_deleted=files_deleted,
+        )
 
 
 # ─────────────────────────────────────────────────────────────

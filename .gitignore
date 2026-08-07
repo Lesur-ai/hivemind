@@ -37,6 +37,7 @@ docker-compose-local.yml
 # === MCP config (local) ===
 .mcp.json
 .codex/
+.claude/
 
 # === IDE ===
 .vscode/
@@ -79,3 +80,11 @@ qdrant_snapshots/
 # Screenshots + proof-report.json are attached to the PR, never committed, so the
 # head SHA stays stable across proof re-runs.
 proof-artifacts/
+
+# === P13-2 protected provider certification output ===
+# The ownership marker and redacted workflow artifacts are run-local. A stale
+# marker is intentionally retained on ambiguous cleanup so the protected
+# workflow can recover only the stack it created.
+.provider-certification-owned
+.provider-certification-budget/
+artifacts/provider-certification/

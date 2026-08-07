@@ -22,8 +22,13 @@ from live_mem.tools.exposure import (  # noqa: E402
 
 
 def render_discovery_fixture() -> str:
+    manifest = exposure_manifest()
+    # Full registration counts are expected only by tool_surface.json. This
+    # fixture owns discovery/exposure projections, not a second surface total.
+    manifest.pop("registered_total")
+    manifest.pop("registry_entries")
     return json.dumps(
-        exposure_manifest(),
+        manifest,
         ensure_ascii=False,
         indent=2,
         sort_keys=False,

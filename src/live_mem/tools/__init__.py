@@ -58,8 +58,8 @@ def register_all_tools(mcp: FastMCP) -> int:
 
     # Tier-canonical aliases (P1, #22): short_*/mid_*/long_* re-registrations of
     # the identical handlers. MUST run AFTER every tier register() so the
-    # historical sources exist. Owns its own count (+13); tier register() return
-    # literals are left untouched.
+    # historical sources exist. Owns and returns its own alias count; tier
+    # register() return literals are left untouched.
     from .aliases import register_tier_aliases
 
     count += register_tier_aliases(mcp)

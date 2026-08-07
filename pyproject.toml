@@ -24,21 +24,29 @@ dependencies = [
     "boto3>=1.40",
     "openai>=1.50",
     "python-dotenv>=1.0",
-    "cryptography>=48.0.1",   # Ed25519 signatures ; HM-06 : >=48.0.1 corrige
-                              # GHSA-537c-gmf6-5ccf (OpenSSL statiquement lié).
+    "cryptography>=50.0.0",   # Ed25519 ; 50.0.0 corrige CVE-2026-69247.
+                              # Conserve aussi le fix GHSA-537c-gmf6-5ccf.
 ]
 
 [dependency-groups]
-# pyyaml/tenacity (P12-3, #268) : requis uniquement pour importer les modules
-# d'inférence du runtime Graph Memory vendored sous test (extractor/embedder →
-# tenacity, ontology → yaml). Bornés au même majeur que requirements.lock du
-# service embarqué (tenacity 9.1.4, PyYAML 6.0.3). Dev-only : l'export
-# pip-audit (--no-dev) et les dépendances runtime Hivemind sont inchangés.
+# pyyaml (P12-3, #268) : requis uniquement pour importer les modules du runtime
+# Graph Memory vendored sous test (ontology → yaml). Borné au même majeur que
+# requirements.lock du service embarqué (PyYAML 6.0.3).
+# tenacity (P12-3) retiré (P13-1C, #276) : sa seule justification était
+# l'import des modules extractor/embedder du runtime vendored, qui consomment
+# désormais le retry borné des adapters hivemind_inference (ADR-0027) — plus
+# aucun module importé sous test ne référence tenacity.
+# qdrant-client (#277) épingle la même version que le runtime Graph Memory
+# embarqué afin que les tests d'intégration exercent les métadonnées de
+# collection introduites par Qdrant 1.16.
+# Dev-only : l'export pip-audit (--no-dev) et les dépendances runtime Hivemind
+# sont inchangés.
 dev = [
+    "coverage>=7.15.2",
     "pytest>=9.0",
     "pytest-asyncio>=1.3",
     "pyyaml>=6.0,<7",
-    "tenacity>=9.1,<10",
+    "qdrant-client==1.18.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -55,7 +63,13 @@ asyncio_mode = "auto"
 # ne doivent pas faire échouer la CI.
 testpaths = ["tests"]
 markers = [
+    "unit: fast isolated behavior with no dedicated runtime dependency",
+    "integration: cross-component, runtime, Docker, or subprocess integration",
+    "contract: documentation, policy, public-surface, and release contracts",
+    "security_protocol: Hivemind protocol, authorization, recovery, and fail-closed safety",
+    "e2e: collected end-to-end scenarios; Playwright remains a dedicated runner",
     # Exploration étendue opt-in du property test Hivemind (issue #11).
     # Exclue du run CI nominal ; activer avec `-m slow` + HIVEMIND_PROPERTY_SLOW=1.
     "slow: exhaustive/opt-in checks excluded from the default test run",
+    "optional: explicit external binary or service proof that may skip locally",
 ]

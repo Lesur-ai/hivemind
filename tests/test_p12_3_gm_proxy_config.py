@@ -82,6 +82,9 @@ def _set_gm_env(monkeypatch, proxy_url):
     monkeypatch.setenv("S3_BUCKET_NAME", "test-bucket")
     monkeypatch.setenv("S3_REGION_NAME", "fr1")
     monkeypatch.setenv("LLMAAS_API_KEY", "test-llm-key")
+    # P13-1C: the shared resolver needs the COMPLETE legacy pair (GM no longer
+    # carries its own default endpoint), exactly like a real deployment.
+    monkeypatch.setenv("LLMAAS_API_URL", "http://llm.p12-3-hivemind.invalid/v1")
     monkeypatch.setenv("NEO4J_PASSWORD", "test-neo4j-password")
     monkeypatch.setenv("AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
     for key in _PROXY_ENV_KEYS:
@@ -592,66 +595,85 @@ class TestProxyRedaction:
         _set_gm_env(monkeypatch, _SECRET_URL)
         from mcp_memory.config import get_settings
         from mcp_memory.core.extractor import ExtractorService
-
-        get_settings.cache_clear()
-        try:
-            svc = ExtractorService()
-        finally:
-            get_settings.cache_clear()
-
-        class _BoomCompletions:
-            async def create(self, **_kw):
-                raise RuntimeError(
-                    f'Failed to connect to proxy URL: "{_SECRET_URL}"'
-                )
-
-        class _BoomChat:
-            completions = _BoomCompletions()
+        from tests.fakes.inference_fakes import gm_inference_runtime
 
         import asyncio
 
-        monkeypatch.setattr(svc._client, "chat", _BoomChat())
-        answer = asyncio.run(svc.generate_answer("question"))
-        asyncio.run(svc.close())
+        get_settings.cache_clear()
+        try:
+            with gm_inference_runtime(proxy_url=_SECRET_URL):
+                svc = ExtractorService()
+
+                async def _boom(*_a, **_kw):
+                    raise RuntimeError(
+                        f'Failed to connect to proxy URL: "{_SECRET_URL}"'
+                    )
+
+                monkeypatch.setattr(svc, "_complete", _boom)
+                answer = asyncio.run(svc.generate_answer("question"))
+                asyncio.run(svc.close())
+        finally:
+            get_settings.cache_clear()
         assert "s3cr3t-pw" not in answer
         assert "svc-user" not in answer
+        # P12-3 baseline preserved verbatim: Graph Memory's own
+        # ``redact_proxy_secrets`` strips USERINFO and keeps the origin, which
+        # is the accepted contract this lot must not change. (The shared
+        # boundary applies the stricter ADR-0027 rendering to the text IT
+        # produces — see hivemind_inference.egress.display_proxy_url.)
         assert "proxy.internal:3128" in answer
 
-    def test_extractor_init_log_never_prints_credentials(self, monkeypatch, capsys):
-        """Construction under a credential-bearing proxy URL must log only the
-        display-safe origin."""
-        _set_gm_env(monkeypatch, _SECRET_URL)
-        from mcp_memory.config import get_settings
-        from mcp_memory.core.extractor import ExtractorService
+    def test_shared_runtime_proxy_log_is_display_safe(self, monkeypatch, caplog):
+        """P13-1C: the P12-3 operator signal ("egress goes through a proxy")
+        survives the migration, but moves to the ONE place that now owns the
+        transport — the shared runtime. The message must exist (otherwise
+        operators silently lose the signal) and must carry no credential, host,
+        or port.
+        """
+        import logging
 
-        get_settings.cache_clear()
-        try:
-            svc = ExtractorService()
-        finally:
-            get_settings.cache_clear()
-        err = capsys.readouterr().err
-        assert "s3cr3t-pw" not in err
-        assert "svc-user:" not in err
-        import asyncio
+        from hivemind_inference import InferenceRuntime
+        from tests.fakes.inference_fakes import make_inference_config
 
-        asyncio.run(svc.close())
+        with caplog.at_level(logging.INFO, logger="hivemind_inference.runtime"):
+            InferenceRuntime(
+                make_inference_config(chat=True, embedding=True),
+                proxy_url=_SECRET_URL,
+            )
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "hivemind_inference.runtime"
+        ]
+        assert any("via proxy" in message for message in messages)
+        joined = "\n".join(messages)
+        assert "s3cr3t-pw" not in joined
+        assert "svc-user" not in joined
+        assert "proxy.internal" not in joined
+        assert "3128" not in joined
 
-    def test_embedder_init_log_never_prints_credentials(self, monkeypatch, capsys):
+    def test_migrated_inference_services_print_nothing_on_construction(
+        self, monkeypatch, capsys
+    ):
+        """The per-service proxy banners are gone with the per-service
+        transports: construction is now a pure profile snapshot, so no
+        credential-bearing value can reach stderr from these paths at all."""
         _set_gm_env(monkeypatch, _SECRET_URL)
         from mcp_memory.config import get_settings
         from mcp_memory.core.embedder import EmbeddingService
+        from mcp_memory.core.extractor import ExtractorService
+        from tests.fakes.inference_fakes import gm_inference_runtime
 
         get_settings.cache_clear()
         try:
-            svc = EmbeddingService()
+            with gm_inference_runtime(proxy_url=_SECRET_URL):
+                ExtractorService()
+                EmbeddingService()
         finally:
             get_settings.cache_clear()
-        err = capsys.readouterr().err
-        assert "s3cr3t-pw" not in err
-        assert "svc-user:" not in err
-        import asyncio
-
-        asyncio.run(svc.close())
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
 
 
 # --------------------------------------------------------------------------- #
@@ -723,24 +745,34 @@ class TestBypassGuards:
                         offenders.append(rel)
         assert offenders == []
 
-    def test_async_openai_only_built_through_egress_helper(self):
-        """Every GM module constructing AsyncOpenAI must wire its transport
-        through the shared egress helper, so no inference client can silently
-        regress to an unclassified direct construction."""
-        builders = []
-        offenders = []
-        for rel, tree in _gm_module_trees():
-            if not _module_calls_name(tree, {"AsyncOpenAI"}):
-                continue
-            builders.append(rel)
-            if not _module_calls_name(
-                tree, {"build_owned_async_http_client"}
-            ) or not _module_imports_egress(tree):
-                offenders.append(rel)
-        # Non-vacuous: both inference services must stay in scope.
-        assert "services/graph-memory/src/mcp_memory/core/extractor.py" in builders
-        assert "services/graph-memory/src/mcp_memory/core/embedder.py" in builders
+    def test_no_gm_module_constructs_a_provider_sdk_client(self):
+        """P13-1C (ADR-0027) supersedes the P12-3 "wire the SDK through the
+        egress helper" rule with a stronger one: the embedded runtime builds NO
+        provider client at all. Every chat/embedding/discovery call goes through
+        the shared boundary, whose registered adapters are the single provider
+        construction seam — so an unclassified direct client is not merely
+        discouraged, it has nowhere to be written.
+        """
+        forbidden = {"AsyncOpenAI", "OpenAI", "AsyncAnthropic", "Anthropic"}
+        offenders = [
+            rel
+            for rel, tree in _gm_module_trees()
+            if _module_calls_name(tree, forbidden)
+        ]
         assert offenders == []
+
+    def test_gm_inference_modules_consume_the_shared_boundary(self):
+        """Non-vacuity companion to the guard above: the two inference services
+        must still be in scope and must reach the provider through the shared
+        package, not through some third path that happens to avoid the SDK
+        names."""
+        for rel in (
+            "services/graph-memory/src/mcp_memory/core/extractor.py",
+            "services/graph-memory/src/mcp_memory/core/embedder.py",
+        ):
+            source = (_REPO_ROOT / rel).read_text(encoding="utf-8")
+            assert "from hivemind_inference" in source, rel
+            assert "from .inference_runtime import get_inference_runtime" in source, rel
 
     def test_boto3_modules_read_egress_proxy_mapping(self):
         """Every GM module building boto3 clients must consult the egress

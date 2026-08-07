@@ -3,22 +3,22 @@
 Registration-surface lock for the single MCP facade.
 
 This is the authoritative enumeration test for the whole tool surface after the
-tier aliases land. It pins, against a real in-process FastMCP built by the real
-``register_all_tools`` (no S3 / no network / no LLM):
+tier aliases land. ``tests/fixtures/tool_surface.json`` is the sole expected
+surface/count authority; one exhaustive test below compares it with a real
+in-process FastMCP built by the real ``register_all_tools`` (no S3 / no network
+/ no LLM) and pins:
 
-- the exact 48 direct names are all registered (guards rename/drop/add drift);
-- the exact 13 canonical aliases (3 short + 6 mid + 4 long) are registered;
-- the total is exactly 61 and every name resolves through ONE tool manager
-  (one MCP endpoint);
+- every fixture-declared direct name and canonical alias is registered;
+- the live registered union and returned total match the fixture exactly, and
+  every name resolves through one tool manager (one MCP endpoint);
 - each alias resolves to the SAME function object as its historical source, with
   full metadata parity (input schema, description, annotations, title, …);
-- none of the 33 bank-op/cross-cutting direct-only tools (5 bank ops + 28
-  cross-cutting) has a tiered alias (negative assertion — folds in the
-  ops-exclusion); the 2 net-new ``long_*`` tools are separately direct
-  registrations with no historical twin;
+- no fixture-declared bank-op/cross-cutting direct-only tool has a tiered alias
+  (negative assertion — folds in the ops-exclusion); direct ``long_*`` tools
+  without a historical twin remain separate from the alias projection;
 - ``mid_delete`` routed through the ``/api/tool`` proxy denies identically to
   ``bank_delete`` under an insufficient-scope token (auth-gate parity);
-- the 4 ``long_*`` aliases inherit the identical ``graph_*`` handler, so the
+- every ``long_*`` alias inherits its identical ``graph_*`` handler, so the
   non-authoritative / protocol-derived posture is preserved by identity
   (the commit-path boundary itself is ADR-0010 territory).
 
@@ -31,7 +31,7 @@ Frozen fixture (``tests/fixtures/tool_surface.json``):
     ADR-0005 alias lifecycle). The tests below assert that the running
     registration exactly matches the fixture; CI fails RED on any drift.
 
-Source of truth: ``docs/TOOL_MAPPING.md`` (ADR-0002 + ADR-0005).
+Normative product mapping: ``docs/TOOL_MAPPING.md`` (ADR-0002 + ADR-0005).
 
 AST-based permission profile:
     The previous version of ``_effective_permission_level()`` scanned raw
@@ -136,7 +136,7 @@ from mcp.server.fastmcp import FastMCP
 
 from live_mem.auth.context import current_token_info
 from live_mem.tools import call_tool_direct, register_all_tools
-from live_mem.tools.aliases import ALIAS_MAP
+from live_mem.tools.aliases import ALIAS_MAP, register_tier_aliases
 from live_mem.tools.exposure import TOOL_EXPOSURES, ToolAudience
 
 # Frozen surface fixture (P6-3). See module docstring for the change protocol.
@@ -441,78 +441,59 @@ def _effective_permission_level(fn) -> str:
     return _effective_permission_profile(fn)["default"]
 
 
-# --- The frozen surface (locks the CURRENT REGISTERED/RUNTIME surface) -------
+# --- The frozen surface (sole expected-surface authority) -------------------
 #
-# This fixture locks the CURRENT REGISTERED/RUNTIME surface.
-# ``DESIGN/hivemind/TOOL_MAPPING.md`` may carry older documented permissions
-# (e.g. ``bank_delete`` documented as ``admin`` while the runtime gate is
-# now ``manage``); the fixture follows the live code, not the older doc.
-# Future doc reconciliation belongs in a separate P6 doc task.
+# Do not restate the names or counts in Python constants. Every projection below
+# is derived from the checked-in fixture, so a deliberate surface change has one
+# expected-contract edit and one exhaustive live-registration comparison.
+EXPECTED_HISTORICAL: frozenset[str] = frozenset(FIXTURE["historical"])
+EXPECTED_ALIAS_PAIRS: dict[str, str] = dict(FIXTURE["alias_map"])
+EXPECTED_ALIASES: frozenset[str] = frozenset(EXPECTED_ALIAS_PAIRS.values())
+EXPECTED_TOTAL: int = FIXTURE["total"]
 
-EXPECTED_HISTORICAL: set[str] = {
-    # system (3)
-    "system_health", "system_about", "system_whoami",
-    # space (10)
-    "space_create", "space_update", "space_update_rules", "space_list",
-    "space_info", "space_rules", "space_summary", "space_export", "space_delete",
-    "space_invite_token",
-    # scoped token provisioning (1)
-    "token_create",
-    # live / short source (3)
-    "live_note", "live_read", "live_search",
-    # bank / mid source + ops (11)
-    "bank_read", "bank_read_all", "bank_list", "bank_write", "bank_consolidate",
-    "bank_delete", "bank_consolidation_status", "bank_consolidation_queues",
-    "bank_stale_spaces", "bank_repair", "bank_compact",
-    # graph / long source (4) + net-new long_* tools (2, P4-7, no graph_* twin)
-    "graph_connect", "graph_push", "graph_status", "graph_disconnect",
-    "long_ingest", "long_query",
-    # backup (5)
-    "backup_create", "backup_list", "backup_restore", "backup_download",
-    "backup_delete",
-    # admin (9)
-    "admin_audit_recent",
-    "admin_create_token", "admin_list_tokens", "admin_revoke_token",
-    "admin_delete_token", "admin_purge_tokens", "admin_update_token",
-    "admin_bulk_update_tokens", "admin_gc_notes",
-}
-
-EXPECTED_ALIAS_PAIRS: dict[str, str] = {
-    "live_note": "short_note",
-    "live_read": "short_read",
-    "live_search": "short_search",
-    "bank_read": "mid_read",
-    "bank_read_all": "mid_read_all",
-    "bank_list": "mid_list",
-    "bank_write": "mid_write",
-    "bank_consolidate": "mid_consolidate",
-    "bank_delete": "mid_delete",
-    "graph_connect": "long_connect",
-    "graph_push": "long_push",
-    "graph_status": "long_status",
-    "graph_disconnect": "long_disconnect",
-}
-EXPECTED_ALIASES: set[str] = set(EXPECTED_ALIAS_PAIRS.values())
-
-# The 33 bank-op/cross-cutting direct-only tools that must NOT get a
-# tiered alias. The two net-new long_* tools are direct registrations with no
-# historical twin and are intentionally kept separate from this set.
-BANK_OPS_NO_ALIAS: set[str] = {
-    "bank_consolidation_status", "bank_consolidation_queues",
-    "bank_stale_spaces", "bank_repair", "bank_compact",
-}
-CROSS_CUTTING_NO_ALIAS: set[str] = {
+# Direct-only projections are derived from that same authority. The two net-new
+# long_* tools are historical/direct registrations with no graph_* twin.
+BANK_OPS_NO_ALIAS: frozenset[str] = frozenset(
+    n
+    for n in EXPECTED_HISTORICAL
+    if n.startswith("bank_") and n not in EXPECTED_ALIAS_PAIRS
+)
+CROSS_CUTTING_NO_ALIAS: frozenset[str] = frozenset({
     n for n in EXPECTED_HISTORICAL
     if n.startswith(("system_", "space_", "token_", "backup_", "admin_"))
-}
-
-EXPECTED_TOTAL = 61  # 48 direct (LM2-11 adds 2) + 13 aliases
+})
 
 
 def _build() -> tuple[FastMCP, int]:
     mcp = FastMCP(name="test")
     total = register_all_tools(mcp)
     return mcp, total
+
+
+_ALIAS_METADATA_FIELDS = (
+    "description",
+    "annotations",
+    "parameters",
+    "title",
+    "icons",
+    "meta",
+    "output_schema",
+)
+
+
+def _assert_alias_identity_and_metadata(
+    tools: dict, alias_map: dict[str, str]
+) -> None:
+    for historical, canonical in alias_map.items():
+        src, alias = tools[historical], tools[canonical]
+        assert callable(src.fn), f"alias source {historical!r} is not callable"
+        assert alias.fn is src.fn, (
+            f"alias {canonical!r} fn is not the SAME object as {historical!r}"
+        )
+        for field in _ALIAS_METADATA_FIELDS:
+            assert getattr(alias, field) == getattr(src, field), (
+                f"{canonical} {field} drift from {historical}"
+            )
 
 
 _PUBLIC_SCHEMA_FORBIDDEN: dict[str, re.Pattern[str]] = {
@@ -591,24 +572,12 @@ def _token(name: str, permissions: list[str], allowed: list[str]) -> dict:
     }
 
 
-# --- Structural surface (these gate every tier PR) ---------------------------
-
-def test_expected_constants_are_internally_consistent():
-    assert len(EXPECTED_HISTORICAL) == 48
-    assert len(EXPECTED_ALIAS_PAIRS) == 13
-    assert len(EXPECTED_ALIASES) == 13
-    assert len(BANK_OPS_NO_ALIAS) == 5
-    assert len(CROSS_CUTTING_NO_ALIAS) == 28
-    # The 33 bank-op/cross-cutting tools are disjoint from alias sources.
-    assert (BANK_OPS_NO_ALIAS | CROSS_CUTTING_NO_ALIAS).isdisjoint(
-        set(EXPECTED_ALIAS_PAIRS)
-    )
-    assert len(BANK_OPS_NO_ALIAS) + len(CROSS_CUTTING_NO_ALIAS) == 33
+# --- Structural and behavioral guards ---------------------------------------
 
 
 def test_every_registered_fastmcp_description_and_input_schema_is_public_safe():
-    """Audit the real 61-tool FastMCP contract, including generated aliases."""
-    mcp, total = _build()
+    """Audit every tool in the real registered contract, including aliases."""
+    mcp, _ = _build()
     tools = mcp._tool_manager._tools
     agent_core_names = {
         entry.canonical_name
@@ -616,9 +585,6 @@ def test_every_registered_fastmcp_description_and_input_schema_is_public_safe():
         if entry.audience is ToolAudience.AGENT_CORE
     }
 
-    assert total == EXPECTED_TOTAL
-    assert len(tools) == EXPECTED_TOTAL
-    assert len(agent_core_names) == 24
     assert agent_core_names <= set(tools)
 
     missing_copy: list[str] = []
@@ -665,58 +631,20 @@ def test_fastmcp_public_schema_hygiene_guard_is_mutation_proven(mutant: str):
         )
 
 
-def test_alias_map_matches_the_frozen_mapping():
-    # The shipped ALIAS_MAP must equal the TOOL_MAPPING.md contract exactly.
-    assert ALIAS_MAP == EXPECTED_ALIAS_PAIRS
-
-
-def test_all_48_direct_names_present_and_no_strays():
+def test_direct_only_tools_have_no_tiered_alias():
     mcp, _ = _build()
     names = set(mcp._tool_manager._tools)
-    # Removing the 13 aliases must leave EXACTLY the 48 direct names —
-    # catches a renamed/dropped historical tool AND any stray registration.
-    assert names - EXPECTED_ALIASES == EXPECTED_HISTORICAL
-
-
-def test_all_13_aliases_present_and_exhaustive():
-    mcp, _ = _build()
-    names = set(mcp._tool_manager._tools)
-    assert EXPECTED_ALIASES <= names
-    # The ONLY short_/mid_/long_ names registered are the 13 canonical aliases
-    # plus the net-new long_* historical tools (long_ingest / long_query, P4-7,
-    # no graph_* twin) — those are NOT aliases, so exclude them via the
-    # historical set before comparing against the alias set.
-    tiered = {
-        n
-        for n in names
-        if n.startswith(("short_", "mid_", "long_")) and n not in EXPECTED_HISTORICAL
-    }
-    assert tiered == EXPECTED_ALIASES
-
-
-def test_total_is_61_through_one_tool_manager():
-    mcp, total = _build()
-    assert total == EXPECTED_TOTAL
-    assert len(mcp._tool_manager._tools) == EXPECTED_TOTAL
-    # call_tool_direct reads the same single manager the protocol surface uses.
-    import live_mem.tools as tools_pkg
-    assert tools_pkg._mcp_ref is mcp
-
-
-def test_33_bank_op_and_cross_cutting_tools_have_no_tiered_alias():
-    mcp, _ = _build()
-    names = set(mcp._tool_manager._tools)
-    # None of the 33 bank-op/cross-cutting tools is an alias source.
+    # None of the bank-op/cross-cutting direct tools is an alias source.
     for hist in BANK_OPS_NO_ALIAS | CROSS_CUTTING_NO_ALIAS:
         assert hist not in ALIAS_MAP, f"{hist} must not be aliased"
-    # The 5 bank-ops would-be aliases must not exist (their suffixes are unique,
-    # unlike e.g. `*_list` which legitimately collides with bank_list -> mid_list).
+    # Bank-ops would-be aliases must not exist (their suffixes are unique, unlike
+    # e.g. `*_list` which legitimately collides with bank_list -> mid_list).
     for missing in (
         "mid_consolidation_status", "mid_consolidation_queues",
         "mid_stale_spaces", "mid_repair", "mid_compact",
     ):
         assert missing not in names, f"unexpected alias {missing}"
-    # Globally, the only short_/mid_/long_ names are the 13 canonical aliases
+    # Globally, the only short_/mid_/long_ aliases are fixture-declared aliases
     # (the net-new long_* historical tools long_ingest / long_query, P4-7, have
     # no graph_* twin and are excluded via EXPECTED_HISTORICAL), so no
     # cross-cutting tool gained a tiered alias either.
@@ -728,18 +656,62 @@ def test_33_bank_op_and_cross_cutting_tools_have_no_tiered_alias():
     assert tiered == EXPECTED_ALIASES
 
 
-# --- Per-alias identity + metadata parity ------------------------------------
+@pytest.mark.parametrize(
+    ("alias_map", "message", "source_without_callable"),
+    [
+        ({"does_not_exist_tool": "zzz_alias"}, "not registered", None),
+        ({"live_note": "short_note"}, "already registered", None),
+        (
+            {"live_note": "x_duplicate", "live_read": "x_duplicate"},
+            "duplicate canonical",
+            None,
+        ),
+        ({"live_note": "x_no_callable"}, "has no callable", "live_note"),
+    ],
+    ids=(
+        "missing-source",
+        "registered-canonical",
+        "intra-map-collision",
+        "source-without-callable",
+    ),
+)
+def test_alias_registration_fails_closed(
+    alias_map, message, source_without_callable
+):
+    """Keep each fail-closed branch distinguishable under mutation.
 
-def test_each_alias_is_identical_fn_with_metadata_parity():
+    Removing any one production guard changes the raised branch/message or
+    removes the exception, so the corresponding case goes RED instead of being
+    accidentally satisfied by a sibling collision check.
+    """
+    mcp, _ = _build()
+    source = (
+        mcp._tool_manager._tools[source_without_callable]
+        if source_without_callable
+        else None
+    )
+    original_fn = source.fn if source is not None else None
+    try:
+        if source is not None:
+            source.fn = None
+        with pytest.raises(RuntimeError, match=message):
+            register_tier_aliases(mcp, alias_map)
+    finally:
+        if source is not None:
+            source.fn = original_fn
+
+
+def test_alias_metadata_parity_guard_rejects_a_mutated_field():
+    """Mutation proof for the exhaustive metadata-parity helper."""
     mcp, _ = _build()
     tools = mcp._tool_manager._tools
-    for historical, canonical in EXPECTED_ALIAS_PAIRS.items():
-        src, alias = tools[historical], tools[canonical]
-        assert alias.fn is src.fn, f"{canonical} not identical fn to {historical}"
-        assert alias.description == src.description
-        assert alias.annotations == src.annotations
-        assert alias.parameters == src.parameters
-        assert alias.title == src.title
+    original = tools["short_note"].description
+    try:
+        tools["short_note"].description = f"{original} drift"
+        with pytest.raises(AssertionError, match="short_note description drift"):
+            _assert_alias_identity_and_metadata(tools, EXPECTED_ALIAS_PAIRS)
+    finally:
+        tools["short_note"].description = original
 
 
 # --- Folded P1-4: destructive auth-gate parity through the proxy -------------
@@ -763,10 +735,10 @@ async def test_mid_delete_denies_identically_to_bank_delete_via_proxy(perms):
     assert mid_res == bank_res
 
 
-def test_tool_mapping_doc_lists_all_13_alias_pairs():
+def test_tool_mapping_doc_lists_all_canonical_alias_pairs():
     # Machine-link doc <-> code: every aliased name (historical source + its
     # canonical target) must appear in the normative TOOL_MAPPING.md, so a
-    # code/doc drift on the 13 names is caught in CI (tool naming consistent
+    # code/doc drift on every mapped name is caught in CI (tool naming consistent
     # in code, docs, and tests).
     from pathlib import Path
 
@@ -779,44 +751,27 @@ def test_tool_mapping_doc_lists_all_13_alias_pairs():
         assert canonical in doc, f"{canonical} missing from TOOL_MAPPING.md"
 
 
-# --- Folded P1-5: long aliases inherit the non-authoritative graph handler ----
-
-def test_long_aliases_inherit_graph_handler_identity():
-    mcp, _ = _build()
-    tools = mcp._tool_manager._tools
-    for historical, canonical in EXPECTED_ALIAS_PAIRS.items():
-        if not canonical.startswith("long_"):
-            continue
-        # Identical handler => no new write path into commit/rollback/audit can
-        # be introduced by the alias; the non-authoritative posture is inherited.
-        assert tools[canonical].fn is tools[historical].fn
-        assert tools[canonical].annotations == tools[historical].annotations
-
-
 # --- P6-3: frozen fixture surface lock + alias permission/identity parity ----
 
 def test_fixture_is_internally_consistent():
     """The fixture alone must be self-coherent before we compare it to the
     live registration. This catches a malformed edit before it can mask a
     real drift."""
-    assert FIXTURE["total"] == 61
-    assert FIXTURE["historical_count"] == 48
-    assert FIXTURE["alias_count"] == 13
-    assert FIXTURE["historical_count"] + FIXTURE["alias_count"] == FIXTURE["total"]
-
     historical = list(FIXTURE["historical"])
-    assert len(historical) == FIXTURE["historical_count"]
-    assert len(set(historical)) == FIXTURE["historical_count"]
-
     alias_map = FIXTURE["alias_map"]
-    assert len(alias_map) == FIXTURE["alias_count"]
     aliases = set(alias_map.values())
+
+    assert FIXTURE["historical_count"] == len(historical)
+    assert FIXTURE["alias_count"] == len(alias_map)
+    assert FIXTURE["total"] == len(set(historical) | aliases)
+    assert FIXTURE["historical_count"] + FIXTURE["alias_count"] == FIXTURE["total"]
+    assert len(set(historical)) == FIXTURE["historical_count"]
     assert len(aliases) == FIXTURE["alias_count"]
 
     # Tier buckets must exactly partition the alias set.
     by_tier = FIXTURE["tier_aliases"]
     counts = FIXTURE["tier_alias_counts"]
-    assert counts == {"short": 3, "mid": 6, "long": 4}
+    assert set(counts) == set(by_tier) == {"short", "mid", "long"}
     assert sum(counts.values()) == FIXTURE["alias_count"]
     for tier, names in by_tier.items():
         assert len(names) == counts[tier]
@@ -838,78 +793,46 @@ def test_fixture_is_internally_consistent():
             assert cond_level in allowed_levels, (name, cond_key, cond_level)
 
 
-def test_fixture_matches_in_memory_constants():
-    """The fixture and the in-test constants are two independent encodings
-    of the same contract — they must agree, otherwise a fixture-only edit
-    could silently desync the assertions."""
-    assert set(FIXTURE["historical"]) == EXPECTED_HISTORICAL
-    assert FIXTURE["alias_map"] == EXPECTED_ALIAS_PAIRS
-    assert FIXTURE["total"] == EXPECTED_TOTAL
+def test_registered_surface_mapping_and_metadata_match_canonical_fixture():
+    """The one exhaustive live MCP surface/mapping/metadata authority.
 
-
-def test_registered_surface_exactly_matches_fixture():
-    """RED if any historical tool is renamed, removed, or added without a
-    deliberate fixture update; RED if the alias set drifts from the fixture."""
+    RED on any unplanned name/count drift, source↔alias mapping drift, alias
+    implementation split, metadata mismatch, permission-profile change, or
+    second tool-manager surface.
+    """
     mcp, total = _build()
-    names = set(mcp._tool_manager._tools)
+    tools = mcp._tool_manager._tools
+    names = set(tools)
+    expected_names = EXPECTED_HISTORICAL | EXPECTED_ALIASES
 
-    assert total == FIXTURE["total"]
-    assert len(names) == FIXTURE["total"]
+    assert ALIAS_MAP == EXPECTED_ALIAS_PAIRS
+    assert total == len(names) == EXPECTED_TOTAL
+    assert names == expected_names
 
-    # Historical names: removing the 13 aliases must leave EXACTLY the
-    # fixture's historical set — catches rename/drop AND stray additions.
-    fixture_aliases = set(FIXTURE["alias_map"].values())
-    fixture_historical = set(FIXTURE["historical"])
-    assert names - fixture_aliases == fixture_historical
+    # call_tool_direct reads the same single manager the protocol surface uses.
+    import live_mem.tools as tools_pkg
 
-    # Aliases are a strict subset of the registered names.
-    assert fixture_aliases <= names
+    assert tools_pkg._mcp_ref is mcp
+    _assert_alias_identity_and_metadata(tools, EXPECTED_ALIAS_PAIRS)
 
-    # Code <-> code: the shipped ALIAS_MAP also equals the fixture.
-    assert ALIAS_MAP == FIXTURE["alias_map"]
-
-
-def test_tier_alias_partition_matches_fixture():
-    """Each of short_/mid_/long_ buckets contains EXACTLY the fixture's
-    names (set + count). The net-new long_* historical tools (long_ingest,
-    long_query — P4-7, no graph_* twin) are NOT aliases and must NOT appear
-    in the long_* bucket."""
-    mcp, _ = _build()
-    names = set(mcp._tool_manager._tools)
-    fixture_historical = set(FIXTURE["historical"])
-
+    # Tier buckets partition exactly the fixture aliases. Net-new direct
+    # long_ingest/long_query stay in EXPECTED_HISTORICAL and are excluded.
     for tier in ("short", "mid", "long"):
-        # Live tier bucket excludes net-new historical long_* tools, which
-        # are not aliases (they have no graph_* twin).
         live = {
             n
             for n in names
-            if n.startswith(f"{tier}_") and n not in fixture_historical
+            if n.startswith(f"{tier}_") and n not in EXPECTED_HISTORICAL
         }
         expected = set(FIXTURE["tier_aliases"][tier])
         assert live == expected, f"{tier} alias bucket drift: {live ^ expected}"
         assert len(live) == FIXTURE["tier_alias_counts"][tier]
 
-
-def test_each_alias_shares_one_impl_object_and_one_permission_profile():
-    """alias ≡ canonical: same ``fn`` object identity AND same statically
-    derived permission *profile* (default + parameter-conditional gates).
-    Identity guarantees the auth gate cannot diverge by construction; the
-    profile read confirms the AST-visible ``check_*`` Call shape is the
-    one the fixture pins for the historical source. Substring matches in
-    imports/comments/dead code cannot satisfy this — only real Call
-    nodes count."""
-    mcp, _ = _build()
-    tools = mcp._tool_manager._tools
+    # Identity also means one permission profile. The AST-derived source
+    # profile must match the fixture so a live authorization relevel cannot be
+    # hidden behind metadata parity.
     perms = FIXTURE["permission_level"]
-    for historical, canonical in FIXTURE["alias_map"].items():
+    for historical, canonical in EXPECTED_ALIAS_PAIRS.items():
         src, alias = tools[historical], tools[canonical]
-        # 1. Identical impl object — no separate codepath.
-        assert alias.fn is src.fn, (
-            f"alias {canonical!r} fn is not the SAME object as {historical!r}"
-        )
-        # 2. Permission *profile* derived from the live handler AST matches
-        # the fixture and is identical on both sides of the alias.
         profile_src = _effective_permission_profile(src.fn)
         profile_alias = _effective_permission_profile(alias.fn)
         assert profile_src == profile_alias, (
@@ -928,12 +851,10 @@ def test_each_alias_shares_one_impl_object_and_one_permission_profile():
         )
 
 
-def test_historical_only_tools_match_fixture_permission_profiles():
-    """Every historical tool — including the 31 bank-op/cross-cutting tools
-    with no tiered alias and the 2 net-new long tools — must
-    match the fixture's permission profile. Catches a silent gate softening
-    on any path (default OR a parameter-conditional branch) on a tool that
-    is NOT covered by the alias-parity test above."""
+def test_all_historical_tools_match_fixture_permission_profiles():
+    """Every historical/direct tool, including alias sources, must match the
+    fixture permission profile. Catches a silent gate softening on any path
+    (default or parameter-conditional) independently of alias parity."""
     mcp, _ = _build()
     tools = mcp._tool_manager._tools
     perms = FIXTURE["permission_level"]
@@ -1017,10 +938,9 @@ async def test_graph_push_conditional_manage_gate_is_actually_enforced():
         ``include_volatile=True``;
       - a deny on the conditional path is therefore observable end-to-end,
         not just structurally. Pair with
-        ``test_each_alias_shares_one_impl_object_and_one_permission_profile``
-        (AST shape) and ``test_long_aliases_inherit_graph_handler_identity``
-        (alias parity) — together they fail RED on either a structural
-        softening of the gate (manage → write inside the
+        ``test_registered_surface_mapping_and_metadata_match_canonical_fixture``
+        (AST shape + alias identity) — together they fail RED on either a
+        structural softening of the gate (manage → write inside the
         ``include_volatile=True`` branch) or a behavioral no-op of it.
     """
     mcp, _ = _build()  # also sets the module _mcp_ref used by call_tool_direct

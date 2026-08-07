@@ -1667,6 +1667,14 @@ def _read_key():
 def main():
     global VERBOSE, STEP_MODE, PAUSE_SECONDS
 
+    active_runner = os.environ.get("HIVEMIND_ACTIVE_TEST_RUNNER", "").strip()
+    if active_runner:
+        raise SystemExit(
+            "refusing nested manual recipe suite; "
+            f"active runner is {active_runner!r}"
+        )
+    os.environ["HIVEMIND_ACTIVE_TEST_RUNNER"] = f"manual:{os.getpid()}"
+
     ap = argparse.ArgumentParser(
         description=f"Recette globale — Hivemind {PRODUCT_VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,

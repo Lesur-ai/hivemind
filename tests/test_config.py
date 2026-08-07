@@ -32,6 +32,7 @@ def _make_settings(**overrides):
         "consolidation_timeout": 600,
         "consolidation_max_notes": 500,
         "consolidation_batch_size": 5,
+        "consolidation_legacy_french_prompts": False,
         "compact_threshold": 0.6,
         "bank_file_max_size": 15360,
         "response_max_bytes": 512 * 1024,
@@ -130,6 +131,23 @@ class TestLLMValidation:
 
 
 class TestConsolidationValidation:
+    def test_english_prompts_are_the_default(self):
+        assert _make_settings().consolidation_legacy_french_prompts is False
+        assert (
+            _make_settings(
+                consolidation_legacy_french_prompts="false"
+            ).consolidation_legacy_french_prompts
+            is False
+        )
+
+    def test_legacy_french_prompts_can_be_enabled(self):
+        settings = _make_settings(consolidation_legacy_french_prompts="true")
+        assert settings.consolidation_legacy_french_prompts is True
+
+    def test_v1_6_language_selector_values_are_not_accepted_early(self):
+        with pytest.raises(ValueError):
+            _make_settings(consolidation_legacy_french_prompts="fr")
+
     def test_timeout_too_low(self):
         with pytest.raises(ValueError, match="CONSOLIDATION_TIMEOUT"):
             _make_settings(consolidation_timeout=5)

@@ -23,8 +23,7 @@ Ce module pin la chorégraphie complète :
 - ``local_only`` et ``not_a_space`` restent octet-pour-octet hérités.
 
 Déterministe, offline, fake-backed. Réutilise ``FakeStorage`` (tests/
-test_hivemind_state.py) et le pattern ``CopyFakeStorage`` (tests/
-test_backup_restore_hivemind_guard.py:49).
+test_hivemind_state.py) et le ``CopyFakeStorage`` partagé des suites restore.
 """
 
 from __future__ import annotations
@@ -51,6 +50,7 @@ from live_mem.core.hivemind import (
     Tombstone,
     generate_peer_keypair,
 )
+from tests.fakes.backup_storage import CopyFakeStorage, patch_backup_storage as _patch_storage
 from tests.test_hivemind_state import FakeStorage
 
 SPACE = "p6-1-space"
@@ -61,25 +61,8 @@ BACKUP_PREFIX = f"_backups/{SPACE}/{TS}/"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CopyFakeStorage — mirror du pattern P2-5 (tests/test_backup_restore_hivemind_guard.py:49)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class CopyFakeStorage(FakeStorage):
-    """``FakeStorage`` + ``copy_object`` (absent de la classe partagée)."""
-
-    async def copy_object(self, source_key: str, dest_key: str) -> None:
-        self.put_calls += 1
-        self.objects[dest_key] = self.objects[source_key]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Helpers de seeding
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def _patch_storage(monkeypatch, storage: FakeStorage) -> None:
-    monkeypatch.setattr("live_mem.core.backup.get_storage", lambda: storage)
 
 
 async def _seed_healthy_hive(

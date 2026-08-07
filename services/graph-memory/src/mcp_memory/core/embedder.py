@@ -1,200 +1,245 @@
 # -*- coding: utf-8 -*-
 """
-EmbeddingService - Génération d'embeddings via LLMaaS Cloud Temple.
+EmbeddingService - Génération d'embeddings via la frontière partagée (P13-1C).
 
-Utilise l'endpoint /v1/embeddings compatible OpenAI avec le modèle
-bge-m3:567m (multilingue, 1024 dimensions).
+Consomme le contrat ``EmbeddingProvider`` de ``hivemind_inference``
+(ADR-0027) : le profil embedding résolu — le MÊME que celui du cœur
+Hivemind — porte modèle, dimensions attendues, transport (``PROXY_URL``,
+contrat egress P12-3 inchangé) et le retry borné. L'adapter valide ordre,
+cardinalité, dimensions exactes et finitude des composantes AVANT tout retour :
+aucun vecteur partiel ou mal dimensionné n'atteint Qdrant.
 
 Utilisé pour :
-- Vectoriser les chunks de documents (ingestion)
-- Vectoriser les requêtes utilisateur (recherche)
+- Vectoriser les chunks de documents (ingestion, ``input_type=document``)
+- Vectoriser les requêtes utilisateur (recherche, ``input_type=query``)
 """
 
 import sys
 from typing import Optional, List
 
-from openai import AsyncOpenAI
-from openai import APIError, APITimeoutError
-from tenacity import retry, stop_after_attempt, wait_exponential
+from hivemind_inference import EmbeddingResult, InferenceError
+from hivemind_inference.certification_budget import (
+    protected_certification_discovery_timeout_seconds,
+    protected_certification_model_discovery,
+)
+from hivemind_inference.records import EmbeddingRequest
 
 from ..config import get_settings
-from .egress import (
-    build_owned_async_http_client,
-    close_owned_client_from_sync,
-    display_proxy_url,
-    redact_proxy_errors_async,
-    redact_proxy_secrets,
-)
+from .egress import redact_proxy_errors_async, redact_proxy_secrets
+
+# Timeout total historique des appels embeddings (connexion + envoi + lecture
+# + le seul retry borné autorisé — ADR-0027).
+EMBEDDING_TIMEOUT_SECONDS = 60.0
 
 
 class EmbeddingService:
     """
-    Service d'embedding via LLMaaS Cloud Temple.
-    
-    Utilise le modèle bge-m3:567m pour générer des vecteurs de 1024 dimensions.
-    L'API est au format OpenAI : POST /v1/embeddings
+    Service d'embedding via la frontière d'inférence partagée.
+
+    Le format wire reste OpenAI-compatible (``POST /embeddings``) via l'adapter
+    générique enregistré ; aucun SDK provider n'est construit ici.
     """
-    
+
     def __init__(self):
-        """Initialise le client OpenAI pour les embeddings.
+        """Snapshotte le profil embedding résolu (P13-1C).
 
-        P12-3 (Hivemind #268) : quand ``PROXY_URL`` est configurée, un
-        ``httpx.AsyncClient`` POSSÉDÉ route documents, requêtes et sonde
-        provider-health via le proxy (même contrat de cycle de vie que
-        l'extracteur : fermeture sur échec du constructeur et via ``close()``
-        au shutdown). Sans proxy, comportement direct historique inchangé.
+        Un profil absent est un démarrage VALIDE : chaque opération échoue
+        alors explicitement (enveloppe sûre), sans accès réseau.
         """
-        settings = get_settings()
+        # Parité historique : une configuration de service invalide échoue ici.
+        get_settings()
 
-        self._owned_http_client = None
-        if settings.proxy_url:
-            self._owned_http_client = build_owned_async_http_client(
-                settings.proxy_url,
-                timeout=60.0,
-            )
-            # Jamais l'URL brute (potentiellement porteuse de credentials).
-            print(
-                f"🔀 [Embedder] LLM egress via proxy "
-                f"{display_proxy_url(settings.proxy_url)}",
-                file=sys.stderr,
-            )
-        # Utilise le même client OpenAI que l'extracteur
-        # L'API LLMaaS Cloud Temple est compatible OpenAI
-        try:
-            self._client = AsyncOpenAI(
-                base_url=settings.llmaas_base_url,
-                api_key=settings.llmaas_api_key,
-                timeout=60.0,
-                http_client=self._owned_http_client,
-            )
-        except BaseException:
-            if self._owned_http_client is not None:
-                close_owned_client_from_sync(self._owned_http_client)
-                self._owned_http_client = None
-            raise
-        self._model = settings.llmaas_embedding_model
-        self._dimensions = settings.llmaas_embedding_dimensions
+        from .inference_runtime import get_inference_runtime
+
+        self._embedding_profile = get_inference_runtime().config.embedding
+        self._model = (
+            self._embedding_profile.configured_model
+            if self._embedding_profile
+            else ""
+        )
+        self._dimensions = (
+            self._embedding_profile.expected_dimensions
+            if self._embedding_profile
+            else 0
+        )
 
     async def close(self) -> None:
-        """Ferme le transport proxy possédé (idempotent, référence conservée).
+        """Compatibilité shutdown : no-op idempotent.
 
-        Une annulation d'appel en vol ne ferme jamais ce transport partagé —
-        seul close() (shutdown du service) le fait.
+        P13-1C : le transport appartient au runtime d'inférence partagé, fermé
+        par le lifespan ASGI. Une annulation d'appel en vol ne peut donc pas le
+        fermer.
         """
-        if self._owned_http_client is not None:
-            await self._owned_http_client.aclose()
-    
+        return None
+
     @property
     def dimensions(self) -> int:
-        """Dimension des vecteurs produits."""
+        """Dimension des vecteurs produits (profil résolu)."""
         return self._dimensions
-    
-    @redact_proxy_errors_async
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True
-    )
-    async def embed_texts(self, texts: List[str]) -> List[List[float]]:
+
+    async def _embed(self, texts: List[str], input_type: str) -> EmbeddingResult:
+        """Requête normalisée vers l'adapter enregistré (P13-1C).
+
+        ``input_type`` (document|query) est préservé sémantiquement même si le
+        format wire OpenAI-compatible est symétrique (ADR-0027). Le retry borné
+        vit dans l'adapter : les décorateurs ``tenacity`` historiques, qui
+        rejouaient jusqu'à 3 fois une requête dont la livraison était ambiguë,
+        sont supprimés.
         """
-        Génère les embeddings pour une liste de textes (batch).
-        
-        Utilisé principalement à l'ingestion pour vectoriser tous les
-        chunks d'un document en une seule passe.
-        
-        Args:
-            texts: Liste de textes à vectoriser
-            
-        Returns:
-            Liste de vecteurs (chacun de dimension self._dimensions)
-            
-        Raises:
-            APIError: Si l'API LLMaaS retourne une erreur
-            APITimeoutError: Si l'appel dépasse le timeout
+        from .inference_runtime import get_inference_runtime
+
+        provider = get_inference_runtime().embedding_provider()
+        request = EmbeddingRequest(
+            inputs=tuple(texts),
+            timeout_seconds=EMBEDDING_TIMEOUT_SECONDS,
+            input_type=input_type,
+        )
+        result = await provider.embed(request)
+        if type(result) is not EmbeddingResult:
+            raise RuntimeError(
+                "embedding provider returned an invalid normalized result"
+            )
+        return result
+
+    @redact_proxy_errors_async
+    async def embed_texts_result(self, texts: List[str]) -> EmbeddingResult:
+        """Génère un batch et conserve son ``EmbeddingResult`` exact.
+
+        P13-1D : l'identité configurée/résolue et la preuve du modèle doivent
+        atteindre le guard Qdrant avec les vecteurs. Les convertir ici en listes
+        les détruirait avant que le consommateur puisse vérifier une dérive entre
+        batches.
         """
         if not texts:
-            return []
-        
+            raise ValueError(
+                "embed_texts_result requires a non-empty text batch"
+            )
+
         try:
             print(f"🔢 [Embedder] Vectorisation de {len(texts)} textes ({self._model})...", file=sys.stderr)
-            
-            response = await self._client.embeddings.create(
-                model=self._model,
-                input=texts
+
+            result = await self._embed(texts, "document")
+
+            print(
+                f"✅ [Embedder] {len(result.vectors)} embeddings générés "
+                f"(dim={result.effective_dimensions})",
+                file=sys.stderr,
             )
-            
-            # Extraire les vecteurs dans l'ordre
-            embeddings = [item.embedding for item in response.data]
-            
-            print(f"✅ [Embedder] {len(embeddings)} embeddings générés (dim={len(embeddings[0])})", file=sys.stderr)
-            
-            return embeddings
-            
-        except APITimeoutError:
-            print(f"⏰ [Embedder] Timeout — trop de textes ou textes trop longs", file=sys.stderr)
+
+            return result
+
+        except InferenceError as e:
+            if e.category == "timeout":
+                print(f"⏰ [Embedder] Timeout — trop de textes ou textes trop longs", file=sys.stderr)
+            else:
+                # Enveloppe sûre par construction ; redaction conservée en
+                # défense en profondeur.
+                print(f"❌ [Embedder] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
-        except APIError as e:
-            print(f"❌ [Embedder] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
-            raise
-    
+
+    async def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        """Wrapper historique : renvoie des listes sans modifier leur ordre."""
+        if not texts:
+            return []
+        result = await self.embed_texts_result(texts)
+        return [list(vector) for vector in result.vectors]
+
     @redact_proxy_errors_async
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True
-    )
+    async def embed_query_result(self, query: str) -> EmbeddingResult:
+        """Génère une requête et conserve son ``EmbeddingResult`` exact.
+
+        La cardinalité est déjà validée par l'adapter contre la requête à une
+        entrée. Le contrôle local reste explicite afin qu'un faux provider
+        in-process ne puisse pas faire choisir silencieusement le premier de
+        plusieurs vecteurs.
+        """
+        try:
+            result = await self._embed([query], "query")
+            if len(result.vectors) != 1:
+                raise RuntimeError(
+                    "embedding provider returned an invalid query cardinality"
+                )
+            return result
+
+        except InferenceError as e:
+            if e.category == "timeout":
+                print(f"⏰ [Embedder] Timeout sur la requête", file=sys.stderr)
+            else:
+                print(f"❌ [Embedder] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            raise
+
     async def embed_query(self, query: str) -> List[float]:
-        """
-        Génère l'embedding pour une requête utilisateur.
-        
-        Utilisé à la recherche pour vectoriser la question avant
-        de la comparer aux chunks dans Qdrant.
-        
-        Args:
-            query: Texte de la requête
-            
-        Returns:
-            Vecteur de dimension self._dimensions
-        """
-        try:
-            response = await self._client.embeddings.create(
-                model=self._model,
-                input=[query]
-            )
-            
-            return response.data[0].embedding
-            
-        except APITimeoutError:
-            print(f"⏰ [Embedder] Timeout sur la requête", file=sys.stderr)
-            raise
-        except APIError as e:
-            print(f"❌ [Embedder] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
-            raise
-    
+        """Wrapper historique : renvoie le vecteur de requête comme liste."""
+        result = await self.embed_query_result(query)
+        return list(result.vectors[0])
+
     async def test_connection(self) -> dict:
-        """Teste la connexion au service d'embedding."""
+        """Sonde de santé du provider embedding — discovery UNIQUEMENT.
+
+        HM-12 / ADR-0027 (P13-1C) : plus AUCUN embedding réel ici — l'ancienne
+        sonde vectorisait "test" et dépensait des tokens à CHAQUE appel santé.
+        Une absence de ``/models`` reste un endpoint joignable, pas une panne.
+        Forme historique préservée : ``{status, model, dimensions, message}`` ;
+        ``dimensions`` rapporte la valeur ATTENDUE du profil, que l'adapter
+        vérifie exactement sur chaque vraie réponse.
+        """
+        from .inference_runtime import get_inference_runtime
+
         try:
-            response = await self._client.embeddings.create(
-                model=self._model,
-                input=["test"]
+            runtime = get_inference_runtime()
+            if runtime.config.embedding is None:
+                return {
+                    "status": "error",
+                    "model": "",
+                    "message": "Erreur embedding: provider embedding non configuré",
+                }
+            discovery_contract = protected_certification_model_discovery(
+                role="embedding",
+                provider_id=runtime.config.embedding.provider_id,
+                endpoint=runtime.config.embedding.endpoint,
+                configured_model=runtime.config.embedding.configured_model,
             )
-            
-            dim = len(response.data[0].embedding)
-            
-            return {
-                "status": "ok",
-                "model": self._model,
-                "dimensions": dim,
-                "message": f"Embedding OK ({self._model}, {dim}d)"
-            }
-            
-        except APIError as e:
+            if discovery_contract == "unsupported":
+                return {
+                    "status": "ok",
+                    "model": self._model,
+                    "dimensions": self._dimensions,
+                    "message": (
+                        "Catalogue embedding non disponible pour le profil "
+                        "de certification protégé"
+                    ),
+                }
+            probe = runtime.embedding_probe()
+            timeout_seconds = protected_certification_discovery_timeout_seconds()
+            if timeout_seconds is None:
+                # Preserve the adapter-owned ordinary-runtime default exactly.
+                result = await probe.probe()
+            else:
+                result = await probe.probe(timeout_seconds=timeout_seconds)
+        except Exception as e:
             return {
                 "status": "error",
                 "model": self._model,
                 # P12-3 : jamais d'URL proxy brute dans la sortie santé.
-                "message": f"Erreur embedding: {redact_proxy_secrets(str(e))}"
+                "message": f"Erreur embedding: {redact_proxy_secrets(str(e))}",
             }
+        if result.healthy:
+            return {
+                "status": "ok",
+                "model": self._model,
+                "dimensions": self._dimensions,
+                "message": f"Embedding OK ({self._model}, {self._dimensions}d attendus)",
+            }
+        return {
+            "status": "error",
+            "model": self._model,
+            "message": "Erreur embedding: provider unreachable"
+            + (
+                f" ({result.error_category})"
+                if result.error_category is not None
+                else ""
+            ),
+        }
 
 
 # Singleton pour usage global
@@ -212,8 +257,9 @@ def get_embedding_service() -> EmbeddingService:
 async def close_embedding_service_if_initialized() -> None:
     """Ferme le singleton s'il a été instancié (shutdown du service).
 
-    P12-3 : libère le transport proxy possédé injecté dans AsyncOpenAI quand
-    ``PROXY_URL`` est défini. Sans instanciation préalable, no-op.
+    P13-1C : le transport appartient au runtime d'inférence partagé, fermé par
+    le lifespan via ``close_inference_runtime_if_initialized``. Ce hook reste
+    pour réinitialiser le singleton.
     """
     global _embedding_service
     if _embedding_service is not None:

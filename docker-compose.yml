@@ -15,9 +15,10 @@
 #
 # Embedded long runtime (mandatory, ADR-0019):
 #   Since P7 the long ontology/knowledge-graph engine is a repository-shipped
-#   product component, built from ./services/graph-memory (no operator-supplied
-#   long backend image, no separate provisioning). It is brought up by
-#   the DEFAULT `docker compose up -d` alongside its Neo4j and Qdrant datastores.
+#   product component, built from services/graph-memory with the repository root
+#   as context (no operator-supplied long backend image, no separate
+#   provisioning). It is brought up by the DEFAULT `docker compose up -d`
+#   alongside its Neo4j and Qdrant datastores.
 #   Long state stays derived-only / non-authoritative (ADR-0010): no commit,
 #   rollback, audit, tombstone, watermark, membership or recovery truth; the
 #   internal token/endpoint config is local-only (never in shared state/backups).
@@ -200,13 +201,18 @@ services:
   # ─────────────────────────────────────────────────────────────
   # Embedded long runtime — Graph Memory (mandatory, ADR-0019)
   # ─────────────────────────────────────────────────────────────
-  # Repository-built from ./services/graph-memory (vendored at a pinned upstream
-  # commit — see THIRD_PARTY_NOTICES.md). NOT exposed to the host and NOT routed
-  # through the WAF; Hivemind reaches it at http://graph-memory:8002 on the
-  # internal network. Long stays derived-only / non-authoritative (ADR-0010).
+  # Repository-built from services/graph-memory (vendored at a pinned upstream
+  # commit — see THIRD_PARTY_NOTICES.md) with the REPOSITORY ROOT as build
+  # context, so the image installs the exact shared `src/hivemind_inference`
+  # package (#306, P13-1C, ADR-0027) instead of a copied variant. NOT exposed to
+  # the host and NOT routed through the WAF; Hivemind reaches it at
+  # http://graph-memory:8002 on the internal network. Long stays derived-only /
+  # non-authoritative (ADR-0010).
   # ─────────────────────────────────────────────────────────────
   graph-memory:
-    build: ./services/graph-memory
+    build:
+      context: .
+      dockerfile: services/graph-memory/Dockerfile
     image: hivemind-graph-memory:latest
     container_name: hivemind-graph-memory
     # NO "ports:" — internal network only (reachable at graph-memory:8002)
@@ -223,9 +229,13 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION_PREFIX=${QDRANT_COLLECTION_PREFIX:-memory_}
       - QDRANT_API_KEY=${QDRANT_API_KEY:-}
-      # Embedding model (LLMaaS) — S3_* and LLMAAS_API_* come from .env (env_file)
-      - LLMAAS_EMBEDDING_MODEL=${LLMAAS_EMBEDDING_MODEL:-bge-m3:567m}
-      - LLMAAS_EMBEDDING_DIMENSIONS=${LLMAAS_EMBEDDING_DIMENSIONS:-1024}
+      # Inference configuration (the legacy LLMAAS_* pair OR the split
+      # INFERENCE_CHAT_* / INFERENCE_EMBEDDING_* families) comes EXCLUSIVELY
+      # from .env (env_file). No service-level override here: Compose
+      # `environment` wins over `env_file`, so a legacy name pinned at this
+      # level would be injected into every split deployment and refuse startup
+      # on the family-coexistence check (P13-1C, ADR-0027). The frozen legacy
+      # embedding defaults (bge-m3:567m / 1024) live in the shared resolver.
       # Distinct internal identity so the shared .env MCP_SERVER_NAME does not
       # bleed Hivemind's public identity into the embedded service handshake/logs.
       - MCP_SERVER_NAME=hivemind-graph-memory
@@ -247,7 +257,7 @@ services:
     networks:
       - hivemind-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/ready', timeout=2)"]
       interval: 30s
       timeout: 10s
       start_period: 20s

@@ -263,6 +263,12 @@ def show_space_delete_recovery(result: dict):
         if failed_keys
         else "  []"
     )
+    access_pending_line = (
+        "[bold]access_grants_pending:[/bold] "
+        f"{json.dumps(result.get('access_grants_pending'), ensure_ascii=False)}\n"
+        if "access_grants_pending" in result
+        else ""
+    )
     console.print(
         Panel.fit(
             "[bold]status:[/bold] partial\n"
@@ -270,6 +276,7 @@ def show_space_delete_recovery(result: dict):
             f"[bold]files_total:[/bold] {json.dumps(result.get('files_total'), ensure_ascii=False)}\n"
             f"[bold]files_deleted:[/bold] {json.dumps(result.get('files_deleted'), ensure_ascii=False)}\n"
             f"[bold]marker_preserved:[/bold] {json.dumps(result.get('marker_preserved'), ensure_ascii=False)}\n"
+            f"{access_pending_line}"
             f"[bold]recovery_required:[/bold] {json.dumps(result.get('recovery_required'), ensure_ascii=False)}\n"
             f"[bold]recovery.retry_safe:[/bold] {json.dumps(recovery.get('retry_safe'), ensure_ascii=False)}\n"
             f"[bold]failed_keys:[/bold]\n{failed_lines}\n"

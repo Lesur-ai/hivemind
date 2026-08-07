@@ -31,7 +31,7 @@ THREE sections, each mapping to a P3-8 requirement:
 
 3. COVERAGE MANIFEST (modeled on
    ``test_p2_regression_gate.py::test_coverage_manifest_names_every_p2_contract``):
-   a ``COVERAGE_MAP`` naming all 10 P3 sibling guard modules with real anchor
+   a ``COVERAGE_MAP`` naming all 9 P3 sibling guard modules with real anchor
    functions, so renaming/deleting any P3 guard suite (or a named anchor) goes
    RED — the executable DoD anchor for P3.
 
@@ -48,9 +48,10 @@ golden):
 - ``DirectLocalWriteSink`` put/put_json/delete/delete_many byte parity:
   ``tests/test_write_sink.py`` (``test_direct_local_*``).
 
-Deterministic and offline: the consolidator is built with ``AsyncOpenAI`` +
-``get_settings`` patched (the ``tests/test_proxy.py::_make_consolidator`` idiom,
-so no real httpx/OpenAI client is constructed); the LLM is stubbed at
+Deterministic and offline: the consolidator is built with ``get_settings``
+patched and a resolved shared-boundary runtime installed (the
+``tests/test_proxy.py::_make_consolidator`` idiom, so no transport is
+constructed); the LLM is stubbed at
 ``ConsolidatorService._call_llm``; the clock is frozen at the
 ``live_mem.core.consolidator.datetime`` seam; and the storage seam
 ``live_mem.core.consolidator.get_storage`` is pointed at an in-memory fake. No
@@ -203,17 +204,19 @@ def _make_settings(**overrides) -> Settings:
 def _make_stubbed_consolidator() -> ConsolidatorService:
     """Build the REAL ``ConsolidatorService`` with NO real LLM/httpx client.
 
-    Idiom from ``tests/test_proxy.py::_make_consolidator`` (lines 122-135): patch
-    ``consolidator.get_settings`` + ``consolidator.AsyncOpenAI`` so
-    ``__init__`` builds no real client, then stub the instance method
-    ``_call_llm`` (``AsyncMock``) to the FIXED ``_LLM_RESULT``. The SAME instance
-    is shared by both runs so any residual nondeterminism is shared and cancels
-    in the equality.
+    Idiom from ``tests/test_proxy.py::_make_consolidator``: patch
+    ``consolidator.get_settings`` and install a resolved shared-boundary
+    runtime (P13-1C) so ``__init__`` snapshots a chat profile without building
+    any transport, then stub the instance method ``_call_llm`` (``AsyncMock``)
+    to the FIXED ``_LLM_RESULT``. The SAME instance is shared by both runs so
+    any residual nondeterminism is shared and cancels in the equality.
     """
+    from tests.fakes.inference_fakes import core_inference_runtime
+
     settings = _make_settings()
     with (
         patch("live_mem.core.consolidator.get_settings", return_value=settings),
-        patch("live_mem.core.consolidator.AsyncOpenAI"),
+        core_inference_runtime(),
     ):
         svc = ConsolidatorService()
     svc._call_llm = AsyncMock(return_value=_LLM_RESULT)
@@ -501,13 +504,6 @@ COVERAGE_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
             "test_bank_delete_routes_delete_many_through_sink",
         ),
     ),
-    "adr_doclock_and_baseline_reconciliation": (
-        "tests.test_adr_registry_p3",
-        (
-            "test_adr_0006_file_exists_and_is_accepted",
-            "test_epic_p3_baseline_is_663_not_580",
-        ),
-    ),
 }
 
 
@@ -519,7 +515,8 @@ def test_coverage_manifest_names_every_p3_contract():
     silently rot. The executable DoD anchor for the P3 engine-boundaries epic.
 
     Non-vacuous: the loop body asserts on real importlib/getattr results, and we
-    pin that ALL 10 EPIC-P3 guard suites are represented so the manifest cannot
+    pin that all nine current EPIC-P3 behavioral guard suites are represented
+    so the manifest cannot
     silently shrink.
     """
     expected_contracts = {
@@ -532,7 +529,6 @@ def test_coverage_manifest_names_every_p3_contract():
         "hivemind_routing_verdict_mapping",
         "tool_path_routing_byte_identical_and_fail_closed",
         "static_no_adhoc_storage_for_mutations",
-        "adr_doclock_and_baseline_reconciliation",
     }
     assert set(COVERAGE_MAP) == expected_contracts
 

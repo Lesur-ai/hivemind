@@ -598,6 +598,7 @@ class MonoTenantSpaceAllowlistProvider:
             "graph_disconnect",
             "graph_push",
             "graph_status",
+            "inference_self_test",
             # ---- live (short) tools — historical aliases ----
             "live_note",
             "live_read",
@@ -605,6 +606,7 @@ class MonoTenantSpaceAllowlistProvider:
             # ---- long tools (no alias mapping) ----
             "long_ingest",
             "long_query",
+            "long_reindex",
             # ---- space tools ----
             "space_create",
             "space_delete",

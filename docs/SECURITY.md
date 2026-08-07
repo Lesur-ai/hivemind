@@ -278,17 +278,60 @@ retry. Incompatible/corrupt prefixes require explicit admin object inspection
 and possibly manual removal. Never automate deletion or grant removal as
 rollback.
 
-`space_delete` deletes/reprobes payload first and `_meta.json` last, but its
-lifecycle lock does not cover every short/mid/long, restore/GC, or Hivemind
-writer. Quiesce all same-space mutations and background jobs before deletion.
-Outside that operational precondition, a late writer may orphan data or
-republish the marker after a nominal success.
+`space_delete` takes lifecycle→token locks and, for stored-token calls,
+revalidates the persisted caller; bootstrap administration has no persisted
+caller to revalidate. It deletes/reprobes payload first and `_meta.json` last,
+then removes the deleted ID from every token allowlist. When scopes change, it
+returns `deleted` only after a fresh validated token-store read proves zero
+references and emits one best-effort aggregate audit event with the stored
+actor's canonical full hash when one exists. That event also records the
+sorted canonical full hashes of every affected token in
+`target_token_hashes`, so an operator can identify whose access was removed
+without exposing plaintext credentials. Payload/marker failure leaves token
+scopes unchanged;
+ambiguous grant cleanup is typed `partial` and surviving references keep
+`space_create` blocked. An empty prefix plus scopes is non-destructive
+`not_found` by default because it may be an intentional future pre-grant.
+Only a caller explicitly resuming a known deletion sets
+`recover_access_grants=True`; grants-only success is `grants_cleaned`. The
+cleanup converges to zero references, but is not caller-idempotent: after its
+own scope is removed, a manager retry is denied; a global stored admin or
+bootstrap identity can inspect the terminal `not_found` state. A successful
+ordinary deletion has the same caller-authority caveat. The lifecycle lock
+still does not cover every short/mid/long, restore/GC, or Hivemind writer.
+Quiesce all same-space mutations and background jobs before deletion. Outside
+that operational precondition, a late writer may orphan data or republish the
+marker after a nominal success.
+
+If token cleanup may have persisted but its confirming read is unavailable, the
+operation returns `partial` and emits a best-effort
+`space_delete_grants_unconfirmed` audit record containing the sorted canonical
+hashes whose scopes were submitted for removal. It never emits the successful
+`space_delete_grants` event on that path.
+
+Backup restoration is intentionally data-only: it copies space objects and
+never restores token allowlists. After a successful deletion, no non-admin
+token retains the target scope, so a global/bootstrap administrator must
+perform the restore. A persisted global admin can then re-grant each intended
+token with `space_invite_token`; a bootstrap identity has no persisted actor
+hash and must instead add the scope with `admin_update_token` or
+`admin_bulk_update_tokens` (`space_ids_add`). Never delete and recreate a
+restored space to repair access; that destroys the data that was just restored.
+
+Deletion loads and validates `_system/tokens.json` before the first prefix
+mutation. If that registry is corrupt, version-incompatible, or unreadable, the
+operation fails closed as a masked error rather than entering the
+post-mutation `partial/recovery_required` contract. No space object is deleted;
+an administrator must repair or restore the token registry before retrying.
 
 Admin lifecycle tools retain their compatibility behavior and can store a
-canonical `space_id` that does not yet exist on a non-admin target. Such a future pre-grant
-intentionally blocks `space_create` under the ABA rule until an admin removes
-it. Prefer creating the space first, then assigning it; do not use `space_ids`
-as a future-space reservation mechanism.
+canonical `space_id` that does not yet exist on a non-admin target. Such a
+future pre-grant intentionally blocks `space_create` under the ABA rule until
+a global admin or an active manager already scoped to that ID deliberately
+removes it. A normal `space_delete` on the absent ID also preserves it;
+`recover_access_grants=True` is an explicit destructive decision that removes
+peer pre-grants too. Prefer creating the space first, then assigning it; do not
+use `space_ids` as a future-space reservation mechanism.
 
 Token-store v2 forbids dormant admin allowlists: every admin entry persists
 `space_ids: []`, because global access comes from the permission. Migration
@@ -351,10 +394,14 @@ the Graph Memory consumer fail closed on a v2 admin entry with non-empty scopes.
   fails closed. The supported deployment is one process and one Mesh identity;
   multiple workers sharing an identity are outside this contract. The bundled
   Compose file masks `HIVEMIND_MESH_PRIVATE_KEY` to an empty value in the
-  derived `graph-memory` service. The root `.dockerignore` excludes `.env*`,
-  `*.key`, and `*.pem` from the Hivemind context, while the Graph build context
-  is a separate subtree; retain both boundaries when adding services or build
-  contexts.
+  derived `graph-memory` service. Hivemind and Graph Memory share the
+  repository-root build context so both import the same lifecycle guard. The
+  root `.dockerignore` carries explicit root and recursive rules for `.env`,
+  `.env.*`, `*.key`, and `*.pem`, and also excludes local worktrees,
+  virtualenvs, bytecode, and tool caches before the context reaches the Docker
+  daemon or BuildKit cache. The Graph Dockerfile then copies only its explicit
+  vendored-runtime inputs plus `src/hivemind_inference` into the image. Retain
+  both boundaries when adding services or build inputs.
 * **Deployer responsibility**: configure the default-on Mesh identity before
   startup, or explicitly set `HIVEMIND_MESH_ENABLED=false` for a deliberately
   non-Mesh deployment; terminate public traffic with TLS; protect the key as a
@@ -363,6 +410,28 @@ the Graph Memory consumer fail closed on a v2 admin entry with non-empty scopes.
   defense in depth. Exact domains and bounds are in
   [`PROJECT_MESH.md`](PROJECT_MESH.md) and
   [`ARCHITECTURE_CONTRACTS.md`](ARCHITECTURE_CONTRACTS.md).
+
+### 3.12 Process lifecycle failures are fail-closed, not self-healing
+
+Both shipped services own process shutdown hooks, so disabling the ASGI
+lifespan protocol is unsupported. With `--lifespan off`, every request,
+including health and metrics, is refused before application handling because
+no shutdown can release the resources.
+
+If the inner lifespan application dies after startup, the shared guard closes
+owned resources and refuses later requests. Uvicorn can nevertheless remain
+listening and returning failures: a process that has not exited does not
+trigger Compose's `restart: unless-stopped` policy merely because its health
+check is failing. Operators must restart/recreate that container manually or
+use a health-aware supervisor that recycles persistently unhealthy processes.
+This is a known, documented availability residual that requires explicit
+deployment acceptance; it is not represented as automatic process recovery.
+
+A lifespan task that deliberately suppresses repeated Python cancellation is
+treated the same way: it is retained in an explicit process-terminal
+quarantine, cleanup runs once, and the request gate remains permanently failed.
+The guard does not claim to forcibly kill Python code; process recycle is the
+only recovery boundary.
 
 ---
 
@@ -545,8 +614,9 @@ inside the container:
 11. **Monitoring** of S3 reachability and of `RESYNC_REQUIRED` /
     `CorruptedStateError` events — both are availability-shaped signals
     that must page an operator.
-12. **Set a strong `NEO4J_PASSWORD`** (required by the compose file —
-    it gates the embedded graph datastore).
+12. **Set a strong `NEO4J_PASSWORD`** beginning with an alphanumeric
+    character (required by the compose file — it gates the embedded graph
+    datastore, and the Neo4j bootstrap CLI treats a leading `-` as an option).
 13. **Never publish host ports for `graph-memory`, `neo4j` or `qdrant`**
     (§2.1) — the WAF is the only public entrypoint; the embedded
     services trust the internal network.
@@ -581,8 +651,10 @@ inside the container:
     before retry; never auto-delete preparation state or roll grants back.
 20. **Quiesce a space before `space_delete`**. Stop notes, consolidation,
     graph, restore/GC, and Hivemind jobs until the result is handled. The
-    payload-first, `_meta.json`-last protocol reports unconfirmed deletion as
-    typed `partial`, but the lifecycle lock is not a universal writer barrier.
+    payload-first, `_meta.json`-last protocol then removes all token grants and
+    confirms zero references. Any unconfirmed object or token cleanup is typed
+    `partial`; retry only when `recovery.retry_safe` is exactly true. The
+    lifecycle lock is not a universal writer barrier.
 
 ---
 

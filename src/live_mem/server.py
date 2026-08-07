@@ -8,15 +8,15 @@ Ce fichier :
 3. Assemble la chaîne de middlewares ASGI
 4. Démarre le serveur Uvicorn
 
-Architecture des outils (48 outils directs, 8 catégories) :
-    tools/system.py → system_health, system_about, system_whoami (3)
-    tools/space.py  → space_create, space_update, space_info, ... (9)
-    tools/live.py   → live_note, live_read, live_search (3)
-    tools/bank.py   → bank_read, bank_consolidate, bank_stale_spaces, ... (11)
-    tools/graph.py  → graph_connect, graph_push, long_query, ... (6)
-    tools/backup.py → backup_create, backup_restore, ... (5)
-    tools/admin.py  → admin_create_token, admin_gc_notes, ... (9)
-    tools/access.py → token_create, space_invite_token (2)
+Architecture des outils (enregistrement centralisé par catégorie) :
+    tools/system.py → system_health, system_about, system_whoami
+    tools/space.py  → space_create, space_update, space_info, ...
+    tools/live.py   → live_note, live_read, live_search
+    tools/bank.py   → bank_read, bank_consolidate, bank_stale_spaces, ...
+    tools/graph.py  → graph_connect, graph_push, long_query, ...
+    tools/backup.py → backup_create, backup_restore, ...
+    tools/admin.py  → admin_create_token, admin_gc_notes, ...
+    tools/access.py → token_create, space_invite_token
 
 Usage :
     python -m live_mem.server
@@ -28,7 +28,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from .config import get_settings
+from hivemind_inference.asgi_lifespan import (
+    LifespanGuard,
+    LifespanHooks,
+    LifespanOwnership,
+)
+from hivemind_inference.process_window import ProcessWindowGate
+
+from .config import get_settings, redact_proxy_secrets
 from .tools.exposure import HivemindFastMCP
 
 # ─────────────────────────────────────────────────────────────
@@ -112,10 +119,15 @@ settings = get_settings()
 @asynccontextmanager
 async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
     """
-    Gère le cycle de vie du serveur MCP.
+    Gère les préflights propres à chaque session MCP.
 
-    Au shutdown : ferme proprement le ConsolidatorService si actif
-    (libère le httpx.AsyncClient injecté quand PROXY_URL est défini).
+    Les transports partagés du processus — consolidateur ET runtime d'inférence
+    partagé (PROXY_URL inclus) — ne sont ni validés ni fermés ici : FastMCP
+    entre ce contexte une fois par SESSION (`StreamableHTTPSessionManager`
+    appelle `Server.run()` par session). Y attacher un singleton de process
+    faisait qu'une déconnexion client fermait les transports pour tout le
+    monde. Ce cycle de vie appartient au guard ASGI extérieur, une fois au
+    démarrage et une fois au shutdown du processus (#306 / P13-1C).
     """
     # LM2-11 : migration auth critique one-shot v1 -> v2. Elle vit dans le
     # lifespan (pas dans main()) afin de couvrir uvicorn --factory, gunicorn et
@@ -161,11 +173,63 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
         registration.get("rotated_out", 0),
     )
 
-    try:
-        yield
-    finally:
-        from .core.consolidator import close_consolidator_if_initialized
-        await close_consolidator_if_initialized()
+    yield
+
+
+async def _close_core_process_resources() -> None:
+    """Release Core resources exactly once at process shutdown."""
+
+    from .core.consolidator import close_consolidator_if_initialized
+
+    await close_consolidator_if_initialized()
+
+
+def _validate_inference_startup() -> None:
+    """Resolve the shared inference configuration fail-closed, once per window.
+
+    Registered as an ``on_startup`` hook and NOT as ``on_validate``: despite the
+    name, :meth:`hivemind_inference.holder.InferenceRuntimeHolder.validate_startup`
+    is not a pure check. It lowers the holder's terminal shutdown flag — it is
+    the only thing that reopens the seam after a shutdown — and publishes a
+    resolved runtime. `on_validate` is documented for checks that acquire
+    nothing, and its failure path rolls back with ``cleanup_required=False``;
+    `on_startup` is the kind the guard designates for work that takes state,
+    and its failure rolls back THROUGH ``on_shutdown``.
+
+    Declaring a startup hook also makes the ASGI lifespan mandatory
+    (``lifecycle_required``), so `uvicorn --lifespan off` is refused before
+    application dispatch rather than serving on an unvalidated configuration.
+    """
+
+    from .core.inference_runtime import validate_inference_startup
+
+    validate_inference_startup()
+
+
+async def _close_inference_runtime() -> None:
+    """Release the shared inference runtime's owned provider transports.
+
+    A SIBLING of ``_close_core_process_resources`` rather than a step inside
+    it: the guard runs every ``on_shutdown`` entry through ``run_finalizers``,
+    so neither closer can be skipped by the other's failure or cancellation.
+    Exhaustive finalisation is the guard's responsibility — re-implementing it
+    per service is what produced two divergent copies in the first place.
+    """
+
+    from .core.inference_runtime import close_inference_runtime_if_initialized
+
+    await close_inference_runtime_if_initialized()
+
+
+def _report_lifespan(line: str) -> None:
+    logger.warning("%s", line)
+
+
+# Every resource the shutdown hooks below release is process-global — the
+# consolidator singleton and the shared inference runtime holder — while each
+# `create_app()` builds its OWN guard with its own startup gate. This gate is
+# what makes those two scopes agree (#276 / R7-F1).
+_process_window = ProcessWindowGate(service="Hivemind")
 
 
 mcp = HivemindFastMCP(
@@ -218,6 +282,17 @@ def create_app():
     # pattern ASGI idiomatique) le contournait et démarrait avec la clé publique
     # `change_me_in_production` → compromission admin totale zéro-connaissance.
     _reject_weak_bootstrap_key(settings.admin_bootstrap_key)
+
+    # P13-1C : la validation d'inférence n'est PAS répétée ici. Elle était
+    # appelée à la factory (revue Codex ronde 5, R5-F1) parce que la faire
+    # uniquement dans le handshake lifespan la rendait tributaire de
+    # l'existence de ce handshake — `uvicorn --factory ... --lifespan off` ne
+    # dispatche aucun scope lifespan. Le guard partagé (#306) règle ce cas
+    # sans acquérir quoi que ce soit : déclarer un hook de cycle de vie rend
+    # le protocole lifespan OBLIGATOIRE, et une requête arrivant sans lui est
+    # refusée avant tout dispatch applicatif. Valider à la factory publierait
+    # au contraire un runtime résolu hors de toute fenêtre capable de le
+    # libérer. Un seul propriétaire : `LifespanHooks.on_startup`, plus bas.
 
     from .auth.middleware import (
         AuthMiddleware,
@@ -359,6 +434,35 @@ def create_app():
     app = MetricsMiddleware(app)
     app = AuthMiddleware(app, peer_namespace=mesh_namespace)
     app = RequestIdMiddleware(app)
+    # Outermost process owner. The consolidator transport and the shared
+    # inference runtime are both lazy and process-scoped, so the guard also
+    # refuses `--lifespan off` before request code can acquire either.
+    #
+    # The process window uses the guard's dedicated synchronous ownership
+    # phase: pure validation remains pure, and a refused overlapping factory
+    # runs no shutdown hook. Every process-global hook is owner-guarded.
+    # Release is deliberately NOT a finalizer; the guard emits it only after a
+    # fully cleaned startup rollback or a completely clean shutdown. Any close
+    # failure, cancellation, inner death, or quarantine retains the slot and
+    # requires process recycle.
+    window = _process_window.new_window()
+    app = LifespanGuard(
+        app,
+        name="hivemind-core",
+        hooks=LifespanHooks(
+            ownership=LifespanOwnership(
+                reserve=window.claim,
+                release_reusable=window.release,
+            ),
+            on_startup=(window.guard(_validate_inference_startup),),
+            on_shutdown=(
+                window.guard(_close_core_process_resources),
+                window.guard(_close_inference_runtime),
+            ),
+        ),
+        redact=redact_proxy_secrets,
+        report=_report_lifespan,
+    )
 
     return app
 

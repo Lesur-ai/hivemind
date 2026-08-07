@@ -10,12 +10,22 @@ import sys
 import json
 import uuid
 import base64
+import asyncio
 import argparse
+from functools import wraps
+from contextlib import AsyncExitStack
 from typing import Annotated, Optional, List, Dict, Any
 
 import uvicorn
 from dotenv import load_dotenv
 from pydantic import Field
+from hivemind_inference.asgi_lifespan import (
+    LifespanGuard,
+    LifespanHooks,
+    LifespanOwnership,
+    run_finalizers,
+)
+from hivemind_inference.process_window import ProcessWindowGate
 
 # Charger .env avant les imports qui en dépendent
 load_dotenv()
@@ -34,6 +44,7 @@ from .core.egress import redact_proxy_secrets
 # =============================================================================
 
 settings = get_settings()
+_GRAPH_SCHEMA_STARTUP_TIMEOUT_SECONDS = settings.neo4j_query_timeout_seconds
 
 # Créer l'instance FastMCP
 # host="0.0.0.0" pour accepter les connexions externes (reverse proxy, Docker)
@@ -120,6 +131,17 @@ def get_vector_store():
     return _vector_store
 
 
+def _embedding_collection_failure(error) -> dict:
+    """Render a value-free collection-compatibility refusal."""
+    return {
+        "status": "error",
+        "embedding_collection": {
+            "state": error.state,
+            "reason": error.reason,
+        },
+    }
+
+
 _backup_service = None
 
 def get_backup():
@@ -131,11 +153,64 @@ def get_backup():
     return _backup_service
 
 
+def _guard_authorized_namespace_mutation(*, create: bool = False):
+    """Hold one multi-backend tool inside the per-memory mutation boundary."""
+
+    def decorate(method):
+        @wraps(method)
+        async def guarded(memory_id: str, *args, **kwargs):
+            try:
+                validate_memory_id(memory_id)
+            except ValueError:
+                return {"status": "error", "message": "Invalid memory_id"}
+            if not create:
+                access_err = check_memory_access(memory_id)
+                if access_err:
+                    return access_err
+                write_err = check_write_permission()
+                if write_err:
+                    return write_err
+            else:
+                write_err = check_write_permission()
+                if write_err:
+                    return write_err
+                auth = current_auth.get()
+                restricted_new_target = (
+                    auth
+                    and auth.get("type") == "token"
+                    and auth.get("memory_ids", [])
+                    and memory_id not in auth.get("memory_ids", [])
+                )
+                if not restricted_new_target:
+                    access_err = check_memory_access(memory_id)
+                    if access_err:
+                        return access_err
+
+            from .core.maintenance import (
+                MaintenanceAdmissionError,
+                get_maintenance_coordinator,
+            )
+
+            try:
+                async with get_maintenance_coordinator().ordinary(memory_id):
+                    return await method(memory_id, *args, **kwargs)
+            except MaintenanceAdmissionError:
+                return {
+                    "status": "error",
+                    "message": "Namespace maintenance is active",
+                }
+
+        return guarded
+
+    return decorate
+
+
 # =============================================================================
 # OUTILS MCP - Gestion des Mémoires
 # =============================================================================
 
 @mcp.tool()
+@_guard_authorized_namespace_mutation(create=True)
 async def memory_create(
     memory_id: Annotated[str, Field(description="Identifiant unique de la mémoire (ex: 'quoteflow-legal')")],
     name: Annotated[str, Field(description="Nom lisible de la mémoire")],
@@ -252,6 +327,7 @@ async def memory_create(
 
 
 @mcp.tool()
+@_guard_authorized_namespace_mutation()
 async def memory_update(
     memory_id: Annotated[str, Field(description="ID de la mémoire à modifier")],
     name: Annotated[Optional[str], Field(default=None, description="Nouveau nom (vide = pas de changement)")] = None,
@@ -299,6 +375,7 @@ async def memory_update(
 
 
 @mcp.tool()
+@_guard_authorized_namespace_mutation()
 async def memory_delete(
     memory_id: Annotated[str, Field(description="ID de la mémoire à supprimer (⚠️ irréversible)")]
 ) -> dict:
@@ -418,16 +495,74 @@ async def memory_stats(
             return access_err
         
         stats = await get_graph().get_memory_stats(memory_id)
+        try:
+            embedding_collection = await get_vector_store().get_collection_info(
+                memory_id
+            )
+        except Exception:
+            embedding_collection = {
+                "state": "unavailable",
+                "reason": "qdrant_unreadable",
+            }
         return {
             "status": "ok",
             "memory_id": memory_id,
             "document_count": stats.document_count,
             "entity_count": stats.entity_count,
             "relation_count": stats.relation_count,
-            "top_entities": stats.top_entities
+            "top_entities": stats.top_entities,
+            "embedding_collection": embedding_collection,
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def _memory_reindex_admission_error() -> dict:
+    """Return the exact retry-safe pre-dispatch maintenance envelope."""
+
+    return {
+        "status": "error",
+        "phase": "admission",
+        "reason": "maintenance_unavailable",
+        "operation_id": None,
+        "source_documents": 0,
+        "source_chunks": 0,
+        "vectors_written": 0,
+        "activated": False,
+        "active_state": "unavailable",
+    }
+
+
+@mcp.tool()
+async def memory_reindex(
+    memory_id: Annotated[
+        str,
+        Field(description="ID de la mémoire à reconstruire en maintenance"),
+    ],
+) -> dict:
+    """Rebuild the current embedding projection from retained source bytes.
+
+    This internal Graph Memory mutation requires ``write``. The public
+    Hivemind façade applies the operator-only ``manage`` boundary before it can
+    reach this service and restricts it to the controlled embedded binding.
+    """
+    try:
+        validate_memory_id(memory_id)
+        access_err = check_memory_access(memory_id)
+        if access_err:
+            # The public façade validates one exact nine-field result. A raw
+            # auth dict would be misclassified as a malformed post-dispatch
+            # outcome even though no non-idempotent work has begun.
+            return _memory_reindex_admission_error()
+        write_err = check_write_permission()
+        if write_err:
+            return _memory_reindex_admission_error()
+
+        from .core.reindex import get_reindex_service
+
+        return await get_reindex_service().reindex(memory_id)
+    except Exception:
+        return _memory_reindex_admission_error()
 
 
 # =============================================================================
@@ -1017,12 +1152,17 @@ async def question_answer(
         rag_context_parts = []
         rag_chunks_used = 0
         rag_mode = "graph-guided" if entities else "rag-only"
+        from .core.vector_store import (
+            EmbeddingCollectionReindexRequired,
+            EmbeddingCollectionUnavailable,
+        )
+
         try:
             # Collecter les doc_ids identifiés par le graphe (vide si aucune entité)
             graph_doc_ids = list(source_documents.keys())
 
             # Vectoriser la question
-            query_embedding = await get_embedder().embed_query(question)
+            query_result = await get_embedder().embed_query_result(question)
 
             # Recherche Qdrant :
             # - Graph-Guided : filtrée par les documents identifiés par le graphe
@@ -1032,7 +1172,7 @@ async def question_answer(
             
             chunk_results = await get_vector_store().search(
                 memory_id=memory_id,
-                query_embedding=query_embedding,
+                embedding_result=query_result,
                 doc_ids=graph_doc_ids if graph_doc_ids else None,
                 limit=chunk_limit
             )
@@ -1076,6 +1216,11 @@ async def question_answer(
                     preview = cr.chunk.text[:60].replace('\n', ' ').strip()
                     print(f"   📎 [F{i+1}] score={cr.score:.4f} ❌ | {section} | \"{preview}...\"", file=sys.stderr)
 
+        except (
+            EmbeddingCollectionReindexRequired,
+            EmbeddingCollectionUnavailable,
+        ) as error:
+            return _embedding_collection_failure(error)
         except Exception as e:
             print(f"⚠️ [Q&A] Erreur RAG vectoriel: {e}", file=sys.stderr)
             # On continue avec le contexte graphe seul
@@ -1241,16 +1386,21 @@ async def memory_query(
         rag_chunks_filtered = 0
         retained = []  # défini hors du try : utilisé plus bas même si le RAG échoue
 
+        from .core.vector_store import (
+            EmbeddingCollectionReindexRequired,
+            EmbeddingCollectionUnavailable,
+        )
+
         try:
             graph_doc_ids = list(source_documents.keys())
-            query_embedding = await get_embedder().embed_query(query)
+            query_result = await get_embedder().embed_query_result(query)
             
             score_threshold = settings.rag_score_threshold
             chunk_limit = settings.rag_chunk_limit
             
             chunk_results = await get_vector_store().search(
                 memory_id=memory_id,
-                query_embedding=query_embedding,
+                embedding_result=query_result,
                 doc_ids=graph_doc_ids if graph_doc_ids else None,
                 limit=chunk_limit
             )
@@ -1280,6 +1430,11 @@ async def memory_query(
                   f" (seuil={score_threshold}, {rag_chunks_filtered} filtrés sur {total_before})", 
                   file=sys.stderr)
         
+        except (
+            EmbeddingCollectionReindexRequired,
+            EmbeddingCollectionUnavailable,
+        ) as error:
+            return _embedding_collection_failure(error)
         except Exception as e:
             print(f"⚠️ [Query] Erreur RAG vectoriel: {e}", file=sys.stderr)
 
@@ -2249,7 +2404,7 @@ async def storage_check(
         graph_uris = set()          # URIs référencées dans Neo4j
         graph_uri_details = {}      # URI -> {memory_id, filename, doc_id}
         memory_prefixes = set()     # Préfixes S3 des mémoires connues
-        
+
         for mem in memories:
             mid = mem.id
             memory_prefixes.add(f"{mid}/")
@@ -2312,15 +2467,15 @@ async def storage_check(
         orphans = []
         for obj in all_s3_objects:
             key = obj["key"]
-            
+
             # Ignorer les fichiers de health check
             if key.startswith("_health_check/"):
                 continue
-            
+
             # Ignorer les backups (gérés séparément via backup_list)
             if key.startswith("_backups/"):
                 continue
-            
+
             # Ignorer les ontologies (fichiers légitimes)
             # Le pattern est {hash[:8]}__ontology_{name}.yaml (double _ car hash + _ontology)
             if "_ontology_" in key:
@@ -2503,7 +2658,31 @@ async def storage_cleanup(
         
         # 2. Supprimer les orphelins
         keys_to_delete = [o["key"] for o in orphans]
-        delete_result = await get_storage().delete_objects(keys_to_delete)
+        target_memories = sorted(
+            {
+                key.split("/", 1)[0]
+                for key in keys_to_delete
+                if type(key) is str and "/" in key and not key.startswith("_")
+            }
+        )
+        from .core.maintenance import (
+            MaintenanceAdmissionError,
+            get_maintenance_coordinator,
+        )
+
+        try:
+            async with AsyncExitStack() as stack:
+                coordinator = get_maintenance_coordinator()
+                for target_memory in target_memories:
+                    await stack.enter_async_context(
+                        coordinator.ordinary(target_memory)
+                    )
+                delete_result = await get_storage().delete_objects(keys_to_delete)
+        except MaintenanceAdmissionError:
+            return {
+                "status": "error",
+                "message": "Namespace maintenance is active",
+            }
         
         return {
             "status": "ok",
@@ -2520,11 +2699,45 @@ async def storage_cleanup(
         return {"status": "error", "message": str(e)}
 
 
+def _resolved_chat_model() -> str:
+    """Configured chat model of the RESOLVED profile, or ``""`` if the role is
+    not configured. Never raises: ``system_about`` must stay total."""
+    try:
+        from .core.inference_runtime import get_inference_runtime
+
+        profile = get_inference_runtime().config.chat
+    except Exception:
+        return ""
+    return profile.configured_model if profile is not None else ""
+
+
+def _resolved_embedding_model() -> str:
+    """Configured embedding model of the RESOLVED profile, or ``""``."""
+    try:
+        from .core.inference_runtime import get_inference_runtime
+
+        profile = get_inference_runtime().config.embedding
+    except Exception:
+        return ""
+    return profile.configured_model if profile is not None else ""
+
+
+def _resolved_embedding_dimensions() -> Optional[int]:
+    """Expected vector size of the RESOLVED embedding profile, or ``None``."""
+    try:
+        from .core.inference_runtime import get_inference_runtime
+
+        profile = get_inference_runtime().config.embedding
+    except Exception:
+        return None
+    return profile.expected_dimensions if profile is not None else None
+
+
 @mcp.tool()
 async def system_about() -> dict:
     """
     Identity and role of Hivemind's embedded long-memory runtime.
-    
+
     Retourne une description complète du service :
     - Qui il est et pourquoi il existe
     - Ses capacités (outils disponibles, ontologies)
@@ -2612,6 +2825,7 @@ async def system_about() -> dict:
             "Documents": ["document_list", "document_get", "document_delete"],
             "Ontologies": ["ontology_list", "ontology_get", "ontology_export", "ontology_import", "ontology_update", "ontology_delete"],
             "Backup/Restore": ["backup_create", "backup_list", "backup_restore", "backup_download", "backup_delete", "backup_restore_archive"],
+            "Maintenance": ["memory_reindex"],
             "Administration": ["admin_create_token", "admin_list_tokens", "admin_revoke_token", "admin_update_token"],
             "Diagnostic": ["system_health", "system_about", "system_whoami", "storage_check", "storage_cleanup"],
             "Visualisation": ["memory_graph"],
@@ -2648,9 +2862,14 @@ async def system_about() -> dict:
             "services": services_status,
             "configuration": (
                 {
-                    "llm_model": settings.llmaas_model,
-                    "embedding_model": settings.llmaas_embedding_model,
-                    "embedding_dimensions": settings.llmaas_embedding_dimensions,
+                    # P13-1C : les identités de modèle viennent des profils
+                    # RÉSOLUS (frontière partagée), plus des variables legacy —
+                    # celles-ci restent vides sur un déploiement INFERENCE_*.
+                    # Surface AUTHENTIFIÉE : métadonnées sûres uniquement,
+                    # jamais l'endpoint ni la clé.
+                    "llm_model": _resolved_chat_model(),
+                    "embedding_model": _resolved_embedding_model(),
+                    "embedding_dimensions": _resolved_embedding_dimensions(),
                     "rag_score_threshold": settings.rag_score_threshold,
                     "chunk_size": settings.chunk_size,
                     "backup_retention": settings.backup_retention_count,
@@ -2668,9 +2887,9 @@ async def system_health() -> dict:
     """
     Vérifie l'état de santé du système.
     
-    Teste les connexions à tous les services :
-    S3, Neo4j, LLMaaS, Qdrant, Embedding.
-    Les 5 doivent être OK, sinon le service est considéré en erreur.
+    Teste les connexions S3, Neo4j, LLMaaS, Qdrant et Embedding, ainsi que
+    les invariants locaux de schéma documentaire et d'admission maintenance.
+    Tous les services rapportés doivent être OK.
     
     Returns:
         État de chaque service
@@ -2687,11 +2906,32 @@ async def system_health() -> dict:
     except Exception as e:
         results["s3"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
 
+    graph = None
+
     # Test Neo4j
     try:
-        results["neo4j"] = await get_graph().test_connection()
+        graph = get_graph()
+        results["neo4j"] = await graph.test_connection()
     except Exception as e:
         results["neo4j"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
+
+    # Process-local mutation admission. These snapshots perform no backend I/O
+    # and contain no namespace or exception value.
+    try:
+        if graph is None:
+            raise RuntimeError("graph unavailable")
+        results["document_schema"] = graph.document_schema_status()
+    except Exception:
+        results["document_schema"] = {"status": "error", "ready": False}
+    try:
+        from .core.maintenance import get_maintenance_coordinator
+
+        results["maintenance"] = get_maintenance_coordinator().health_status()
+    except Exception:
+        results["maintenance"] = {
+            "status": "error",
+            "admissions_available": False,
+        }
 
     # Test LLMaaS (génération)
     try:
@@ -2711,7 +2951,7 @@ async def system_health() -> dict:
     except Exception as e:
         results["embedding"] = {"status": "error", "message": redact_proxy_secrets(str(e))}
     
-    # Statut global : TOUS doivent être OK (couplage strict)
+    # Statut global : backends and process admission must all be OK.
     all_ok = all(r.get("status") == "ok" for r in results.values())
     
     return {
@@ -3078,24 +3318,15 @@ async def backup_restore_archive(
         
         archive_bytes = base64.b64decode(archive_base64)
         
-        # Extraire le memory_id du manifest pour vérifier l'accès
-        import tarfile
-        from io import BytesIO
-        try:
-            with tarfile.open(fileobj=BytesIO(archive_bytes), mode='r:gz') as tar:
-                manifest_member = tar.getmember('manifest.json')
-                manifest_file = tar.extractfile(manifest_member)
-                if manifest_file:
-                    manifest_data = json.loads(manifest_file.read())
-                else:
-                    manifest_data = {}
-                archive_memory_id = manifest_data.get("memory_id")
-                if archive_memory_id:
-                    access_err = check_memory_access(archive_memory_id)
-                    if access_err:
-                        return access_err
-        except (KeyError, json.JSONDecodeError):
-            pass  # Le backup service gérera les erreurs de format
+        # Utiliser exactement le même parseur strict que le service de restore,
+        # y compris pour un manifest sous un dossier. Une archive illisible ne
+        # peut jamais contourner le contrôle d'accès avant le restore.
+        from .core.backup import BackupService
+
+        archive_memory_id = BackupService._archive_memory_id(archive_bytes)
+        access_err = check_memory_access(archive_memory_id)
+        if access_err:
+            return access_err
         
         async def _progress(msg):
             if ctx:
@@ -3118,65 +3349,134 @@ async def backup_restore_archive(
 # =============================================================================
 
 async def _close_llm_singletons() -> None:
-    """Ferme et réinitialise les singletons d'inférence au shutdown.
+    """Ferme et réinitialise les singletons extracteur/embedder au shutdown.
 
-    Libère les transports proxy possédés (créés uniquement quand PROXY_URL
-    est définie) des services extracteur et embedder — les deux registres
-    (modules core et caches lazy de ce module) sont réinitialisés. Idempotent
-    et no-op quand rien n'a été instancié.
+    Les deux registres (modules core et caches lazy de ce module) sont
+    réinitialisés. Quand un cache serveur référence le singleton de son module,
+    l'objet n'est fermé qu'une fois ; tout objet distinct reste fermé exactement
+    une fois. Idempotent et no-op quand rien n'a été instancié.
+
+    P13-1C : les transports provider possédés (proxy inclus) ne vivent PLUS
+    ici — ils appartiennent au runtime d'inférence partagé, libéré par le hook
+    frère ``_close_inference_runtime``. Séparer les deux est ce qui garantit
+    qu'un échec ici ne peut pas sauter la libération des transports : c'est
+    ``run_finalizers``, dans le guard, qui tente chaque hook indépendamment.
     """
     global _extractor_service, _embedding_service
-    from .core.embedder import close_embedding_service_if_initialized
-    from .core.extractor import close_extractor_service_if_initialized
+    from .core import embedder as embedder_module
+    from .core import extractor as extractor_module
 
-    local_extractor = _extractor_service
-    local_embedder = _embedding_service
+    candidates = (
+        extractor_module._extractor_service,
+        embedder_module._embedding_service,
+        _extractor_service,
+        _embedding_service,
+    )
+    extractor_module._extractor_service = None
+    embedder_module._embedding_service = None
     _extractor_service = None
     _embedding_service = None
-    await close_extractor_service_if_initialized()
-    await close_embedding_service_if_initialized()
-    # Les caches lazy de ce module peuvent référencer les mêmes instances que
-    # les singletons de module (déjà fermés ci-dessus) ou des instances
-    # injectées : fermer explicitement couvre les deux cas (close idempotent).
-    if local_extractor is not None:
-        await local_extractor.close()
-    if local_embedder is not None:
-        await local_embedder.close()
+
+    owned_services = []
+    for service in candidates:
+        if service is not None and not any(
+            service is owned for owned in owned_services
+        ):
+            owned_services.append(service)
+
+    # Every close is attempted independently. The shared outer guard needs an
+    # exception (including cancellation) so it can fold the outcome into the
+    # single shutdown verdict before propagating cancellation.
+    outcome = await run_finalizers(*(service.close for service in owned_services))
+    if outcome is not None:
+        raise outcome
 
 
-class EgressLifecycleMiddleware:
-    """Shim ASGI : ferme les transports proxy possédés au lifespan.shutdown.
+def _validate_inference_startup() -> None:
+    """Resolve the shared inference configuration fail-closed, once per window.
 
-    Posé en couche EXTERNE de la pile dans ``main()`` pour que l'arrêt réel
-    d'uvicorn (SIGTERM/SIGINT) atteigne toujours le chemin de fermeture,
-    quel que soit le comportement des couches internes. Les messages lifespan
-    sont transmis inchangés ; les scopes non-lifespan passent tels quels.
+    Registered as ``on_startup`` and not ``on_validate``: ``validate_startup``
+    lowers the holder's terminal shutdown flag and publishes a resolved
+    runtime, so it is not the pure check ``on_validate`` documents. Declaring a
+    startup hook also makes the ASGI lifespan mandatory, so `--lifespan off` is
+    refused instead of serving on an unvalidated configuration.
     """
 
-    def __init__(self, app):
-        self.app = app
+    from .core.inference_runtime import validate_inference_startup
 
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "lifespan":
-            return await self.app(scope, receive, send)
+    validate_inference_startup()
 
-        async def wrapped_receive():
-            message = await receive()
-            if message["type"] == "lifespan.shutdown":
-                try:
-                    await _close_llm_singletons()
-                except Exception as e:
-                    # Un échec de fermeture ne doit pas casser le shutdown
-                    # des couches internes ; message redacted (jamais d'URL
-                    # proxy brute).
-                    print(
-                        "⚠️ [Egress] close on shutdown failed: "
-                        f"{redact_proxy_secrets(str(e))}",
-                        file=sys.stderr,
-                    )
-            return message
 
-        await self.app(scope, wrapped_receive, send)
+async def _initialize_graph_document_schema() -> None:
+    """Require global legacy Document migration before request admission."""
+
+    graph = get_graph()
+    # This performance-only index has its own short fail-open budget and is not
+    # allowed to consume the critical schema-invariant deadline below.
+    await graph.ensure_document_lookup_index()
+    try:
+        async with asyncio.timeout(_GRAPH_SCHEMA_STARTUP_TIMEOUT_SECONDS):
+            await graph.initialize_document_schema()
+    except TimeoutError:
+        raise RuntimeError("document schema initialization is unavailable") from None
+
+
+async def _close_inference_runtime() -> None:
+    """Release the shared inference runtime's owned provider transports.
+
+    A SIBLING of ``_close_llm_singletons``, not a step inside it: the guard
+    runs every ``on_shutdown`` entry through ``run_finalizers``, so an
+    extractor/embedder close that raises or is cancelled cannot skip the
+    transport release — the exact defect the P13-1C round-3 sweep found when
+    the provider step was last in a hand-written sequence.
+    """
+
+    from .core.inference_runtime import close_inference_runtime_if_initialized
+
+    await close_inference_runtime_if_initialized()
+
+
+def _report_egress_lifespan(line: str) -> None:
+    print(f"⚠️ [Egress] {line}", file=sys.stderr)
+
+
+# The extractor/embedder registries and the shared inference runtime holder are
+# module singletons, but each `_create_app()` builds its own guard with its own
+# startup gate. This gate reconciles the two scopes (#276 / R7-F1).
+_process_window = ProcessWindowGate(service="Graph Memory")
+
+
+def _create_app(*, debug: bool = False):
+    """Build the final Graph Memory ASGI stack with one process owner."""
+
+    base_app = mcp.streamable_http_app()
+    app = StaticFilesMiddleware(base_app)
+    app = LoggingMiddleware(app, debug=debug)
+    app = AuthMiddleware(app, debug=debug)
+    # Reserve in the guard's dedicated synchronous ownership phase. Release is
+    # a positive lifecycle checkpoint, never a shutdown finalizer: ambiguous
+    # or failed cleanup retains the process window and requires recycle.
+    window = _process_window.new_window()
+    return LifespanGuard(
+        app,
+        name="graph-memory",
+        hooks=LifespanHooks(
+            ownership=LifespanOwnership(
+                reserve=window.claim,
+                release_reusable=window.release,
+            ),
+            on_startup=(
+                window.guard(_validate_inference_startup),
+                window.guard(_initialize_graph_document_schema),
+            ),
+            on_shutdown=(
+                window.guard(_close_llm_singletons),
+                window.guard(_close_inference_runtime),
+            ),
+        ),
+        redact=redact_proxy_secrets,
+        report=_report_egress_lifespan,
+    )
 
 
 # =============================================================================
@@ -3191,24 +3491,21 @@ def main():
     parser.add_argument("--debug", action="store_true", default=settings.mcp_server_debug)
     args = parser.parse_args()
     
-    # Récupérer l'app ASGI Streamable HTTP de FastMCP
-    # Remplace l'ancien mcp.sse_app() — endpoint unique /mcp au lieu de /sse + /messages
-    # Le HostNormalizerMiddleware n'est plus nécessaire (plus de validation Host par Starlette)
-    base_app = mcp.streamable_http_app()
-    
-    # Empiler les middlewares (le dernier wrappé est le premier exécuté)
-    # Flux requête : EgressLifecycleMiddleware (lifespan uniquement) →
-    # AuthMiddleware → LoggingMiddleware → StaticFilesMiddleware → MCP app
-    app = StaticFilesMiddleware(base_app)
-    app = LoggingMiddleware(app, debug=args.debug)
-    app = AuthMiddleware(app, debug=args.debug)
-    # P12-3 : couche externe — ferme les transports proxy possédés des
-    # services d'inférence sur lifespan.shutdown (arrêt uvicorn).
-    app = EgressLifecycleMiddleware(app)
+    # Le guard partagé reste la couche la plus externe et possède le shutdown
+    # du processus, indépendamment des sessions MCP internes.
+    app = _create_app(debug=args.debug)
     
     # Sécurité v2.1.0 : vérifier la clé bootstrap au démarrage
     check_bootstrap_key_safety(settings.admin_bootstrap_key or "")
-    
+
+    # P13-1C (ADR-0027) : la validation fail-closed de la configuration
+    # d'inférence n'est PAS appelée ici. Elle appartient au hook `on_startup`
+    # du guard (`_validate_inference_startup`), qui la joue une fois par
+    # fenêtre de service et répond `lifespan.startup.failed` au superviseur.
+    # L'appeler AUSSI ici la ferait tourner deux fois par process et
+    # publierait un runtime résolu hors de toute fenêtre capable de le
+    # libérer si le lifespan n'était jamais dispatché.
+
     # Afficher le banner
     print("=" * 70, file=sys.stderr)
     print("🧠 MCP Memory Server - Démarrage (Streamable HTTP)", file=sys.stderr)
@@ -3218,7 +3515,7 @@ def main():
     print(f"🐛 Debug    : {'ACTIVÉ' if args.debug else 'Désactivé'}", file=sys.stderr)
     print("=" * 70, file=sys.stderr)
     print("Outils disponibles:", file=sys.stderr)
-    print("  - memory_create, memory_delete, memory_list, memory_stats", file=sys.stderr)
+    print("  - memory_create, memory_delete, memory_list, memory_stats, memory_reindex", file=sys.stderr)
     print("  - memory_ingest, memory_search, memory_query, memory_get_context", file=sys.stderr)
     print("  - admin_create_token, admin_list_tokens, admin_revoke_token, admin_update_token", file=sys.stderr)
     print("  - storage_check, storage_cleanup, system_health, system_about, system_whoami", file=sys.stderr)

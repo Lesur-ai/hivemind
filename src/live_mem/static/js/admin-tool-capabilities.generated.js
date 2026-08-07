@@ -331,6 +331,20 @@ const HIVEMIND_TOOL_CAPABILITIES = Object.freeze({
     "operation": "mutation",
     "space_scope_argument": "space_id"
   },
+  "long_reindex": {
+    "canonical": "long_reindex",
+    "audience": "operator",
+    "minimum_permission": "manage",
+    "operation": "mutation",
+    "space_scope_argument": "space_id"
+  },
+  "inference_self_test": {
+    "canonical": "inference_self_test",
+    "audience": "operator",
+    "minimum_permission": "manage",
+    "operation": "mutation",
+    "space_scope_argument": null
+  },
   "backup_create": {
     "canonical": "backup_create",
     "audience": "operator",

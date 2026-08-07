@@ -32,6 +32,11 @@ RUN apk add --no-cache libcap=2.78-r0 \
     && setcap cap_net_bind_service=+ep /usr/bin/caddy \
     && mkdir -p /data /config \
     && chown -R 10001:10001 /data /config
-USER 10001:10001
 
-# Le Caddyfile sera monté en volume depuis docker-compose
+# Conserver une configuration exacte dans l'image. Le Compose produit peut la
+# remplacer par son bind read-only pour les éditions opérateur, tandis que les
+# exécutions sans ce bind utilisent ce fallback construit depuis le même SHA.
+# La copie précède l'utilisateur non-root afin que Caddy puisse la lire.
+COPY Caddyfile /etc/caddy/Caddyfile
+
+USER 10001:10001

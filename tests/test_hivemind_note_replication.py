@@ -8,7 +8,7 @@ réseau réel. Chaque test nomme la mutation qui le rendrait ROUGE.
 Couvre :
 - couche pure : ``note_id_from_filename`` / ``note_id_from_key`` (garde slash),
   ``provenance_label``, ``advance_event_cursor`` (monotone + port bank_version),
-  ``cursor_admits`` (bornes), pin des 15 ``EventType`` ;
+  ``cursor_admits`` (bornes), pin des 16 ``EventType`` ;
 - idempotence : même note deux fois -> une copie ;
 - curseur d'event : avance monotone, port de ``bank_version``, invisible à la GC ;
 - anti-résurrection : tombstone-first, réordre note-first, mismatch d'identité,
@@ -297,26 +297,28 @@ def test_P4_eventtype_frozen_at_16_members() -> None:
     """P5-7 n'ajoute AUCUN membre ``EventType``. P6-1 (issue #87, ADR-0014)
     APPEND ``UNSAFE_RECOVERY_RESTORED`` (append-only safe per le commentaire
     modèle « ces valeurs sont des chaînes persistées dans le journal d'audit,
-    elles ne doivent jamais être renommées »). Le jeu des 16 noms est figé.
-    RED si un 17e membre est ajouté."""
-    assert len(EventType.__members__) == 16
-    assert set(EventType.__members__) == {
-        "MEMBERSHIP_UPDATED",
-        "TERM_BUMPED",
-        "TOKEN_CLAIM",
-        "TOKEN_GRANTED",
-        "TOKEN_RELEASED",
-        "TOKEN_ACK",
-        "BANK_COMMITTED",
-        "TOMBSTONE_RECORDED",
-        "WATERMARK_UPDATED",
-        "PEER_JOINED",
-        "PEER_EVICTED",
-        "RESYNC_REQUIRED",
-        "RESYNC_COMPLETED",
-        "BOOTSTRAP_SNAPSHOT_EXPORTED",
-        "BOOTSTRAP_SNAPSHOT_IMPORTED",
-        "UNSAFE_RECOVERY_RESTORED",
+    elles ne doivent jamais être renommées »). Les 16 paires nom/valeur sont
+    figées. RED si un membre est ajouté ou une valeur persistée est modifiée."""
+    actual = {
+        name: member.value for name, member in EventType.__members__.items()
+    }
+    assert actual == {
+        "MEMBERSHIP_UPDATED": "membership_updated",
+        "TERM_BUMPED": "term_bumped",
+        "TOKEN_CLAIM": "token_claim",
+        "TOKEN_GRANTED": "token_granted",
+        "TOKEN_RELEASED": "token_released",
+        "TOKEN_ACK": "token_ack",
+        "BANK_COMMITTED": "bank_committed",
+        "TOMBSTONE_RECORDED": "tombstone_recorded",
+        "WATERMARK_UPDATED": "watermark_updated",
+        "PEER_JOINED": "peer_joined",
+        "PEER_EVICTED": "peer_evicted",
+        "RESYNC_REQUIRED": "resync_required",
+        "RESYNC_COMPLETED": "resync_completed",
+        "BOOTSTRAP_SNAPSHOT_EXPORTED": "bootstrap_snapshot_exported",
+        "BOOTSTRAP_SNAPSHOT_IMPORTED": "bootstrap_snapshot_imported",
+        "UNSAFE_RECOVERY_RESTORED": "unsafe_recovery_restored",
     }
 
 
@@ -1199,9 +1201,14 @@ def _make_stubbed_consolidator():
             "proxy_url": None,
         }
     )
+    from tests.fakes.inference_fakes import core_inference_runtime
+
     with (
         _patch("live_mem.core.consolidator.get_settings", return_value=settings),
-        _patch("live_mem.core.consolidator.AsyncOpenAI"),
+        # P13-1C: the provider seam is the shared runtime, not an SDK
+        # constructor — install a resolved chat profile so __init__ snapshots
+        # one. No transport is built (``_call_llm`` is stubbed below).
+        core_inference_runtime(),
     ):
         svc = ConsolidatorService()
     svc._call_llm = AsyncMock(

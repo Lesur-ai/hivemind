@@ -108,7 +108,7 @@ def _mcp_request(token_info: dict | None) -> Iterator[None]:
 @pytest.fixture
 def exposed_mcp() -> HivemindFastMCP:
     mcp = HivemindFastMCP("p10-tool-exposure")
-    assert register_all_tools(mcp) == 61
+    register_all_tools(mcp)
     return mcp
 
 
@@ -153,13 +153,12 @@ def _call_payload(result) -> dict:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("permission", "expected_count"),
-    [("read", 17), ("write", 20), ("manage", 24), ("admin", 24)],
+    "permission",
+    tuple(DISCOVERY_FIXTURE["discovery"]),
 )
 async def test_low_level_tools_list_is_exact_and_ordered_by_request_permission(
     exposed_mcp: HivemindFastMCP,
     permission: str,
-    expected_count: int,
 ) -> None:
     result = await _list_result(exposed_mcp, _identity(permission))
     names = [tool.name for tool in result.root.tools]
@@ -168,7 +167,6 @@ async def test_low_level_tools_list_is_exact_and_ordered_by_request_permission(
     assert names == list(
         DISCOVERY_NAMES_BY_PERMISSION[ToolPermission(permission)]
     )
-    assert len(names) == expected_count
     assert len(names) == len(set(names))
 
 
@@ -280,16 +278,21 @@ async def test_largest_real_low_level_discovery_response_stays_below_64_kib(
     assert max(sizes) <= DISCOVERY_SCHEMA_BUDGET_BYTES
 
 
-def test_complete_registration_baseline_remains_independent_and_exact(
+def test_complete_exposure_registry_matches_canonical_surface(
     exposed_mcp: HivemindFastMCP,
 ) -> None:
     registered = set(exposed_mcp._tool_manager._tools)
+    exposure_names = registered_exposure_names()
     complete_aliases = set(COMPLETE_FIXTURE["alias_map"].values())
     complete_names = set(COMPLETE_FIXTURE["historical"]) | complete_aliases
 
-    assert COMPLETE_FIXTURE["total"] == 61
-    assert len(registered_exposure_names()) == 61
-    assert registered == complete_names == set(registered_exposure_names())
+    # This P10 test owns only exposure-projection parity. The fixture's full
+    # surface/count and live registration are validated canonically in
+    # test_mcp_tool_surface.py.
+    assert len(exposure_names) == len(set(exposure_names)), (
+        "exposure registry must not contain duplicate registered names"
+    )
+    assert registered == complete_names == set(exposure_names)
 
 
 @pytest.mark.asyncio
@@ -383,7 +386,7 @@ async def test_system_about_uses_same_compact_projection_without_secondary_leak(
     payload = _call_payload(result)
     names = [tool["name"] for tool in payload["tools"]]
 
-    assert payload["tools_count"] == 17
+    assert payload["tools_count"] == len(names)
     assert names == DISCOVERY_FIXTURE["discovery"]["read"]
 
 
@@ -397,10 +400,9 @@ async def test_system_about_keeps_projection_through_direct_console_proxy(
     finally:
         current_token_info.reset(ambient)
 
-    assert payload["tools_count"] == 20
-    assert [tool["name"] for tool in payload["tools"]] == (
-        DISCOVERY_FIXTURE["discovery"]["write"]
-    )
+    names = [tool["name"] for tool in payload["tools"]]
+    assert payload["tools_count"] == len(names)
+    assert names == DISCOVERY_FIXTURE["discovery"]["write"]
 
 
 def test_current_agent_name_prefers_fresh_request_identity_over_stale_session() -> None:
@@ -843,7 +845,7 @@ def test_registry_mutations_fail_closed(exposed_mcp: HivemindFastMCP) -> None:
     with pytest.raises(RuntimeError, match="duplicate overwrite"):
         validate_tool_exposure_registry(
             exposed_mcp,
-            declared_registration_count=62,
+            declared_registration_count=len(registered_exposure_names()) + 1,
         )
 
 
@@ -856,7 +858,16 @@ def test_alias_metadata_drift_fails_closed(
 
 
 def test_generated_fixture_docs_and_console_mapping_match_registry() -> None:
-    assert DISCOVERY_FIXTURE == exposure_manifest()
+    manifest = exposure_manifest()
+    assert manifest.pop("registered_total") == COMPLETE_FIXTURE["total"]
+    # These are different name spaces: registry entries use tier names while
+    # historical_count covers the historical source names. Their cardinality
+    # equality pins the current one-entry-per-historical-tool contract.
+    assert (
+        manifest.pop("registry_entries")
+        == COMPLETE_FIXTURE["historical_count"]
+    )
+    assert DISCOVERY_FIXTURE == manifest
     result = subprocess.run(
         [sys.executable, "scripts/generate_tool_exposure.py", "--check"],
         cwd=ROOT,

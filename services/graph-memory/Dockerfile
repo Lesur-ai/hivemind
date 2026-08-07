@@ -1,7 +1,12 @@
 # =============================================================================
 # Hivemind embedded long runtime - Dockerfile
 # =============================================================================
-# Build   : docker build -t hivemind-graph-memory .
+# Build   : docker build -f services/graph-memory/Dockerfile -t hivemind-graph-memory .
+#           The build context is the REPOSITORY ROOT: the image installs the
+#           exact shared `src/hivemind_inference` package consumed by the
+#           Hivemind core, never a copied or reimplemented variant (#306,
+#           P13-1C, ADR-0027). Compose and the public CI overlay wire this
+#           context.
 # Run     : Hivemind starts this internal-only service through Compose.
 # =============================================================================
 
@@ -26,18 +31,24 @@ WORKDIR /app
 # Dépendances Python : versions transitives et artefacts sont hash-lockés. Le
 # pip fourni par l'image de base épinglée est utilisé tel quel, sans upgrade
 # réseau flottant. Les images amd64/arm64 consomment uniquement des wheels.
-COPY requirements.txt requirements.lock ./
+COPY services/graph-memory/requirements.txt services/graph-memory/requirements.lock ./
 RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Créer un utilisateur non-root pour la sécurité
 RUN groupadd -r mcp && useradd -r -g mcp -d /app -s /sbin/nologin mcp
 
 # Copie des ontologies
-COPY ONTOLOGIES/ ./ONTOLOGIES/
+COPY services/graph-memory/ONTOLOGIES/ ./ONTOLOGIES/
 
 # Copie de la version et du code source
-COPY VERSION .
-COPY src/ ./src/
+COPY services/graph-memory/VERSION .
+COPY services/graph-memory/src/ ./src/
+
+# P13-1C (ADR-0027) : frontière d'inférence partagée. L'image consomme le
+# package EXACT du dépôt racine via PYTHONPATH=/app (même mécanisme que le code
+# du runtime lui-même), jamais une copie divergente. Ses dépendances (httpx,
+# python-dotenv) sont déjà hash-lockées dans requirements.lock.
+COPY src/hivemind_inference/ ./hivemind_inference/
 
 # Donner les droits à l'utilisateur mcp
 RUN chown -R mcp:mcp /app
@@ -48,9 +59,9 @@ EXPOSE 8002
 # Passer en utilisateur non-root
 USER mcp
 
-# Healthcheck via /health endpoint, sans paquet système additionnel.
+# Readiness includes the process-local mutation-admission invariants.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/ready', timeout=2)" || exit 1
 
 # Point d'entrée
 ENTRYPOINT ["python", "-m", "src.mcp_memory.server"]

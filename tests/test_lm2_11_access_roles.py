@@ -20,9 +20,11 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 
 from live_mem.auth import context as auth_context
+from live_mem.core import backup as backup_module
 from live_mem.core import locks as locks_module
 from live_mem.core import space as space_module
 from live_mem.core import tokens as tokens_module
+from live_mem.core.backup import BackupService
 from live_mem.core.locks import LockManager
 from live_mem.core.models import INTERNAL_LONG_TOKEN_NAME, TokenInfo, TokensStore
 from live_mem.core.space import SpaceService
@@ -136,6 +138,10 @@ class FakeStorage:
         if key in self.delete_then_raise:
             raise TimeoutError(f"ambiguous post-DELETE timeout: {key}")
 
+    async def copy_object(self, source_key: str, dest_key: str) -> None:
+        self.events.append(f"copy:{source_key}->{dest_key}")
+        self.objects[dest_key] = self.objects[source_key]
+
 
 def _seed_store(storage: FakeStorage, *tokens: TokenInfo) -> None:
     store = TokensStore(tokens=list(tokens))
@@ -174,6 +180,7 @@ def wired(monkeypatch: pytest.MonkeyPatch):
     token_service = TokenService()
     monkeypatch.setattr(tokens_module, "get_storage", lambda: storage)
     monkeypatch.setattr(space_module, "get_storage", lambda: storage)
+    monkeypatch.setattr(backup_module, "get_storage", lambda: storage)
     monkeypatch.setattr(tokens_module, "_token_service", token_service)
     return storage, token_service
 
@@ -214,6 +221,55 @@ async def test_writer_cannot_create_space_or_token(wired):
     assert token_result["status"] == "error"
     assert invite_result["status"] == "error"
     assert storage.objects == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bootstrap", [False, True])
+@pytest.mark.parametrize("recover_access_grants", [False, True])
+async def test_space_delete_passes_exact_persisted_actor_identity(
+    wired,
+    monkeypatch: pytest.MonkeyPatch,
+    bootstrap: bool,
+    recover_access_grants: bool,
+):
+    from live_mem.tools.space import register as register_space
+
+    captured: dict = {}
+
+    class _Spaces:
+        async def delete(self, space_id: str, **kwargs):
+            captured["space_id"] = space_id
+            captured.update(kwargs)
+            return {"status": "deleted"}
+
+    monkeypatch.setattr(space_module, "get_space_service", lambda: _Spaces())
+    identity = {
+        "type": "bootstrap" if bootstrap else "token",
+        "client_name": "operator",
+        "permissions": ["admin"] if bootstrap else ["manage"],
+        "allowed_resources": [] if bootstrap else ["alpha"],
+    }
+    if not bootstrap:
+        identity["token_hash"] = _hash("a")
+        auth_context.update_fresh_token(identity)
+    token = auth_context.current_token_info.set(identity)
+    try:
+        result = await _handler(register_space, "space_delete")(
+            "alpha",
+            confirm=True,
+            recover_access_grants=recover_access_grants,
+        )
+    finally:
+        auth_context.current_token_info.reset(token)
+
+    assert result["status"] == "deleted"
+    assert captured == {
+        "space_id": "alpha",
+        "unsafe_recovery": False,
+        "recover_access_grants": recover_access_grants,
+        "actor_token_hash": "" if bootstrap else _hash("a"),
+        "bootstrap_admin": bootstrap,
+    }
 
 
 @pytest.mark.asyncio
@@ -1328,11 +1384,224 @@ async def test_space_create_refuses_delete_recreate_with_actor_historical_grant(
     assert result["recovery_required"] is True
     assert result["recovery"]["retry_safe"] is False
     assert "space_ids" in result["recovery"]["action"]
+    assert "pré-grant intentionnel" in result["recovery"]["action"]
+    assert "space_delete(confirm=True" in result["recovery"]["action"]
+    assert "recover_access_grants=True" in result["recovery"]["action"]
     assert storage.objects == before
 
 
 @pytest.mark.asyncio
-async def test_actual_space_delete_then_recreate_is_denied_by_surviving_scope(
+async def test_space_delete_revokes_all_grants_then_recreate_grants_only_creator(
+    wired, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    storage, _ = wired
+    caplog.set_level(logging.INFO, logger="live_mem.audit")
+    manager = _token(
+        "manager", "a", permissions=["manage"], spaces=["alpha", "beta"]
+    )
+    reader = _token(
+        "reader", "b", permissions=["read"], spaces=["alpha", "beta"]
+    )
+    revoked = _token(
+        "revoked", "c", permissions=["read"], spaces=["alpha"], revoked=True
+    )
+    expired = _token(
+        "expired",
+        "d",
+        permissions=["read"],
+        spaces=["alpha"],
+        expires_at="2000-01-01T00:00:00+00:00",
+    )
+    untouched = _token("untouched", "e", permissions=["read"], spaces=["beta"])
+    _seed_store(storage, manager, reader, revoked, expired, untouched)
+    _seed_committed_space(storage, "alpha")
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    deleted = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
+    assert deleted["status"] == "deleted"
+    assert deleted["files_deleted"] == 4
+    assert deleted["files_total"] == 4
+    assert deleted["access_grants_removed"] == 4
+    delete_events = [event for event in storage.events if event.startswith("delete:")]
+    assert delete_events[-1] == "delete:alpha/_meta.json"
+    assert set(storage.objects) == {TOKENS_KEY}
+    after_delete = {token.name: token for token in _stored_tokens(storage).tokens}
+    assert after_delete["manager"].space_ids == ["beta"]
+    assert after_delete["reader"].space_ids == ["beta"]
+    assert after_delete["revoked"].space_ids == []
+    assert after_delete["expired"].space_ids == []
+    assert after_delete["untouched"].space_ids == ["beta"]
+    grant_audits = [
+        json.loads(record.message)
+        for record in caplog.records
+        if '"event": "space_delete_grants"' in record.message
+    ]
+    assert grant_audits == [
+        {
+            "event": "space_delete_grants",
+            "request_id": "-",
+            "caller": "manager",
+            "actor_token_hash": manager.hash,
+            "space_id": "alpha",
+            "grants_removed": 4,
+            "target_token_hashes": [
+                manager.hash,
+                reader.hash,
+                revoked.hash,
+                expired.hash,
+            ],
+            "recovered": False,
+        }
+    ]
+
+    recreated = await SpaceService().create(
+        "alpha", "description", "# Rules", actor_token_hash=manager.hash
+    )
+    assert recreated["status"] == "created"
+    after_recreate = {
+        token.name: token for token in _stored_tokens(storage).tokens
+    }
+    assert after_recreate["manager"].space_ids == ["beta", "alpha"]
+    assert after_recreate["reader"].space_ids == ["beta"]
+    assert after_recreate["revoked"].space_ids == []
+    assert after_recreate["expired"].space_ids == []
+    assert after_recreate["untouched"].space_ids == ["beta"]
+
+
+@pytest.mark.asyncio
+async def test_space_delete_then_backup_restore_keeps_access_revoked(
+    wired, monkeypatch: pytest.MonkeyPatch
+):
+    storage, token_service = wired
+    manager = _token(
+        "manager", "a", permissions=["manage"], spaces=["alpha"]
+    )
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    _seed_store(storage, manager, reader)
+    _seed_committed_space(storage, "alpha")
+    backup_id = "alpha/2026-07-29T20-00-00"
+    backup_prefix = f"_backups/{backup_id}/"
+    storage.objects[f"{backup_prefix}_meta.json"] = storage.objects[
+        "alpha/_meta.json"
+    ]
+    storage.objects[f"{backup_prefix}_rules.md"] = "# Restored rules"
+    storage.objects[f"{backup_prefix}live/restored.md"] = "restored data"
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    deleted = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
+    assert deleted["status"] == "deleted"
+    assert deleted["access_grants_removed"] == 2
+
+    restored = await BackupService().restore(backup_id)
+    assert restored == {
+        "status": "ok",
+        "backup_id": backup_id,
+        "space_id": "alpha",
+        "files_restored": 3,
+    }
+    assert storage.objects["alpha/live/restored.md"] == "restored data"
+    assert all(
+        "alpha" not in token.space_ids
+        for token in _stored_tokens(storage).tokens
+    )
+
+    denied = await token_service.invite_token_to_space(
+        actor_token_hash=manager.hash,
+        space_id="alpha",
+        target_token_hash=reader.hash,
+    )
+    assert denied == {
+        "status": "error",
+        "message": "Accès manage actif requis pour cet espace",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mcp_delete_restore_and_bootstrap_regrant_flow(
+    wired, monkeypatch: pytest.MonkeyPatch
+):
+    """The public handlers enforce the documented data/access split."""
+    from live_mem.tools.admin import register as register_admin
+    from live_mem.tools.backup import register as register_backup
+
+    storage, _ = wired
+    manager = _token("manager", "a", permissions=["manage"], spaces=["alpha"])
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    _seed_store(storage, manager, reader)
+    _seed_committed_space(storage, "alpha")
+    backup_id = "alpha/2026-07-29T20-00-00"
+    backup_prefix = f"_backups/{backup_id}/"
+    storage.objects[f"{backup_prefix}_meta.json"] = storage.objects[
+        "alpha/_meta.json"
+    ]
+    storage.objects[f"{backup_prefix}_rules.md"] = "# Restored rules"
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    monkeypatch.setattr(backup_module, "hive_status_label", _local_only)
+    deleted = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
+    assert deleted["status"] == "deleted"
+
+    restore = _handler(register_backup, "backup_restore")
+    manager_identity = {
+        "type": "token",
+        "client_name": manager.name,
+        "permissions": manager.permissions,
+        "allowed_resources": ["alpha"],
+        "token_hash": manager.hash,
+    }
+    manager_context = auth_context.current_token_info.set(manager_identity)
+    try:
+        denied = await restore(backup_id, confirm=True)
+    finally:
+        auth_context.current_token_info.reset(manager_context)
+    assert denied["status"] == "error"
+    assert "Authentification" in denied["message"]
+
+    bootstrap_identity = {
+        "type": "bootstrap",
+        "client_name": "bootstrap_admin",
+        "permissions": ["admin"],
+        "allowed_resources": [],
+    }
+    bootstrap_context = auth_context.current_token_info.set(bootstrap_identity)
+    try:
+        restored = await restore(backup_id, confirm=True)
+        regranted = await _handler(register_admin, "admin_update_token")(
+            reader.hash,
+            space_ids_add="alpha",
+        )
+    finally:
+        auth_context.current_token_info.reset(bootstrap_context)
+
+    assert restored == {
+        "status": "ok",
+        "backup_id": backup_id,
+        "space_id": "alpha",
+        "files_restored": 2,
+    }
+    assert regranted["status"] == "ok"
+    persisted = {token.name: token for token in _stored_tokens(storage).tokens}
+    assert persisted["manager"].space_ids == []
+    assert persisted["reader"].space_ids == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_space_delete_recovery_flag_on_committed_space_still_reports_deleted(
     wired, monkeypatch: pytest.MonkeyPatch
 ):
     storage, _ = wired
@@ -1344,18 +1613,19 @@ async def test_actual_space_delete_then_recreate_is_denied_by_surviving_scope(
         return "local_only"
 
     monkeypatch.setattr(space_module, "hive_status_label", _local_only)
-    deleted = await SpaceService().delete("alpha")
-    assert deleted["status"] == "deleted"
-    assert deleted["files_deleted"] == 4
-    assert deleted["files_total"] == 4
-    delete_events = [event for event in storage.events if event.startswith("delete:")]
-    assert delete_events[-1] == "delete:alpha/_meta.json"
-    assert set(storage.objects) == {TOKENS_KEY}
-
-    recreated = await SpaceService().create(
-        "alpha", "description", "# Rules", actor_token_hash=manager.hash
+    result = await SpaceService().delete(
+        "alpha",
+        recover_access_grants=True,
+        actor_token_hash=manager.hash,
     )
-    assert recreated["status"] == "partial"
+
+    assert result == {
+        "status": "deleted",
+        "space_id": "alpha",
+        "files_deleted": 4,
+        "files_total": 4,
+        "access_grants_removed": 1,
+    }
     assert set(storage.objects) == {TOKENS_KEY}
 
 
@@ -1369,12 +1639,15 @@ async def test_space_delete_payload_failure_preserves_marker_and_reports_exact_k
     _seed_committed_space(storage, "alpha")
     failing_key = "alpha/bank/.keep"
     storage.fail_before_delete.add(failing_key)
+    tokens_before = storage.objects[TOKENS_KEY]
 
     async def _local_only(*_args, **_kwargs):
         return "local_only"
 
     monkeypatch.setattr(space_module, "hive_status_label", _local_only)
-    result = await SpaceService().delete("alpha")
+    result = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
 
     assert result["status"] == "partial"
     assert result["recovery_required"] is True
@@ -1384,6 +1657,7 @@ async def test_space_delete_payload_failure_preserves_marker_and_reports_exact_k
     assert result["files_deleted"] == 2
     assert "alpha/_meta.json" in storage.objects
     assert "delete:alpha/_meta.json" not in storage.events
+    assert storage.objects[TOKENS_KEY] == tokens_before
 
 
 @pytest.mark.asyncio
@@ -1395,19 +1669,28 @@ async def test_space_delete_post_delete_timeout_is_success_when_absence_is_confi
     _seed_store(storage, _token("admin", "a", permissions=["admin"]))
     _seed_committed_space(storage, "alpha")
     storage.delete_then_raise.add(timed_out_key)
+    # No token scope changes, so the validated authorization read under the
+    # token lock is already sufficient and a redundant confirmation GET must
+    # not downgrade an otherwise complete deletion.
+    storage.fail_get_calls[TOKENS_KEY] = {2}
 
     async def _local_only(*_args, **_kwargs):
         return "local_only"
 
     monkeypatch.setattr(space_module, "hive_status_label", _local_only)
-    result = await SpaceService().delete("alpha")
+    result = await SpaceService().delete(
+        "alpha", actor_token_hash=_hash("a")
+    )
 
     assert result == {
         "status": "deleted",
         "space_id": "alpha",
         "files_deleted": 4,
         "files_total": 4,
+        "access_grants_removed": 0,
     }
+    assert storage.get_counts[TOKENS_KEY] == 1
+    assert f"put:{TOKENS_KEY}" not in storage.events
     assert set(storage.objects) == {TOKENS_KEY}
 
 
@@ -1423,6 +1706,7 @@ async def test_space_delete_marker_failure_is_never_reported_deleted(
     _seed_committed_space(storage, "alpha")
     meta_key = "alpha/_meta.json"
     storage.fail_before_delete.add(meta_key)
+    tokens_before = storage.objects[TOKENS_KEY]
     if ambiguous_reprobe:
         # Initial existence check is call 1; the post-DELETE confirmation is 2.
         storage.fail_exists_calls[meta_key] = {2}
@@ -1431,13 +1715,518 @@ async def test_space_delete_marker_failure_is_never_reported_deleted(
         return "local_only"
 
     monkeypatch.setattr(space_module, "hive_status_label", _local_only)
-    result = await SpaceService().delete("alpha")
+    result = await SpaceService().delete(
+        "alpha", actor_token_hash=_hash("a")
+    )
 
     assert result["status"] == "partial"
     assert result["failed_keys"] == [meta_key]
     assert result["files_deleted"] == 3
     assert result["marker_preserved"] is (None if ambiguous_reprobe else True)
     assert meta_key in storage.objects
+    assert storage.objects[TOKENS_KEY] == tokens_before
+
+
+@pytest.mark.asyncio
+async def test_space_delete_token_save_failure_requires_explicit_empty_prefix_recovery(
+    wired,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    storage, _ = wired
+    manager = _token("manager", "a", permissions=["manage"], spaces=["alpha"])
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    _seed_store(storage, manager, reader)
+    _seed_committed_space(storage, "alpha")
+    storage.fail_before_put.add(TOKENS_KEY)
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    with caplog.at_level(logging.INFO, logger="live_mem.audit"):
+        first = await SpaceService().delete(
+            "alpha", actor_token_hash=manager.hash
+        )
+
+    assert first["status"] == "partial"
+    assert first["recovery_required"] is True
+    assert first["marker_preserved"] is False
+    assert first["failed_keys"] == [TOKENS_KEY]
+    assert first["access_grants_pending"] == 2
+    assert first["recovery"]["retry_safe"] is True
+    assert "recover_access_grants=True" in first["recovery"]["action"]
+    assert not any(key.startswith("alpha/") for key in storage.objects)
+    assert [token.space_ids for token in _stored_tokens(storage).tokens] == [
+        ["alpha"],
+        ["alpha"],
+    ]
+    assert not [
+        record
+        for record in caplog.records
+        if '"event": "space_delete_grants"' in record.message
+    ]
+
+    storage.fail_before_put.clear()
+    second = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
+    assert second["status"] == "not_found"
+    assert "recover_access_grants=True" in second["message"]
+    assert [token.space_ids for token in _stored_tokens(storage).tokens] == [
+        ["alpha"],
+        ["alpha"],
+    ]
+
+    recovered = await SpaceService().delete(
+        "alpha",
+        recover_access_grants=True,
+        actor_token_hash=manager.hash,
+    )
+    assert recovered == {
+        "status": "grants_cleaned",
+        "space_id": "alpha",
+        "files_deleted": 0,
+        "files_total": 0,
+        "access_grants_removed": 2,
+        "recovered": True,
+    }
+    assert all(
+        "alpha" not in token.space_ids
+        for token in _stored_tokens(storage).tokens
+    )
+
+    manager_retry = await SpaceService().delete(
+        "alpha",
+        recover_access_grants=True,
+        actor_token_hash=manager.hash,
+    )
+    assert manager_retry["status"] == "error"
+    assert "manage" in manager_retry["message"]
+
+    bootstrap_retry = await SpaceService().delete(
+        "alpha",
+        recover_access_grants=True,
+        bootstrap_admin=True,
+    )
+    assert bootstrap_retry == {
+        "status": "not_found",
+        "space_id": "alpha",
+        "message": "Espace 'alpha' introuvable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_space_delete_absent_future_pregrant_is_not_destructive_by_default(
+    wired,
+):
+    storage, _ = wired
+    manager = _token("manager", "a", permissions=["manage"], spaces=["alpha"])
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    _seed_store(storage, manager, reader)
+    tokens_before = storage.objects[TOKENS_KEY]
+
+    result = await SpaceService().delete(
+        "alpha",
+        actor_token_hash=manager.hash,
+    )
+
+    assert result["status"] == "not_found"
+    assert result["space_id"] == "alpha"
+    assert "pré-grants intentionnels" in result["message"]
+    assert "recover_access_grants=True" in result["message"]
+    assert storage.objects[TOKENS_KEY] == tokens_before
+    assert f"put:{TOKENS_KEY}" not in storage.events
+
+
+@pytest.mark.asyncio
+async def test_space_delete_absent_without_grants_returns_identified_not_found(
+    wired,
+):
+    storage, _ = wired
+    _seed_store(storage)
+
+    result = await SpaceService().delete(
+        "alpha",
+        bootstrap_admin=True,
+    )
+
+    assert result == {
+        "status": "not_found",
+        "space_id": "alpha",
+        "message": "Espace 'alpha' introuvable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_space_delete_token_post_put_timeout_is_success_only_after_clean_reprobe(
+    wired, monkeypatch: pytest.MonkeyPatch
+):
+    storage, _ = wired
+    manager = _token("manager", "a", permissions=["manage"], spaces=["alpha"])
+    _seed_store(storage, manager)
+    _seed_committed_space(storage, "alpha")
+    storage.persist_then_raise.add(TOKENS_KEY)
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    result = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
+
+    assert result["status"] == "deleted"
+    assert result["access_grants_removed"] == 1
+    assert _stored_tokens(storage).tokens[0].space_ids == []
+
+
+@pytest.mark.asyncio
+async def test_space_delete_bootstrap_admin_revokes_grants_without_stored_actor(
+    wired,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    storage, _ = wired
+    caplog.set_level(logging.INFO, logger="live_mem.audit")
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    _seed_store(storage, reader)
+    _seed_committed_space(storage, "alpha")
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    result = await SpaceService().delete(
+        "alpha",
+        actor_token_hash="",
+        bootstrap_admin=True,
+    )
+
+    assert result["status"] == "deleted"
+    assert result["access_grants_removed"] == 1
+    assert _stored_tokens(storage).tokens[0].space_ids == []
+    grant_audits = [
+        json.loads(record.message)
+        for record in caplog.records
+        if '"event": "space_delete_grants"' in record.message
+    ]
+    assert grant_audits == [
+        {
+            "event": "space_delete_grants",
+            "request_id": "-",
+            "caller": "bootstrap_admin",
+            "actor_token_hash": None,
+            "space_id": "alpha",
+            "grants_removed": 1,
+            "target_token_hashes": [reader.hash],
+            "recovered": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_space_delete_bootstrap_admin_can_retry_pending_grant_cleanup(
+    wired,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    storage, _ = wired
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    _seed_store(storage, reader)
+    _seed_committed_space(storage, "alpha")
+    storage.fail_before_put.add(TOKENS_KEY)
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    with caplog.at_level(logging.INFO, logger="live_mem.audit"):
+        result = await SpaceService().delete(
+            "alpha",
+            bootstrap_admin=True,
+        )
+
+    assert result["status"] == "partial"
+    assert result["access_grants_pending"] == 1
+    assert result["recovery"]["retry_safe"] is True
+    assert "recover_access_grants=True" in result["recovery"]["action"]
+    assert not [
+        record
+        for record in caplog.records
+        if '"event": "space_delete_grants"' in record.message
+    ]
+
+
+@pytest.mark.asyncio
+async def test_space_delete_locked_rejects_missing_actor_before_mutation(wired):
+    storage, _ = wired
+    _seed_store(storage)
+    _seed_committed_space(storage, "alpha")
+    before = dict(storage.objects)
+
+    result = await SpaceService()._delete_locked(
+        "alpha",
+        token_service=None,
+        token_store=None,
+        actor=None,
+        bootstrap_admin=False,
+    )
+
+    assert result == {
+        "status": "error",
+        "message": "Identité stockée du manager requise avant toute suppression",
+    }
+    assert storage.objects == before
+    assert storage.events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_error"),
+    [
+        ("invalid_json", json.JSONDecodeError),
+        ("future_version", RuntimeError),
+        ("read_timeout", TimeoutError),
+    ],
+)
+async def test_space_delete_invalid_token_registry_fails_before_prefix_mutation(
+    wired,
+    failure: str,
+    expected_error: type[Exception],
+):
+    storage, _ = wired
+    _seed_committed_space(storage, "alpha")
+    if failure == "invalid_json":
+        storage.objects[TOKENS_KEY] = "{invalid"
+    elif failure == "future_version":
+        storage.objects[TOKENS_KEY] = json.dumps({"version": 3, "tokens": []})
+    else:
+        _seed_store(storage)
+        storage.fail_get_calls[TOKENS_KEY] = {1}
+    before = dict(storage.objects)
+
+    with pytest.raises(expected_error):
+        await SpaceService().delete(
+            "alpha",
+            actor_token_hash="",
+            bootstrap_admin=True,
+        )
+
+    assert storage.objects == before
+    assert not [
+        event
+        for event in storage.events
+        if event.startswith("delete:") or event == "delete_many"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_space_delete_token_confirmation_read_failure_never_reports_success(
+    wired,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    storage, _ = wired
+    manager = _token("manager", "a", permissions=["manage"], spaces=["alpha"])
+    _seed_store(storage, manager)
+    _seed_committed_space(storage, "alpha")
+    auth_context.update_fresh_token(
+        {
+            "type": "token",
+            "client_name": manager.name,
+            "permissions": list(manager.permissions),
+            "allowed_resources": list(manager.space_ids),
+            "token_hash": manager.hash,
+        }
+    )
+    # Call 1 authorizes the actor; call 2 confirms the token cleanup.
+    storage.fail_get_calls[TOKENS_KEY] = {2}
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    with caplog.at_level(logging.INFO, logger="live_mem.audit"):
+        result = await SpaceService().delete(
+            "alpha", actor_token_hash=manager.hash
+        )
+
+    assert result["status"] == "partial"
+    assert result["marker_preserved"] is False
+    assert result["failed_keys"] == [TOKENS_KEY]
+    assert result["access_grants_pending"] is None
+    assert result["recovery"]["retry_safe"] is None
+    assert not any(key.startswith("alpha/") for key in storage.objects)
+    # The write did persist, but unreadable authority can never be reported as
+    # successful.
+    assert _stored_tokens(storage).tokens[0].space_ids == []
+    assert manager.hash in auth_context._invalidated_token_hashes
+    assert manager.hash not in auth_context._fresh_token_store
+    assert not [
+        record
+        for record in caplog.records
+        if '"event": "space_delete_grants"' in record.message
+    ]
+    unconfirmed = [
+        json.loads(record.message)
+        for record in caplog.records
+        if '"event": "space_delete_grants_unconfirmed"' in record.message
+    ]
+    assert unconfirmed == [
+        {
+            "event": "space_delete_grants_unconfirmed",
+            "request_id": "-",
+            "caller": "manager",
+            "actor_token_hash": manager.hash,
+            "space_id": "alpha",
+            "target_token_hashes": [manager.hash],
+            "recovered": False,
+            "confirmation": "unreadable",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_space_delete_invalidates_every_changed_fresh_token(
+    wired, monkeypatch: pytest.MonkeyPatch
+):
+    storage, _ = wired
+    manager = _token("manager", "a", permissions=["manage"], spaces=["alpha"])
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    untouched = _token("untouched", "c", permissions=["read"], spaces=["beta"])
+    _seed_store(storage, manager, reader, untouched)
+    _seed_committed_space(storage, "alpha")
+    for token in (manager, reader, untouched):
+        auth_context.update_fresh_token(
+            {
+                "type": "token",
+                "client_name": token.name,
+                "permissions": list(token.permissions),
+                "allowed_resources": list(token.space_ids),
+                "token_hash": token.hash,
+            }
+        )
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    result = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
+
+    assert result["status"] == "deleted"
+    assert auth_context._invalidated_token_hashes == {
+        manager.hash,
+        reader.hash,
+    }
+    assert set(auth_context._fresh_token_store) == {untouched.hash}
+
+
+@pytest.mark.asyncio
+async def test_space_delete_confirmation_regrant_after_actor_revocation_is_not_retryable(
+    wired,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    storage, token_service = wired
+    manager = _token("manager", "a", permissions=["manage"], spaces=["alpha"])
+    reader = _token("reader", "b", permissions=["read"], spaces=["alpha"])
+    _seed_store(storage, manager, reader)
+    _seed_committed_space(storage, "alpha")
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    original_load = token_service._load_store
+    load_count = 0
+
+    async def _load_with_concurrent_regrant():
+        nonlocal load_count
+        load_count += 1
+        if load_count == 2:
+            revoked_manager = manager.model_copy(deep=True)
+            revoked_manager.revoked = True
+            storage.objects[TOKENS_KEY] = json.dumps(
+                TokensStore(tokens=[revoked_manager, reader]).model_dump()
+            )
+        return await original_load()
+
+    monkeypatch.setattr(token_service, "_load_store", _load_with_concurrent_regrant)
+    with caplog.at_level(logging.INFO, logger="live_mem.audit"):
+        result = await SpaceService().delete(
+            "alpha",
+            actor_token_hash=manager.hash,
+        )
+
+    assert result["status"] == "partial"
+    assert result["marker_preserved"] is False
+    assert result["access_grants_pending"] == 2
+    assert result["recovery"]["retry_safe"] is False
+    assert "caller ne possède plus" in result["recovery"]["action"]
+    assert "Un admin doit retenter" in result["recovery"]["action"]
+    assert not any(key.startswith("alpha/") for key in storage.objects)
+    assert not [
+        record
+        for record in caplog.records
+        if '"event": "space_delete_grants"' in record.message
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["downgrade", "rescope", "revoke", "expire"])
+async def test_space_delete_revalidates_actor_after_waiting_for_token_lock(
+    wired, monkeypatch: pytest.MonkeyPatch, change: str
+):
+    storage, _ = wired
+    manager = _token(
+        "manager", "a", permissions=["read", "write", "manage"], spaces=["alpha"]
+    )
+    _seed_store(storage, manager)
+    _seed_committed_space(storage, "alpha")
+    before_prefix = {
+        key: value
+        for key, value in storage.objects.items()
+        if key.startswith("alpha/")
+    }
+    locks = locks_module.get_lock_manager()
+
+    async def _local_only(*_args, **_kwargs):
+        return "local_only"
+
+    monkeypatch.setattr(space_module, "hive_status_label", _local_only)
+    await locks.tokens.acquire()
+    try:
+        pending = asyncio.create_task(
+            SpaceService().delete(
+                "alpha", actor_token_hash=manager.hash
+            )
+        )
+        await asyncio.sleep(0)
+        assert not pending.done()
+        changed = _stored_tokens(storage)
+        if change == "downgrade":
+            changed.tokens[0].permissions = ["read", "write"]
+        elif change == "rescope":
+            changed.tokens[0].space_ids = []
+        elif change == "revoke":
+            changed.tokens[0].revoked = True
+        else:
+            changed.tokens[0].expires_at = "2000-01-01T00:00:00+00:00"
+        storage.objects[TOKENS_KEY] = json.dumps(changed.model_dump())
+    finally:
+        locks.tokens.release()
+
+    result = await pending
+    assert result["status"] == "error"
+    assert "manage" in result["message"]
+    assert {
+        key: value
+        for key, value in storage.objects.items()
+        if key.startswith("alpha/")
+    } == before_prefix
 
 
 @pytest.mark.asyncio
@@ -1457,23 +2246,27 @@ async def test_space_delete_late_preparation_keeps_marker_then_retry_blocks_aba(
         return "local_only"
 
     monkeypatch.setattr(space_module, "hive_status_label", _local_only)
-    first = await SpaceService().delete("alpha")
+    first = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
     assert first["status"] == "partial"
     assert first["failed_keys"] == [last_payload]
     assert first["marker_preserved"] is True
     assert "alpha/_meta.json" in storage.objects
 
     storage.inject_after_delete.clear()
-    second = await SpaceService().delete("alpha")
+    second = await SpaceService().delete(
+        "alpha", actor_token_hash=manager.hash
+    )
     assert second["status"] == "deleted"
+    assert second["access_grants_removed"] == 1
     assert set(storage.objects) == {TOKENS_KEY}
 
     recreated = await SpaceService().create(
         "alpha", "description", "# Rules", actor_token_hash=manager.hash
     )
-    assert recreated["status"] == "partial"
-    assert recreated["recovery"]["retry_safe"] is False
-    assert set(storage.objects) == {TOKENS_KEY}
+    assert recreated["status"] == "created"
+    assert _stored_tokens(storage).tokens[0].space_ids == ["alpha"]
 
 
 @pytest.mark.asyncio
@@ -1485,7 +2278,9 @@ async def test_space_delete_marker_absent_with_residual_refuses_automatic_cleanu
     storage.objects["alpha/live/late.md"] = "late"
     before = dict(storage.objects)
 
-    result = await SpaceService().delete("alpha")
+    result = await SpaceService().delete(
+        "alpha", actor_token_hash=_hash("a")
+    )
 
     assert result["status"] == "partial"
     assert result["marker_preserved"] is False
@@ -1839,7 +2634,9 @@ async def test_create_and_delete_share_space_lifecycle_lock(
         )
     )
     await storage.put_started.wait()
-    deleter = asyncio.create_task(SpaceService().delete("alpha"))
+    deleter = asyncio.create_task(
+        SpaceService().delete("alpha", actor_token_hash=admin.hash)
+    )
     await asyncio.sleep(0)
     assert not deleter.done(), "delete must wait for the in-flight create commit"
     storage.release_put.set()
@@ -1871,6 +2668,13 @@ def test_space_create_mutation_guard_manage_only_no_actorless_grant():
     assert '"admin" not in' not in barrier
     assert core.index("await token_service._save_store") < core.index(
         "await storage.put_json(meta_key, meta)"
+    )
+    delete = inspect.getsource(SpaceService.delete)
+    assert delete.index("locks.space_lifecycle") < delete.index("locks.tokens")
+    assert delete.index("locks.tokens") < delete.index("self._delete_locked")
+    delete_locked = inspect.getsource(SpaceService._delete_locked)
+    assert delete_locked.index("marker_absent = await delete_and_confirm") < (
+        delete_locked.rindex("return await finish_access_cleanup")
     )
 
 
