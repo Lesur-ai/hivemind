@@ -832,21 +832,6 @@ async def test_resync_triggers_delegate_to_resync_service(monkeypatch) -> None:
 
 
 # =============================================================================
-# H. Verrou de surface MCP
-# =============================================================================
-
-
-def test_mcp_tool_surface_unchanged_at_61() -> None:
-    """P5-4 n'enregistre AUCUN outil MCP : surface LM2-11 à 61."""
-    from mcp.server.fastmcp import FastMCP
-    from live_mem.tools import register_all_tools
-
-    mcp = FastMCP(name="test-p5-4")
-    register_all_tools(mcp)
-    assert len(mcp._tool_manager._tools) == 61
-
-
-# =============================================================================
 # I. Isolation (AST) + absence de timer
 # =============================================================================
 

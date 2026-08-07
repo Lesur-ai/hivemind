@@ -73,7 +73,10 @@ SHELL_COMMANDS = {
     "space rules": "Space rules (space rules <id>)",
     "space summary": "Full summary (space summary <id>)",
     "space export": "Export as tar.gz (space export <id>)",
-    "space delete": "Delete a space (space delete <id> --confirm)",
+    "space delete": (
+        "Delete a space and remove its token grants "
+        "(space delete <id> --confirm [--recover-access-grants])"
+    ),
     "live note": "Write a note (live note <space> <cat> <content>)",
     "live read": "Read notes (live read <space>)",
     "live search": "Search (live search <space> <query>)",
@@ -454,19 +457,41 @@ async def _handle_space(client, args, json_out):
 
     elif sub == "delete" and len(args) >= 2:
         confirm = "--confirm" in args
+        recover_access_grants = "--recover-access-grants" in args
         if not confirm:
             show_warning(
                 f"⚠️  Deleting '{args[1]}' — add --confirm to confirm:"
             )
-            show_warning(f"   space delete {args[1]} --confirm")
+            recovery_flag = (
+                " --recover-access-grants" if recover_access_grants else ""
+            )
+            show_warning(
+                f"   space delete {args[1]} --confirm{recovery_flag}"
+            )
+            show_warning(
+                "   A committed-space deletion also removes this ID from "
+                "_system/tokens.json."
+            )
             return
+        tool_args = {"space_id": args[1], "confirm": True}
+        if recover_access_grants:
+            tool_args["recover_access_grants"] = True
         result = await client.call_tool(
-            "space_delete", {"space_id": args[1], "confirm": True}
+            "space_delete", tool_args
         )
         if json_out:
             show_json(result)
         elif result.get("status") in {"deleted", "ok"}:
-            show_success("Deleted")
+            show_success(
+                "Deleted "
+                f"({result.get('files_deleted', 0)} files, "
+                f"{result.get('access_grants_removed', 0)} grants)"
+            )
+        elif result.get("status") == "grants_cleaned":
+            show_success(
+                "Access grants cleaned "
+                f"({result.get('access_grants_removed', 0)} grants)"
+            )
         elif (
             result.get("status") == "partial"
             and result.get("recovery_required") is True

@@ -3,6 +3,13 @@
 # cleanup touches only resources created by this invocation.
 set -Eeuo pipefail
 
+ACTIVE_TEST_RUNNER="${HIVEMIND_ACTIVE_TEST_RUNNER:-}"
+if [[ -n "$ACTIVE_TEST_RUNNER" ]]; then
+  echo "refusing nested embedded-secret Docker suite; active runner is '$ACTIVE_TEST_RUNNER'" >&2
+  exit 2
+fi
+export HIVEMIND_ACTIVE_TEST_RUNNER="embedded-secret-docker:$$"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 

@@ -1,9 +1,9 @@
 # MCP Tools Specification — Hivemind
 
-> **Contract revision**: 2.6.0 (independent of the product release version in
+> **Contract revision**: 2.8.0 (independent of the product release version in
 > [`VERSION`](../VERSION)) | **Author**: Hivemind maintainers
 >
-> The live registered MCP tool surface is **61 tools = 48 direct registrations
+> The live registered MCP tool surface is **63 tools = 50 direct registrations
 > + 13 canonical tier aliases**, arranged in 8 categories. 13 canonical
 > `short_*`/`mid_*`/`long_*` aliases are registered and callable as thin,
 > behaviorally-identical re-registrations of their historical `live_*` /
@@ -11,15 +11,15 @@
 > [Compatibility & deprecation expectations](#compatibility--deprecation-expectations)).
 > `admin_audit_recent` is a deliberate cross-cutting, admin-gated registration;
 > `token_create` and `space_invite_token` are direct registrations with no
-> alias, and `space_create` requires `manage` permission. The two net-new
-> `long_ingest` / `long_query` tools are also direct registrations with no
-> `graph_*` twin.
+> alias, and `space_create` requires `manage` permission. The direct
+> `long_ingest`, `long_query`, and hidden operator-only `long_reindex` tools
+> have no `graph_*` twin.
 >
 > The permission model is the real **4-level hierarchy
 > `admin ⊃ manage ⊃ write ⊃ read`** enforced in `auth/context.py`
 > (`check_write_permission` / `check_manage_permission` /
-> `check_admin_permission`). The permission matrix below covers all 43
-> historical tools and flags every destructive / `confirm`-gated tool. See
+> `check_admin_permission`). The permission matrix below covers all 50 direct
+> tools and flags every destructive / `confirm`-gated tool. See
 > [Rules immutability](#rules-immutability-clarification) for the
 > `space_update_rules` contract. Each tier-mapped tool is annotated with its
 > canonical `short_*`/`mid_*`/`long_*` alias name; see
@@ -31,14 +31,14 @@
 
 ## Overview
 
-Hivemind exposes **48 direct MCP tools** in 8 categories, plus **13 canonical
+Hivemind exposes **50 direct MCP tools** in 8 categories, plus **13 canonical
 tier aliases**. Historical `live_*`, `bank_*`, and `graph_*` names remain
 registered as compatibility surfaces; they are tool aliases, not the current
 product identity.
-The **live registered surface is 61 = 48 + 13**
-(48 direct registrations + 13
-`short_*`/`mid_*`/`long_*` aliases). The 2 net-new `long_ingest` /
-`long_query` tools, `admin_audit_recent`, and
+The **live registered surface is 63 = 50 + 13**
+(50 direct registrations + 13
+`short_*`/`mid_*`/`long_*` aliases). The direct `long_ingest`, `long_query`,
+and `long_reindex` tools, `admin_audit_recent`, `inference_self_test`, and
 `token_create` / `space_invite_token` are all registered directly with no
 alias. Tool
 names are derived 1:1 from the decorated
@@ -47,23 +47,23 @@ Python function name; there are **zero `@mcp.tool(name=...)` overrides** in
 
 | Category        | Tools | Description                                        |
 | --------------- | ----- | -------------------------------------------------- |
-| **System** (3)  | 3     | Service health & identity                          |
+| **System** (4)  | 4     | Service health, identity, and bounded inference readiness |
 | **Space** (10)  | 10    | Memory space CRUD and bounded invitation           |
 | **Token** (1)   | 1     | Manager-safe non-admin token creation              |
 | **Live** (3)    | 3     | Real-time notes (`short` tier)                     |
 | **Bank** (11)   | 11    | LLM-consolidated Memory Bank (`mid` tier)          |
-| **Graph** (6)   | 6     | Bridge to Graph Memory / ontology engine (`long` tier) |
+| **Graph** (7)   | 7     | Bridge to Graph Memory / ontology engine (`long` tier) |
 | **Backup** (5)  | 5     | Backup & restore                                   |
 | **Admin** (9)   | 9     | Token management, maintenance (GC), recent console/auth audit |
 
-Per-category counts match the code: system 3, space 10, token 1, live 3, bank
-11, graph 6, backup 5, admin 9 = **48 direct**. The 13 aliases bring the
-registered total to **61**.
+Per-category counts match the code: system 4, space 10, token 1, live 3, bank
+11, graph 7, backup 5, admin 9 = **50 direct**. The 13 aliases bring the
+registered total to **63**.
 
 ### Registration versus discovery
 
 Registration is the complete compatibility contract; discovery is the compact
-agent-facing projection. The server keeps all **61** names registered and
+agent-facing projection. The server keeps all **63** names registered and
 callable by exact name, while authenticated `tools/list` responses advertise
 only canonical `agent_core` names for the effective request permission:
 
@@ -90,10 +90,10 @@ The `live_*` / `bank_*` / `graph_*` tools map to the public `short` / `mid` /
 canonical `short_*`/`mid_*`/`long_*` names are registered as additive aliases bound to the
 identical implementation function (ADR-0005 "thin re-registration, never a copy").
 Both names are callable today. The historical name always stays callable. 13 tools
-earn a tiered alias; the other 35 direct tools — including `space_*`, `token_*`,
-`system_*`, `backup_*`, `admin_*`, bank ops/supervision, and the two net-new
-long tools — keep their names only. The 2 net-new `long_ingest` / `long_query` tools are also direct
-registrations with no `graph_*` twin. Each
+earn a tiered alias; the other 37 direct tools — including `space_*`, `token_*`,
+`system_*`, `backup_*`, `admin_*`, bank ops/supervision, and the three direct
+long tools — keep their names only. `long_ingest`, `long_query`, and
+`long_reindex` are direct registrations with no `graph_*` twin. Each
 affected section below is annotated **→ alias (live): `…`** or
 **→ no tiered alias (keep historical)**.
 
@@ -189,6 +189,10 @@ async def system_health() -> dict:
 The top-level `status` is `healthy` only when every configured dependency probe
 returns `ok`; otherwise it is `degraded`. `service_name` follows
 `MCP_SERVER_NAME` (default `Hivemind`) and `version` is read from `VERSION`.
+Authenticated health remains discovery-only and never initiates paid inference.
+When a fresh, exact-profile result from `inference_self_test` already exists,
+the `chat` and `embedding` role blocks add its secret-free readiness evidence;
+public `GET /health` ignores this cache.
 
 ---
 
@@ -226,6 +230,28 @@ the caller's current permission projection and therefore vary by token.
 
 ---
 
+### `inference_self_test` 🛠️ (manage, hidden)
+
+Runs one bounded synthetic inference request per configured role (chat and
+embedding) to collect deep readiness evidence. The tool accepts no arguments,
+uses fixed source-controlled inputs, disables retries, and caps chat output at
+8 tokens. It is hidden from all discovery profiles but remains callable by
+exact name with `manage` or inherited `admin` permission.
+
+Successful and failed results are cached per event loop and exact safe profile
+fingerprint for five minutes. Concurrent callers join one in-flight check.
+Responses contain only typed readiness metadata; generated text, vectors,
+credentials, endpoints, and raw provider errors are never returned.
+
+```python
+@mcp.tool()
+async def inference_self_test() -> dict:
+```
+
+> → No tiered alias (cross-cutting hidden operator tool).
+
+---
+
 ### `system_whoami` 🔑
 
 Identity of the current token used to reach the server. Returns `client_name`
@@ -238,7 +264,7 @@ Identity of the current token used to reach the server. Returns `client_name`
 async def system_whoami() -> dict:
 ```
 
-> Implemented in `system.py:163`.
+> Implemented in `system.py:222`.
 > → No tiered alias (cross-cutting `system_*`, keep historical name).
 
 ---
@@ -279,10 +305,11 @@ async def space_create(
   `recovery.retry_safe` is true. An incompatible preparation, stale historical
   grant, or failed token/final-marker write returns `status:"partial"` with an
   exact `recovery.action`; it is never reported as ordinary success and no
-  destructive rollback is attempted. Because `space_delete` leaves token
-  allowlists intact, reusing a deleted ID first requires an admin to remove all
-  persisted scope references named by that action, including admin,
-  active/revoked/expired entries.
+  destructive rollback is attempted. A successful `space_delete` removes every
+  allowlist reference after deleting the marker. References left by an older or
+  interrupted deletion keep reuse blocked until an explicit `space_delete`
+  retry confirms their cleanup. A compatible partial creation still requires
+  admin inspection and explicit cleanup.
 - Persisted admins and the bootstrap identity have global access and skip the
   allowlist auto-grant. Bootstrap remains an explicit provisioning exception.
 - Error if the space already exists (`status: "already_exists"`)
@@ -419,42 +446,54 @@ raise. The `_meta.json` inside the archive remains masked via
 Deletes a space and ALL its data (irreversible). `destructiveHint=True`. Requires
 `confirm=True`; gated by `check_manage_permission()`.
 
-Deletion removes the space prefix but intentionally does **not** rewrite token
-allowlists. Once a quiescent deletion has removed the commit marker, those
-historical grants do not authorize the missing space; they instead block later
-reuse of the identifier. An admin must explicitly remove every stale
-persisted scope reference—including from admin/revoked/expired entries—before
-`space_create` can reuse the ID. The same zero-reference rule applies to a
-compatible incomplete preparation: the creating actor's own grant is not a
-retry exception.
+For stored-token calls, deletion revalidates the exact persisted caller under
+the token lock; bootstrap administration has no persisted caller. It removes
+the space prefix, then removes the `space_id` from every token allowlist,
+including revoked and expired entries. The same zero-reference rule still
+applies to a compatible incomplete creation: the creating actor's own grant is
+not a retry exception and creation never treats grant cleanup as rollback.
 
 ```python
 @mcp.tool()
 async def space_delete(
     space_id: str,
-    confirm: bool = False,          # Must be True to confirm
-    unsafe_recovery: bool = False  # Explicit shared/unsafe Hivemind recovery; never bypasses corrupt-state refusal
+    confirm: bool = False,                 # Must be True to confirm
+    unsafe_recovery: bool = False,         # Shared/unsafe Hivemind recovery; never bypasses corrupt-state refusal
+    recover_access_grants: bool = False,   # Grants-only recovery for a known already-deleted space
 ) -> dict:
 ```
 
 `unsafe_recovery` is an advanced MCP-only recovery path. The normal console
 does not send it. Without it, shared/unsafe Hivemind spaces are refused; even
 with it, unclassifiable/corrupt coordination state remains fail-closed.
+`recover_access_grants` is independent and defaults false. It is consulted only
+after the marker and complete prefix are confirmed absent; set it only when
+resuming a known older or interrupted deletion, because it explicitly removes
+otherwise valid future-space pre-grants.
 
-The service snapshots the prefix, deletes and reprobes each payload key,
-re-lists, then deletes/reprobes `_meta.json` **last**. Success is count-honest:
+The service holds the fixed lifecycle→token lock order, snapshots the prefix,
+deletes and reprobes each payload key, re-lists, then deletes/reprobes
+`_meta.json` **last**. It rewrites `tokens.json` only after the marker is
+confirmed absent. Success is count-honest; any registry rewrite requires a
+fresh validated token read proving zero references. If the validated store
+already contains no matching scope, no registry write or redundant confirming
+read is performed:
 
 ```json
 {
   "status": "deleted",
   "space_id": "project-alpha",
   "files_total": 12,
-  "files_deleted": 12
+  "files_deleted": 12,
+  "access_grants_removed": 4
 }
 ```
 
-Any unconfirmed payload/marker delete is **not** success. The typed recovery
-shape is:
+Any unconfirmed payload/marker delete or token cleanup is **not** success.
+Payload/marker failure leaves `tokens.json` unchanged. A token cleanup failure
+uses the same typed recovery shape; `failed_keys` contains
+`_system/tokens.json`, `marker_preserved` is `false`, and
+`access_grants_pending` is a count or `null` when confirmation is unreadable:
 
 ```json
 {
@@ -463,11 +502,12 @@ shape is:
   "recovery_required": true,
   "message": "<server message>",
   "files_total": 12,
-  "files_deleted": 10,
-  "failed_keys": ["project-alpha/bank/example.md"],
-  "marker_preserved": true,
+  "files_deleted": 12,
+  "failed_keys": ["_system/tokens.json"],
+  "marker_preserved": false,
+  "access_grants_pending": null,
   "recovery": {
-    "retry_safe": true,
+    "retry_safe": null,
     "action": "<exact operator action>"
   }
 }
@@ -475,9 +515,42 @@ shape is:
 
 `marker_preserved` can be `true`, `false`, or `null` when its state cannot be
 read. A marker-absent residual prefix is returned as `partial` and is never
-cleaned automatically. Clients must render the counts, failed keys, marker
-state, and recovery action; they must not toast/navigate as success or blindly
-retry when `recovery.retry_safe` is false.
+cleaned automatically. An empty prefix with surviving grants is `not_found` and
+leaves the registry byte-identical by default because the same state can be an
+intentional future pre-grant. For a known older or interrupted deletion,
+repeating the request with `recover_access_grants=True` completes only grant
+cleanup and returns:
+
+```json
+{
+  "status": "grants_cleaned",
+  "space_id": "project-alpha",
+  "files_total": 0,
+  "files_deleted": 0,
+  "access_grants_removed": 4,
+  "recovered": true
+}
+```
+
+Clients must render the counts, failed keys, marker state, optional grant count,
+and recovery action; they must not toast/navigate as deletion success or blindly
+retry. `recovery.retry_safe: true` means only that the exact server-provided
+`recovery.action` is safe to follow manually. Grant-cleanup partials name
+`recover_access_grants=True`; payload/marker partials name a plain retry.
+Clients must never infer or add the flag automatically.
+Cleanup converges to zero references but is not caller-idempotent: after its
+own scope is removed, a manager retry is denied. A persisted global admin or
+bootstrap identity can inspect the resulting `not_found` state. The same
+caller-authority caveat applies to a successful ordinary deletion.
+
+Successful deletion also removes the target scope required by non-admin
+`backup_restore` callers. Backup restoration copies space objects only and
+never restores token allowlists. A global/bootstrap administrator must perform
+the restore. A persisted global admin then calls `space_invite_token` for each
+intended non-admin token. Bootstrap has no persisted actor hash and instead
+uses `admin_update_token` or `admin_bulk_update_tokens` with `space_ids_add`.
+Never delete/recreate the restored space to repair access, because that
+destroys the restored data.
 
 **Operational precondition:** quiesce every same-space short, mid,
 long/graph, backup/GC, and Hivemind mutation/background job before calling
@@ -976,13 +1049,14 @@ async def bank_compact(
 > recovery; `long_push` is a derived projection write into the ontology engine,
 > never an authoritative memory commit.
 >
-> **New long-tier tools:** `long_ingest` (canonical document
+> **Direct long-tier tools:** `long_ingest` (canonical document
 > ingestion keyed by a stable `source_path`, dry-run / check-remote / apply
 > planning — distinct from the filename-keyed `graph_push` bank mirror) and
-> `long_query` (read-only graph/ontology query). These are
-> net-new `long_*` tools (no `graph_*` twin), registered directly by
-> `tools/graph.py::register` (NOT via ALIAS_MAP). Both stay strictly
-> downstream / non-authoritative. See the documented subsections below.
+> `long_query` (read-only graph/ontology query) are ordinary agent-facing
+> additions. `long_reindex` is instead a hidden, `manage`-only maintenance
+> operation. All three have no `graph_*` twin and are registered directly by
+> `tools/graph.py::register` (NOT via ALIAS_MAP). They stay strictly downstream
+> and non-authoritative. See the documented subsections below.
 
 ### `graph_connect` ✏️ — → alias (live): `long_connect`
 
@@ -1118,6 +1192,163 @@ non-authoritative — never on the commit / rollback / audit / recovery path.
 
 ---
 
+### long_reindex maintenance
+
+**Hidden `manage` tool; no `graph_*` twin.**
+
+Explicitly rebuilds one incompatible embedding projection from retained source
+documents. The exact-name call is registered but intentionally absent from
+normal `tools/list` discovery. It is synchronous, mutating and non-idempotent
+(`readOnlyHint=False`, `idempotentHint=False`): keep the request open and never
+automatically retry a timeout or ambiguous response. The internal bridge uses
+a finite seven-day maintenance deadline instead of the ordinary 120-second
+tool-call deadline; operator clients and proxies must still be configured for
+the expected duration.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False))
+async def long_reindex(space_id: str) -> dict:
+```
+
+The tool checks current space access and `manage` before engine lookup. It then
+accepts only an already-persisted embedded binding and maps `space_id` to the
+deterministic internal `memory_id`; it never auto-binds, provisions, or follows
+an external `graph_connect` override. The bridge makes exactly one internal
+`memory_reindex` call. That internal-only Graph Memory tool retains its `write`
+check and the embedded credential remains exactly `read,write`; the public
+Hivemind boundary is what supplies the stronger operator-only `manage` gate.
+
+Only an initial collection state of exactly `reindex_required` is accepted.
+`missing`, `ready`, and `unavailable` are not maintenance inputs. Operators must
+first quiesce writers and invoke the tool only in a deliberate maintenance
+window. Admission fails fast if the per-memory ingest queue is not idle, an
+ordinary mutation is active, or another maintenance request owns the memory;
+once requested, new same-memory mutation admissions fail fast. The gate is
+process-local and per exact `memory_id`, consistent with the one-active-Graph-
+runtime scope.
+
+The rebuild never uses existing vectors as source truth. It requires an exact
+match between succeeded Neo4j `Document` rows and retained S3 source objects:
+every document resolves to one object, multiple documents may share that same
+verified object, and no unreferenced ordinary object is accepted. It verifies
+namespace, metadata, size and SHA-256 over downloaded bytes, and validates then
+excludes the known per-memory ontology artifact. Each source
+is extracted and rechunked under a frozen chunker signature; regenerated chunk
+count and contiguous indexes must exactly equal the stored per-document count.
+All embedding batches must agree on normalized model evidence before they are
+written to a uniquely attributable shadow collection.
+
+The shadow is exhaustively read with vectors and payloads. Collection identity,
+dimensions, cosine distance, finite vector components, exact point count,
+scalar memory/document ownership, and complete per-document chunk indexes must
+all match. Immediately before activation, the service recaptures the source
+inventory, chunker signature, embedding profile, and active-target snapshot.
+It then performs one final atomic Qdrant alias batch against the stable
+per-memory active alias. The batch is the final mutation; only alias, identity,
+and point-count reads follow it.
+
+Within a valid internal response, failure before that batch leaves the previous
+target active. The public bridge must be more conservative: once the
+non-idempotent internal dispatch begins, a transport exception or malformed
+response cannot prove whether the batch ran. It therefore reports
+`phase="activated"`, `activated=true`, and `active_state="unavailable"` even
+when the operation id and counts are unavailable. Treat that envelope as
+possible activation and retry-unsafe; there is no rollback, cleanup, or
+automatic retry. Old active collections and every created shadow remain
+attributable and retained. This operation provides no online/live reindex,
+zero-downtime guarantee, cross-process or HA fencing, crash resume, automatic
+orphan cleanup, backup/restore repair, retention, deletion, or other general
+long-data lifecycle behavior.
+After active-alias activation, `memory_delete` fails closed without cleanup
+until whole-memory lifecycle recovery is implemented by EPIC #309.
+
+After access and `manage` authorization succeed, every outcome uses exactly this
+bounded, redacted nine-field shape; extra/malformed internal fields become
+`reason="invalid_result"`:
+
+```json
+{
+  "status": "ok | error",
+  "phase": "admission | snapshot | rebuild | validate | pre_switch | activated | verified",
+  "reason": null,
+  "operation_id": "32 lowercase hex characters or null",
+  "source_documents": 0,
+  "source_chunks": 0,
+  "vectors_written": 0,
+  "activated": false,
+  "active_state": "missing | ready | reindex_required | unavailable"
+}
+```
+
+Success is only `status="ok"`, `phase="verified"`, `reason=null`, a non-null
+operation id, `0 < source_documents <= source_chunks`, equal chunk/vector counts,
+`activated=true`, and `active_state="ready"`. Maintenance error reasons are
+restricted to:
+
+```text
+active_target_changed, activation_unverified, backend_unavailable,
+binding_unavailable, chunking_config_changed, chunking_config_unavailable,
+embedding_failed,
+embedding_identity_changed, embedding_invalid, embedding_profile_changed,
+initial_state_invalid, invalid_result, maintenance_unavailable, namespace_busy,
+post_switch_unverified, shadow_collision, shadow_creation_failed,
+shadow_invalid, shadow_write_failed, source_changed,
+source_chunk_accounting_mismatch, source_chunking_failed, source_chunks_empty,
+source_document_duplicate, source_extraction_failed, source_hash_mismatch,
+source_inventory_empty, source_inventory_invalid, source_inventory_unavailable,
+source_metadata_mismatch, source_object_duplicate, source_object_mismatch,
+source_object_unavailable, source_ownership_invalid, source_size_limit_exceeded,
+source_size_mismatch,
+source_status_invalid, reindex_failed, runtime_unavailable, space_not_found,
+unsupported_runtime
+```
+
+Authorization denials remain the standard auth envelope because they precede
+the operation. Before internal dispatch, space/binding/storage/client failures
+use `phase="admission"`, a null operation id, zero counts, `activated=false`,
+and `active_state="unavailable"`; reasons include `space_not_found`,
+`unsupported_runtime`, `binding_unavailable`, `runtime_unavailable`, and
+`reindex_failed`:
+
+```json
+{
+  "status": "error",
+  "phase": "admission",
+  "reason": "binding_unavailable",
+  "operation_id": null,
+  "source_documents": 0,
+  "source_chunks": 0,
+  "vectors_written": 0,
+  "activated": false,
+  "active_state": "unavailable"
+}
+```
+
+After dispatch begins, transport/timeout failures use `runtime_unavailable`,
+other dispatch exceptions use `reindex_failed`, and a malformed backend result
+uses `invalid_result`. All three use this conservative retry-unsafe envelope:
+
+```json
+{
+  "status": "error",
+  "phase": "activated",
+  "reason": "runtime_unavailable",
+  "operation_id": null,
+  "source_documents": 0,
+  "source_chunks": 0,
+  "vectors_written": 0,
+  "activated": true,
+  "active_state": "unavailable"
+}
+```
+
+A valid internal post-switch error also uses `phase="activated"`,
+`activated=true`, and `active_state="unavailable"`, but may preserve its
+operation id and counts. No result includes backend, provider, source,
+collection, endpoint, or vector values.
+
+---
+
 ## 7. Backup — Backup & Restore
 
 > → All `backup_*` tools are **cross-cutting** and keep historical names only (no
@@ -1161,6 +1392,15 @@ exist (`_meta.json` absent). For a target classified `hivemind_healthy`,
 default. The only override is the advanced MCP-only disaster-recovery path
 `unsafe_recovery=True`; the normal CLI and admin console deliberately do not
 send this flag.
+
+Restore is data-only and never recreates token access. If the target was
+successfully removed with `space_delete`, every prior allowlist scope is gone:
+a global/bootstrap administrator must perform the restore, verify the restored
+objects, and re-grant each intended non-admin token. A persisted global admin
+uses `space_invite_token`; bootstrap has no persisted actor hash and uses
+`admin_update_token` or `admin_bulk_update_tokens` with `space_ids_add`.
+Do not delete and recreate a restored space as an access repair; that destroys
+the restored data.
 
 ```python
 @mcp.tool()
@@ -1532,7 +1772,7 @@ two statements are not contradictory once the permission tier is named. There is
 
 ---
 
-## Complete Matrix — Tools × Permissions (all 48 direct tools)
+## Complete Matrix — Tools × Permissions (all 50 direct tools)
 
 Permission is the **minimum** scope that satisfies the call; higher scopes inherit
 it (`admin ⊃ manage ⊃ write ⊃ read`). "Dest." = `destructiveHint=True`. "Confirm" =
@@ -1591,6 +1831,8 @@ name registered (additive, live, never a rename of the historical name);
 | 46 | `admin_audit_recent` | | | | | ✅ | | — | — (cross-cutting) |
 | 47 | `long_query` | | ✅ | | | | | — | — (net-new) |
 | 48 | `long_ingest` | | ✅ | | (✅) | | | `mode=apply` deferred; `include_volatile` needs `manage` | — (net-new) |
+| 49 | `long_reindex` | | | | ✅ | (✅) | | — | — (hidden operator maintenance) |
+| 50 | `inference_self_test` | | | | ✅ | (✅) | | — | — (hidden operator readiness probe) |
 
 \* `bank_consolidate`: `write` is sufficient to consolidate your own notes
 (`agent=caller`, omitted, or `null`). `manage`/`admin` is required to consolidate
@@ -1642,11 +1884,14 @@ This section governs the long-term relationship between the **historical tool na
   Callers using the historical names will continue to work without change.
 - New integrations should prefer the canonical `short_*` / `mid_*` / `long_*`
   names — they are the recommended grammar going forward.
-- The 35 direct no-alias tools (`space_*`, `token_*`, `system_*`, `backup_*`,
+- The 37 direct no-alias tools (`space_*`, `token_*`, `system_*`, `backup_*`,
   `admin_*`, bank ops/supervision, plus direct-only long tools) have no tier
   alias now and keep their names as canonical.
-- The 2 net-new `long_ingest` / `long_query` tools are direct long-tier
-  registrations with no historical `graph_*` twin and no alias.
+- `long_ingest`, `long_query`, and hidden operator-only `long_reindex` are
+  direct long-tier registrations with no historical `graph_*` twin and no
+  alias.
+- Hidden manage-only `inference_self_test` is a direct cross-cutting system
+  registration with no tier alias.
 
 ### Stage B — soft deprecation (future, ADR-gated)
 

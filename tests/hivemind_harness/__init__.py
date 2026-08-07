@@ -25,29 +25,14 @@ Composants :
   ``AssertionError`` nommant le nœud / term / bank_version fautif.
 
 ═══════════════════════════════════════════════════════════════════════════════
-SUIVI POUR LES ISSUES AVAL (#6 / #7 / #8 / #12) — IMPÉRATIF
+STATUT DES ISSUES AVAL (#6 / #7 / #8 / #12)
 ═══════════════════════════════════════════════════════════════════════════════
-Quand les services réels atterrissent, ils doivent RE-POINTER le harnais sur le
-vrai service derrière le MÊME seam (NodeRuntime / ProtocolModel) et garder les
-assertions d'invariants INCHANGÉES :
-
-- #6 QueueService        → remplace ``ProtocolModel.claim`` + l'allocation de
-                           ``sequence`` (tri déterministe des claims concurrents).
-- #7 TokenLeaseService   → remplace ``ProtocolModel.grant`` / ``release`` et
-                           l'évaluation d'expiration de lease
-                           (``is_lease_expired``).
-- #8 CommitService       → remplace ``ProtocolModel.apply_commit`` ET porte le
-                           commit-apply fencing guard (aujourd'hui dans le
-                           modèle car ``append_commit`` ne valide pas le term).
-                           Doit aussi introduire les EventType manquants
-                           (COMMIT_PROPOSED / COMMIT_REJECTED, etc.).
-- #12 ReplicationService → remplace la réplication live-note / tombstone / GC
-                           croisée et l'observation de watermark.
-
-EventType manquants à AJOUTER dans src/ par les issues concernées (PAS ici) :
-QUEUE_REQUEST (ou conserver le mapping → TOKEN_CLAIM), RESYNC_REQUESTED /
-RESYNC_COMPLETED, PEER_EVICTED / PEER_JOINED, LEASE_EXPIRED / TOKEN_FENCED.
-Ces concepts vivent en couche test ici (cf. ``ProtocolModel`` / ``HiveStatus``).
+Les services de queue, lease, commit et réplication sont désormais implémentés
+dans ``src/`` et possèdent leurs suites comportementales dédiées. Ce harnais
+reste un modèle de référence déterministe pour l'injection de fautes ; il ne
+redéfinit ni le registre ``EventType`` ni l'autorité des services réels. Toute
+évolution du harnais doit garder les assertions d'invariants inchangées et être
+recoupée avec les tests des runtimes concernés.
 """
 
 from __future__ import annotations

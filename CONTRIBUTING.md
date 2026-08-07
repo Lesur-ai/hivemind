@@ -32,14 +32,22 @@ uv run python scripts/check_doc_links.py
 git diff --check
 ```
 
+The [testing guide](docs/TESTING.md) documents the pytest marker taxonomy,
+optional and dedicated suites, nested-runner guard, and parameter-matrix rules.
+
 Changes that affect a container build should also prove each relevant image
 locally. These commands do not publish an image:
 
 ```bash
 docker build -t hivemind:contributor .
 docker build -t hivemind-waf:contributor waf
-docker build -t hivemind-graph-memory:contributor services/graph-memory
+docker build -f services/graph-memory/Dockerfile \
+  -t hivemind-graph-memory:contributor .
 ```
+
+The embedded long runtime builds from the repository root: its image installs
+the same `src/hivemind_inference` package the main service uses, so both
+resolve one shared inference boundary instead of two drifting copies.
 
 Run the default public test suite without production credentials. Individual
 integration or operator proofs may require Docker, an LLM provider, or external

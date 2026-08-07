@@ -2,7 +2,7 @@
 """
 Tier-canonical alias registration (P1 — issue #22).
 
-Registers the 13 canonical ``short_*`` / ``mid_*`` / ``long_*`` aliases as a
+Registers the canonical ``short_*`` / ``mid_*`` / ``long_*`` aliases as a
 SECOND registration bound to the IDENTICAL handler object as their historical
 source. No copy, no wrapper, no behavior change: each alias reuses the source's
 identical ``fn`` and re-passes its ``title`` / ``description`` / ``annotations``
@@ -12,9 +12,9 @@ source — so the permission gate, the fixed note-category set, the destructive
 contracts and the long-tier non-authoritative posture are inherited by identity.
 
 Normative mapping: ``DESIGN/hivemind/TOOL_MAPPING.md`` (governed by ADR-0002
-grammar + ADR-0005 alias lifecycle). 3 short + 6 mid + 4 long = 13 aliases;
-48 directly registered names (the frozen baseline plus long/audit and the two
-LM2-11 access tools) + 13 aliases = 61 registered names.
+grammar + ADR-0005 alias lifecycle). The complete expected registered surface
+and its counts have one test authority in ``tests/fixtures/tool_surface.json``;
+this module owns only the executable alias mapping and registration mechanism.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ ALIAS_MAP: dict[str, str] = {
     "live_note": "short_note",
     "live_read": "short_read",
     "live_search": "short_search",
-    # mid tier — bank_* -> mid_* (exactly 6; the 5 bank ops tools get no alias)
+    # mid tier — bank_* -> mid_*; bank ops without a tier twin stay direct-only
     "bank_read": "mid_read",
     "bank_read_all": "mid_read_all",
     "bank_list": "mid_list",
@@ -62,7 +62,7 @@ def register_tier_aliases(
     - a source tool with no callable (``fn is None``),
     - a canonical name that already exists (alias or historical) — no overwrite.
 
-    Returns the number of aliases registered (13 for the frozen map).
+    Returns the number of aliases registered from the selected mapping.
     """
     alias_map = ALIAS_MAP if alias_map is None else alias_map
 

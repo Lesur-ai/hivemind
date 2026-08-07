@@ -13,12 +13,15 @@ boto3 / network / S3 / LLM / Docker. The repo root is resolved from ``__file__``
 so the gate runs from any working directory (agent threads reset cwd between
 calls).
 
-Build-in-isolation (``docker build services/graph-memory``) is verified manually
-/ in CI (P7-7), not here — this gate stays offline and deterministic.
+The image builds from the repository root with
+``-f services/graph-memory/Dockerfile`` so it can import the shared lifecycle
+guard. The actual image build remains a manual/CI proof; this gate stays
+offline and deterministic while locking the Dockerfile's narrow COPY surface.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -34,6 +37,42 @@ _PINNED_SHA = "ae9afb0b95d449b68a8fb3ca3e70674b8f26eeb8"
 
 def _nonempty(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
+
+
+def _docker_sources(text: str) -> list[str]:
+    """Extract local COPY/ADD sources independently of the release auditor."""
+
+    physical = text.splitlines()
+    logical: list[str] = []
+    index = 0
+    while index < len(physical):
+        parts: list[str] = []
+        while index < len(physical):
+            current = physical[index].rstrip()
+            index += 1
+            if current.endswith("\\"):
+                parts.append(current[:-1])
+                continue
+            parts.append(current)
+            break
+        logical.append(" ".join(parts))
+
+    sources: list[str] = []
+    for line in logical:
+        instruction = line.strip().split(None, 1)
+        if not instruction or instruction[0].upper() not in {"COPY", "ADD"}:
+            continue
+        remainder = instruction[1] if len(instruction) > 1 else ""
+        if remainder.lstrip().startswith("["):
+            entries = json.loads(remainder)
+            sources.extend(entries[:-1])
+            continue
+        tokens = remainder.split()
+        if any(token.startswith("--from=") for token in tokens):
+            continue
+        arguments = [token for token in tokens if not token.startswith("--")]
+        sources.extend(arguments[:-1])
+    return sources
 
 
 def _git_tracked_under_svc() -> list[str]:
@@ -72,6 +111,22 @@ def test_required_runtime_files_present():
     ]
     missing = [str(p.relative_to(_REPO_ROOT)) for p in required if not _nonempty(p)]
     assert not missing, f"vendored runtime is missing required files: {missing}"
+
+
+def test_graph_dockerfile_uses_explicit_root_context_inputs():
+    dockerfile = (_SVC / "Dockerfile").read_text(encoding="utf-8")
+    assert (
+        "docker build -f services/graph-memory/Dockerfile "
+        "-t hivemind-graph-memory ."
+    ) in dockerfile
+    assert _docker_sources(dockerfile) == [
+        "services/graph-memory/requirements.txt",
+        "services/graph-memory/requirements.lock",
+        "services/graph-memory/ONTOLOGIES/",
+        "services/graph-memory/VERSION",
+        "services/graph-memory/src/",
+        "src/hivemind_inference/",
+    ]
 
 
 def test_ontologies_dir_has_yaml():
@@ -129,7 +184,7 @@ def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
         "FROM python:3.14.6-slim-bookworm@sha256:"
         "86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30"
     ) in dockerfile
-    assert "aiohttp==3.14.2" in lock
+    assert "aiohttp==3.14.3" in lock
     assert "boto3==1.43.52" in lock
     assert "botocore==1.43.52" in lock
     assert "--require-hashes -r requirements.lock" in dockerfile

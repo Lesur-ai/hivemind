@@ -5,7 +5,8 @@ Service Consolidator — Pipeline LLM pour la consolidation notes → bank.
 C'est le cœur intelligent de Live Memory. Le pipeline :
 1. Collecte : rules + synthèse précédente + notes live + bank actuelle
 2. Prompt : construit le prompt LLM (system + user)
-3. Appel LLM : une seule requête au modèle configuré (LLMAAS_MODEL), réponse JSON
+3. Appel LLM : une requête au modèle du profil chat résolu (frontière
+   `hivemind_inference`, ADR-0027), réponse JSON
 4. Application : éditions chirurgicales sur les fichiers bank existants
 5. Écriture : bank files + synthesis + suppression notes + update meta
 
@@ -28,10 +29,9 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
-import httpx
-from openai import AsyncOpenAI
+from hivemind_inference.records import ChatMessage, ChatRequest
 
-from ..config import display_proxy_url, get_settings
+from ..config import get_settings
 from .storage import get_storage, bank_relpath
 from .reservation_guard import assert_space_not_reserved
 from .live_note_format import split_live_note_front_matter
@@ -120,13 +120,12 @@ def _parse_live_note_agent(raw_content: object) -> str | None:
 # Issue #17 — Post-consolidation validation pass (opt-in)
 # ─────────────────────────────────────────────────────────────
 
-# Explicit marker produced by the LLM to signal an inference (SYSTEM_PROMPT
-# rule #8). Any line containing this token is considered explicitly
-# attributed as an inference and is NOT counted as an unsourced claim.
-# Note: the literal token is kept in French (`[inféré]`) because the
-# SYSTEM_PROMPT is in French (consistency with the 7 other anti-hallucination
-# rules already defined in French in v1.9.0).
-_INFERRED_MARKER_RE = re.compile(r"\[inféré(?:[,\s][^\]]*)?\]", re.IGNORECASE)
+# Explicit markers produced by the LLM to signal an inference (system-prompt
+# rule #8). English is the Hivemind default; the French spelling remains
+# accepted for banks produced by the 1.x compatibility prompt.
+_INFERRED_MARKER_RE = re.compile(
+    r"\[(?:inferred|inféré)(?:[,\s][^\]]*)?\]", re.IGNORECASE
+)
 
 # Detection of "risky" claims: lines containing at least one verifiable
 # fact (metric, date, strong status). We stay deliberately conservative
@@ -140,7 +139,7 @@ _INFERRED_MARKER_RE = re.compile(r"\[inféré(?:[,\s][^\]]*)?\]", re.IGNORECASE)
 # exist between `%` and ` `.
 _METRIC_RE = re.compile(
 
-    r"\b\d+(?:[.,/]\d+)*\s*(?:%|tests?|notes?|findings?|lignes?|files?|"
+    r"\b\d+(?:[.,/]\d+)*\s*(?:%|tests?|notes?|findings?|lignes?|lines?|files?|"
     r"fichiers?|points?|tokens?|ms|s|h|jours?|days?|bytes?|kb|mb|gb|"
     r"commits?|PRs?|issues?)(?=\W|$)",
     re.IGNORECASE,
@@ -159,13 +158,13 @@ _PR_REF_RE = re.compile(r"#\d+\b")
 _STATUS_KEYWORDS = (
     # résoudre / to resolve
     "résolu", "résolue", "résolus", "résolues",
-    "resolu", "resolue", "resolus", "resolues",
+    "resolu", "resolue", "resolus", "resolues", "resolved",
     # merger / to merge
     "mergé", "mergée", "mergés", "mergées",
     "merge", "merged",
     # publier / to publish
     "publié", "publiée", "publiés", "publiées",
-    "publie", "released",
+    "publie", "published", "released",
     # déployer / to deploy
     "déployé", "déployée", "déployés", "déployées",
     "deploye", "deployed",
@@ -236,7 +235,8 @@ def _validate_unattributed_claims(
 ) -> dict:
     """
     Count the "claims" introduced by the consolidation that are neither
-    sourced in the batch notes nor explicitly marked `[inféré]`.
+    sourced in the batch notes nor explicitly marked `[inferred]` (or the
+    historical French `[inféré]`).
 
     Code-only approach (deterministic, zero LLM tokens):
     1. Per-file diff: only ADDED LINES are inspected (present in
@@ -244,7 +244,7 @@ def _validate_unattributed_claims(
     2. For each added line, extract verifiable tokens (metrics, dates,
        versions, refs).
     3. If the line carries a numeric claim OR a strong status:
-       - If it contains `[inféré]` → traced but not counted.
+       - If it contains `[inferred]`/`[inféré]` → traced but not counted.
        - Otherwise, check that each verifiable token appears in the
          normalized notes corpus. If NO token is found in the notes,
          the line is unsourced.
@@ -297,7 +297,7 @@ def _validate_unattributed_claims(
 
             lines_scanned += 1
 
-            # Explicit `[inféré]` marker → traced but not counted as
+            # Explicit inference marker → traced but not counted as
             # unsourced (the LLM explicitly flagged the inference).
             if _INFERRED_MARKER_RE.search(line):
                 inferred += 1
@@ -341,7 +341,132 @@ def _validate_unattributed_claims(
 # Prompts
 # ─────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Tu es un assistant spécialisé dans la maintenance de Memory Banks pour des projets.
+SYSTEM_PROMPT_ENGLISH = """You are an assistant specialized in maintaining project Memory Banks.
+
+Your mission: integrate work notes into structured Markdown files through SURGICAL EDITS.
+
+## What you receive:
+1. The RULES that define the Memory Bank structure
+2. The PREVIOUS SYNTHESIS (context from earlier consolidations)
+3. New LIVE NOTES to integrate (with their metadata: agent, category, tags)
+4. The CURRENT BANK FILES (the existing content)
+
+## What you must return:
+JSON containing EDIT OPERATIONS per file — NOT the full file contents.
+
+## Output language (mandatory)
+
+Write all generated bank prose and the residual synthesis in English, regardless of the language of the rules, notes, existing bank, or caller.
+Preserve required existing headings, exact project terminology, code identifiers, URLs, and quoted source text verbatim.
+Do not translate or rewrite existing bank content solely to change its language. Content that is not otherwise touched must remain intact.
+
+## Fundamental principle: EDIT, DON'T REWRITE
+
+⚠️ You must NEVER return the full contents of a file unless:
+- It is a new file to create (action "create")
+- The file requires major restructuring (action "rewrite" — exceptional, with a mandatory justification)
+
+For existing files, produce edit operations by Markdown SECTION.
+Anything you do not explicitly touch remains INTACT — that is the purpose.
+
+## Available operation types:
+
+1. **replace_section** — Replaces the contents of a section (identified by its heading)
+   Content BELOW the heading through the next heading of the same or a higher level is replaced.
+
+2. **append_to_section** — Adds content to the END of an existing section
+   Preserves all existing content and adds after it.
+
+3. **prepend_to_section** — Adds content to the START of a section (after its heading)
+   Preserves all existing content and adds before it.
+
+4. **add_section** — Creates a new section (heading + content) at the end of the file
+   Or after a specific section when "after" is provided.
+   ⚠️ NEVER use add_section for a section that ALREADY EXISTS — use replace_section instead.
+   If you use add_section with an existing heading, it will automatically be converted to replace_section.
+
+5. **delete_section** — Deletes a whole section (heading + content)
+
+## ⚠️ ANTI-HALLUCINATION RULES (CRITICAL)
+
+These rules are MANDATORY and take precedence over every other consideration:
+
+1. **Strict source attribution**: EVERY factual statement written to the bank MUST be
+   derivable from at least one note in the batch. If the notes do not provide the
+   information required to fill a section expected by the rules, leave the section EMPTY
+   or write "To be defined — not specified in the available notes." NEVER invent content
+   to "complete" a section.
+
+2. **Preserve domain vocabulary**: when a note contains a definition or a project-specific
+   domain term (for example a concept, entity, or role name), use the EXACT definition from
+   the notes. NEVER reinterpret a term using general knowledge. Project vocabulary takes
+   precedence over common vocabulary.
+
+3. **Gate metrics and numbers**: numbers (lines of code, test counts, percentages, times,
+   scores) may appear in the bank ONLY when they come explicitly from a note. NEVER invent
+   a metric, even approximately. When notes provide metrics, MAKE SURE to include them in
+   the appropriate file (for example test count → Metrics section in progress.md).
+
+4. **Do not invent structure**: if the notes do not describe the file tree, DO NOT GENERATE
+   a file tree. If the stack is mentioned (for example "Rails 8"), you may mention the stack
+   but MUST NOT invent its corresponding file tree.
+
+5. **Isolation by agent and task**: when notes come from MULTIPLE agents or concern
+   INDEPENDENT tasks (different branches/tags), NEVER combine facts from different sources
+   in one sentence or paragraph. Keep separate paragraphs per agent/task. NEVER forge a
+   connection between independent notes.
+
+## Inference and removal rules:
+
+6. **Remove replaced items**: when a `decision` note explicitly introduces a new
+   plan/scope/sequence that REPLACES an earlier version in the bank, REMOVE the old-scope
+   items from the backlog/roadmap. Do not silently preserve them. If uncertainty remains,
+   mark them "DEPRECATED — verify".
+
+7. **Transitive status inference**: if a `progress` note describes completion of step N
+   while the bank still says "Step N-1 in progress", mark N-1 complete by inference.
+   Likewise, if Phase N+1 is in progress → Phase N is complete.
+
+8. **`[inferred]` traceability markers**: every fact that is not LITERALLY present in a
+   batch note but that you produce through TRANSITIVE INFERENCE (rule #7) or logical
+   deduction (for example "Phase 3 in progress" → "Phase 2 complete") MUST end with the
+   `[inferred]` marker at the end of the sentence or bullet. Examples:
+     - "Phase 3 started on 2026-03-12 [inferred, from progress: Phase 2 complete]"
+     - "Migration complete [inferred]"
+   DIRECTLY sourced facts (present as-is in a note) NEVER carry the marker. This traceability
+   lets operators distinguish hard facts from deductions and supports post-consolidation
+   validation.
+
+## General rules:
+
+- STRICTLY follow the structure defined in the rules
+- Integrate new information from the live notes
+- Prefer append_to_section and replace_section — they are the most common operations
+- For CURRENT CONTEXT files (focus, ongoing work): replace the focus section and append recent items.
+  ⚠️ CLEAN ACTIVELY: move completed items to the tracking/history file, remove details from
+  old sessions (> 2 sessions), and keep ONLY current focus, recent work, next steps, and
+  active decisions. These files must remain LIGHTWEIGHT.
+- For HISTORY/PROGRESS files: append new entries and NEVER delete history.
+  Summarize old entries (> 30 days) in one line per milestone.
+  ⚠️ SEMANTIC ANTI-DUPLICATION: before creating a NEW section in a history file, check
+  whether a milestone covering the SAME WORK (same date, same feature/phase) already exists
+  in the file, even under a different heading or shorter format.
+  Examples of duplicates to avoid:
+    - "### Phase B — Service created (2026-04-10)" AND "### 2026-04-10 session — Phase B COMPLETE"
+    - "### Phase 4.4x — Mermaid fix (2026-04-06)" AND "### 2026-04-06 session — Diagram fixes complete"
+  If a similar milestone exists → ENRICH IT with replace_section (keep the existing heading
+  and add missing details) instead of creating a duplicate section. This is especially
+  important after compaction has summarized sections.
+- Identify the ROLE of every bank file from the provided RULES (not from its filename)
+- Headings must EXACTLY match the headings in the file (including ##)
+- If a file does not need modification, DO NOT INCLUDE IT
+- The synthesis must be concise while covering the key points from the processed notes
+- ⚠️ ANTI-ACCUMULATION RULE: every consolidation must CLEAN obsolete content rather than
+  only appending. A file that EXCEEDS ITS SIZE LIMIT and continues growing is a problem —
+  compact old sections to make room."""
+
+
+SYSTEM_PROMPT_FRENCH = """Tu es un assistant spécialisé dans la maintenance de Memory Banks pour des projets.
 
 Ta mission : intégrer des notes de travail dans des fichiers Markdown structurés via des ÉDITIONS CHIRURGICALES.
 
@@ -463,54 +588,69 @@ Ces règles sont OBLIGATOIRES et prioritaires sur toute autre considération :
   de grossir est un problème — compacte les sections anciennes pour faire de la place."""
 
 
+# Backward-compatible import alias. Runtime selection is instance-scoped below;
+# direct users of the historical constant now receive the Hivemind default.
+SYSTEM_PROMPT = SYSTEM_PROMPT_ENGLISH
+
+
 class ConsolidatorService:
     """
     Service de consolidation LLM : transforme les notes live en bank.
 
-    Utilise AsyncOpenAI pour communiquer avec le LLMaaS Cloud Temple.
-    Mode "édition chirurgicale" : le LLM produit des opérations d'édition
-    par section Markdown, pas des réécritures complètes.
+    Consomme le contrat ``ChatProvider`` partagé (``hivemind_inference``,
+    P13-1C / ADR-0027) : le profil chat résolu et son adapter enregistré
+    portent modèle, température, plafond de sortie, transport (``PROXY_URL``)
+    et le retry borné. Mode "édition chirurgicale" : le LLM produit des
+    opérations d'édition par section Markdown, pas des réécritures complètes.
     """
+
+    # Distingue « rôle chat résolu comme ABSENT » (None, posé par __init__ →
+    # consolidate() échoue explicitement) d'une instance partielle construite
+    # sans __init__ (doubles de test via object.__new__ : la garde les laisse
+    # passer, leurs seams _call_llm/_complete_chat étant stubbés). Le chemin
+    # production passe toujours par __init__.
+    _chat_profile = object()
+    # Partial test doubles that intentionally bypass ``__init__`` follow the
+    # split-family diagnostic. Production overrides this from profile.source.
+    _context_window_env_name = "INFERENCE_CHAT_CONTEXT_WINDOW"
 
     def __init__(self):
         settings = get_settings()
 
-        # ── Proxy HTTP sortant (optionnel) ────────────────────
-        # Utilise PROXY_URL (variable custom) plutôt que HTTP_PROXY/HTTPS_PROXY
-        # pour éviter d'affecter toutes les libs Python qui lisent les vars d'env OS.
-        # AsyncOpenAI utilise httpx en interne — on passe un client httpx pré-configuré.
-        # Quand http_client est fourni, AsyncOpenAI n'en prend pas ownership :
-        # c'est ConsolidatorService qui gère son cycle de vie (voir close()).
-        proxy_url = settings.proxy_url
-        self._http_client: httpx.AsyncClient | None = (
-            httpx.AsyncClient(
-                proxy=httpx.Proxy(url=proxy_url),
-                timeout=settings.consolidation_timeout,
-            )
-            if proxy_url
-            else None
-        )
-        if self._http_client:
-            # P12-3 (#268) : PROXY_URL est potentiellement porteuse de
-            # credentials (http://user:pass@host:port) — ne logguer que
-            # l'origine scheme://host:port, jamais la valeur brute.
-            logger.info(
-                "ConsolidatorService: LLM requests via proxy %s",
-                display_proxy_url(proxy_url),
-            )
+        # ── Frontière d'inférence partagée (P13-1C, ADR-0027) ──
+        # Plus AUCUNE construction de SDK provider ici : le profil chat résolu
+        # (familles INFERENCE_* ou chemin legacy LLMAAS_* strict) est
+        # snapshotté une fois par process par le runtime partagé, qui possède
+        # aussi le transport sortant (PROXY_URL inclus — contrat egress P12-3
+        # inchangé) et le ferme au shutdown ASGI. Un profil chat absent est un
+        # démarrage VALIDE : consolidate() échoue alors explicitement à
+        # l'appel, sans accès réseau.
+        from .inference_runtime import get_inference_runtime
 
-        self._client = AsyncOpenAI(
-            base_url=settings.llmaas_api_url,
-            api_key=settings.llmaas_api_key,
-            timeout=settings.consolidation_timeout,
-            http_client=self._http_client,
-        )
-        self._model = settings.llmaas_model
-        self._context_window = settings.llmaas_context_window
-        self._max_tokens = settings.llmaas_max_tokens
-        self._temperature = settings.llmaas_temperature
+        self._chat_profile = get_inference_runtime().config.chat
+        self._timeout = settings.consolidation_timeout
+        if self._chat_profile is not None:
+            self._model = self._chat_profile.configured_model
+            self._context_window = self._chat_profile.context_window
+            self._max_tokens = self._chat_profile.max_output_tokens
+            self._context_window_env_name = (
+                "LLMAAS_CONTEXT_WINDOW"
+                if self._chat_profile.source == "llmaas-legacy"
+                else "INFERENCE_CHAT_CONTEXT_WINDOW"
+            )
+        else:
+            self._model = ""
+            self._context_window = 0
+            self._max_tokens = 0
+            self._context_window_env_name = "INFERENCE_CHAT_CONTEXT_WINDOW"
         self._max_notes = settings.consolidation_max_notes
         self._batch_size = settings.consolidation_batch_size
+        # V1.4.0: English is the Hivemind default. This bool intentionally
+        # remains narrower than the general language selector planned for
+        # v1.6.0 and is snapshotted with the rest of the process config.
+        self._legacy_french_prompts = (
+            settings.consolidation_legacy_french_prompts
+        )
         # LM2-18 fix : cooldown anti-spam (voir _last_consolidation_started)
         self._cooldown_seconds = settings.consolidation_cooldown_seconds
         # Bank compaction settings
@@ -575,6 +715,21 @@ class ConsolidatorService:
         """
         await assert_space_not_reserved(space_id)
         t0 = time.monotonic()
+
+        # P13-1C : rôle chat non configuré = échec explicite AVANT toute
+        # collecte, tout appel réseau et toute mutation durable (fail-closed,
+        # zéro fallback). Le démarrage sans provider reste valide ; c'est
+        # l'opération qui le signale.
+        if self._chat_profile is None:
+            return {
+                "status": "error",
+                "message": (
+                    "Aucun provider d'inférence chat configuré — définissez "
+                    "la famille INFERENCE_CHAT_* ou le couple legacy "
+                    "LLMAAS_API_URL + LLMAAS_API_KEY."
+                ),
+            }
+
         storage = get_storage()
         agent_label = agent or "(all)"
 
@@ -994,7 +1149,8 @@ class ConsolidatorService:
                         logger.warning(
                             "Batch %d/%d validation — %d unsourced claim(s) "
                             "detected (over %d scanned lines, %d marked "
-                            "[inféré]). See `examples` in the MCP response.",
+                            "[inferred]/[inféré]). See `examples` in the MCP "
+                            "response.",
                             batch_idx,
                             batch_count,
                             val["unattributed_claims_count"],
@@ -1335,6 +1491,8 @@ class ConsolidatorService:
         Returns:
             Liste de messages [{"role": "system", ...}, {"role": "user", ...}]
         """
+        legacy_french = self._legacy_french_prompts
+
         # Construire la section notes avec métadonnées (agent, catégorie, tags)
         # Issue #17 : les métadonnées permettent au LLM d'isoler les notes
         # par agent/tâche et de mieux respecter les catégories sémantiques.
@@ -1364,9 +1522,10 @@ class ConsolidatorService:
                     elif stripped.startswith("tags:"):
                         tags = stripped.split(":", 1)[1].strip()
 
+            category_label = "catégorie" if legacy_french else "category"
             notes_section += (
                 f"\n--- Note {i}/{len(notes)} "
-                f"[agent={agent_name}, catégorie={category}"
+                f"[agent={agent_name}, {category_label}={category}"
                 f"{', tags=' + tags if tags else ''}] ---\n"
                 f"{content_clean}\n"
             )
@@ -1380,19 +1539,28 @@ class ConsolidatorService:
                 # Extraire le chemin relatif complet (supporte les sous-dossiers)
                 raw_relpath = bank_relpath(bf["key"], space_id)
                 filename = _sanitize_filename(raw_relpath)
+                file_label = "Fichier" if legacy_french else "File"
+                end_file_label = "Fin fichier" if legacy_french else "End file"
                 bank_section += (
-                    f"\n--- Fichier: {filename} ---\n"
+                    f"\n--- {file_label}: {filename} ---\n"
                     f"{bf['content']}\n"
-                    f"--- Fin fichier: {filename} ---\n"
+                    f"--- {end_file_label}: {filename} ---\n"
                 )
         else:
-            bank_section = (
-                "Aucun fichier bank — première consolidation. "
-                "Utilise l'action 'create' pour créer les fichiers selon les rules."
-            )
+            if legacy_french:
+                bank_section = (
+                    "Aucun fichier bank — première consolidation. "
+                    "Utilise l'action 'create' pour créer les fichiers selon les rules."
+                )
+            else:
+                bank_section = (
+                    "No bank files — this is the first consolidation. "
+                    "Use the 'create' action to create files according to the rules."
+                )
 
         # Construire le prompt utilisateur
-        user_prompt = f"""=== RULES DE L'ESPACE "{space_id}" ===
+        if legacy_french:
+            user_prompt = f"""=== RULES DE L'ESPACE "{space_id}" ===
 {rules}
 
 === SYNTHÈSE PRÉCÉDENTE ===
@@ -1460,8 +1628,82 @@ Retourne un JSON avec cette structure exacte :
 8. Pour les fichiers d'historique/progression : TOUJOURS append, JAMAIS supprimer l'historique
 9. La synthèse résiduelle doit résumer les notes traitées"""
 
+            system_prompt = SYSTEM_PROMPT_FRENCH
+        else:
+            user_prompt = f"""=== RULES FOR SPACE "{space_id}" ===
+{rules}
+
+=== PREVIOUS SYNTHESIS ===
+{synthesis or "None — first consolidation"}
+
+=== LIVE NOTES TO INTEGRATE ({len(notes)} notes) ===
+{notes_section}
+
+=== CURRENT BANK FILES ===
+{bank_section}
+
+=== RESPONSE FORMAT ===
+Return JSON with this exact structure:
+{{
+  "file_edits": [
+    {{
+      "filename": "activeContext.md",
+      "action": "edit",
+      "operations": [
+        {{
+          "type": "replace_section",
+          "heading": "## Current Focus",
+          "content": "New section content..."
+        }},
+        {{
+          "type": "append_to_section",
+          "heading": "## Recent Work",
+          "content": "- New item added\\n- Another item"
+        }},
+        {{
+          "type": "add_section",
+          "heading": "## New Section",
+          "content": "New section content",
+          "after": "## Existing Section"
+        }},
+        {{
+          "type": "delete_section",
+          "heading": "## Obsolete Section"
+        }}
+      ]
+    }},
+    {{
+      "filename": "new_file.md",
+      "action": "create",
+      "content": "# Title\\n\\nFull contents of the new file..."
+    }},
+    {{
+      "filename": "restructured_file.md",
+      "action": "rewrite",
+      "content": "# Title\\n\\nFully rewritten content...",
+      "reason": "Major restructuring is required because..."
+    }}
+  ],
+  "synthesis": "Concise summary of the processed notes..."
+}}
+
+=== IMPORTANT INSTRUCTIONS ===
+1. For EXISTING files, use action "edit" with surgical operations
+2. For NEW files, use action "create" with the full contents
+3. Action "rewrite" = COMPLETE rewrite — ONLY when major restructuring is required
+4. Unchanged files MUST NOT appear in file_edits
+5. Operation headings must EXACTLY match those in the file (for example "## Current Focus")
+6. Prefer append_to_section when ADDING information without losing anything
+7. Prefer replace_section when UPDATING a section whose content changes
+8. For history/progress files: ALWAYS append and NEVER delete history
+9. The residual synthesis must summarize the processed notes in English
+10. Write generated prose in English, but preserve required existing headings, exact project terminology, code identifiers, URLs, and quoted source text verbatim
+11. Do not translate or rewrite existing bank content solely to change its language"""
+
+            system_prompt = SYSTEM_PROMPT_ENGLISH
+
         return [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
@@ -1475,7 +1717,10 @@ Retourne un JSON avec cette structure exacte :
         Heuristique : 1 token ≈ 4 caractères. On réserve au minimum
         8192 tokens pour la sortie (éditions chirurgicales JSON).
 
-        Inclut un retry si la réponse n'est pas du JSON valide.
+        UNE seule requête applicative. Une réponse inexploitable est terminale
+        après la seule réparation LOCALE ``_repair_json`` (zéro réseau) : le
+        retry borné des transitoires vit dans l'adapter partagé (ADR-0027), et
+        cette frontière n'émet jamais de second appel payant silencieux.
 
         Returns:
             {"status": "ok", "data": {...}, "usage": {...}} ou erreur
@@ -1491,11 +1736,11 @@ Retourne un JSON avec cette structure exacte :
         # configuré ni la fenêtre restante ; le plancher ne sert plus que de
         # seuil de diagnostic. Fenêtre épuisée → erreur structurée pré-écriture
         # (le pipeline la classe batch_llm_failed sans mutation durable).
-        # Revue ronde 2 : le budget est recalculé sur les messages COURANTS
-        # avant CHAQUE appel provider — les chemins de retry (JSON invalide,
-        # structure invalide) apprennent la réponse brute + une correction au
-        # prompt, et un budget figé pouvait dépasser la fenêtre exactement
-        # quand le retry était nécessaire.
+        # Le budget est calculé sur les messages COURANTS juste avant l'appel
+        # provider. (La revue ronde 2 de PR #256 exigeait ce recalcul parce que
+        # les tours correctifs faisaient grossir le prompt ; ces tours ont été
+        # supprimés — PR #303 ronde 1, ADR-0027 §Retry — mais calculer au plus
+        # près de l'appel reste la forme correcte.)
         _MIN_OUTPUT_TOKENS = 8192
 
         def _compute_output_budget() -> int | None:
@@ -1510,10 +1755,11 @@ Retourne un JSON avec cette structure exacte :
                     "LLM call refused — estimated input (~%d tokens) exhausts "
                     "the context window (context_window=%d, max_tokens=%d): no "
                     "positive output budget remains. Reduce the bank size or "
-                    "raise LLMAAS_CONTEXT_WINDOW.",
+                    "raise %s.",
                     estimated_input_tokens,
                     self._context_window,
                     self._max_tokens,
+                    self._context_window_env_name,
                 )
                 return None
 
@@ -1556,160 +1802,142 @@ Retourne un JSON avec cette structure exacte :
             "message": (
                 "Le contexte estimé épuise la fenêtre du modèle : aucun "
                 "budget de sortie positif. Réduisez la taille de la bank "
-                "ou augmentez LLMAAS_CONTEXT_WINDOW."
+                f"ou augmentez {self._context_window_env_name}."
             ),
         }
 
-        for attempt in range(2):  # 1 essai + 1 retry
-            output_budget = _compute_output_budget()
-            if output_budget is None:
-                return dict(_WINDOW_EXHAUSTED_ERROR)
+        # UNE seule requête applicative (revue Codex Sol, PR #303 ronde 1).
+        # ADR-0027 §Retry énonce que les réponses MALFORMÉES ne sont jamais
+        # rejouées, que la politique existe pour « prevent duplicate paid work »
+        # et que « callers may start a new explicit operation after seeing the
+        # normalized failure; the adapter never does so silently ». Un tour de
+        # prompt correctif automatique est exactement ce second appel payant
+        # silencieux : chaque tour retraversant en plus le retry transport
+        # autorisé, un lot pouvait produire jusqu'à QUATRE tentatives amont.
+        # Le rattrapage LOCAL sans réseau (_repair_json) reste le seul recours ;
+        # une complétion inexploitable est TERMINALE pour cette consolidation.
+        output_budget = _compute_output_budget()
+        if output_budget is None:
+            return dict(_WINDOW_EXHAUSTED_ERROR)
+        try:
+            # P13-1C : requête normalisée vers l'adapter enregistré. La
+            # température vient du PROFIL résolu (jamais per-call —
+            # ADR-0027 : un enregistrement d'opération ne peut pas
+            # surcharger le profil) et le budget de sortie ne peut
+            # qu'ABAISSER le plafond du profil.
+            result = await self._complete_chat(messages, output_budget)
+
+            raw_content = result.text
+            finish_reason = result.finish_reason
+            completion_tokens = result.output_tokens
+
+            # Extraire le JSON de la réponse (peut être enveloppé dans ```json)
+            json_str = _extract_json(raw_content)
+
+            # Parser le JSON
             try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=messages,
-                    max_tokens=output_budget,
-                    temperature=self._temperature,
+                data = json.loads(json_str)
+            except json.JSONDecodeError as exc:
+                # ADR-0027 : AUCUN fragment de complétion dans les logs ni
+                # dans les résultats client — métadonnées sûres seulement
+                # (l'ancien `raw_preview` de 500 caractères publiait du
+                # contenu opérateur des deux côtés).
+                logger.warning(
+                    "LLM: JSON invalide — json_error=%s, finish_reason=%s, "
+                    "completion_tokens=%s, raw_len=%d",
+                    str(exc)[:100],
+                    finish_reason,
+                    completion_tokens,
+                    len(raw_content),
                 )
 
-                raw_content = response.choices[0].message.content or ""
-                finish_reason = response.choices[0].finish_reason
-                completion_tokens = (
-                    response.usage.completion_tokens if response.usage else None
+                # ── Réparation LOCALE uniquement (zéro réseau) ──
+                # Gère le cas "Unterminated string" (le plus fréquent
+                # avec qwen3.x : chaîne non fermée, finish_reason=stop).
+                repaired_data = _repair_json(json_str, exc)
+                repaired_files = (
+                    len(repaired_data.get("file_edits", []))
+                    if repaired_data
+                    else 0
                 )
-
-                # Extraire le JSON de la réponse (peut être enveloppé dans ```json)
-                json_str = _extract_json(raw_content)
-
-                # Parser le JSON
-                try:
-                    data = json.loads(json_str)
-                except json.JSONDecodeError as exc:
-                    # Log la réponse brute (tronquée) pour diagnostic
-                    raw_preview = raw_content[:500] if raw_content else "(empty)"
-                    visible_tokens_est = len(raw_content) // 4
+                if repaired_data is not None and repaired_files > 0:
+                    # Repair réussie avec du contenu utile
+                    repaired_ops = sum(
+                        len(fe.get("operations", []))
+                        for fe in repaired_data.get("file_edits", [])
+                        if fe.get("action") == "edit"
+                    )
                     logger.warning(
-                        "LLM: JSON invalide (attempt %d/%d) — "
-                        "json_error=%s, finish_reason=%s, "
-                        "completion_tokens=%s, visible_tokens_est=%d, "
-                        "raw_len=%d, raw_preview=%s",
-                        attempt + 1,
-                        2,
-                        str(exc)[:100],
-                        finish_reason,
-                        completion_tokens,
-                        visible_tokens_est,
-                        len(raw_content),
-                        raw_preview,
+                        "LLM: JSON réparé automatiquement — "
+                        "%d file_edits, %d operations récupérées "
+                        "(dernière opération tronquée supprimée)",
+                        repaired_files,
+                        repaired_ops,
                     )
-
-                    # ── Tentative de réparation automatique ──
-                    # Avant le retry coûteux (2ème appel LLM complet),
-                    # essayer de réparer le JSON tronqué/malformé.
-                    # Gère le cas "Unterminated string" (le plus fréquent
-                    # avec qwen3.x : chaîne non fermée, finish_reason=stop).
-                    repaired_data = _repair_json(json_str, exc)
-                    repaired_files = (
-                        len(repaired_data.get("file_edits", []))
-                        if repaired_data
-                        else 0
-                    )
-                    if repaired_data is not None and repaired_files > 0:
-                        # Repair réussie avec du contenu utile
-                        repaired_ops = sum(
-                            len(fe.get("operations", []))
-                            for fe in repaired_data.get("file_edits", [])
-                            if fe.get("action") == "edit"
-                        )
+                    data = repaired_data
+                    # Fall through vers la validation ci-dessous
+                else:
+                    if repaired_data is not None and repaired_files == 0:
                         logger.warning(
-                            "LLM: JSON réparé automatiquement — "
-                            "%d file_edits, %d operations récupérées "
-                            "(dernière opération tronquée supprimée)",
-                            repaired_files,
-                            repaired_ops,
+                            "LLM: JSON réparé mais 0 file_edits récupérés "
+                            "— échec terminal"
                         )
-                        data = repaired_data
-                        # Fall through vers la validation ci-dessous
-                    elif attempt == 0:
-                        # Repair échouée OU repair vide (0 file_edits) → retry
-                        if repaired_data is not None and repaired_files == 0:
-                            logger.warning(
-                                "LLM: JSON réparé mais 0 file_edits "
-                                "récupérés — retry au lieu d'accepter"
-                            )
-                        # Retry avec un rappel plus explicite
-                        messages.append({"role": "assistant", "content": raw_content})
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Ta réponse n'est pas du JSON valide. "
-                                    "Retourne UNIQUEMENT un objet JSON valide "
-                                    "avec file_edits et synthesis."
-                                ),
-                            }
-                        )
-                        continue
-                    else:
-                        return {
-                            "status": "error",
-                            "message": "LLM returned invalid JSON after retry",
-                            "raw_preview": raw_preview,
-                        }
-
-                # Valider la structure minimale
-                if "file_edits" not in data or "synthesis" not in data:
-                    # Rétrocompat : accepter aussi l'ancien format "bank_files"
-                    if "bank_files" in data and "synthesis" in data:
-                        data = _convert_legacy_format(data)
-                    elif attempt == 0:
-                        logger.warning(
-                            "LLM: structure invalide (attempt %d), retry...",
-                            attempt + 1,
-                        )
-                        messages.append({"role": "assistant", "content": raw_content})
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Ta réponse doit contenir 'file_edits' et 'synthesis'. "
-                                    "Retourne le JSON au format demandé."
-                                ),
-                            }
-                        )
-                        continue
-                    else:
-                        return {
-                            "status": "error",
-                            "message": "LLM response missing file_edits or synthesis",
-                        }
-
-                # Extraire les métriques d'usage
-                usage = {}
-                if response.usage:
-                    usage = {
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens,
-                    }
-
-                return {"status": "ok", "data": data, "usage": usage}
-
-            except Exception as e:
-                # LM2-25 fix : ne pas exposer str(e) (peut contenir l'URL
-                # LLMaaS et des détails openai). Log côté serveur, message
-                # générique au client. Le caller (consolidate()) propage
-                # déjà ce dict tel quel.
-                logger.error("LLM call exception : %s", e)
-                from ..config import get_settings as _gs
-                if _gs().mcp_server_debug:
                     return {
                         "status": "error",
-                        "message": f"LLM call failed: {str(e)}",
+                        "message": "LLM returned invalid JSON",
+                        "json_error": str(exc)[:100],
+                        "finish_reason": finish_reason,
+                        "raw_len": len(raw_content),
                     }
-                return {"status": "error", "message": "LLM call failed"}
 
-        return {"status": "error", "message": "LLM failed after retries"}
+            # Valider la structure minimale
+            if "file_edits" not in data or "synthesis" not in data:
+                # Rétrocompat : accepter aussi l'ancien format "bank_files"
+                if "bank_files" in data and "synthesis" in data:
+                    data = _convert_legacy_format(data)
+                else:
+                    logger.warning(
+                        "LLM: structure invalide — file_edits/synthesis "
+                        "manquants (finish_reason=%s, raw_len=%d)",
+                        finish_reason,
+                        len(raw_content),
+                    )
+                    return {
+                        "status": "error",
+                        "message": "LLM response missing file_edits or synthesis",
+                    }
+
+            # Extraire les métriques d'usage. ADR-0027 : une métrique
+            # absente reste explicitement absente (None) — jamais une
+            # valeur inventée.
+            usage = {}
+            if (
+                result.input_tokens is not None
+                or result.output_tokens is not None
+                or result.total_tokens is not None
+            ):
+                usage = {
+                    "prompt_tokens": result.input_tokens,
+                    "completion_tokens": result.output_tokens,
+                    "total_tokens": result.total_tokens,
+                }
+
+            return {"status": "ok", "data": data, "usage": usage}
+
+        except Exception as e:
+            # LM2-25 fix : ne pas exposer str(e) (peut contenir l'URL
+            # LLMaaS et des détails openai). Log côté serveur, message
+            # générique au client. Le caller (consolidate()) propage
+            # déjà ce dict tel quel.
+            logger.error("LLM call exception : %s", e)
+            from ..config import get_settings as _gs
+            if _gs().mcp_server_debug:
+                return {
+                    "status": "error",
+                    "message": f"LLM call failed: {str(e)}",
+                }
+            return {"status": "error", "message": "LLM call failed"}
+
 
     async def _write_results(
         self,
@@ -2168,7 +2396,8 @@ Retourne un JSON avec cette structure exacte :
         for i, v in enumerate(versions, 1):
             versions_text += f"\n--- VERSION {i} ---\n{v.strip()}\n"
 
-        prompt = f"""Tu reçois {len(versions)} versions d'une même section Markdown qui a été dupliquée par erreur.
+        if self._legacy_french_prompts:
+            prompt = f"""Tu reçois {len(versions)} versions d'une même section Markdown qui a été dupliquée par erreur.
 
 SECTION : {heading}
 
@@ -2180,16 +2409,30 @@ CONSIGNE : Fusionne ces versions en UNE SEULE version cohérente.
 - Supprime les doublons d'information
 - Conserve le format et le style Markdown
 - Retourne UNIQUEMENT le contenu fusionné (SANS le heading, SANS balises, SANS explication)"""
+        else:
+            prompt = f"""You receive {len(versions)} versions of the same Markdown section, duplicated by mistake.
+
+SECTION: {heading}
+
+{versions_text}
+
+INSTRUCTION: Merge these versions into ONE coherent version.
+- Keep all RELEVANT and CURRENT information from every version
+- If one version contains more recent data (for example "322 tests" vs "272 tests"), keep the most recent
+- Remove duplicate information
+- Preserve the Markdown format and style
+- Write generated prose in English while preserving exact headings, project terminology, code identifiers, URLs, and quoted source text
+- Return ONLY the merged content (WITHOUT the heading, WITHOUT wrappers, WITHOUT explanation)"""
 
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],  # type: ignore[list-item]
-                max_tokens=4096,
-                temperature=0.1,  # Basse température pour la fusion
+            # P13-1C : température per-call supprimée — le profil résolu
+            # gouverne (ADR-0027 : aucun override par opération). Le budget est
+            # clampé au plafond du profil par _complete_chat.
+            result = await self._complete_chat(
+                [{"role": "user", "content": prompt}], 4096
             )
 
-            merged = response.choices[0].message.content or ""
+            merged = result.text
 
             # Nettoyer : retirer les blocs <think> et les backticks
             merged = re.sub(r"<think>.*?</think>", "", merged, flags=re.DOTALL)
@@ -2208,33 +2451,65 @@ CONSIGNE : Fusionne ces versions en UNE SEULE version cohérente.
             logger.error("DEDUP merge FAILED: '%s' — %s", heading, str(e))
             return None
 
+    async def _complete_chat(self, messages: list[dict], output_budget: int):
+        """Requête chat normalisée vers l'adapter enregistré (P13-1C).
+
+        ``output_budget`` ne peut qu'ABAISSER le plafond du profil : le clamp
+        est explicite ici parce que l'adapter refuse (``invalid_request``) une
+        valeur supérieure au plafond résolu. Le modèle et la température
+        viennent EXCLUSIVEMENT du profil. Lève ``InferenceError`` (enveloppe
+        sûre, sans secret ni contenu) quand le provider échoue, et
+        ``InferenceRoleUnavailable`` quand le rôle chat n'est pas configuré.
+        """
+        from .inference_runtime import get_inference_runtime
+
+        provider = get_inference_runtime().chat_provider()
+        request = ChatRequest(
+            messages=tuple(
+                ChatMessage(role=message["role"], content=message["content"])
+                for message in messages
+            ),
+            timeout_seconds=self._timeout,
+            max_output_tokens=max(1, min(output_budget, self._max_tokens)),
+        )
+        return await provider.complete(request)
+
     async def close(self) -> None:
         """
-        Ferme le httpx.AsyncClient injecté, si présent.
+        Compatibilité shutdown : no-op idempotent.
 
-        AsyncOpenAI ne prend pas ownership du http_client qu'on lui passe :
-        c'est ConsolidatorService qui est responsable de l'appeler explicitement.
-        À brancher sur le shutdown ASGI (voir close_consolidator_if_initialized).
+        P13-1C : le transport provider appartient désormais au runtime
+        d'inférence partagé, fermé par le même shutdown ASGI via
+        ``close_inference_runtime_if_initialized``. Ce service n'en possède
+        plus aucun.
         """
-        if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
+        return None
 
     async def test_connection(self) -> dict:
-        """Teste la connexion au LLMaaS avec un appel minimal."""
+        """Teste la connexion au provider chat — sonde discovery, zéro token.
+
+        Forme historique préservée : ``{status, model, latency_ms}`` ou
+        ``{status: "error", message: "LLMaaS unreachable"}``. Une absence de
+        ``/models`` (``discovery="unsupported"``) reste un endpoint joignable,
+        pas une panne (ADR-0027).
+        """
+        from .inference_runtime import get_inference_runtime
+
         try:
-            t0 = time.monotonic()
-            await self._client.models.list()
-            latency = round((time.monotonic() - t0) * 1000, 1)
-            return {
-                "status": "ok",
-                "model": self._model,
-                "latency_ms": latency,
-            }
+            runtime = get_inference_runtime()
+            if runtime.config.chat is None:
+                return {"status": "error", "message": "LLMaaS non configuré"}
+            result = await runtime.chat_probe().probe()
         except Exception as e:
-            # LM2-25 fix : ne pas exposer str(e) (peut contenir l'URL LLMaaS).
+            # LM2-25 fix : jamais le texte brut d'un transport côté client.
             logger.warning("LLMaaS test_connection failed: %s", e)
             return {"status": "error", "message": "LLMaaS unreachable"}
+        if not result.healthy:
+            return {"status": "error", "message": "LLMaaS unreachable"}
+        payload = {"status": "ok", "model": self._model}
+        if result.latency_ms is not None:
+            payload["latency_ms"] = result.latency_ms
+        return payload
 
     # ─────────────────────────────────────────────────────────
     # Bank Compaction
@@ -2377,16 +2652,17 @@ CONSIGNE : Fusionne ces versions en UNE SEULE version cohérente.
         """
         # Instructions de compaction génériques — les rules de l'espace
         # définissent la sémantique de chaque fichier, pas le serveur.
-        specific = (
-            "Synthétise le contenu en gardant la structure des sections.\n"
-            "- Fusionne les informations redondantes\n"
-            "- Supprime les détails obsolètes ou trop granulaires\n"
-            "- Conserve les décisions architecturales et les informations structurantes\n"
-            "- Résume les entrées anciennes en une ligne par jalon\n"
-            "- Réfère-toi aux RULES DE RÉFÉRENCE ci-dessus pour comprendre le rôle de ce fichier"
-        )
+        if self._legacy_french_prompts:
+            specific = (
+                "Synthétise le contenu en gardant la structure des sections.\n"
+                "- Fusionne les informations redondantes\n"
+                "- Supprime les détails obsolètes ou trop granulaires\n"
+                "- Conserve les décisions architecturales et les informations structurantes\n"
+                "- Résume les entrées anciennes en une ligne par jalon\n"
+                "- Réfère-toi aux RULES DE RÉFÉRENCE ci-dessus pour comprendre le rôle de ce fichier"
+            )
 
-        prompt = f"""Tu reçois un fichier bank "{filename}" qui fait {len(content)} bytes
+            prompt = f"""Tu reçois un fichier bank "{filename}" qui fait {len(content)} bytes
 (limite : {max_size} bytes). Tu dois le COMPACTER pour le ramener sous cette limite.
 
 === RULES DE RÉFÉRENCE ===
@@ -2408,20 +2684,54 @@ CONSIGNE : Fusionne ces versions en UNE SEULE version cohérente.
 {content}
 
 Retourne UNIQUEMENT le contenu compacté (Markdown pur, pas de JSON, pas de balises, pas d'explication)."""
+        else:
+            specific = (
+                "Synthesize the content while retaining the section structure.\n"
+                "- Merge redundant information\n"
+                "- Remove obsolete or overly granular details\n"
+                "- Preserve architectural decisions and structural information\n"
+                "- Summarize older entries in one line per milestone\n"
+                "- Use the REFERENCE RULES above to understand this file's role"
+            )
+
+            prompt = f"""You receive a bank file named "{filename}" that is {len(content)} bytes
+(limit: {max_size} bytes). COMPACT it below that limit.
+
+=== REFERENCE RULES ===
+{rules[:2000]}
+
+=== SPECIFIC INSTRUCTIONS ===
+{specific}
+
+=== COMPACTION RULES ===
+- Preserve the main heading (# title) and section structure (##, ###)
+- Summarize redundant or overly detailed blocks
+- Remove completed or obsolete items
+- Merge similar entries
+- Preserve important milestone dates
+- DO NOT LOSE structural information (decisions, architecture, stack)
+- Write generated prose in English while preserving required existing headings, exact project terminology, code identifiers, URLs, and quoted source text
+- Do not translate or rewrite content solely to change its language
+- Goal: reduce the file BELOW {max_size} bytes
+
+=== CURRENT CONTENT ===
+{content}
+
+Return ONLY the compacted content (plain Markdown, no JSON, no wrappers, no explanation)."""
 
         try:
             # Estimer le budget de sortie : on veut ~max_size bytes en sortie
             # + marge pour le formatting. Le contenu max_size / 4 ≈ tokens cibles.
+            # P13-1C : température per-call supprimée (le profil résolu
+            # gouverne) et le budget est clampé au plafond du profil par
+            # _complete_chat.
             output_tokens = max(4096, max_size // 3)
 
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=output_tokens,
-                temperature=0.2,  # Basse température pour la compaction
+            result = await self._complete_chat(
+                [{"role": "user", "content": prompt}], output_tokens
             )
 
-            compacted = response.choices[0].message.content or ""
+            compacted = result.text
 
             # Nettoyer : retirer les blocs <think> et les backticks
             compacted = re.sub(r"<think>.*?</think>", "", compacted, flags=re.DOTALL)
@@ -3252,9 +3562,10 @@ async def close_consolidator_if_initialized() -> None:
     """
     Ferme le ConsolidatorService singleton s'il a été instancié.
 
-    À appeler au shutdown ASGI pour libérer proprement le httpx.AsyncClient
-    injecté dans AsyncOpenAI (quand PROXY_URL est défini).
-    Sans appel explicite, le client resterait ouvert jusqu'à la fin du process.
+    P13-1C : le transport provider appartient désormais au runtime d'inférence
+    partagé (``core.inference_runtime.close_inference_runtime_if_initialized``,
+    branché sur le MÊME shutdown ASGI). Ce hook reste pour réinitialiser le
+    singleton et préserver l'ordre d'arrêt historique.
     """
     global _consolidator
     if _consolidator is not None:

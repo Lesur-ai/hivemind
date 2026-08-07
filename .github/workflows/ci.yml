@@ -39,7 +39,7 @@ jobs:
         run: uv sync --locked --dev
 
       - name: Run public test suite
-        run: uv run pytest tests/ -q
+        run: uv run --no-sync pytest tests/ -q --strict-markers --durations=50
 
       - name: Check public documentation links
         run: uv run python scripts/check_doc_links.py
@@ -88,35 +88,20 @@ jobs:
           PY
 
       - name: Run complete public Python test suite
-        run: uv run --no-sync pytest tests/ -q
+        run: uv run --no-sync pytest tests/ -q --strict-markers --durations=50
 
       - name: Check public documentation links
         run: uv run --no-sync python scripts/check_doc_links.py
 
-  build:
-    name: Build ${{ matrix.name }} image
-    needs: [test, test_python314_arm64]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Hivemind
-            context: .
-          - name: WAF
-            context: waf
-          - name: Graph Memory
-            context: services/graph-memory
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Build image without publishing
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: ${{ matrix.context }}
-          push: false
+# TQ-11 (#349): this workflow used to end with a `build` job (matrix: Hivemind,
+# WAF, Graph Memory) that built every shipped image without publishing it, on
+# every pull_request and push to main. That coverage is now the exact-SHA
+# pre-release-validate.yml workflow's job in the private canonical repository
+# (TQ-9, #347), which builds and smokes the identical Dockerfiles (Dockerfile,
+# waf/Dockerfile, services/graph-memory/Dockerfile) this staged public tree
+# also ships, on every push to private main, before any release candidate can
+# publish. Unlike the private build.yml `build` job, this one carries no
+# required-status-check name to preserve: the public repository this template
+# is staged into does not exist yet (ADR-0023), so there is no live ruleset
+# depending on a "Build ... image" context here. The final release-time build
+# remains release.yml's tag-triggered publish job.

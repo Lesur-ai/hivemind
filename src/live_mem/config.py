@@ -207,6 +207,10 @@ class Settings(BaseSettings):
     consolidation_batch_size: int = (
         5  # Notes par lot LLM (réponses courtes = moins de drift)
     )
+    # V1.4.0 compatibility bridge: Hivemind-owned consolidator prompts are
+    # English by default. Existing deployments can keep the imported Live
+    # Memory French prompts until the v1.6.0 language selector lands.
+    consolidation_legacy_french_prompts: bool = False
     # LM2-18 fix : cooldown entre deux consolidations du même space.
     # Empêche un agent write de boucler sur bank_consolidate et de
     # saturer le budget LLM ou de monopoliser le lock du space.

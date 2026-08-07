@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Outils MCP — Catégorie Graph (6 outils).
+Outils MCP — Catégorie Graph (7 outils).
 
 Pont entre Live Memory et Graph Memory : connecter un space à une
 instance de graphe de connaissances et y pousser la memory bank.
@@ -14,6 +14,8 @@ Permissions :
     - long_query        🔑 (read)  — Interroge le graphe (P4-7, net-new long_*)
     - long_ingest       ✏️ (plan)  — Planifie l'ingestion canonique (P4-7,
                                      net-new long_*, source_path-keyed, PLAN-ONLY)
+    - long_reindex      🛠️ (manage) — Reconstruit explicitement la projection
+                                      d'embeddings du runtime embarqué
 
 P4-7 : ``long_query`` / ``long_ingest`` sont DEUX outils long_* net-new,
 enregistrés DIRECTEMENT par ``register()`` (PAS via ALIAS_MAP — ils n'ont aucun
@@ -129,17 +131,18 @@ def _emit_long_ingest_volatile_optin_audit(
 
 def register(mcp: FastMCP) -> int:
     """
-    Enregistre les 6 outils graph sur l'instance MCP.
+    Enregistre les 7 outils graph sur l'instance MCP.
 
     Les 4 historiques (graph_connect / graph_push / graph_status /
-    graph_disconnect) + les 2 net-new long_* (long_query / long_ingest, P4-7),
-    enregistrés DIRECTEMENT ici (PAS via ALIAS_MAP — aucun jumeau graph_*).
+    graph_disconnect) + les 3 outils long_* directs (long_query / long_ingest /
+    long_reindex), enregistrés DIRECTEMENT ici (PAS via ALIAS_MAP — aucun
+    jumeau graph_*).
 
     Args:
         mcp: Instance FastMCP
 
     Returns:
-        Nombre d'outils enregistrés (6)
+        Nombre d'outils enregistrés (7)
     """
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
@@ -602,4 +605,55 @@ def register(mcp: FastMCP) -> int:
         except Exception as e:
             return safe_error(e, "graph")
 
-    return 6  # Nombre d'outils enregistrés (4 historiques + 2 net-new long_*)
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False))
+    async def long_reindex(
+        space_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "Space whose embedded long-memory embedding projection "
+                    "should be rebuilt in explicit maintenance mode"
+                )
+            ),
+        ],
+    ) -> dict:
+        """Rebuild a space's embedded long-memory embedding projection.
+
+        This hidden operator operation is synchronous, non-idempotent, and
+        supported only for an already-persisted embedded runtime binding. It
+        never provisions a binding and never operates on a custom remote
+        binding.
+
+        Args:
+            space_id: Space whose derived embedding projection should be rebuilt.
+
+        Returns:
+            The bounded maintenance result returned by the embedded runtime.
+        """
+        from ..auth.context import check_access, check_manage_permission
+        from ..core.engines import get_engine_registry
+
+        # Authorization is deliberately complete before engine lookup. The
+        # bridge lookup resolves persisted binding state and may construct a
+        # network client, so neither may happen for an unauthorized caller.
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            manage_err = check_manage_permission()
+            if manage_err:
+                return manage_err
+        except Exception as e:
+            from ..auth.context import safe_error
+
+            return safe_error(e, "graph")
+
+        try:
+            return await get_engine_registry().long_engine().reindex(space_id)
+        except Exception:
+            from ..core.graph_bridge import _reindex_error
+
+            return _reindex_error("reindex_failed")
+
+    return 7  # 4 historiques + long_query / long_ingest / long_reindex

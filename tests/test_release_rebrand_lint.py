@@ -18,7 +18,8 @@ regressions:
     while keeping those exact tokens out of the rest of the doc.
   * `docker-compose.yml` ships the embedded long runtime
     (`graph-memory` + `neo4j` + `qdrant`) in the DEFAULT profile,
-    built from `./services/graph-memory` (no `LONG_BACKEND_IMAGE`),
+    built from the repository-root context with
+    `services/graph-memory/Dockerfile` (no `LONG_BACKEND_IMAGE`),
     with no host ports on the internal services (ADR-0019).
   * `scripts/release_smoke.sh` treats a disabled/unbound/unreachable
     long tier as a release FAILURE (P7-5, ADR-0019). The legacy P6-5
@@ -29,8 +30,9 @@ regressions:
     `long_push` + `connected`/`reachable` `long_status` + a non-empty
     `long_ingest` dry-run plan.
 
-All YAML and document parsing is intentionally stdlib-only (no
-PyYAML dependency added).
+Release-wide lexical checks remain stdlib-only. The Graph build-context
+contract additionally loads Compose with the already-pinned dev PyYAML parser,
+rejecting duplicate keys before comparing the exact semantic mapping.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -172,7 +175,8 @@ def _iter_top_level_services(compose_text: str):
     key as a service entry, then captures the lines indented deeper
     until the next service or a top-level key.
 
-    Avoids a PyYAML dependency.
+    This lexical iterator remains useful for location-scoped service checks;
+    the security-critical Graph build mapping is also parsed strictly below.
     """
 
     lines = compose_text.splitlines()
@@ -215,6 +219,65 @@ def _iter_top_level_services(compose_text: str):
         yield current_name, "\n".join(current_lines)
 
 
+class _StrictComposeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate explicit keys."""
+
+
+def _construct_unique_mapping(
+    loader: yaml.Loader, node: yaml.MappingNode, deep: bool = False
+):
+    explicit_keys = set()
+    for key_node, value_node in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in explicit_keys
+        except TypeError as exc:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "unhashable mapping key",
+                key_node.start_mark,
+            ) from exc
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"duplicate mapping key: {key!r}",
+                key_node.start_mark,
+            )
+        explicit_keys.add(key)
+    # Compose legitimately uses anchors/merge keys outside the Graph service.
+    # After rejecting duplicate explicit keys, retain SafeLoader's standard
+    # merge semantics for the actual value construction.
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_StrictComposeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+def _assert_exact_graph_build_mapping(compose_text: str) -> None:
+    try:
+        document = yaml.load(compose_text, Loader=_StrictComposeLoader)  # noqa: S506
+    except yaml.YAMLError as exc:
+        raise AssertionError(f"docker-compose.yml is not strict YAML: {exc}") from exc
+    assert type(document) is dict
+    services = document.get("services")
+    assert type(services) is dict
+    graph = services.get("graph-memory")
+    assert type(graph) is dict
+    build = graph.get("build")
+    expected = {
+        "context": ".",
+        "dockerfile": "services/graph-memory/Dockerfile",
+    }
+    assert build == expected, f"Graph build mapping drifted: {build!r}"
+
+
 def _service_has_profile(block: str, profile: str) -> bool:
     """
     Return True if the service block declares the given profile.
@@ -252,6 +315,23 @@ def _service_has_any_profile(block: str) -> bool:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+_LOCKED_TAGLINE = "The open memory layer for collective agent awareness."
+_LOCKED_SUPPORTING = (
+    "Agents notice what others are doing, inherit what others have learned, "
+    "and\nunderstand complex projects together."
+)
+
+
+def test_public_readme_preserves_locked_brand_hero_and_language_authority():
+    """The canonical README must not paraphrase the locked public identity."""
+
+    readme = _read(REPO_ROOT / "README.md")
+    assert "# hivemind" in readme
+    assert readme.count(_LOCKED_TAGLINE) >= 2
+    assert _LOCKED_SUPPORTING in readme
+    assert "English is the canonical contract." in readme
+    assert "French README" in readme and "may trail" in readme
 
 @pytest.mark.parametrize("rel_path,denylist", _RELEASE_SURFACES_WITH_DENYLIST)
 def test_no_stale_live_mem_branding_in_release_surfaces(rel_path, denylist):
@@ -354,11 +434,13 @@ def test_compose_graph_memory_service_is_default_required():
     """
     The embedded long runtime (`graph-memory`) is a MANDATORY default-profile
     service built from the vendored source (ADR-0019). It must NOT be gated
-    behind any profile, and it must build from `./services/graph-memory` rather
-    than pull an operator-supplied image / `LONG_BACKEND_IMAGE`.
+    behind any profile, and it must use the Graph Dockerfile with the repository
+    root context rather than pull an operator-supplied image /
+    `LONG_BACKEND_IMAGE`.
     """
 
     compose = _read(REPO_ROOT / "docker-compose.yml")
+    _assert_exact_graph_build_mapping(compose)
     graph_blocks = [
         (name, block)
         for name, block in _iter_top_level_services(compose)
@@ -372,14 +454,54 @@ def test_compose_graph_memory_service_is_default_required():
             f"embedded long service `{name}` must run in the DEFAULT profile "
             f"(ADR-0019) — it must not be gated behind any profile"
         )
-        assert "build:" in block and "services/graph-memory" in block, (
-            f"embedded long service `{name}` must build from "
-            f"./services/graph-memory (no operator-supplied image)"
+        assert (
+            "build:" in block
+            and re.search(r"(?m)^\s*context:\s*\.\s*$", block)
+            and re.search(
+                r"(?m)^\s*dockerfile:\s*services/graph-memory/Dockerfile\s*$",
+                block,
+            )
+        ), (
+            f"embedded long service `{name}` must use the repository-root "
+            "context plus services/graph-memory/Dockerfile "
+            "(no operator-supplied image)"
         )
         assert "LONG_BACKEND_IMAGE" not in block, (
             f"embedded long service `{name}` must not interpolate "
             f"LONG_BACKEND_IMAGE (P6 drift pattern forbidden by ADR-0019)"
         )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        (
+            "      context: .\n",
+            "      context: ./services/graph-memory\n",
+        ),
+        (
+            "      dockerfile: services/graph-memory/Dockerfile\n",
+            "      dockerfile: Dockerfile\n",
+        ),
+        (
+            "      context: .\n",
+            "      context: ./services/graph-memory\n"
+            "      context: .\n",
+        ),
+        (
+            "    build:\n"
+            "      context: .\n"
+            "      dockerfile: services/graph-memory/Dockerfile\n",
+            "    build: ./services/graph-memory\n",
+        ),
+    ),
+    ids=("old-context", "wrong-dockerfile", "duplicate-context", "scalar-build"),
+)
+def test_mutation_red_graph_build_mapping_must_be_exact(old: str, new: str) -> None:
+    compose = _read(REPO_ROOT / "docker-compose.yml")
+    assert compose.count(old) == 1
+    with pytest.raises(AssertionError):
+        _assert_exact_graph_build_mapping(compose.replace(old, new, 1))
 
 
 def test_compose_default_profile_brings_full_embedded_stack():
@@ -732,17 +854,30 @@ def test_workflow_doc_smoke_section_blocks_disabled_long():
 def test_compose_config_parses_clean_with_no_long_backend_image():
     """
     Regression (ADR-0019): `docker-compose.yml` must (1) never reference
-    `LONG_BACKEND_IMAGE` — the embedded long runtime is repository-built
-    (`build: ./services/graph-memory`), so there is no operator-supplied image to
-    interpolate — and (2) parse cleanly with no operator `.env`. The static
+    `LONG_BACKEND_IMAGE` — the embedded long runtime is repository-built with
+    `context: .` and `dockerfile: services/graph-memory/Dockerfile`, so there is
+    no operator-supplied image to interpolate — and (2) parse cleanly with no
+    operator `.env`. The static
     LONG_BACKEND_IMAGE check runs everywhere; the `docker compose config --quiet`
     parse runs when docker is on PATH.
     """
 
     compose_text = _read(REPO_ROOT / "docker-compose.yml")
+    _assert_exact_graph_build_mapping(compose_text)
     assert "LONG_BACKEND_IMAGE" not in compose_text, (
         "docker-compose.yml must not reference LONG_BACKEND_IMAGE (ADR-0019)"
     )
+    graph_block = next(
+        block
+        for name, block in _iter_top_level_services(compose_text)
+        if name == "graph-memory"
+    )
+    assert re.search(r"(?m)^\s*context:\s*\.\s*$", graph_block)
+    assert re.search(
+        r"(?m)^\s*dockerfile:\s*services/graph-memory/Dockerfile\s*$",
+        graph_block,
+    )
+    assert "context: ./services/graph-memory" not in graph_block
 
     if shutil.which("docker") is None:
         pytest.skip("docker not available — static LONG_BACKEND_IMAGE check still ran")

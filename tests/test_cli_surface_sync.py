@@ -368,6 +368,13 @@ def test_cli_help_uses_manage_and_routes_rules_updates_separately():
     assert "manage" in shell.SHELL_COMMANDS["graph use-local"]
     assert "--confirm" in shell.SHELL_COMMANDS["bank delete"]
     assert "--confirm" in shell.SHELL_COMMANDS["token purge"]
+    assert "--recover-access-grants" in shell.SHELL_COMMANDS["space delete"]
+    assert "token grants" in shell.SHELL_COMMANDS["space delete"]
+
+    delete_help = runner.invoke(cli, ["space", "delete", "--help"])
+    assert delete_help.exit_code == 0, delete_help.output
+    assert "--recover-access-grants" in delete_help.output
+    assert "remove its token grants" in delete_help.output
 
 
 def test_public_cli_snippets_use_executable_current_syntax():
@@ -389,6 +396,138 @@ def test_public_cli_snippets_use_executable_current_syntax():
         content = (ROOT / faq_name).read_text(encoding="utf-8")
         assert "hivemind> help" in content
         assert "live-mem>" not in content
+
+
+def test_public_faq_pins_safe_space_delete_and_reuse_contract():
+    english = (ROOT / "FAQ.md").read_text(encoding="utf-8")
+    french = (ROOT / "FAQ.fr.md").read_text(encoding="utf-8")
+    english_normalized = " ".join(english.split())
+    french_normalized = " ".join(french.split())
+
+    assert (
+        "successful deletion removes the ID from every token allowlist"
+        in english
+    )
+    assert "recover_access_grants=True" in english
+    assert "intentional future pre-grant" in english
+    assert (
+        "deleting a space leaves historical token allowlists intact"
+        not in english
+    )
+    assert "Even after a clean deletion" not in english
+    assert (
+        "Restoring a backup copies space objects only; it never restores "
+        "token allowlists."
+        in english_normalized
+    )
+    assert (
+        "Never delete and recreate the restored space to repair access"
+        in english_normalized
+    )
+    assert "active manager already scoped to that ID" in english_normalized
+    assert "not caller-idempotent" in english_normalized
+    assert "bootstrap has no persisted actor hash" in english_normalized
+    assert "admin_update_token" in english_normalized
+
+    assert "suppression réussie retire l'ID de toutes les allowlists" in french
+    assert "recover_access_grants=True" in french
+    assert "pré-grant futur intentionnel" in french
+    assert (
+        "supprimer un space conserve les allowlists historiques"
+        not in french
+    )
+    assert "Même après une suppression propre" not in french
+    assert (
+        "Restaurer un backup recopie uniquement les objets du space"
+        in french_normalized
+    )
+    assert (
+        "Ne jamais supprimer puis recréer le space restauré pour réparer "
+        "les accès"
+        in french_normalized
+    )
+    assert "manager actif déjà scopé sur cet ID" in french_normalized
+    assert "n'est pas idempotent pour le caller" in french_normalized
+    assert "bootstrap n'a pas de hash d'acteur persisté" in french_normalized
+    assert "admin_update_token" in french_normalized
+
+    private_overlay_root = ROOT / "release" / "public-overlay"
+    security = (ROOT / "docs" / "SECURITY.md").read_text(encoding="utf-8")
+    deployment = (ROOT / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    mcp_spec = (ROOT / "docs" / "MCP_TOOLS_SPEC.md").read_text(
+        encoding="utf-8"
+    )
+    security_normalized = " ".join(security.split())
+    deployment_normalized = " ".join(deployment.split())
+    mcp_spec_normalized = " ".join(mcp_spec.split())
+    assert "Backup restoration is intentionally data-only" in security_normalized
+    assert "target_token_hashes" in security
+    assert "space_delete_grants_unconfirmed" in security
+    assert "not caller-idempotent" in security_normalized
+    assert "data-only recovery" in deployment_normalized
+    assert (
+        "Never delete/recreate the restored space" in deployment_normalized
+    )
+    assert (
+        "Backup restoration copies space objects only" in mcp_spec_normalized
+    )
+    assert "Bootstrap has no persisted actor hash" in mcp_spec_normalized
+    assert "admin_bulk_update_tokens" in mcp_spec_normalized
+    assert "not caller-idempotent" in mcp_spec_normalized
+    assert (
+        "Do not delete and recreate a restored space" in mcp_spec_normalized
+    )
+
+    if private_overlay_root.exists():
+        private_mcp_spec = (
+            ROOT / "DESIGN" / "live-mem" / "MCP_TOOLS_SPEC.md"
+        ).read_text(encoding="utf-8")
+        private_mcp_spec_normalized = " ".join(private_mcp_spec.split())
+        assert (
+            "Backup restoration copies space objects only"
+            in private_mcp_spec_normalized
+        )
+        assert (
+            "Do not delete and recreate a restored space"
+            in private_mcp_spec_normalized
+        )
+        assert "delete it first" not in private_mcp_spec
+        assert "Bootstrap has no persisted actor hash" in private_mcp_spec_normalized
+        assert "unsafe_recovery=True" in private_mcp_spec
+        plan = (
+            ROOT / "DESIGN" / "hivemind" / "PLAN-space-delete-grant-revocation.md"
+        ).read_text(encoding="utf-8")
+        assert "complete cleanup idempotently" not in plan
+        assert "not caller-idempotent" in plan
+        caller_idempotence_contracts = [
+            ROOT / "DESIGN" / "live-mem" / "CONCURRENCY.md",
+            ROOT / "DESIGN" / "live-mem" / "ARCHITECTURE.md",
+            ROOT / "DESIGN" / "live-mem" / "S3_DATA_MODEL.md",
+            ROOT
+            / "docs"
+            / "adr"
+            / "0022-manage-delegation-and-space-provisioning.md",
+        ]
+        for contract in caller_idempotence_contracts:
+            content = " ".join(
+                contract.read_text(encoding="utf-8").split()
+            )
+            assert "not caller-idempotent" in content
+            assert "admin/bootstrap repeat returns `not_found`" in content
+
+    public_overlay = private_overlay_root / "CHANGELOG.md"
+    if private_overlay_root.exists():
+        assert public_overlay.exists()
+        public_changelog_path = public_overlay
+    else:
+        public_changelog_path = ROOT / "CHANGELOG.md"
+    public_changelog = public_changelog_path.read_text(encoding="utf-8")
+    assert (
+        "Deleting a space now revokes its token access grants."
+        in public_changelog
+    )
+    assert "Backup restoration" in public_changelog
+    assert "canonical hashes of affected tokens" in public_changelog
 
 
 def test_shell_dispatcher_exposes_admin_console_bank_supervision_tools():
@@ -1138,15 +1277,109 @@ def test_click_space_delete_partial_uses_only_recovery_renderer(monkeypatch):
     )
     monkeypatch.setattr(commands, "show_success", success_rendered.append)
     result = CliRunner().invoke(
-        cli, ["space", "delete", "project-a", "--confirm"]
+        cli,
+        [
+            "space",
+            "delete",
+            "project-a",
+            "--confirm",
+            "--recover-access-grants",
+        ],
     )
 
     assert result.exit_code == 0, result.output
     assert calls == [
-        ("space_delete", {"space_id": "project-a", "confirm": True})
+        (
+            "space_delete",
+            {
+                "space_id": "project-a",
+                "confirm": True,
+                "recover_access_grants": True,
+            },
+        )
     ]
     assert recovery_rendered == [payload]
     assert success_rendered == []
+
+
+def test_click_space_delete_grants_only_recovery_is_not_reported_as_deletion(
+    monkeypatch,
+):
+    payload = {
+        "status": "grants_cleaned",
+        "space_id": "project-a",
+        "files_total": 0,
+        "files_deleted": 0,
+        "access_grants_removed": 3,
+        "recovered": True,
+    }
+    calls = []
+    successes = []
+
+    class RecoveryClient:
+        def __init__(self, url, token):
+            pass
+
+        async def call_tool(self, name, args):
+            calls.append((name, args))
+            return payload
+
+    monkeypatch.setattr(commands, "MCPClient", RecoveryClient)
+    monkeypatch.setattr(commands, "show_success", successes.append)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "space",
+            "delete",
+            "project-a",
+            "--confirm",
+            "--recover-access-grants",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        (
+            "space_delete",
+            {
+                "space_id": "project-a",
+                "confirm": True,
+                "recover_access_grants": True,
+            },
+        )
+    ]
+    assert successes == ["Access grants for 'project-a' cleaned (3 grants)"]
+    assert all("deleted" not in message.lower() for message in successes)
+
+
+def test_click_space_delete_reports_deleted_files_and_grants(monkeypatch):
+    payload = {
+        "status": "deleted",
+        "space_id": "project-a",
+        "files_total": 4,
+        "files_deleted": 4,
+        "access_grants_removed": 3,
+    }
+    successes = []
+
+    class DeletedClient:
+        def __init__(self, url, token):
+            pass
+
+        async def call_tool(self, name, args):
+            assert name == "space_delete"
+            assert args == {"space_id": "project-a", "confirm": True}
+            return payload
+
+    monkeypatch.setattr(commands, "MCPClient", DeletedClient)
+    monkeypatch.setattr(commands, "show_success", successes.append)
+    result = CliRunner().invoke(
+        cli,
+        ["space", "delete", "project-a", "--confirm"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert successes == ["Space 'project-a' deleted (4 files, 3 grants)"]
 
 
 async def test_shell_space_delete_partial_never_retries_or_reports_success(
@@ -1183,6 +1416,86 @@ async def test_shell_space_delete_partial_never_retries_or_reports_success(
     assert success_rendered == []
 
 
+async def test_shell_space_delete_confirmation_preserves_recovery_flag_and_warns(
+    monkeypatch,
+):
+    warnings = []
+
+    class NeverCalledClient:
+        async def call_tool(self, name, args):
+            raise AssertionError((name, args))
+
+    monkeypatch.setattr(shell, "show_warning", warnings.append)
+    await shell.dispatch(
+        NeverCalledClient(),
+        "space delete project-a --recover-access-grants",
+        False,
+    )
+
+    assert any(
+        "space delete project-a --confirm --recover-access-grants" in message
+        for message in warnings
+    )
+    assert any("_system/tokens.json" in message for message in warnings)
+
+
+async def test_shell_space_delete_renders_grants_only_and_deleted_successes(
+    monkeypatch,
+):
+    responses = [
+        {
+            "status": "grants_cleaned",
+            "space_id": "project-a",
+            "files_total": 0,
+            "files_deleted": 0,
+            "access_grants_removed": 3,
+            "recovered": True,
+        },
+        {
+            "status": "deleted",
+            "space_id": "project-b",
+            "files_total": 4,
+            "files_deleted": 4,
+            "access_grants_removed": 2,
+        },
+    ]
+    calls = []
+    successes = []
+
+    class SuccessClient:
+        async def call_tool(self, name, args):
+            calls.append((name, args))
+            return responses.pop(0)
+
+    monkeypatch.setattr(shell, "show_success", successes.append)
+    client = SuccessClient()
+    await shell.dispatch(
+        client,
+        "space delete project-a --confirm --recover-access-grants",
+        False,
+    )
+    await shell.dispatch(client, "space delete project-b --confirm", False)
+
+    assert calls == [
+        (
+            "space_delete",
+            {
+                "space_id": "project-a",
+                "confirm": True,
+                "recover_access_grants": True,
+            },
+        ),
+        (
+            "space_delete",
+            {"space_id": "project-b", "confirm": True},
+        ),
+    ]
+    assert successes == [
+        "Access grants cleaned (3 grants)",
+        "Deleted (4 files, 2 grants)",
+    ]
+
+
 def test_space_delete_recovery_renderer_preserves_counts_keys_and_action(
     monkeypatch,
 ):
@@ -1205,6 +1518,7 @@ def test_space_delete_recovery_renderer_preserves_counts_keys_and_action(
             "files_deleted": 3,
             "failed_keys": failed_keys,
             "marker_preserved": False,
+            "access_grants_pending": 2,
             "recovery": {"retry_safe": False, "action": action},
         }
     )
@@ -1214,6 +1528,7 @@ def test_space_delete_recovery_renderer_preserves_counts_keys_and_action(
     assert "files_total: 7" in output
     assert "files_deleted: 3" in output
     assert "marker_preserved: false" in output
+    assert "access_grants_pending: 2" in output
     assert "recovery.retry_safe: false" in output
     assert f"recovery.action: {action}" in output
     assert all(key in output for key in failed_keys)

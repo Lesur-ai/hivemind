@@ -623,7 +623,7 @@
         return `<div class="sd-action-stack">
             ${canWrite ? `<div class="form-group"><label class="form-label" for="sdBackupDescription">Backup description</label><input id="sdBackupDescription" class="form-input" maxlength="500"><button type="button" class="btn btn-secondary sd-action-button" data-action="sd-create-backup">${icon('plus')}Create backup</button></div>` : stateUnavailable('Write permission is required to create a backup.')}
             <div id="sdBackupsPanel">${renderBackups(view)}</div>
-            ${canManage ? `<div class="sd-danger-zone"><h3>Delete space</h3><p>Permanently removes this space and its stored data. Existing token grants must be removed before reusing the same ID.</p><button type="button" class="btn btn-danger" data-action="sd-confirm-space-delete">${icon('trash')}Delete space</button></div>` : stateUnavailable('Manage permission is required to delete this space.')}
+            ${canManage ? `<div class="sd-danger-zone"><h3>Delete space</h3><p>Permanently removes this space and its stored data, then removes the space from every token allowlist. Reusing the same ID never restores previous access.</p><button type="button" class="btn btn-danger" data-action="sd-confirm-space-delete">${icon('trash')}Delete space</button></div>` : stateUnavailable('Manage permission is required to delete this space.')}
         </div>`;
     }
 
@@ -1028,6 +1028,15 @@
             : '<code class="mono-data">[]</code>';
         const markerPreserved = result.marker_preserved === null ? 'null' : String(result.marker_preserved);
         const retrySafe = recovery.retry_safe === null ? 'null' : String(recovery.retry_safe);
+        const accessPending = Object.hasOwn(result, 'access_grants_pending')
+            ? keyValue(
+                'access_grants_pending',
+                result.access_grants_pending === null ? 'null' : result.access_grants_pending,
+            )
+            : '';
+        const accessRecoveryBoundary = String(recovery.action || '').includes('recover_access_grants=True')
+            ? '<p class="form-hint">Grant-recovery retry is MCP/CLI-only. This console never sends recover_access_grants and will not retry automatically.</p>'
+            : '';
         return `<div class="sd-delete-recovery" data-recovery-required="true">
             <div class="sd-banner sd-banner--error" role="alert">${icon('alert')}<div>
                 <strong>Space deletion incomplete — recovery required (not successful)</strong>
@@ -1037,10 +1046,12 @@
                 ${keyValue('files_total', result.files_total)}
                 ${keyValue('files_deleted', result.files_deleted)}
                 ${keyValue('marker_preserved', markerPreserved)}
+                ${accessPending}
                 ${keyValue('recovery.retry_safe', retrySafe)}
             </div>
             <div class="form-group"><span class="micro-label">failed_keys</span>${failedKeysHtml}</div>
             <div class="form-group"><span class="micro-label">recovery.action</span><p>${safe(recovery.action)}</p></div>
+            ${accessRecoveryBoundary}
             <p class="form-hint">No automatic retry, cleanup, success toast, or navigation was performed.</p>
         </div>`;
     }
@@ -1062,7 +1073,7 @@
             title: 'Delete space',
             verb: 'Delete space',
             typedConfirmation: view.spaceId,
-            bodyHtml: `${warning}<p>Permanently deletes this space and its stored data. Access grants for this space remain on tokens and must be removed before the same ID can be created again.</p>`,
+            bodyHtml: `${warning}<p>Permanently deletes this space and its stored data, then removes the space from every token allowlist. Reusing the same ID never restores previous access.</p>`,
             onConfirm: async () => {
                 const epochAtCall = view.ctx.epoch;
                 const result = await callTool('space_delete', { space_id: view.spaceId, confirm: true });
@@ -1072,9 +1083,20 @@
                     return false;
                 }
                 if (result.status === 'deleted' || result.status === 'ok') {
-                    showToast('ok', 'Space deleted.');
+                    const filesDeleted = Number(result.files_deleted || 0);
+                    const grantsRemoved = Number(result.access_grants_removed || 0);
+                    showToast('ok', `Space deleted (${filesDeleted} files, ${grantsRemoved} token grants removed).`);
                     AdminRouter.go('/spaces');
                     return true;
+                }
+                if (result.status === 'grants_cleaned') {
+                    const grantsRemoved = Number(result.access_grants_removed || 0);
+                    showToast('ok', `Access grants cleaned (${grantsRemoved} token grants). The space was not deleted by this result.`);
+                    return false;
+                }
+                if (result.status === 'not_found') {
+                    showToast('error', (result.message || 'Space not found.') + ' If grant recovery is required, it is MCP/CLI-only; this console never sends recover_access_grants.');
+                    return false;
                 }
                 showToast('error', result.message || 'Space deletion failed.');
                 return false;

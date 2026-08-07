@@ -19,6 +19,12 @@ DEFAULT_TEMPLATE = REPO_ROOT / ".env.example"
 DEFAULT_OUTPUT = REPO_ROOT / ".env"
 
 
+def _neo4j_password() -> str:
+    """Return a strong password that Neo4j cannot parse as a CLI option."""
+
+    return f"hm_{secrets.token_urlsafe(32)}"
+
+
 def _updates() -> dict[str, str]:
     return {
         "ADMIN_BOOTSTRAP_KEY": secrets.token_urlsafe(48),
@@ -32,7 +38,7 @@ def _updates() -> dict[str, str]:
         "HIVEMIND_MESH_PUBLIC_URL": "",
         "HIVEMIND_MESH_PRIVATE_KEY": "",
         "HIVEMIND_MESH_DISPLAY_NAME": "",
-        "NEO4J_PASSWORD": secrets.token_urlsafe(32),
+        "NEO4J_PASSWORD": _neo4j_password(),
         "SITE_ADDRESS": ":8080",
         "WAF_PORT": "8080",
     }

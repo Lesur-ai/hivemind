@@ -24,6 +24,7 @@ import asyncio
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -54,6 +55,9 @@ from live_mem.tools.graph import _validate_gm_url
 
 ROOT = Path(__file__).parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
+UV_LOCK = ROOT / "uv.lock"
+GRAPH_REQUIREMENTS = ROOT / "services" / "graph-memory" / "requirements.txt"
+GRAPH_REQUIREMENTS_LOCK = ROOT / "services" / "graph-memory" / "requirements.lock"
 CADDYFILE = ROOT / "waf" / "Caddyfile"
 VENDOR_DIR = ROOT / "src" / "live_mem" / "static" / "vendor"
 
@@ -957,6 +961,65 @@ class TestLM2_26_DependencyBounds:
         major, minor = (int(x) for x in m.group(1).split(".")[:2])
         assert (major, minor) >= (0, 28)
 
+    def test_cryptography_requires_50_or_later(self, pyproject_content):
+        """CVE-2026-69247 is fixed in cryptography 50.0.0."""
+        match = re.search(r'"cryptography>=(\d+\.\d+\.\d+)"', pyproject_content)
+        assert match, "Borne cryptography introuvable"
+        version = tuple(int(part) for part in match.group(1).split("."))
+        assert version >= (50, 0, 0), (
+            f"cryptography>={match.group(1)} reste vulnérable à CVE-2026-69247"
+        )
+
+    def test_uv_lock_pins_patched_cryptography(self):
+        document = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+        packages = [
+            package for package in document["package"] if package["name"] == "cryptography"
+        ]
+        assert len(packages) == 1, "Pin cryptography unique introuvable dans uv.lock"
+        version = tuple(int(part) for part in packages[0]["version"].split("."))
+        assert version >= (50, 0, 0), (
+            f"uv.lock épingle cryptography {packages[0]['version']}, vulnérable à "
+            "CVE-2026-69247"
+        )
+
+    def test_graph_runtime_lock_pins_patched_cryptography(self):
+        lock = GRAPH_REQUIREMENTS_LOCK.read_text(encoding="utf-8")
+        match = re.search(r"^cryptography==(\d+\.\d+\.\d+)(?:\s|$)", lock, re.MULTILINE)
+        assert match, "Pin cryptography introuvable dans le lock Graph Memory"
+        version = tuple(int(part) for part in match.group(1).split("."))
+        assert version >= (50, 0, 0), (
+            f"Graph Memory épingle cryptography {match.group(1)}, vulnérable à "
+            "CVE-2026-69247"
+        )
+
+    def test_graph_requirements_pin_patched_security_floors(self):
+        requirements = GRAPH_REQUIREMENTS.read_text(encoding="utf-8")
+        expected = {
+            "cryptography": ((50, 0, 0), "CVE-2026-69247"),
+            "aiohttp": ((3, 14, 3), "CVE-2026-69244"),
+        }
+        for package, (minimum, cve) in expected.items():
+            match = re.search(
+                rf"^{re.escape(package)}==(\d+\.\d+\.\d+)(?:\s|$)",
+                requirements,
+                re.MULTILINE,
+            )
+            assert match, f"Pin {package} introuvable dans requirements.txt Graph Memory"
+            version = tuple(int(part) for part in match.group(1).split("."))
+            assert version >= minimum, (
+                f"Graph Memory demande {package} {match.group(1)}, vulnérable à {cve}"
+            )
+
+    def test_graph_runtime_lock_pins_patched_aiohttp(self):
+        lock = GRAPH_REQUIREMENTS_LOCK.read_text(encoding="utf-8")
+        match = re.search(r"^aiohttp==(\d+\.\d+\.\d+)(?:\s|$)", lock, re.MULTILINE)
+        assert match, "Pin aiohttp introuvable dans le lock Graph Memory"
+        version = tuple(int(part) for part in match.group(1).split("."))
+        assert version >= (3, 14, 3), (
+            f"Graph Memory épingle aiohttp {match.group(1)}, vulnérable à "
+            "CVE-2026-69244"
+        )
+
 
 # =============================================================================
 # LM2-13 — Anti-erasure rewrite guard
@@ -1364,28 +1427,24 @@ class TestLM2_25_ConsolidatorNoStrErrorLeak:
 
     @staticmethod
     def _make_consolidator_with_failing_llm(exception_message: str):
-        """Construit un ConsolidatorService avec un client OpenAI mocké
-        dont chat.completions.create lève l'exception passée.
+        """Construit un ConsolidatorService dont le seam de complétion
+        partagé (P13-1C ``_complete_chat``) lève l'exception passée.
 
         Centralisé pour éviter la duplication entre tests debug-on/off.
         """
         from live_mem.core.consolidator import ConsolidatorService
 
-        # On bypass le constructeur réel (qui instancie httpx + AsyncOpenAI
-        # + lit get_settings) en créant l'objet via __new__ et en injectant
-        # uniquement les attributs nécessaires à _call_llm.
+        # On bypass le constructeur réel (qui lit get_settings et snapshotte
+        # le profil du runtime d'inférence partagé) en créant l'objet via
+        # __new__ et en injectant uniquement les attributs nécessaires à
+        # _call_llm.
         svc = ConsolidatorService.__new__(ConsolidatorService)
-        mock_client = MagicMock()
-        mock_client.chat = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(
+        svc._complete_chat = AsyncMock(
             side_effect=RuntimeError(exception_message)
         )
-        svc._client = mock_client
-        svc._http_client = None
         svc._model = "test-model"
         svc._context_window = 32768
         svc._max_tokens = 4096
-        svc._temperature = 0.0
         return svc
 
     @pytest.mark.asyncio

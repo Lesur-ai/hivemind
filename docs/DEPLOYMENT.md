@@ -29,8 +29,10 @@ generate local secrets; `uv` supplies the locked CLI environment.
 ```bash
 python scripts/configure_dev_env.py
 uv sync --locked --dev
-# Before mid/long, set LLMAAS_API_URL, LLMAAS_API_KEY, LLMAAS_MODEL,
-# LLMAAS_EMBEDDING_MODEL, and the exact LLMAAS_EMBEDDING_DIMENSIONS.
+# Before mid/long, configure complete split INFERENCE_CHAT_* and
+# INFERENCE_EMBEDDING_* role families. Existing 1.x LLMAAS_* deployments may
+# remain legacy or migrate atomically; never mix the two families. See
+# docs/INFERENCE_PROVIDER_PROFILES.md and .env.example.
 
 docker compose --profile dev up --build -d --wait
 curl -fsS http://localhost:8080/health
@@ -40,16 +42,27 @@ curl -fsS http://localhost:8080/health
 MinIO and Neo4j credentials, `S3_SIGNATURE_MODE=sigv4`, and
 `HIVEMIND_MESH_ENABLED=false` for this deliberate single-node evaluation. It
 refuses to overwrite an existing file and never prints the secrets. The
-application’s default-on Mesh behavior is unchanged; enabling Mesh requires the
-complete identity described in [Project Mesh deployment](#project-mesh-deployment).
+application’s default-on Mesh behavior is unchanged; a deployment that does
+not explicitly opt out requires the complete identity described in
+[Project Mesh deployment](#project-mesh-deployment).
 
-The configured provider must expose OpenAI-compatible `/chat/completions` and
-`/embeddings` endpoints. Model ids are provider-specific; the values in
-`.env.example` are illustrative and must be replaced when the provider does
-not publish those exact names. The embedding dimension must equal the vector
-length returned by that model. A mismatch breaks long writes/search; changing
-it after ingestion requires a reviewed Qdrant collection rebuild and
-re-ingestion.
+For the exact v1.4 provider matrix, strict eight-variable legacy migration,
+role blocks, evidence states, and bounded readiness test, use the
+[inference provider operator guide](INFERENCE_PROVIDER_PROFILES.md).
+
+On the legacy unified `LLMAAS_*` configuration, the single configured
+provider must expose OpenAI-compatible `/chat/completions` and `/embeddings`
+endpoints. That requirement is per ROLE, not per deployment: with the split
+`INFERENCE_CHAT_*` / `INFERENCE_EMBEDDING_*` families each role may use a
+different provider, and the native `anthropic` chat profile speaks the Messages
+API instead of `/chat/completions` — it is chat-only and must be paired with a
+separate embedding provider. Model ids are provider-specific. The split Cloud
+Temple example is the exact named v1.4 profile; the active
+`LLMAAS_MODEL=qwen3.5:27b` value is the preserved illustrative 1.x legacy
+default, not an interchangeable alias. The embedding dimension must equal the
+vector length returned by that model. Identity drift blocks long writes/search;
+after ingestion it requires the explicit bounded Qdrant reindex below, never
+an automatic rebuild.
 
 After start-up (the WAF at `http://localhost:8080` is the only exposed
 entrypoint to Hivemind — the Hivemind container publishes no host port; the
@@ -104,6 +117,24 @@ dev profile additionally publishes the MinIO web console on `:9001`):
    (`short_note`, `short_read`, own `mid_consolidate`, `mid_read`) to confirm
    round-trip persistence to the configured S3 bucket. Create a different
    token for every agent identity; never share one agent token across clients.
+6. With a dedicated `read,write,manage` operator token, explicitly verify deep
+   inference readiness once. This call may spend provider budget; it is
+   single-flight per serving event loop and exact role-profile fingerprint,
+   cached for five minutes, capped at one zero-retry request per role and eight
+   chat output tokens. Neither `/health` nor `system_health` performs this work
+   automatically:
+
+   ```bash
+   curl -sS http://localhost:8080/api/tool \
+     -H "Authorization: Bearer $MCP_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"tool":"inference_self_test","arguments":{}}'
+   ```
+
+   Require both role readiness values to be `ready`. If embedding is ready but
+   an existing space reports `reindex_required`, the provider is usable but
+   that space's persisted vector identity still needs the bounded maintenance
+   procedure below.
 
 For MCP client configuration and reusable project instructions, follow
 [Configure agents for unified Hivemind memory](AGENT_MEMORY_SETUP.md).
@@ -124,6 +155,103 @@ store. The WAF stays the only exposed entrypoint.
 docker compose up --build -d --wait
 ```
 
+### Qdrant deployment boundary
+
+The supported topology dedicates one complete Qdrant instance exclusively to
+one Hivemind deployment. Sharing a Qdrant instance between Hivemind deployments
+or with another workload is unsupported; a collection-name prefix is not a
+tenant or deployment-isolation boundary.
+
+Canonical collection names are fixed by Hivemind's vector-identity contract and
+never use `QDRANT_COLLECTION_PREFIX`. That setting is retained only to probe
+the lossy names written by legacy Graph Memory deployments. Keep its default
+`memory_` value unless the deployment actually used a different legacy prefix.
+A non-default value emits one fixed, redacted `FutureWarning` once per process;
+the configured value is not disclosed. The exact diagnostic is:
+
+```text
+QDRANT_COLLECTION_PREFIX is legacy-probe-only; non-default values do not scope canonical collections; shared Qdrant deployments are unsupported
+```
+
+The value-free `embedding_collection` status distinguishes persisted-state
+trouble from live availability. `embedding_profile_unavailable` requires
+repairing the embedding configuration/runtime, not reindexing;
+`shadow_validation_failed` means the active alias target's required payload
+schema could not be read and requires backend repair, not a blind reindex;
+`invalid_status` means the connected Graph Memory omitted or malformed this
+contract and must be upgraded or repaired. `reindex_required` denotes persisted
+identity, schema, legacy, or ownership evidence that #277 never repairs
+automatically. Non-empty legacy state also blocks memory deletion; migrate or
+reindex it before use rather than treating deletion as a cleanup bypass.
+
+#### Bounded embedding reindex
+
+`long_reindex(space_id)` is a hidden, exact-name, `manage`-only maintenance
+operation for an existing embedded binding whose `long_status` reports
+`embedding_collection.state="reindex_required"`. It is synchronous and
+non-idempotent. It never provisions a binding and refuses external
+`graph_connect` targets. The internal Graph Memory call still uses the shipped
+`read,write` embedded token; only the Hivemind facade carries the stronger
+operator authorization.
+
+Use it only in an explicit maintenance window:
+
+1. Stop every writer, ingestion submitter/worker, restore, delete, cleanup, and
+   other same-space mutation. Wait for accepted ingestion work to finish.
+2. Confirm the persisted binding is embedded and the collection state is
+   exactly `reindex_required` with `long_status`.
+3. Make one `long_reindex(space_id="<space-id>")` call with a manager token and
+   keep the request open. The internal bridge permits a finite seven-day
+   maintenance request, but every operator-side client and proxy must also be
+   configured for the expected duration. Never automatically retry an
+   ambiguous timeout.
+4. Accept completion only when the result is `status="ok"`,
+   `phase="verified"`, `activated=true`, `active_state="ready"`, and
+   `0 < source_documents <= source_chunks == vectors_written`. Re-read
+   `long_status` and run a bounded
+   representative `long_query` before reopening writers.
+
+Admission is fail-fast, not a waiting queue. A process-local gate closes new
+mutations for the exact internal memory, rejects an active/queued ingest lane or
+another maintenance owner, and leaves unrelated memories independent. This is
+not an online/live or zero-downtime operation and provides no cross-process or
+HA fencing; deploy exactly one active Graph Memory runtime.
+
+The rebuild derives vectors only from an exactly matched Neo4j document and S3
+source-object inventory: every document resolves to one retained object, more
+than one document may share the same verified object, and no unreferenced
+ordinary object is accepted. It verifies succeeded status, ownership, metadata,
+size, content hash and exact regenerated chunk accounting. The known validated
+per-memory ontology object is configuration and is excluded from the document
+inventory. Existing vectors are never source truth. A uniquely attributable
+shadow receives normalized embeddings and is then exhaustively checked for
+identity, cosine distance, dimensions, finite values, exact vector count,
+payload ownership and per-document chunk indexes.
+
+The service recaptures source/configuration/target evidence immediately before
+one final atomic batch that points the stable active alias to the shadow, then
+performs read-only post-verification. A pre-switch error leaves the old target
+active when that result is received intact. Space, binding, storage, or client
+failures proven to precede internal dispatch use `phase="admission"`, a null
+operation id, and `activated=false`; an intact internal refusal may also carry
+a non-activated phase while proving it never reached the alias batch. By
+contrast, `phase="activated"` with `activated=true` is the conservative
+retry-unsafe boundary: dispatch began, but a timeout, transport exception,
+malformed result, or post-switch read failure may prevent Hivemind from knowing
+whether the final alias batch committed. The operation id may therefore be
+null. Do not retry, roll back, or delete anything automatically; inspect
+`long_status` and retain the complete bounded result for diagnosis. Old targets
+and failed shadows
+remain attributable and intentionally retained. Crash resume, automatic
+cleanup, retention, deletion, backup repair, and other general long-data
+lifecycle work are outside this operation. The exact bounded result examples,
+phases, states and reason codes are defined in
+[`MCP_TOOLS_SPEC.md`](MCP_TOOLS_SPEC.md#long_reindex-maintenance).
+After active-alias activation, `memory_delete` fails closed without cleanup
+until whole-memory lifecycle recovery is implemented by EPIC #309.
+
+Do not change the setting to co-locate otherwise independent deployments.
+
 Production checklist:
 
 - TLS terminates AT the WAF. Either set `SITE_ADDRESS=my-service.example.com`
@@ -132,11 +260,14 @@ Production checklist:
   front the WAF with an upstream reverse proxy that handles TLS.
 - Configure S3 endpoint, credentials, and bucket name via `.env`.
 - Generate independent random values of at least 32 characters for
-  `ADMIN_BOOTSTRAP_KEY` and `NEO4J_PASSWORD`; the blank template values are
-  intentionally refused or unusable.
-- The shipped `.env.example` selects single-node mode explicitly. For Project
-  Mesh, set `HIVEMIND_MESH_ENABLED=true` only together with the public URL,
-  private Ed25519 key and display name documented below.
+  `ADMIN_BOOTSTRAP_KEY` and `NEO4J_PASSWORD`; the Neo4j password must begin
+  with an alphanumeric character because its bootstrap CLI treats a leading
+  `-` as an option. The configuration helper enforces this, and the blank
+  template values are intentionally refused or unusable.
+- The shipped `.env.example` enables Project Mesh. Supply the public URL,
+  private Ed25519 key, and display name documented below; otherwise startup
+  fails closed. Set `HIVEMIND_MESH_ENABLED=false` only for a deliberate
+  non-Mesh deployment.
 - Run the Hivemind container as the non-root user the image ships with
   (UID 10001); do not override the `USER` directive.
 - Keep the shipped `hivemind-secrets-init` dependency enabled. It is a
@@ -170,8 +301,44 @@ Production checklist:
 - Before `space_delete`, quiesce every same-space note, consolidation, graph,
   restore/GC, and Hivemind mutation/job until the result is fully handled.
   Deletion reprobes payload and removes `_meta.json` last, but its lifecycle
-  lock does not fence every writer. Treat `status:"partial"` as recovery,
-  render its exact counts/failed keys/action, and never auto-retry blindly.
+  lock does not fence every writer. Successful deletion also removes the ID
+  from every token allowlist. Treat `status:"partial"` as recovery, render its
+  exact counts/failed keys/action, and never auto-retry blindly. An absent
+  prefix with scopes preserves possible intentional pre-grants by default;
+  use `recover_access_grants=True` only to resume a known older or interrupted
+  deletion, and expect grants-only `status:"grants_cleaned"`.
+- Treat backup restoration after a successful deletion as data-only recovery:
+  it never restores token allowlists. A global/bootstrap administrator must
+  restore the space and verify its data. A persisted global admin then uses
+  `space_invite_token`; bootstrap has no persisted actor hash and instead uses
+  `admin_update_token` or `admin_bulk_update_tokens` with `space_ids_add` for
+  each intended non-admin token. Never delete/recreate the restored space to
+  repair access, because that destroys the restored data.
+
+### ASGI process lifecycle
+
+Both shipped services register process-owned shutdown hooks and therefore
+require an ASGI server that dispatches lifespan. `uvicorn --lifespan off` is
+unsupported: the guard refuses every route before application dispatch,
+including MCP, health, and metrics endpoints.
+
+During a server-requested shutdown, a failed Graph Memory close produces
+`lifespan.shutdown.failed`; because the server had already started, the Uvicorn
+command still exits with status zero.
+
+If the inner lifespan application terminates unexpectedly after startup, the
+guard closes owned resources and permanently refuses requests, but Uvicorn
+0.44 may remain listening. Docker Compose's `restart: unless-stopped` policy
+does not restart a merely unhealthy running container. Diagnose and
+restart/recreate the affected service, or use a health-aware external
+supervisor. The guard does not own a portable primitive for terminating the
+server process.
+
+If an inner lifespan task deliberately suppresses repeated Python task
+cancellation, the guard records a terminal protocol failure, retains the task
+in a process-terminal quarantine, runs cleanup once, and refuses every request.
+Only recycling the process can guarantee that such a non-cooperative coroutine
+has stopped; do not attempt to reopen the service in place.
 
 ## WAF route table
 
@@ -216,8 +383,9 @@ The long ontology/knowledge-graph runtime (ADR-0019) is a
 **mandatory, repository-shipped, embedded product component** — not an
 optional add-on, an operator-supplied image, or a separately provisioned
 backend. The default `docker compose up --build -d --wait` brings up the **complete**
-stack: WAF, Hivemind, the embedded Graph Memory runtime (built from
-`./services/graph-memory`), and its datastores Neo4j and Qdrant. There is
+stack: WAF, Hivemind, the embedded Graph Memory runtime (built with
+`services/graph-memory/Dockerfile` from the repository-root context), and its
+datastores Neo4j and Qdrant. There is
 no opt-in `long` profile and no disabled-state release path.
 
 - **Internal-network only.** Graph Memory, Neo4j, and Qdrant expose no
@@ -331,8 +499,10 @@ Hivemind backups follow ADR-0014:
   key and emits an audit entry.
 - Every `backup_restore` call requires `confirm=True`; a normal restore
   needs nothing more. It targets a fresh space: the tool refuses if the
-  target space already exists (delete it first), then copies the backup
-  back. No `unsafe_recovery` flag is involved on this path.
+  target marker already exists, then copies the backup back. Do not delete an
+  existing or just-restored space merely to satisfy this precondition; choose
+  and verify the intended recovery path first. No `unsafe_recovery` flag is
+  involved on this path.
 - Restoring OVER a space that carries shared Hivemind protocol state is
   REFUSE-BY-DEFAULT: the call fails with a blocking error unless the
   operator additionally passes `unsafe_recovery=True`. That explicit
@@ -452,9 +622,16 @@ space, S3, logs, an issue, the console, or long memory. The bundled Compose
 configuration explicitly replaces `HIVEMIND_MESH_PRIVATE_KEY` with an empty
 value in the `graph-memory` service even though that service consumes the shared
 environment file; preserve this isolation for every service other than
-`hivemind`. The root `.dockerignore` also excludes `.env*`, `*.key`, and `*.pem`
-from the Hivemind build context; the separate Graph Memory context is scoped to
-`services/graph-memory` and cannot read root deployment files.
+`hivemind`. Hivemind and Graph Memory now both build from the repository-root
+context so they consume the exact same lifecycle guard. The root
+`.dockerignore` uses explicit root and recursive rules for `.env`, `.env.*`,
+`*.key`, and `*.pem`, and excludes local worktrees, virtualenvs, bytecode, and
+tool caches before the context reaches the Docker daemon or BuildKit cache.
+The Graph Memory Dockerfile then uses explicit `COPY` entries for its vendored
+runtime plus `src/hivemind_inference`; these are the only inputs copied into
+that image. Preserve both boundaries: never weaken the recursive ignore rules
+and never replace the Dockerfile allowlist with a broad or wildcard repository
+copy.
 
 Configure the eight variables documented in `.env.example`. In particular:
 

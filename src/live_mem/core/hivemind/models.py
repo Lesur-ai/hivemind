@@ -172,8 +172,9 @@ class EventType(str, Enum):
     """
     Types d'événements posés au journal append-only.
 
-    La liste est volontairement restreinte au scope V1 ; les couches
-    transport/membership/observabilité (issues #4-#12) en ajouteront.
+    La liste est volontairement restreinte au scope V1. Une évolution V1 peut
+    uniquement ajouter une valeur revue : une valeur persistée ne doit jamais
+    être renommée, supprimée ou réaffectée (ADR-0013).
     """
 
     MEMBERSHIP_UPDATED = "membership_updated"

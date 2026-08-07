@@ -32,7 +32,8 @@ Les DÉCLENCHEURS de récupération manuelle (eviction, resync) ne vivent PAS ic
 ils délèguent aux services P5-1 existants (``MembershipService.evict_member`` /
 ``ResyncService``) depuis ``recovery.py``, qui n'ajoute qu'une traduction de
 code d'erreur. La surface de statut reste, elle, strictement read-only et
-n'enregistre AUCUN nouvel outil MCP (la surface LM2-11 est verrouillée à 61).
+n'enregistre AUCUN nouvel outil MCP ; la surface globale reste verrouillée par
+son fixture canonique et son test exhaustif.
 
 Codes d'erreur MCP structurés (taxonomie ``PeerErrorCode`` réutilisée, surfacés
 via ``PeerChannelError.to_dict()``) distinguant les trois cas :

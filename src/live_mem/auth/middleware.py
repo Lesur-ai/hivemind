@@ -470,7 +470,6 @@ class StaticFilesMiddleware:
         or 503 + {"status": "unhealthy"} when critical deps fail.
         """
         import json
-        import time
         from pathlib import Path
 
         version_file = Path(__file__).parent.parent.parent.parent / "VERSION"
@@ -494,36 +493,22 @@ class StaticFilesMiddleware:
             )
             services["s3"] = {"status": "error", "message": "S3 unreachable"}
 
-        # ── Probe LLMaaS ─────────────────────────────────────
+        # ── Probe inférence (rôles chat + embedding) ─────────
+        # P13-1C (ADR-0027) : sondes discovery-only via les adapters
+        # enregistrés du runtime partagé (PROXY_URL honoré, transport possédé).
+        # Zéro génération, zéro embedding — aucun token dépensé (HM-12).
+        # Les champs historiques de `services.llmaas` sont préservés à
+        # l'identique et les enfants additifs `chat`/`embedding` restent
+        # ANONYMES sur ce endpoint PUBLIC (HM-18 : aucun provider, adapter,
+        # modèle, dimension ni endpoint divulgué — le détail complet reste sur
+        # l'outil MCP authentifié system_health).
         try:
-            from ..config import get_settings
+            from ..core.inference_runtime import build_llmaas_health_block
 
-            settings = get_settings()
-            if settings.llmaas_api_url and settings.llmaas_api_key:
-                # P12-1 : la sonde honore PROXY_URL via le client possédé de
-                # list_llm_models, fermé sur tous les chemins.
-                from ..core.llm_probe import list_llm_models
-
-                t0 = time.monotonic()
-                await list_llm_models(settings)
-                latency = round((time.monotonic() - t0) * 1000, 1)
-                # HM-18 fix : /health est PUBLIC (non authentifié). On ne divulgue
-                # PLUS le nom du modèle LLM configuré (ni la liste des modèles) —
-                # c'est du fingerprinting offert à un attaquant anonyme. Le détail
-                # complet (modèle, disponibilité) reste accessible via l'outil MCP
-                # authentifié system_health.
-                services["llmaas"] = {
-                    "status": "ok",
-                    "latency_ms": latency,
-                }
-            else:
-                services["llmaas"] = {
-                    "status": "warning",
-                    "message": "LLMaaS non configuré",
-                }
+            services["llmaas"] = await build_llmaas_health_block(authenticated=False)
         except Exception as e:
-            # LM2-24 fix : pareil que S3 — ne pas exposer la stack openai
-            # ou l'URL LLMaaS sur un endpoint public.
+            # LM2-24 fix : pareil que S3 — ne pas exposer la stack provider
+            # ou l'URL d'inférence sur un endpoint public.
             logger.warning(
                 "/health: LLMaaS probe failed: %s", _redact_proxy_secrets(str(e))
             )

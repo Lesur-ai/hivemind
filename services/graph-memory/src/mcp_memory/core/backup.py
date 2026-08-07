@@ -172,7 +172,15 @@ class BackupService:
         
         # === 2. Export Qdrant ===
         await _log("🔢 Export vecteurs Qdrant...")
-        qdrant_points = await self._vectors.export_collection(memory_id)
+        qdrant_export = await self._vectors.export_collection(memory_id)
+        if (
+            type(qdrant_export) is not dict
+            or type(qdrant_export.get("identity")) is not dict
+            or type(qdrant_export.get("points")) is not list
+        ):
+            raise RuntimeError("Export Qdrant invalide")
+        qdrant_identity = qdrant_export["identity"]
+        qdrant_points = qdrant_export["points"]
         
         # Format JSONL (une ligne JSON par point, économise de la mémoire)
         qdrant_lines = []
@@ -217,6 +225,7 @@ class BackupService:
             "memory_id": memory_id,
             "memory_name": memory.name,
             "memory_ontology": memory.ontology,
+            "qdrant_identity": qdrant_identity,
             "description": description,
             "created_at": datetime.utcnow().isoformat() + "Z",
             "elapsed_seconds": elapsed,
@@ -340,6 +349,25 @@ class BackupService:
         backup_id: str,
         progress_callback=None
     ) -> Dict[str, Any]:
+        """Acquire ordinary mutation admission for the exact backup memory."""
+        memory_id, _timestamp = self._validate_backup_id(backup_id)
+        from .validators import validate_memory_id
+
+        validate_memory_id(memory_id)
+
+        from .maintenance import get_maintenance_coordinator
+
+        async with get_maintenance_coordinator().ordinary(memory_id):
+            return await self._restore_backup_unlocked(
+                backup_id,
+                progress_callback=progress_callback,
+            )
+
+    async def _restore_backup_unlocked(
+        self,
+        backup_id: str,
+        progress_callback=None
+    ) -> Dict[str, Any]:
         """
         Restaure une mémoire depuis un backup S3.
         
@@ -421,15 +449,30 @@ class BackupService:
             )
         
         await _log(f"✅ {len(qdrant_points)} vecteurs chargés (checksum OK)")
-        
-        # === 4. Restaurer le graphe Neo4j ===
+
+        qdrant_identity = manifest.get("qdrant_identity")
+
+        # Garde de compatibilité lecture seule #277. Elle précède toute mutation
+        # Neo4j/Qdrant ; la restauration multi-backend qui suit n'est pas
+        # transactionnelle.
         await _log("📊 Restauration du graphe Neo4j...")
+        await self._vectors.preflight_import(
+            memory_id,
+            qdrant_identity,
+            qdrant_points,
+        )
+
+        # === 4. Restaurer le graphe Neo4j ===
         graph_counters = await self._graph.import_memory_data(graph_data)
         await _log(f"✅ Graphe restauré: {graph_counters}")
         
         # === 5. Restaurer les vecteurs Qdrant ===
         await _log("🔢 Restauration des vecteurs Qdrant...")
-        vectors_imported = await self._vectors.import_collection(memory_id, qdrant_points)
+        vectors_imported = await self._vectors.import_collection(
+            memory_id,
+            qdrant_points,
+            identity=qdrant_identity,
+        )
         await _log(f"✅ Qdrant: {vectors_imported} vecteurs restaurés")
         
         # === 6. Vérifier les documents S3 ===
@@ -574,8 +617,68 @@ class BackupService:
     # =========================================================================
     # Restore from archive (tar.gz)
     # =========================================================================
+
+    @staticmethod
+    def _archive_memory_id(archive_bytes: bytes) -> str:
+        """Read and validate the manifest namespace before admission."""
+        if not isinstance(archive_bytes, bytes):
+            raise ValueError("archive_bytes doit être un contenu bytes")
+        if len(archive_bytes) > MAX_ARCHIVE_SIZE_BYTES:
+            raise ValueError("Archive trop volumineuse")
+
+        try:
+            with tarfile.open(
+                fileobj=io.BytesIO(archive_bytes),
+                mode="r:gz",
+            ) as archive:
+                manifest_name = next(
+                    (
+                        name
+                        for name in archive.getnames()
+                        if name == "manifest.json"
+                        or name.endswith("/manifest.json")
+                    ),
+                    None,
+                )
+                if manifest_name is None:
+                    raise ValueError(
+                        "manifest.json introuvable dans l'archive"
+                    )
+                manifest_file = archive.extractfile(manifest_name)
+                if manifest_file is None:
+                    raise ValueError(
+                        "Impossible de lire 'manifest.json' dans l'archive"
+                    )
+                manifest = json.loads(manifest_file.read().decode("utf-8"))
+        except ValueError:
+            raise
+        except Exception as error:
+            raise ValueError(f"Archive tar.gz invalide: {error}") from error
+
+        memory_id = manifest.get("memory_id") if isinstance(manifest, dict) else None
+        from .validators import validate_memory_id
+
+        try:
+            return validate_memory_id(memory_id)
+        except (TypeError, ValueError):
+            raise ValueError("memory_id invalide dans le manifest") from None
     
     async def restore_from_archive(
+        self,
+        archive_bytes: bytes,
+        progress_callback=None
+    ) -> Dict[str, Any]:
+        """Acquire ordinary mutation admission for the archive namespace."""
+        memory_id = self._archive_memory_id(archive_bytes)
+        from .maintenance import get_maintenance_coordinator
+
+        async with get_maintenance_coordinator().ordinary(memory_id):
+            return await self._restore_from_archive_unlocked(
+                archive_bytes,
+                progress_callback=progress_callback,
+            )
+
+    async def _restore_from_archive_unlocked(
         self,
         archive_bytes: bytes,
         progress_callback=None
@@ -728,18 +831,49 @@ class BackupService:
         doc_keys_list = []
         if doc_keys_path:
             doc_keys_list = json.loads(_read_member(doc_keys_path).decode("utf-8"))
+        if type(doc_keys_list) is not list:
+            tar.close()
+            raise ValueError("document_keys.json invalide")
         
         # Construire un mapping filename → key S3 original
         filename_to_key = {}
         for dk in doc_keys_list:
-            fn = dk.get("filename", "")
-            key = dk.get("key", "")
-            if fn and key:
-                filename_to_key[fn] = key
+            if type(dk) is not dict:
+                tar.close()
+                raise ValueError("document_keys.json invalide")
+            fn = dk.get("filename")
+            key = dk.get("key")
+            namespace_prefix = f"{memory_id}/documents/"
+            if (
+                type(fn) is not str
+                or not fn
+                or type(key) is not str
+                or not key.startswith(namespace_prefix)
+                or key == namespace_prefix
+                or fn in filename_to_key
+            ):
+                tar.close()
+                raise ValueError("document_keys.json invalide")
+            filename_to_key[fn] = key
         
         docs_uploaded = 0
         docs_skipped = 0
-        
+
+        qdrant_identity = manifest.get("qdrant_identity")
+
+        # Dernière garde, en lecture seule, avant le premier upload S3 (ou, pour
+        # une archive légère, avant la première mutation Neo4j). Ce placement
+        # fail-closed ne rend pas la restauration multi-backend transactionnelle.
+        try:
+            await self._vectors.preflight_import(
+                memory_id,
+                qdrant_identity,
+                qdrant_points,
+            )
+        except Exception:
+            tar.close()
+            raise
+
         for doc_member in doc_members:
             # Extraire le nom de fichier
             doc_filename = doc_member.split("/documents/", 1)[-1]
@@ -813,7 +947,11 @@ class BackupService:
         
         # === 7. Restaurer les vecteurs Qdrant ===
         await _log("🔢 Restauration des vecteurs Qdrant...")
-        vectors_imported = await self._vectors.import_collection(memory_id, qdrant_points)
+        vectors_imported = await self._vectors.import_collection(
+            memory_id,
+            qdrant_points,
+            identity=qdrant_identity,
+        )
         await _log(f"✅ Qdrant: {vectors_imported} vecteurs restaurés")
         
         total_elapsed = round(_time.monotonic() - _t0, 1)

@@ -25,6 +25,9 @@ from unittest.mock import patch
 
 import pytest
 
+from hivemind_inference.certification_budget import (
+    PROTECTED_CERTIFICATION_GRAPH_HEALTH_TIMEOUT_SECONDS,
+)
 from live_mem.config import Settings
 from live_mem.core.graph_bridge import (
     GraphBridgeService,
@@ -40,6 +43,12 @@ _SPACE = "space-a"
 _META = f"{_SPACE}/_meta.json"
 _EMBEDDED_URL = "http://graph-memory:8002"
 _EMBEDDED_TOKEN = "tok-embedded-xyz"
+_CERTIFICATION_ENV = (
+    "HIVEMIND_CERTIFICATION_BUDGET_PATH",
+    "HIVEMIND_CERTIFICATION_RUN_ID",
+    "HIVEMIND_CERTIFICATION_SOURCE_SHA",
+    "HIVEMIND_CERTIFICATION_PROFILE_ID",
+)
 
 
 class FakeStorage:
@@ -104,6 +113,11 @@ def _space_meta() -> dict:
     return {"space_id": _SPACE, "version": 1}
 
 
+def _clear_certification_environment(monkeypatch) -> None:
+    for name in _CERTIFICATION_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
 async def _run(coro, storage, settings):
     p1, p2, p3 = _patches(storage, settings)
     with p1, p2, p3:
@@ -153,6 +167,91 @@ async def test_first_push_provisions_embedded_bind() -> None:
     # memory_create appelé avec le memory_id dérivé.
     created = [c for inst in factory.instances for c in inst.args_for("memory_create")]
     assert any(a.get("memory_id") == derive_memory_id(_SPACE) for a in created)
+
+
+async def test_ordinary_autobind_preserves_historical_client_construction(
+    monkeypatch,
+) -> None:
+    _clear_certification_environment(monkeypatch)
+    storage = FakeStorage(bank={"projectbrief.md": "hello"})
+    storage.objects[_META] = json.dumps(_space_meta())
+    settings = _settings()
+    backing_factory = FakeGraphTransport.factory()
+    constructor_kwargs: list[dict[str, Any]] = []
+
+    def factory(url: str, token: str, **kwargs: Any):
+        constructor_kwargs.append(dict(kwargs))
+        return backing_factory(url, token, **kwargs)
+
+    bridge = GraphBridgeService(client_factory=factory)
+    result = await _run(lambda: bridge.push(_SPACE), storage, settings)
+
+    assert result["status"] == "ok"
+    assert constructor_kwargs[0] == {}
+    assert backing_factory.instances[0].timeout == 120.0
+    assert backing_factory.instances[0].tool_names()[0] == "system_health"
+
+
+async def test_strict_certification_autobind_uses_reviewed_health_timeout_and_fails_closed(
+    monkeypatch,
+) -> None:
+    _clear_certification_environment(monkeypatch)
+    for name, value in zip(
+        _CERTIFICATION_ENV,
+        (
+            "/run/hivemind-provider-certification/budget.sqlite3",
+            "12345.1",
+            "a" * 40,
+            "cloud-temple-reference",
+        ),
+        strict=True,
+    ):
+        monkeypatch.setenv(name, value)
+    storage = FakeStorage(bank={"projectbrief.md": "hello"})
+    storage.objects[_META] = json.dumps(_space_meta())
+    settings = _settings()
+    backing_factory = FakeGraphTransport.factory(
+        responses={"system_health": {"status": "error"}}
+    )
+    constructor_kwargs: list[dict[str, Any]] = []
+
+    def factory(url: str, token: str, **kwargs: Any):
+        constructor_kwargs.append(dict(kwargs))
+        return backing_factory(url, token, **kwargs)
+
+    bridge = GraphBridgeService(client_factory=factory)
+    result = await _run(lambda: bridge.push(_SPACE), storage, settings)
+
+    assert PROTECTED_CERTIFICATION_GRAPH_HEALTH_TIMEOUT_SECONDS == 180.0
+    assert result["status"] == "error"
+    assert result["connected"] is False
+    assert constructor_kwargs == [
+        {"timeout": PROTECTED_CERTIFICATION_GRAPH_HEALTH_TIMEOUT_SECONDS}
+    ]
+    assert backing_factory.instances[0].timeout == 180.0
+    assert backing_factory.instances[0].tool_names() == ["system_health"]
+    assert "graph_memory" not in storage.raw_meta()
+
+
+async def test_partial_strict_certification_environment_refuses_before_graph_health(
+    monkeypatch,
+) -> None:
+    _clear_certification_environment(monkeypatch)
+    monkeypatch.setenv(
+        "HIVEMIND_CERTIFICATION_BUDGET_PATH",
+        "/run/hivemind-provider-certification/budget.sqlite3",
+    )
+    storage = FakeStorage(bank={"projectbrief.md": "hello"})
+    storage.objects[_META] = json.dumps(_space_meta())
+    settings = _settings()
+    bridge, factory = _bridge()
+
+    result = await _run(lambda: bridge.push(_SPACE), storage, settings)
+
+    assert result["status"] == "error"
+    assert result["connected"] is False
+    assert factory.instances == []
+    assert "graph_memory" not in storage.raw_meta()
 
 
 async def test_autobind_persists_sentinel_not_literal_token() -> None:

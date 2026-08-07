@@ -49,9 +49,9 @@ currently still carries the P6 opt-in drift, so a lint here would be RED until
 P7-6 lands). P7-7 therefore guards only surfaces that are already clean:
 the compose↔embedded wiring, the ``.env.example`` datastore documentation, and
 the sentinel-not-assigned contract. The two MINOR gate-sequence deferrals owned
-by P7-7 land next to the gates they harden: ADR-0019 boundary-clause pins in
-``test_adr_registry_p7.py``, vendored-tree venv/datastore-volume hygiene in
-``test_source_inventory_graph_memory.py``.
+by P7-7 land next to the gates they harden: ADR-0019 boundary-clause pins now
+consolidated in ``test_architecture_contracts.py``, vendored-tree
+venv/datastore-volume hygiene in ``test_source_inventory_graph_memory.py``.
 
 Out of scope (other Wave-3 children): release-smoke disabled-state (P7-5);
 backup-at-rest secret masking + GM ``document_delete`` write-gate (P7-8);
@@ -287,6 +287,7 @@ def test_graph_memory_healthchecks_use_only_runtime_python():
     dockerfile = _read(REPO_ROOT / "services" / "graph-memory" / "Dockerfile")
     for healthcheck in (compose_health, dockerfile):
         assert "urllib.request" in healthcheck
+        assert "/ready" in healthcheck
         assert "curl" not in healthcheck
 
     mutated = compose_health.replace("python", "curl", 1)

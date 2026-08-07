@@ -156,7 +156,9 @@ Par compatibilité, les outils admin acceptent aussi, sur une cible non-admin, u
 explicite dont le space n'existe pas encore. Ne l'utilisez pas comme
 réservation : ce pré-grant non-admin bloque ensuite `space_create` pour le même
 identifiant (y compris une préparation partielle compatible) jusqu'à son retrait
-par un admin. Préférez créer d'abord, attribuer ensuite.
+délibéré par un admin global ou un manager actif déjà scopé sur cet ID avec
+`recover_access_grants=True`. Cela retire aussi tous les pré-grants pairs :
+préférez créer d'abord, attribuer ensuite.
 
 Un manager emploie le flux plus étroit :
 
@@ -191,10 +193,14 @@ quel que soit son allowlist courant ; le space commité est automatiquement ajou
 écrit en dernier ; un résultat partial/recovery-required doit être rejoué avec
 exactement les mêmes entrées **uniquement** si `recovery.retry_safe` vaut
 `true`, jamais traduit en succès ni rollbacké automatiquement. Sinon suivre
-`recovery.action` : notamment, supprimer un space conserve les allowlists
-historiques, donc la réutilisation de son ID reste bloquée jusqu'au retrait
-admin explicite de toutes les références obsolètes, y compris sur les tokens
-admin/révoqués/expirés.
+`recovery.action`. Une suppression réussie retire l'ID de toutes les allowlists,
+y compris des entrées révoquées et expirées, avant de retourner `deleted`. Un
+préfixe absent qui porte encore des scopes est ambigu : il peut s'agir d'un
+pré-grant futur intentionnel, donc une suppression normale les conserve. Pour
+une ancienne suppression connue ou interrompue seulement, un admin ou manager
+scopé autorisé peut explicitement retenter avec
+`recover_access_grants=True` ; cette recovery destructive des seuls droits
+retourne `grants_cleaned`, jamais `deleted`.
 
 ### Que faire avant de supprimer ou réutiliser l'ID d'un space ?
 
@@ -203,11 +209,27 @@ opérations graph, restore/GC et activité Hivemind. La suppression revalide
 chaque objet payload puis retire `_meta.json` en dernier, mais son verrou de
 lifecycle ne fence pas tous les writers. Un résultat `partial` n'est pas un
 succès : suivre ses compteurs, clés échouées, état du marker et
-`recovery.action`, sans retry automatique. Même après une suppression propre,
-`space_create` refuse la réutilisation tant qu'un admin n'a pas retiré cet ID de
-tous les tokens qui le portent, y compris admin/révoqués/expirés. En v2, une
-entrée admin normale porte `[]` ; la compter reste une défense en profondeur
-pour un objet legacy ou pré-migration.
+`recovery.action`, sans retry automatique. Une suppression réussie retire l'ID
+de toutes les allowlists et confirme zéro référence avant `deleted` : la
+réutilisation normale ne demande aucun rescoping manuel et ne restaure aucun
+ancien accès. Si le préfixe est déjà absent mais que des scopes survivent, une
+suppression normale préserve le possible pré-grant futur intentionnel.
+N'utiliser `recover_access_grants=True` que pour une ancienne suppression
+connue ou interrompue ; un nettoyage `partial` ou un grant concurrent/ultérieur
+peut encore bloquer la réutilisation et doit être résolu explicitement.
+Le nettoyage converge au niveau du registre, mais n'est pas idempotent pour le
+caller : après retrait de son propre scope, le retry d'un manager est refusé.
+Il en va de même après une suppression ordinaire réussie ; admin global ou
+bootstrap peuvent inspecter l'état terminal.
+
+Restaurer un backup recopie uniquement les objets du space ; cela ne restaure
+jamais les allowlists des tokens. Comme une suppression réussie retire tous les
+scopes de cet ID, un administrateur global/bootstrap doit effectuer le restore
+puis utiliser l'outil adapté pour chaque token non-admin prévu. Un admin global
+persisté appelle `space_invite_token` ; bootstrap n'a pas de hash d'acteur
+persisté et utilise `admin_update_token` ou `admin_bulk_update_tokens` avec
+`space_ids_add`. Ne jamais supprimer puis recréer le space restauré pour
+réparer les accès : cela détruit les données restaurées.
 
 ### Comment ajouter la permission `manage` à un token ?
 

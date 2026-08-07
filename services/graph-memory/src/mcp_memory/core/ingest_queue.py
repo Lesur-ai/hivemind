@@ -26,6 +26,7 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Any, Optional
 
 from ..config import get_settings
@@ -48,6 +49,22 @@ NO_AUTO_POLLING_CONTRACT = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _guard_queue_admission(method):
+    """Linearize source reads and enqueue with maintenance admission."""
+
+    @wraps(method)
+    async def guarded(self, *args, **kwargs):
+        memory_id = kwargs.get("memory_id")
+        if memory_id is None and args:
+            memory_id = args[0]
+        from .maintenance import get_maintenance_coordinator
+
+        async with get_maintenance_coordinator().ordinary(memory_id):
+            return await method(self, *args, **kwargs)
+
+    return guarded
 
 
 @dataclass
@@ -97,6 +114,7 @@ class IngestQueueService:
         self._max_queued_bytes = settings.ingest_max_queued_bytes
 
     # ------------------------------------------------------------------ submit
+    @_guard_queue_admission
     async def submit(
         self,
         *,
@@ -266,6 +284,17 @@ class IngestQueueService:
                 "guarantee": QUEUE_GUARANTEE,
                 "jobs": [self._job_payload(j) for j in jobs],
             }
+
+    async def is_idle_for_memory(self, memory_id: str) -> bool:
+        """Return exact queue/worker idleness for maintenance admission."""
+        async with self._state_lock:
+            if memory_id in self._active_jobs:
+                return False
+            # Every deque entry is worker-visible: _pop_next_job_locked will
+            # promote it to running regardless of a stale/missing job record.
+            # Treat even terminal or orphan entries as non-idle so corrupted
+            # queue bookkeeping cannot admit maintenance over future work.
+            return not bool(self._queues.get(memory_id))
 
     async def batch_summary(self, batch_id: str) -> dict:
         async with self._state_lock:

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Tests — Issue #17 — Validation pass `unattributed_claims_count` + `[inféré]` markers.
+Tests — Issue #17 — Validation pass and bilingual inference markers.
 
 Strategy: purely code-only tests (deterministic, zero LLM calls).
 Each test describes a bank-write scenario and verifies that the
@@ -9,9 +9,9 @@ unsourced-claim detector produces the expected verdict.
 Convention: ``test_FIXNAME_blocks_ATTACK`` when the test proves that a
 fake claim is correctly detected (proof by contraposition).
 
-Note: French test strings (e.g. ``"Bug résolu hier"``, ``"15/05/2026"``)
-are intentional — they exercise the French-aware detection used by the
-default `general` ontology.
+Note: French and English test strings are intentional — consolidation can
+produce either language across the v1.4.0 compatibility boundary, so the
+validator must recognize both without changing its conservative scope.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ import pytest
 
 from live_mem.core.consolidator import (
     SYSTEM_PROMPT,
+    SYSTEM_PROMPT_ENGLISH,
+    SYSTEM_PROMPT_FRENCH,
     _validate_unattributed_claims,
     _extract_claim_tokens,
     _has_strong_status_claim,
@@ -40,6 +42,10 @@ class TestExtractClaimTokens:
         tokens = _extract_claim_tokens("171/171 tests PASS")
         # "171" should be matched via the "171 tests" unit pattern.
         assert any("171" in t for t in tokens), f"got {tokens}"
+
+    def test_extracts_metric_with_english_lines(self):
+        tokens = _extract_claim_tokens("737 lines added")
+        assert any("737 lines" in t for t in tokens), f"got {tokens}"
 
     def test_extracts_percentage(self):
         tokens = _extract_claim_tokens("Réduction de 80% sur les batches")
@@ -80,9 +86,11 @@ class TestHasStrongStatusClaim:
         [
             "Bug résolu hier",
             "Bug resolu hier",
+            "Bug resolved yesterday",
             "PR mergé",
             "Branch merged",
             "v2.0.0 publié",
+            "Package published",
             "Issue fermée",
             "Tests passed",
             "Tests failed",
@@ -128,7 +136,7 @@ class TestNormalizeForMatch:
 
 
 class TestInferredMarkerRegex:
-    """The `[inféré]` regex must recognize LLM variants."""
+    """The validator recognizes the default and compatibility markers."""
 
     @pytest.mark.parametrize(
         "line",
@@ -137,6 +145,8 @@ class TestInferredMarkerRegex:
             "Phase 2 terminée [inféré, suite progress Phase 3]",
             "Phase 2 terminée [INFÉRÉ]",
             "Phase 2 terminée [Inféré, raison]",
+            "Phase 2 complete [inferred]",
+            "Phase 2 complete [INFERRED, from Phase 3]",
         ],
     )
     def test_matches_variants(self, line):
@@ -147,7 +157,7 @@ class TestInferredMarkerRegex:
         [
             "Phase 2 terminée",  # no marker
             "Phase 2 inféré sans crochets",  # no brackets
-            "[infered] mauvais accent",  # missing accent
+            "[infered] typo",  # missing an r
         ],
     )
     def test_rejects_non_marker(self, line):
@@ -246,13 +256,22 @@ class TestValidateUnattributedClaims_DetectsHallucinations:
         result = _validate_unattributed_claims(before, after, notes, 20)
         assert result["unattributed_claims_count"] == 1
 
-    def test_blocks_invented_status_without_source(self):
-        """Strong status 'résolu' with NO source in the notes."""
+    @pytest.mark.parametrize("claim", ["bug Y résolu", "bug Y resolved"])
+    def test_blocks_invented_status_without_source(self, claim):
+        """French and English strong statuses with no source are blocked."""
         before = {"progress.md": "## Bugs\n- bug X ouvert"}
-        after = {"progress.md": "## Bugs\n- bug X ouvert\n- bug Y résolu"}
+        after = {"progress.md": f"## Bugs\n- bug X ouvert\n- {claim}"}
         # The note mentions neither bug Y nor any resolution.
         notes = [_note("Sprint planning en cours.")]
         result = _validate_unattributed_claims(before, after, notes, 20)
+        assert result["unattributed_claims_count"] == 1
+
+    def test_blocks_invented_english_lines_metric(self):
+        before = {"progress.md": ""}
+        after = {"progress.md": "- 737 lines added"}
+        notes = [_note("Implementation changed without a measured line count.")]
+        result = _validate_unattributed_claims(before, after, notes, 20)
+        assert result["lines_scanned"] == 1
         assert result["unattributed_claims_count"] == 1
 
     def test_accepts_status_when_mentioned_in_notes(self):
@@ -310,32 +329,37 @@ class TestValidateUnattributedClaims_DiffOnly:
 
 
 # =============================================================================
-# SYSTEM_PROMPT — rule #8 [inféré]
+# System prompts — rule #8 inference traceability
 # =============================================================================
 
 
 class TestSystemPromptRule8:
-    """SYSTEM_PROMPT must contain the `[inféré]` rule."""
+    """Both prompt modes must preserve rule #8 and concrete examples."""
 
-    def test_rule_8_present_in_system_prompt(self):
-        assert "[inféré]" in SYSTEM_PROMPT, (
+    def test_default_rule_8_present_in_system_prompt(self):
+        assert SYSTEM_PROMPT is SYSTEM_PROMPT_ENGLISH
+        assert "[inferred]" in SYSTEM_PROMPT, (
             "Without rule #8 the LLM will never flag its inferences, "
             "and the validation pass will report false positives."
         )
 
-    def test_rule_8_mentions_inference_transitive(self):
+    def test_default_rule_8_mentions_transitive_inference(self):
         # Rule #8 must reference transitive inference or logical deduction,
         # so the LLM knows WHEN to apply the marker.
         assert (
-            "INFÉRENCE TRANSITIVE" in SYSTEM_PROMPT
-            or "déduction logique" in SYSTEM_PROMPT
+            "TRANSITIVE INFERENCE" in SYSTEM_PROMPT
+            or "logical" in SYSTEM_PROMPT
         )
 
-    def test_rule_8_provides_examples(self):
+    def test_default_rule_8_provides_examples(self):
         # Check that at least one literal example from the rule is present.
         # This protects against prompt regressions that would strip the
         # examples (crucial for smaller models).
-        assert "Migration terminée [inféré]" in SYSTEM_PROMPT
+        assert "Migration complete [inferred]" in SYSTEM_PROMPT
+
+    def test_legacy_french_rule_8_remains_available(self):
+        assert "INFÉRENCE TRANSITIVE" in SYSTEM_PROMPT_FRENCH
+        assert "Migration terminée [inféré]" in SYSTEM_PROMPT_FRENCH
 
 
 # =============================================================================

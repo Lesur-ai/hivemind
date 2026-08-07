@@ -320,7 +320,8 @@
         if (!backupId) { showToast('error', 'Missing backup id'); return; }
         const body = `
             <p class="body-small">Restores backup <code>${esc(backupId)}</code>${spaceId ? ` into space <code>${esc(spaceId)}</code>` : ''}.</p>
-            <p class="body-small">Restores over the target space. The server refuses to restore over a mesh-participating or fail-closed space (<code>hive_status_label</code> gate).</p>`;
+            <p class="body-small">Restores over the target space. The server refuses to restore over a mesh-participating or fail-closed space (<code>hive_status_label</code> gate).</p>
+            <p class="body-small"><strong>Data only:</strong> restore never restores token allowlists. A stored global admin may re-grant with <code>space_invite_token</code>; bootstrap must use <code>admin_update_token</code> or <code>admin_bulk_update_tokens</code>. Never delete and recreate the restored space to repair access.</p>`;
         const epoch = AdminRouter.epoch;
         const op = beginModalOp();
         showDestructiveModal({
@@ -334,7 +335,7 @@
                 if (data && data.status === 'ok') {
                     const sid = String(data.space_id || spaceId || '');
                     const link = sid ? `<p class="body-small"><a href="#/spaces/${esc(encodeURIComponent(sid))}">Open ${esc(sid)}</a></p>` : '';
-                    showModal('Restore complete', `<div class="state state-success">${icon('check')}<h3>Restored</h3><p class="body-small">${esc(numOr(data.files_restored))} file(s) restored${sid ? ` to ${esc(sid)}` : ''}.</p>${link}</div>`);
+                    showModal('Restore complete', `<div class="state state-success">${icon('check')}<h3>Restored</h3><p class="body-small">${esc(numOr(data.files_restored))} file(s) restored${sid ? ` to ${esc(sid)}` : ''}.</p><p class="body-small"><strong>Access was not restored.</strong> A stored global admin may use <code>space_invite_token</code>; bootstrap must use <code>admin_update_token</code> or <code>admin_bulk_update_tokens</code>. Never delete and recreate this space to repair access.</p>${link}</div>`);
                     loadBackups(epoch);
                     return false;
                 }

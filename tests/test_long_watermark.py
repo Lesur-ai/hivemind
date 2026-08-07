@@ -60,10 +60,8 @@ from __future__ import annotations
 import ast
 import inspect
 import json
-from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
 from unittest.mock import patch
 
 import pytest
@@ -74,7 +72,7 @@ from live_mem.core.models import (
     meta_local_complement,
     meta_shared_projection,
 )
-from tests.fakes import FakeGraphTransport
+from tests.fakes import FakeGraphTransport, GraphLongFakeStorage
 
 # A frozen instant for the injected clock — every push in this module records
 # provenance/recorded-at against THIS, so timestamps are reproducible and tests
@@ -88,30 +86,13 @@ _GM_URL = "https://gm.example.com"
 
 
 # =============================================================================
-# In-memory storage fake (idiom from tests/test_hivemind_state.py +
-# tests/test_long_engine.py) — only the methods the bridge + watermark read
-# touch: get / put / get_json / put_json / list_objects / list_and_get.
+# Watermark extension of the shared Graph/Long storage fake. It adds only the
+# operations needed here: delete / exists and bounded ``list_objects``.
 # =============================================================================
 
 
-class FakeStorage:
-    """Minimal in-memory StorageService stand-in. No S3, fully deterministic."""
-
-    def __init__(self) -> None:
-        self.objects: dict[str, str] = {}
-
-    async def put(self, key: str, content: str, content_type: str = "text/plain") -> None:
-        self.objects[key] = content
-
-    async def put_json(self, key: str, data: dict[str, Any]) -> None:
-        await self.put(key, json.dumps(data, indent=2, ensure_ascii=False))
-
-    async def get(self, key: str) -> Optional[str]:
-        return self.objects.get(key)
-
-    async def get_json(self, key: str) -> Optional[dict]:
-        raw = await self.get(key)
-        return None if raw is None else json.loads(raw)
+class FakeStorage(GraphLongFakeStorage):
+    """Shared base plus the watermark suite's extra state operations."""
 
     async def delete(self, key: str) -> None:
         self.objects.pop(key, None)
@@ -129,27 +110,6 @@ class FakeStorage:
                 if max_keys and len(out) >= max_keys:
                     break
         return out
-
-    async def list_and_get(self, prefix: str, exclude_keep: bool = True) -> list[dict]:
-        results: list[dict] = []
-        for obj in await self.list_objects(prefix):
-            key = obj["Key"]
-            if exclude_keep and key.endswith(".keep"):
-                continue
-            content = self.objects.get(key)
-            if content is not None:
-                results.append(
-                    {
-                        "key": key,
-                        "content": content,
-                        "size": obj["Size"],
-                        "last_modified": "",
-                    }
-                )
-        return results
-
-    def snapshot(self) -> dict[str, str]:
-        return deepcopy(self.objects)
 
 
 # =============================================================================

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Outils MCP — Catégorie System (3 outils).
+Outils MCP — Catégorie System (4 outils).
 
 Outils MCP de base (transport /mcp authentifié, sans permission handler en plus) :
     - system_health : vérifie S3, LLMaaS, compte les espaces
@@ -8,6 +8,9 @@ Outils MCP de base (transport /mcp authentifié, sans permission handler en plus
 
 Outil avec identité authentifiée explicite :
     - system_whoami : identité du token courant (nom, permissions, espaces)
+
+Outil opérateur caché avec permission explicite :
+    - inference_self_test : readiness profonde bornée (manage uniquement)
 """
 
 import logging
@@ -30,7 +33,7 @@ def register(mcp: FastMCP) -> int:
         mcp: Instance FastMCP
 
     Returns:
-        Nombre d'outils enregistrés (3)
+        Nombre d'outils enregistrés (4)
     """
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -69,33 +72,21 @@ def register(mcp: FastMCP) -> int:
             )
             results["s3"] = {"status": "error", "message": "S3 unreachable"}
 
-        # ── Test LLMaaS ─────────────────────────────────────
+        # ── Test inférence (rôles chat + embedding) ─────────
+        # HM-12 fix (préservé) : sondes LÉGÈRES discovery-only — aucune
+        # complétion ni embedding réel, zéro token dépensé par appel santé.
+        # L'ancien chat.completions.create dépensait des tokens à CHAQUE appel
+        # sans check de permission → un token read-only pouvait boucler dessus
+        # et brûler le budget LLM (amplification de coût / DoS de facturation).
+        # P13-1C (ADR-0027) : les sondes passent par les adapters enregistrés du
+        # runtime partagé (PROXY_URL honoré, transport possédé). Champs
+        # historiques préservés (status / model / model_available / latency_ms)
+        # + enfants additifs `chat`/`embedding` avec l'identité provider sûre,
+        # réservée à cette surface AUTHENTIFIÉE.
         try:
-            if settings.llmaas_api_url and settings.llmaas_api_key:
-                # HM-12 fix : sonde LÉGÈRE (models.list) au lieu d'une complétion
-                # LLM réelle. L'ancien chat.completions.create dépensait des tokens
-                # LLMaaS à CHAQUE appel, sans check de permission → un token
-                # read-only pouvait boucler dessus et brûler le budget LLM
-                # (amplification de coût / DoS de facturation). Aligne system_health
-                # sur la sonde du endpoint public /health.
-                # P12-1 : la sonde honore PROXY_URL via le client possédé de
-                # list_llm_models, fermé sur tous les chemins.
-                from ..core.llm_probe import list_llm_models
+            from ..core.inference_runtime import build_llmaas_health_block
 
-                t0 = time.monotonic()
-                model_ids = await list_llm_models(settings)
-                latency = round((time.monotonic() - t0) * 1000, 1)
-                results["llmaas"] = {
-                    "status": "ok",
-                    "model": settings.llmaas_model,
-                    "model_available": settings.llmaas_model in model_ids,
-                    "latency_ms": latency,
-                }
-            else:
-                results["llmaas"] = {
-                    "status": "warning",
-                    "message": "LLMaaS non configuré",
-                }
+            results["llmaas"] = await build_llmaas_health_block(authenticated=True)
         except Exception as e:
             _logger.warning(
                 "system_health: LLMaaS probe failed: %s",
@@ -191,6 +182,42 @@ def register(mcp: FastMCP) -> int:
             "tools": tools,
         }
 
+    @mcp.tool()
+    async def inference_self_test() -> dict:
+        """Run the bounded deep inference readiness check.
+
+        Requires manage permission. The check uses fixed synthetic inputs and
+        the process-frozen configured roles; it accepts no caller-selected
+        provider, endpoint, model, credential, prompt, or embedding content.
+
+        Returns:
+            Cached or freshly collected secret-free role readiness evidence.
+        """
+        # Authorization MUST precede runtime resolution or adapter access: a
+        # denied caller cannot trigger provider construction or paid egress.
+        from ..auth.context import check_manage_permission
+
+        manage_err = check_manage_permission()
+        if manage_err:
+            return manage_err
+
+        try:
+            from ..core.inference_runtime import run_inference_self_test
+
+            return await run_inference_self_test()
+        except Exception as exc:  # noqa: BLE001 - fixed outward envelope
+            _logger.warning(
+                "inference_self_test failed: %s",
+                type(exc).__name__,
+            )
+            return {
+                "status": "error",
+                "readiness": "not_ready",
+                "evidence": "none",
+                "cached": False,
+                "message": "Inference self-test unavailable",
+            }
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def system_whoami() -> dict:
         """
@@ -250,7 +277,7 @@ def register(mcp: FastMCP) -> int:
 
         return result
 
-    return 3  # Nombre d'outils enregistrés
+    return 4  # Nombre d'outils enregistrés
 
 
 # ─────────────────────────────────────────────────────────────

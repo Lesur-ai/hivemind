@@ -156,6 +156,8 @@ refreshed against a future upstream release:
     `AsyncOpenAI` (extraction, Q&A, embeddings, provider-health probes,
     including retry attempts); it is closed on constructor failure and at
     service shutdown via `close()`; startup logs show only the proxy origin.
+    *(Superseded by the shared inference boundary below, which keeps the same
+    egress contract while moving transport ownership out of these modules.)*
   - **`src/mcp_memory/core/storage.py`** — both document-storage botocore
     configs (SigV2 data / SigV4 metadata, and the single `sigv4`-mode client)
     carry the proxies mapping; outward storage exceptions are redacted
@@ -166,6 +168,84 @@ refreshed against a future upstream release:
   - **`src/mcp_memory/server.py`** — `system_health` messages are redacted;
     an outermost ASGI lifespan shim closes the owned inference transports on
     service shutdown.
+
+- **Shared provider-neutral inference boundary (Hivemind P13-1C, #276,
+  ADR-0027).** The vendored baseline resolved its own `LLMAAS_*` configuration
+  and built its own `AsyncOpenAI` clients, so the embedded runtime and the
+  Hivemind core could disagree about the configured model, output budget, and
+  temperature while reading one shared `.env`. The embedded service now
+  consumes the repository-owned `hivemind_inference` package — the same one the
+  core consumes — instead of a copied or reimplemented contract. The P12-3
+  egress classification and redaction contract above is unchanged; only the
+  transport's owner moves:
+  - **`src/mcp_memory/core/inference_runtime.py`** — NEW. Process-wide holder
+    of the resolved chat/embedding profiles; owns the adapter transports
+    (`PROXY_URL` included), closes them on ASGI shutdown, validates the
+    configuration fail-closed at startup, and is the single authority for the
+    Qdrant vector width.
+  - **`src/mcp_memory/core/extractor.py`**, **`core/embedder.py`** — construct
+    no provider client and carry no `tenacity` retry decorator; they issue
+    normalized requests through the registered adapters, whose single bounded
+    retry replaces the historical three attempts. Their `test_connection`
+    health probes are discovery-only: the baseline ran a real completion and a
+    real embedding on every health call.
+  - **`src/mcp_memory/config.py`** — the `LLMAAS_*` fields keep no provider
+    default and are no longer required at startup; they exist only so a legacy
+    `.env` stays parsable.
+  - **`src/mcp_memory/core/vector_store.py`** — the Qdrant collection width
+    comes from the resolved embedding profile and fails closed when no
+    embedding role is configured.
+  - **`src/mcp_memory/server.py`** — `system_about` reports the resolved role
+    identities; `main()` validates the inference configuration before serving
+    and the lifespan shim closes the shared runtime.
+  - **`Dockerfile`** — builds from the repository root and installs the exact
+    shared `src/hivemind_inference` package (Compose and the public CI overlay
+    declare the same context).
+
+- **Minimum safe Qdrant collection identity (Hivemind P13-1D, #277,
+  ADR-0028).** The vendored runtime now binds canonical vector collections to
+  an exact memory namespace and normalized embedding identity, and fails closed
+  on ambiguous legacy data, incompatible stored identity, or payload ownership
+  drift:
+  - **`src/mcp_memory/core/vector_store.py`** — replaces lossy active collection
+    naming with canonical identity resolution before semantic vector I/O.
+    `QDRANT_COLLECTION_PREFIX` remains a legacy probe only; a non-default value
+    emits the fixed, redacted `LEGACY_PREFIX_DIAGNOSTIC` `FutureWarning` once
+    per process and never scopes canonical names.
+  - **`src/mcp_memory/core/embedder.py`**,
+    **`core/inference_runtime.py`**, and **`core/ingest_pipeline.py`** — preserve
+    normalized embedding-profile and model evidence through ingestion so the
+    vector compatibility boundary can validate it before mutation.
+  - **`src/mcp_memory/core/backup.py`** — carries the compact collection
+    identity in vector backup artifacts and refuses incompatible restore
+    preflight before vector mutation.
+  - **`src/mcp_memory/server.py`** — propagates only coarse, redacted collection
+    compatibility states to operator-visible status surfaces.
+
+- **Bounded embedding reindex maintenance (Hivemind P13-M1, #278,
+  ADR-0028).** The embedded runtime adds one explicit, non-resumable
+  source-to-shadow maintenance path without importing a broader upstream
+  collection-lifecycle design:
+  - **`src/mcp_memory/core/maintenance.py`** — NEW. Process-local, fail-fast,
+    task-owned per-memory admission for ordinary mutations and one exclusive
+    maintenance owner.
+  - **`src/mcp_memory/core/reindex.py`** — NEW. Verifies retained Neo4j/S3
+    document evidence, exact chunk accounting and normalized embedding evidence;
+    writes an attributable shadow, rechecks sources/configuration, then delegates
+    the final activation.
+  - **`src/mcp_memory/core/vector_store.py`** — resolves a stable active alias,
+    creates and exhaustively validates fresh shadow collections, and performs
+    one final atomic alias batch followed only by read verification. It never
+    rolls back or cleans old/shadow collections automatically.
+  - **`src/mcp_memory/core/graph.py`**, **`core/storage.py`**,
+    **`core/chunker.py`**, **`core/ingest_queue.py`**,
+    **`core/ingest_pipeline.py`**, and **`core/backup.py`** — expose strict
+    retained-source/configuration evidence and place namespace mutations behind
+    the shared maintenance admission boundary. The known per-memory ontology
+    object is validated and excluded from the document inventory.
+  - **`src/mcp_memory/server.py`** — adds the internal `memory_reindex` write
+    operation. Its existing embedded `read,write` token contract is unchanged;
+    the public Hivemind facade owns the stronger `manage` gate.
 
 ---
 

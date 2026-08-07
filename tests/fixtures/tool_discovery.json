@@ -1,7 +1,5 @@
 {
   "version": 1,
-  "registered_total": 61,
-  "registry_entries": 48,
   "serialized_schema_budget_bytes": 65536,
   "discovery": {
     "read": [
@@ -396,6 +394,22 @@
       "minimum_permission": "write",
       "operation": "mutation",
       "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_reindex",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "inference_self_test",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": null
     },
     {
       "canonical_name": "backup_create",

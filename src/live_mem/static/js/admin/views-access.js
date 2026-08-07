@@ -14,8 +14,9 @@
  * The current-session badge and bootstrap panel read the cached `system_whoami`
  * (`ctx.identity`) — no request. The token last-used timestamp is NEVER shown
  * (D-lastused, §6.5): it is dead data server-side. There is no rotate backend
- * (D-rotate,
- * §6.4): rotation is documented as create → verify → revoke, never a control.
+ * (D-rotate, §6.4): the row menu offers a guided replacement flow that uses
+ * create → verify → disable, never a fake atomic rotate call. Revocation is
+ * permanent; the UI never claims a revoked entry can be re-activated.
  *
  * Escaping (§7.3.3): every dynamic value passes through the shell `esc()` at its
  * interpolation site (R1); attribute values are quoted + esc()'d (R2); values
@@ -339,6 +340,10 @@
     // ─────────────────────────── render ───────────────────────────
 
     function render(contentEl, params, ctx) {
+        // Close before replacing this view synchronously. The panel remains a
+        // descendant of its disclosure, so any other route's render also
+        // removes it atomically with the Access DOM.
+        closeAllActionMenus(null, false);
         var identity = (ctx && ctx.identity) || {};
         var epochAtRender = ctx ? ctx.epoch : (AdminRouter ? AdminRouter.epoch : 0);
 
@@ -402,8 +407,6 @@
         return '' +
             '<button class="btn btn-secondary" data-action="access-refresh">' +
             icon('refresh') + '<span>Refresh</span></button>' +
-            '<button class="btn btn-secondary" data-action="access-open-edit">' +
-            icon('access') + '<span>Edit token</span></button>' +
             '<button class="btn btn-primary" data-action="access-create">' +
             icon('plus') + '<span>Create token</span></button>';
     }
@@ -493,7 +496,7 @@
         var identity = (ctx && ctx.identity) || {};
         var headers = ['Name', 'Hash', 'Status', 'Permissions', 'Space allowlist', 'Email / owner', ''];
         var rows = tokens.map(function (t) { return renderRow(t, identity); }).join('');
-        tableEl.innerHTML = dataTable(headers, rows);
+        tableEl.innerHTML = '<div class="access-token-table">' + dataTable(headers, rows) + '</div>';
     }
 
     // §5.0 status handling: sentinels + error render honest states; French text
@@ -508,44 +511,43 @@
     }
 
     function renderRow(t, identity) {
-        var internal = isInternalLong(t);
         var current = identity && identity.token_hash && t.hash === identity.token_hash;
         var rowClass = t.revoked ? ' class="row-muted"' : '';
 
         var nameCell = '<div class="token-name">' + esc(String(t.name || '')) + '</div>';
-        if (internal) {
-            nameCell += '<span class="badge-reserved">' + icon('shield') +
-                'System — embedded long runtime</span>';
-        }
         if (current) {
             nameCell += '<span class="chip chip-current">current session</span>';
         }
 
-        var adminCell = isAdminToken(t) ? pill('warn', 'admin') : '<span class="text-faint">—</span>';
-
-        // Row actions. Edit is absent for internal-long (never widen/narrow the
-        // reserved token, §7.4.2). Revoke is hidden once already revoked. Delete
-        // is offered for revoked rows only.
-        var actions = '';
-        if (!internal && !t.revoked) {
-            actions += '<button class="btn btn-secondary btn-sm" data-action="access-edit"' +
-                ' data-hash="' + esc(t.hash) + '"' +
-                ' data-name="' + esc(String(t.name || '')) + '"' +
-                ' data-perms="' + esc((t.permissions || []).join(',')) + '"' +
-                ' data-spaces="' + esc((t.space_ids || []).join(',')) + '"' +
-                ' data-email="' + esc(String(t.email || '')) + '">Edit</button>';
-        }
-        if (!t.revoked) {
-            actions += '<button class="btn btn-danger btn-sm" data-action="access-revoke"' +
-                ' data-hash="' + esc(t.hash) + '"' +
-                ' data-name="' + esc(String(t.name || '')) + '"' +
-                ' data-internal="' + (internal ? '1' : '0') + '">Revoke</button>';
-        }
-        if (t.revoked) {
-            actions += '<button class="btn btn-danger btn-sm" data-action="access-delete"' +
-                ' data-hash="' + esc(t.hash) + '"' +
-                ' data-name="' + esc(String(t.name || '')) + '">Delete</button>';
-        }
+        // One disclosure control per row. The full hash lives once on the
+        // enclosing menu; action buttons resolve it through closest() and then
+        // reselect the exact token from the fresh in-memory list. No plaintext or
+        // editable metadata is copied into row attributes.
+        var editDisabled = t.revoked
+            ? ' disabled aria-disabled="true" title="Revoked tokens cannot be edited"'
+            : '';
+        var lifecycleItem = t.revoked
+            ? '<button type="button" class="row-action-item" disabled aria-disabled="true"' +
+              ' title="Revocation is permanent; create a replacement token instead">' +
+              '<span>Reactivate token</span><small>Revocation is permanent</small></button>'
+            : '<button type="button" class="row-action-item row-action-danger"' +
+              ' data-action="access-revoke"><span>Disable token</span><small>Permanent soft revoke</small></button>';
+        var actions =
+            '<details class="row-action-menu" name="token-actions" data-hash="' + esc(t.hash) + '">' +
+            '<summary class="row-action-trigger" aria-label="Actions for token ' +
+            esc(String(t.name || 'unnamed')) + '"><span aria-hidden="true">•••</span></summary>' +
+            '<div class="row-action-menu-panel" role="group" aria-label="Token actions">' +
+            '<button type="button" class="row-action-item" data-action="access-edit"' +
+            editDisabled + '><span>Edit token</span><small>Permissions, spaces, owner</small></button>' +
+            '<button type="button" class="row-action-item" data-action="access-replace">' +
+            '<span>Create replacement…</span><small>Old token stays active</small></button>' +
+            lifecycleItem +
+            '<div class="row-action-separator" role="separator"></div>' +
+            '<button type="button" class="row-action-item row-action-danger"' +
+            ' data-action="access-delete"><span>Delete permanently</span><small>Irreversible</small></button>' +
+            '<button type="button" class="row-action-item row-action-close" data-action="access-close-menu">' +
+            '<span>Close menu</span><small>Return to the token list</small></button>' +
+            '</div></details>';
 
         return '<tr' + rowClass + '>' +
             '<td>' + nameCell + '</td>' +
@@ -560,7 +562,33 @@
 
     // ─────────────────────────── create ───────────────────────────
 
-    function openCreateModal() {
+    function replacementExpiryDays(expiresAt) {
+        if (!expiresAt) return 0;
+        var expiry = Date.parse(expiresAt);
+        // A malformed finite expiry must not silently widen to "never" in the
+        // prefill. One day is the safest editable fallback the create API accepts.
+        if (Number.isNaN(expiry)) return 1;
+        var remaining = expiry - Date.now();
+        return remaining > 0 ? Math.max(1, Math.ceil(remaining / 86400000)) : 1;
+    }
+
+    function replacementPrefill(token) {
+        var permissionsAvailable = Array.isArray(token.permissions) && token.permissions.length > 0 &&
+            token.permissions.every(function (permission) {
+                return typeof permission === 'string' && permission.length > 0;
+            });
+        return {
+            replacementFor: String(token.name || 'unnamed token'),
+            name: String(token.name || 'token') + '-replacement',
+            permissions: permissionsAvailable ? token.permissions.join(',') : '',
+            permissionsUnavailable: !permissionsAvailable,
+            spaces: Array.isArray(token.space_ids) ? token.space_ids.join(', ') : '',
+            expiresInDays: replacementExpiryDays(token.expires_at),
+            email: String(token.email || ''),
+        };
+    }
+
+    function openCreateModal(prefill) {
         var identityAtOpen = _sessionIdentity();
         if (!hasManage(identityAtOpen)) {
             clearAdminTokenCache();
@@ -568,16 +596,44 @@
             return;
         }
         var adminMode = hasGlobalAdmin(identityAtOpen);
+        prefill = prefill || {};
+        var replacementFor = prefill.replacementFor ? String(prefill.replacementFor) : '';
+        var hasPrefilledPermissions = Object.prototype.hasOwnProperty.call(prefill, 'permissions');
+        var initialPermissions = hasPrefilledPermissions ? String(prefill.permissions) : 'read,write';
+        var permissionsUnavailable = Boolean(replacementFor) &&
+            (prefill.permissionsUnavailable === true || !initialPermissions);
+        var initialName = prefill.name || '';
+        var initialSpaces = prefill.spaces || '';
+        var initialDays = Number.isFinite(prefill.expiresInDays) ? prefill.expiresInDays : 0;
+        var initialEmail = prefill.email || '';
         var presets = adminMode ? PERMISSION_PRESETS : PERMISSION_PRESETS.slice(0, 3);
-        var permOptions = presets.map(function (p, i) {
-            return '<option value="' + esc(p.value) + '"' + (i === 1 ? ' selected' : '') +
+        var exactPreset = presets.some(function (p) { return p.value === initialPermissions; });
+        // The backend accepts and returns valid de-duplicated permission
+        // sequences verbatim. Replacement must preserve that exact profile,
+        // including a non-preset order/subset, instead of letting the browser
+        // silently select the first preset.
+        var unavailableProfileOption = permissionsUnavailable
+            ? '<option value="" selected disabled>Stored permission profile unavailable — choose a preset</option>'
+            : '';
+        var storedProfileOption = replacementFor && !permissionsUnavailable && !exactPreset
+            ? '<option value="' + esc(initialPermissions) + '" selected>Stored permission profile — ' +
+              esc(initialPermissions) + '</option>'
+            : '';
+        var permOptions = unavailableProfileOption + storedProfileOption + presets.map(function (p) {
+            return '<option value="' + esc(p.value) + '"' + (p.value === initialPermissions ? ' selected' : '') +
                 '>' + esc(p.label) + '</option>';
         }).join('');
+        var permissionsHint = permissionsUnavailable
+            ? 'The stored permission profile cannot be copied safely. Choose a preset intentionally before creating.'
+            : (storedProfileOption
+                ? 'The stored permission profile is preserved exactly. Choose a preset only to change it intentionally.'
+                : 'Inclusive model: each preset includes the ones before it.');
 
         var spacesField = adminMode ?
             '<div class="form-group">' +
             '<label class="form-label" for="ctSpaces">Space allowlist</label>' +
-            '<input class="form-input mono" id="ctSpaces" autocomplete="off" placeholder="space-a, space-b">' +
+            '<input class="form-input mono" id="ctSpaces" autocomplete="off" placeholder="space-a, space-b" value="' +
+            esc(initialSpaces) + '">' +
             '<div class="form-hint" id="ctSpacesHint">Empty grants no space access. Use ' +
             '<code>*</code> or <code>all</code> to grant access to all existing spaces. ' +
             'New spaces are not added automatically. ' +
@@ -586,27 +642,35 @@
             '<div class="access-banner">New tokens start with no space access. ' +
             'Save the Token ID, then use <strong>Invite token</strong> to grant one of your spaces.</div>';
 
-        var body =
+        var replacementNotice = replacementFor
+            ? '<div class="access-banner replacement-banner">' + icon('refresh') + '<span>Creating a replacement for <strong>' +
+              esc(replacementFor) + '</strong>. The old token stays active until you explicitly disable or delete it.</span></div>'
+            : '';
+        var body = replacementNotice +
             '<div class="form-group">' +
             '<label class="form-label" for="ctName">Name <span class="req">*</span></label>' +
-            '<input class="form-input mono" id="ctName" autocomplete="off" data-1p-ignore data-lpignore="true" placeholder="agent-cline">' +
+            '<input class="form-input mono" id="ctName" autocomplete="off" data-1p-ignore data-lpignore="true"' +
+            ' placeholder="agent-cline" value="' + esc(initialName) + '">' +
             '<div class="form-error" id="ctNameErr" hidden></div>' +
             '<div class="form-hint" id="ctNameHint">Names are labels, not identifiers — they need not be unique.</div>' +
             '</div>' +
             '<div class="form-group">' +
             '<label class="form-label" for="ctPerms">Permissions <span class="req">*</span></label>' +
             '<select class="form-input" id="ctPerms">' + permOptions + '</select>' +
-            '<div class="form-hint">Inclusive model: each preset includes the ones before it.</div>' +
+            '<div class="form-error" id="ctPermsErr" hidden></div>' +
+            '<div class="form-hint">' + permissionsHint + '</div>' +
             '</div>' +
             spacesField +
             '<div class="form-group">' +
             '<label class="form-label" for="ctExpires">Expires in days</label>' +
-            '<input class="form-input mono" id="ctExpires" type="number" min="0" value="0">' +
-            '<div class="form-hint">0 = never expires.</div>' +
+            '<input class="form-input mono" id="ctExpires" type="number" min="0" value="' + esc(String(initialDays)) + '">' +
+            '<div class="form-hint">0 = never expires.' + (replacementFor && initialDays > 0
+                ? ' Remaining lifetime was rounded up to whole days; review before creating.' : '') + '</div>' +
             '</div>' +
             '<div class="form-group">' +
             '<label class="form-label" for="ctEmail">Email / owner</label>' +
-            '<input class="form-input" id="ctEmail" type="email" autocomplete="off" placeholder="optional">' +
+            '<input class="form-input" id="ctEmail" type="email" autocomplete="off" placeholder="optional" value="' +
+            esc(initialEmail) + '">' +
             '</div>' +
             // Timer-free recovery for an indefinitely pending request (Terra-R3):
             // callTool has no abort/timeout and timer-based coordination is
@@ -619,7 +683,8 @@
             '<button type="button" class="btn btn-ghost btn-sm" id="ctStopWaiting">Stop waiting</button>' +
             '</div>';
 
-        _openModal('Create token', body, 'Create token', function () {
+        _openModal(replacementFor ? 'Create replacement token' : 'Create token', body,
+            replacementFor ? 'Create replacement' : 'Create token', function () {
             return onCreateConfirm(adminMode, identityAtOpen);
         });
 
@@ -694,6 +759,15 @@
         }
 
         var selectedPermissions = document.getElementById('ctPerms').value;
+        var permissionsErr = document.getElementById('ctPermsErr');
+        if (!selectedPermissions) {
+            if (permissionsErr) {
+                permissionsErr.textContent = 'Select a permission profile before creating the token.';
+                permissionsErr.hidden = false;
+            }
+            return false;
+        }
+        if (permissionsErr) permissionsErr.hidden = true;
         var targetIsAdmin = selectedPermissions.split(',').indexOf('admin') !== -1;
         var safePresetValues = PERMISSION_PRESETS.slice(0, 3).map(function (p) { return p.value; });
         if (!adminMode && safePresetValues.indexOf(selectedPermissions) === -1) {
@@ -1099,57 +1173,167 @@
         };
     }
 
-    // A clear page-level entry point complements the per-row Edit button. The
-    // full hash is the option value and part of its label, so duplicate names
-    // can never select the wrong credential.
-    function openEditPickerModal() {
+    function freshTokenForAction(hash) {
         if (_tokenListEpoch !== AdminRouter.epoch) {
-            showToast('warn', 'Wait for the token list to finish loading before selecting a token.');
-            return;
+            showToast('warn', 'The token list changed. Refresh it before taking action.');
+            return null;
         }
-        var editable = (cache && Array.isArray(cache.tokens) ? cache.tokens : []).filter(function (token) {
-            return !isInternalLong(token) && !token.revoked;
+        var tokens = cache && Array.isArray(cache.tokens) ? cache.tokens : [];
+        for (var i = 0; i < tokens.length; i++) {
+            if (tokens[i] && tokens[i].hash === hash) return tokens[i];
+        }
+        showToast('warn', 'Token not found in the current list. Refresh and try again.');
+        return null;
+    }
+
+    function actionHash(data, btn) {
+        if (data && data.hash) return String(data.hash);
+        var menu = actionMenuForButton(btn);
+        return menu && menu.dataset ? String(menu.dataset.hash || '') : '';
+    }
+
+    function actionMenuForButton(btn) {
+        if (!btn || typeof btn.closest !== 'function') return null;
+        return btn.closest('.row-action-menu');
+    }
+
+    function actionPanelForMenu(menu) {
+        return menu && menu.querySelector && menu.querySelector('.row-action-menu-panel');
+    }
+
+    function closeActionMenu(btn, restoreFocus) {
+        var menu = actionMenuForButton(btn);
+        if (!menu) return;
+        menu.open = false;
+        if (restoreFocus) {
+            var trigger = menu.querySelector && menu.querySelector('.row-action-trigger');
+            if (trigger && typeof trigger.focus === 'function') trigger.focus();
+        }
+    }
+
+    function closeAllActionMenus(except, restoreFocus) {
+        if (!document.querySelectorAll) return false;
+        var menus = document.querySelectorAll('.row-action-menu[open]');
+        var closed = false;
+        for (var i = 0; i < menus.length; i++) {
+            var menu = menus[i];
+            if (menu === except) continue;
+            menu.open = false;
+            closed = true;
+            if (restoreFocus) {
+                var trigger = menu.querySelector && menu.querySelector('.row-action-trigger');
+                if (trigger && typeof trigger.focus === 'function') trigger.focus();
+            }
+        }
+        return closed;
+    }
+
+    function narrowActionLayout() {
+        return typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1100px)').matches;
+    }
+
+    function positionActionMenu(menu) {
+        if (!menu || !menu.open || !menu.querySelector) return;
+        var panel = actionPanelForMenu(menu);
+        var trigger = menu.querySelector('.row-action-trigger');
+        if (!panel || !trigger || !panel.style) return;
+
+        var viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+        var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        var narrow = narrowActionLayout();
+        panel.style.width = narrow ? Math.max(0, viewportWidth - 32) + 'px' : '';
+        panel.style.top = '0px';
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+        panel.style.left = '0px';
+        if (typeof trigger.getBoundingClientRect !== 'function' ||
+            typeof panel.getBoundingClientRect !== 'function') return;
+
+        var triggerRect = trigger.getBoundingClientRect();
+        // Chromium treats a fixed descendant of a disclosure inside a table as
+        // if the disclosure established the containing block. Measure that
+        // zero-inset origin and compensate back into viewport coordinates; the
+        // panel stays in DOM/tab order and still escapes the table scroller.
+        var originRect = panel.getBoundingClientRect();
+        var panelWidth = originRect.width || panel.offsetWidth || 236;
+        var panelHeight = originRect.height || panel.offsetHeight || 240;
+        var gutter = 16;
+        var desiredLeft;
+        var desiredTop;
+        if (narrow) {
+            desiredLeft = gutter;
+            desiredTop = Math.max(gutter, viewportHeight - panelHeight - gutter);
+        } else {
+            desiredLeft = Math.min(
+                Math.max(gutter, triggerRect.right - panelWidth),
+                Math.max(gutter, viewportWidth - panelWidth - gutter)
+            );
+            desiredTop = triggerRect.bottom + 4;
+            if (desiredTop + panelHeight > viewportHeight - gutter) {
+                desiredTop = Math.max(gutter, triggerRect.top - panelHeight - 4);
+            }
+        }
+        panel.style.left = (desiredLeft - originRect.left) + 'px';
+        panel.style.top = (desiredTop - originRect.top) + 'px';
+    }
+
+    // Native details provides disclosure state and keyboard activation. These
+    // document-level hooks add consistent one-open-at-a-time behavior for
+    // engines that ignore details[name], plus the expected dismissal paths.
+    if (typeof document.addEventListener === 'function') {
+        document.addEventListener('toggle', function (event) {
+            var menu = event.target;
+            if (!menu || !menu.classList || !menu.classList.contains('row-action-menu')) return;
+            if (!menu.open) return;
+            closeAllActionMenus(menu, false);
+            positionActionMenu(menu);
+            // `toggle` can fire before the opened panel has its final intrinsic
+            // size. Re-clamp after layout so long labels cannot push it beyond
+            // the viewport edge.
+            if (typeof window.requestAnimationFrame === 'function') {
+                window.requestAnimationFrame(function () { positionActionMenu(menu); });
+            }
+        }, true);
+        document.addEventListener('click', function (event) {
+            var inside = event.target && typeof event.target.closest === 'function'
+                ? (event.target.closest('.row-action-menu') || event.target.closest('.row-action-menu-panel')) : null;
+            if (!inside) closeAllActionMenus(null, false);
         });
-        if (!editable.length) {
-            showToast('warn', 'There are no active tokens available to edit.');
-            return;
-        }
+        document.addEventListener('keydown', function (event) {
+            if (event.key === 'Escape' && closeAllActionMenus(null, true)) {
+                event.preventDefault();
+            }
+        });
+    }
+    if (typeof window.addEventListener === 'function') {
+        window.addEventListener('resize', function () { closeAllActionMenus(null, false); });
+    }
 
-        var options = editable.map(function (token) {
-            var label = token.name ? String(token.name) : 'Unnamed token';
-            return '<option value="' + esc(String(token.hash || '')) + '">' +
-                esc(label + ' — ' + String(token.hash || '')) + '</option>';
-        }).join('');
+    function openReplacementModal(token) {
         var body =
-            '<div class="form-group">' +
-            '<label class="form-label" for="editTokenPicker">Token</label>' +
-            '<select class="form-input" id="editTokenPicker">' + options + '</select>' +
-            '<div class="form-hint">Select by full token ID. Only active, non-system tokens can be edited.</div>' +
-            '</div>' +
-            '<div id="editTokenPickerErr"></div>';
+            '<div class="access-banner replacement-banner">' + icon('refresh') +
+            '<span>The backend does not expose an atomic regenerate-or-replace operation. ' +
+            'Hivemind can create a new one-time secret, but it cannot reissue the existing token.</span></div>' +
+            '<ol class="replacement-steps">' +
+            '<li>Create a replacement with the access profile prefilled.</li>' +
+            '<li>Save its plaintext token and full Token ID.</li>' +
+            '<li>Verify the new credential works.</li>' +
+            '<li>Return to this row and disable or delete <strong>' + esc(String(token.name || 'the old token')) +
+            '</strong>.</li></ol>' +
+            '<p class="form-hint"><strong>The old token stays active</strong> until you explicitly disable or delete it. ' +
+            'No destructive action is chained to creation.</p>' +
+            '<div id="replacementErr"></div>';
 
-        _openModal('Choose a token to edit', body, 'Edit token', function () {
+        _openModal('Replace token safely', body, 'Create replacement', function () {
             if (!requireGlobalAdmin()) return false;
-            if (_tokenListEpoch !== AdminRouter.epoch) {
-                var staleEl = document.getElementById('editTokenPickerErr');
-                if (staleEl) staleEl.innerHTML = serverMessage('The token list changed. Close this dialog and select a token again.');
-                return false;
-            }
-            var picker = document.getElementById('editTokenPicker');
-            var selectedHash = picker ? picker.value : '';
-            var selected = null;
-            for (var i = 0; i < editable.length; i++) {
-                if (editable[i].hash === selectedHash) {
-                    selected = editable[i];
-                    break;
-                }
-            }
+            var selected = freshTokenForAction(token.hash);
             if (!selected) {
-                var errorEl = document.getElementById('editTokenPickerErr');
-                if (errorEl) errorEl.innerHTML = serverMessage('Select an active token from this list.');
+                var err = document.getElementById('replacementErr');
+                if (err) err.innerHTML = serverMessage('The token list changed. Close this dialog, refresh, and try again.');
                 return false;
             }
-            openEditModal(editDataFromToken(selected));
+            token = selected;
+            openCreateModal(replacementPrefill(token));
             return false;
         });
     }
@@ -1329,29 +1513,28 @@
 
     // ─────────────────────────── revoke / delete (non-typed, red) ───────────────────────────
 
-    function openRevokeModal(data) {
-        var hash = data.hash || '';
-        var name = data.name || '';
-        var internal = data.internal === '1';
+    function openRevokeModal(token) {
+        var hash = token.hash || '';
+        var name = token.name || '';
 
-        var warn = '<p>This soft-revokes <strong>' + esc(name) + '</strong>. There is no ' +
-            'un-revoke: a revoked token can be deleted but never re-activated.</p>';
-        if (internal) {
-            warn += '<div class="destructive-note">' + icon('alert') +
-                '<span>Revoking <code>internal-long</code> fails the embedded long tier ' +
-                'closed: a revoked entry is never re-activated automatically, and ' +
-                '<code>long_push</code> / <code>long_status</code> will fail until the ' +
-                'credential is re-provisioned by an operator.</span></div>';
-        }
-        openConfirmDanger('Revoke token', warn, 'Revoke', 'access-revoke-do', hash);
+        var warn = '<p>This permanently disables <strong>' + esc(name) + '</strong> by soft-revoking it. ' +
+            'There is no reactivation: a revoked token can only be replaced or permanently deleted.</p>';
+        openConfirmDanger('Disable token', warn, 'Disable token', 'access-revoke-do', hash);
     }
 
-    function openDeleteModal(data) {
-        var hash = data.hash || '';
-        var name = data.name || '';
-        var warn = '<p>This permanently deletes the revoked token <strong>' + esc(name) +
-            '</strong> from the registry. This is irreversible.</p>';
-        openConfirmDanger('Delete token', warn, 'Delete', 'access-delete-do', hash);
+    function openDeleteModal(token) {
+        var hash = token.hash || '';
+        var name = token.name || '';
+        var warn;
+        if (token.revoked) {
+            warn = '<p>This permanently deletes the revoked token <strong>' + esc(name) +
+                '</strong> from the registry. This is irreversible.</p>';
+        } else {
+            warn = '<p>This permanently deletes the active token <strong>' + esc(name) +
+                '</strong> from the registry and immediately invalidates its access. ' +
+                'This skips the retained revoked state and cannot be undone.</p>';
+        }
+        openConfirmDanger('Delete token permanently', warn, 'Delete permanently', 'access-delete-do', hash);
     }
 
     // Non-typed destructive confirm (§7.4.1 "Medium-impact") with a Critical-Red
@@ -1474,11 +1657,38 @@
     });
     registerAction('access-create', function () { openCreateModal(); });
     registerAction('access-invite', function () { openInviteModal(); });
-    registerAction('access-open-edit', function () { if (requireGlobalAdmin()) openEditPickerModal(); });
-    registerAction('access-edit', function (data) { if (requireGlobalAdmin()) openEditModal(data); });
-    registerAction('access-revoke', function (data) { if (requireGlobalAdmin()) openRevokeModal(data); });
-    registerAction('access-delete', function (data) { if (requireGlobalAdmin()) openDeleteModal(data); });
-    registerAction('access-purge', function (data) { if (requireGlobalAdmin()) openPurgeModal(data.mode); });
+    registerAction('access-edit', function (data, btn) {
+        if (!requireGlobalAdmin()) return;
+        closeActionMenu(btn);
+        var token = freshTokenForAction(actionHash(data, btn));
+        if (!token || token.revoked) return;
+        openEditModal(editDataFromToken(token));
+    });
+    registerAction('access-replace', function (data, btn) {
+        if (!requireGlobalAdmin()) return;
+        closeActionMenu(btn);
+        var token = freshTokenForAction(actionHash(data, btn));
+        if (token) openReplacementModal(token);
+    });
+    registerAction('access-revoke', function (data, btn) {
+        if (!requireGlobalAdmin()) return;
+        closeActionMenu(btn);
+        var token = freshTokenForAction(actionHash(data, btn));
+        if (token && !token.revoked) openRevokeModal(token);
+    });
+    registerAction('access-delete', function (data, btn) {
+        if (!requireGlobalAdmin()) return;
+        closeActionMenu(btn);
+        var token = freshTokenForAction(actionHash(data, btn));
+        if (token) openDeleteModal(token);
+    });
+    registerAction('access-close-menu', function (_data, btn) {
+        closeActionMenu(btn, true);
+    });
+    registerAction('access-purge', function (data) {
+        if (!requireGlobalAdmin()) return;
+        openPurgeModal(data.mode);
+    });
     registerAction('access-revoke-do', function (data, btn) {
         if (!requireGlobalAdmin()) return;
         runMutation('admin_revoke_token', data.hash, btn, 'ok', 'Token revoked');

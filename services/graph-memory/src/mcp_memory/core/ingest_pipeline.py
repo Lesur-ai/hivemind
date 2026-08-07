@@ -27,7 +27,10 @@ import gc
 import sys
 import time as _time
 import uuid
+from functools import wraps
 from typing import Any, Awaitable, Callable, Dict, Optional
+
+from hivemind_inference import EmbeddingResult
 
 from ..config import get_settings
 
@@ -39,6 +42,84 @@ class IngestCancelled(Exception):
 # Type des callbacks
 ProgressCallback = Callable[[str, int, Dict[str, Any]], Awaitable[None]]
 CancelCheck = Callable[[], bool]
+
+
+def _guard_namespace_mutation(method):
+    """Guard a keyword-scoped ingestion mutation before its first effect."""
+
+    @wraps(method)
+    async def guarded(*args, **kwargs):
+        memory_id = kwargs.get("memory_id")
+        if memory_id is None and args:
+            memory_id = args[0]
+        from .maintenance import get_maintenance_coordinator
+
+        async with get_maintenance_coordinator().ordinary(memory_id):
+            return await method(*args, **kwargs)
+
+    return guarded
+
+
+def _merge_embedding_results(
+    results: list[EmbeddingResult],
+) -> EmbeddingResult:
+    """Merge des batches seulement si leur identité embedding est identique.
+
+    Les quatre champs comparés sont exactement ceux que le résultat normalisé
+    apporte au consommateur Qdrant. La comparaison et la reconstruction ont lieu
+    avant tout appel au vector store : une dérive provider/model/dimensions
+    échoue donc sans création de collection ni écriture partielle.
+    """
+    if not results:
+        raise RuntimeError(
+            "embedding provider returned no normalized batch result"
+        )
+
+    first = results[0]
+    if type(first) is not EmbeddingResult:
+        raise RuntimeError(
+            "embedding provider returned an invalid normalized batch result"
+        )
+
+    identity = (
+        first.configured_model,
+        first.resolved_model,
+        first.model_evidence,
+        first.effective_dimensions,
+    )
+    vectors: list[tuple[float, ...]] = []
+
+    for result in results:
+        if type(result) is not EmbeddingResult:
+            raise RuntimeError(
+                "embedding provider returned an invalid normalized batch result"
+            )
+        if (
+            result.configured_model,
+            result.resolved_model,
+            result.model_evidence,
+            result.effective_dimensions,
+        ) != identity:
+            # Value-free by design: model identities may be provider-derived and
+            # must never be copied into an outward exception.
+            raise RuntimeError("embedding identity changed between batches")
+        vectors.extend(result.vectors)
+
+    def _complete_usage_sum(field: str) -> int | None:
+        values = [getattr(result, field) for result in results]
+        if any(value is None for value in values):
+            return None
+        return sum(values)
+
+    return EmbeddingResult(
+        vectors=tuple(vectors),
+        configured_model=first.configured_model,
+        resolved_model=first.resolved_model,
+        model_evidence=first.model_evidence,
+        effective_dimensions=first.effective_dimensions,
+        input_tokens=_complete_usage_sum("input_tokens"),
+        total_tokens=_complete_usage_sum("total_tokens"),
+    )
 
 
 # =============================================================================
@@ -79,10 +160,13 @@ def _vector_store():
 # Suppression multi-backend ordonnée (Qdrant → Neo4j → S3)
 # =============================================================================
 
+@_guard_namespace_mutation
 async def delete_document_everywhere(
     memory_id: str,
     doc_id: str,
     uri: Optional[str] = None,
+    *,
+    delete_vectors: bool = True,
 ) -> Dict[str, Any]:
     """
     Supprime un document de TOUS les backends, dans un ordre sûr.
@@ -97,6 +181,8 @@ async def delete_document_everywhere(
         memory_id: ID de la mémoire
         doc_id: UUID du document à supprimer
         uri: URI S3 (optionnel — récupéré depuis le graphe si absent)
+        delete_vectors: False seulement si aucune écriture Qdrant n'a encore
+                        été tentée pour ce document
     """
     result: Dict[str, Any] = {
         "neo4j_deleted": False,
@@ -117,11 +203,19 @@ async def delete_document_everywhere(
             result["errors"].append(f"get_document: {e}")
 
     # 1. Qdrant (chunks vectoriels)
-    try:
-        result["qdrant_chunks_deleted"] = await _vector_store().delete_document_chunks(memory_id, doc_id)
-    except Exception as e:
-        result["errors"].append(f"qdrant: {e}")
-        print(f"⚠️ [delete_everywhere] Qdrant: {e}", file=sys.stderr)
+    if delete_vectors:
+        try:
+            result["qdrant_chunks_deleted"] = await _vector_store().delete_document_chunks(memory_id, doc_id)
+        except Exception as e:
+            from .vector_store import EmbeddingCollectionError
+
+            if isinstance(e, EmbeddingCollectionError):
+                # Identity/unavailability means Qdrant ownership was not
+                # decided. Deleting Neo4j/S3 anyway would orphan vectors whose
+                # safe target is precisely what the resolver refused to guess.
+                raise
+            result["errors"].append(f"qdrant: {e}")
+            print(f"⚠️ [delete_everywhere] Qdrant: {e}", file=sys.stderr)
 
     # 2. Neo4j (document + entités orphelines)
     try:
@@ -211,6 +305,7 @@ async def resolve_ingestion(
 # Pipeline principal
 # =============================================================================
 
+@_guard_namespace_mutation
 async def run_ingest_pipeline(
     *,
     memory_id: str,
@@ -266,6 +361,7 @@ async def run_ingest_pipeline(
     file_ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else ''
     s3_uploaded_uri: Optional[str] = None
     doc_id: Optional[str] = None
+    vector_write_attempted = False
 
     try:
         # Vérifier la mémoire + ontologie (nécessaire pour l'extraction)
@@ -388,7 +484,6 @@ async def run_ingest_pipeline(
         chunks_stored = 0
         EMBED_BATCH_SIZE = 5
         try:
-            await _vector_store().ensure_collection(memory_id)
             await _report("chunking", 72, "🧩 Chunking sémantique...")
             import asyncio
             loop = asyncio.get_event_loop()
@@ -402,7 +497,7 @@ async def run_ingest_pipeline(
 
                 chunk_texts = [c.text for c in chunks]
                 total_chunks = len(chunk_texts)
-                all_embeddings = []
+                batch_results: list[EmbeddingResult] = []
                 total_batches = (total_chunks + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
 
                 for batch_start in range(0, total_chunks, EMBED_BATCH_SIZE):
@@ -413,13 +508,23 @@ async def run_ingest_pipeline(
                     batch_texts = chunk_texts[batch_start:batch_end]
                     pct = 75 + int(20 * batch_num / max(1, total_batches))  # 75 → 95
                     await _report("embedding", pct, f"🔢 Embedding batch {batch_num}/{total_batches}")
-                    batch_embeddings = await _embedder().embed_texts(batch_texts)
-                    all_embeddings.extend(batch_embeddings)
+                    batch_result = await _embedder().embed_texts_result(batch_texts)
+                    if len(batch_result.vectors) != len(batch_texts):
+                        raise RuntimeError(
+                            "embedding provider returned an invalid batch cardinality"
+                        )
+                    batch_results.append(batch_result)
 
-                await _report("vector_store", 96, f"📦 Stockage Qdrant ({len(all_embeddings)} vecteurs)...")
-                chunks_stored = await _vector_store().store_chunks(
+                embedding_result = _merge_embedding_results(batch_results)
+                await _report("vector_store", 96, f"📦 Stockage Qdrant ({len(embedding_result.vectors)} vecteurs)...")
+                vector_store = _vector_store()
+                # Dès que le store est invoqué, sa livraison peut être partielle.
+                # Avant ce point, le rollback ne doit pas créer à lui seul un
+                # chemin de mutation Qdrant.
+                vector_write_attempted = True
+                chunks_stored = await vector_store.store_chunks(
                     memory_id=memory_id, doc_id=doc_id, filename=filename,
-                    chunks=chunks, embeddings=all_embeddings,
+                    chunks=chunks, embedding_result=embedding_result,
                 )
                 await _report("vector_store", 98, f"✅ RAG : {chunks_stored} chunks vectorisés")
         except IngestCancelled:
@@ -468,13 +573,23 @@ async def run_ingest_pipeline(
 
     except IngestCancelled as c:
         # Annulation propre : nettoyer ce qui a pu être écrit
-        cleanup = await _rollback(memory_id, doc_id, s3_uploaded_uri)
+        cleanup = await _rollback(
+            memory_id,
+            doc_id,
+            s3_uploaded_uri,
+            delete_vectors=vector_write_attempted,
+        )
         out = {"status": "cancelled", "message": f"Annulé ({c})", "steps": _steps_log}
         if cleanup.get("errors"):
             out["cleanup"] = cleanup
         return out
     except Exception as e:
-        cleanup = await _rollback(memory_id, doc_id, s3_uploaded_uri)
+        cleanup = await _rollback(
+            memory_id,
+            doc_id,
+            s3_uploaded_uri,
+            delete_vectors=vector_write_attempted,
+        )
         print(f"❌ [Ingest] Erreur: {e}", file=sys.stderr)
         out = {"status": "error", "message": str(e), "steps": _steps_log}
         if cleanup.get("errors"):
@@ -483,7 +598,13 @@ async def run_ingest_pipeline(
         return out
 
 
-async def _rollback(memory_id: str, doc_id: Optional[str], s3_uri: Optional[str]) -> Dict[str, Any]:
+async def _rollback(
+    memory_id: str,
+    doc_id: Optional[str],
+    s3_uri: Optional[str],
+    *,
+    delete_vectors: bool = True,
+) -> Dict[str, Any]:
     """
     Nettoie les écritures partielles pour ne laisser aucun orphelin.
 
@@ -495,7 +616,12 @@ async def _rollback(memory_id: str, doc_id: Optional[str], s3_uri: Optional[str]
     try:
         if doc_id:
             # Le document a été créé → suppression complète (Qdrant + Neo4j + S3)
-            result = await delete_document_everywhere(memory_id, doc_id, uri=s3_uri)
+            result = await delete_document_everywhere(
+                memory_id,
+                doc_id,
+                uri=s3_uri,
+                delete_vectors=delete_vectors,
+            )
             if result.get("errors") and not result.get("neo4j_deleted"):
                 # Le nœud subsiste : marqueur durable pour ne pas le voir 'succeeded'
                 try:

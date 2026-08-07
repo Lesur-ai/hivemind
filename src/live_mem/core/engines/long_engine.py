@@ -240,6 +240,16 @@ class LongEngine:
         """
         return await self._bridge.search(space_id, query, limit=limit)
 
+    async def reindex(self, space_id: str) -> dict:
+        """Run explicit embedding-projection maintenance for ``space_id``.
+
+        Pass-through to :meth:`GraphBridgeService.reindex`. The bridge enforces
+        the persisted embedded-runtime boundary and issues the one internal
+        maintenance call. This derived projection remains outside every
+        Hivemind commit, rollback, audit, and recovery decision.
+        """
+        return await self._bridge.reindex(space_id)
+
     async def plan_ingest(
         self,
         space_id: str,

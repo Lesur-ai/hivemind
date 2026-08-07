@@ -7,6 +7,7 @@ weakening of that runtime job visible in the ordinary Python test job.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -24,13 +25,25 @@ def _read(relative: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _build_job_body(workflow: str) -> str:
+    match = re.search(
+        r"(?ms)^  build:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_]*:|\Z)", workflow
+    )
+    assert match is not None, "missing workflow job 'build'"
+    return match.group("body")
+
+
 def _assert_ci_gate(workflow: str) -> None:
     assert "  embedded_secret_runtime:" in workflow
     assert "run: bash scripts/verify_embedded_secret_docker.sh" in workflow
     # embedded_secret_runtime must be a REQUIRED build dependency (issue #183),
     # regardless of any other required jobs (e.g. the P9-3 public_tree gate) also
-    # being listed in the same `needs:`.
-    needs_lines = [ln for ln in workflow.splitlines() if ln.strip().startswith("needs:")]
+    # being listed in the same `needs:`. Scoped to the build job's own body: a
+    # different job's needs: line can also legitimately mention
+    # embedded_secret_runtime (TQ-8's aggregate Required CI gate does), which
+    # would otherwise mask this job's own dependency being dropped.
+    build_body = _build_job_body(workflow)
+    needs_lines = [ln for ln in build_body.splitlines() if ln.strip().startswith("needs:")]
     assert any("embedded_secret_runtime" in ln for ln in needs_lines), (
         "embedded_secret_runtime must be listed in the build job's needs"
     )

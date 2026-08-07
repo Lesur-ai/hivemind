@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from live_mem.core import consolidator as consolidator_module
 from live_mem.core import gc as gc_module
 from live_mem.core.consolidator import ConsolidatorService
 from live_mem.core.engines import EngineRegistry, RegistryRefused
@@ -909,6 +910,7 @@ async def test_consolidator_agent_filter_resists_filename_normalization_collisio
 
 def test_consolidator_prompt_preserves_body_with_inline_delimiter_in_identity() -> None:
     service = object.__new__(ConsolidatorService)
+    service._legacy_french_prompts = False
     body = "PAYLOAD EXACT --- body marker stays"
     content = (
         '---\nagent: "a.b---c"\ncategory: "decision"\n'
@@ -932,7 +934,7 @@ def test_consolidator_prompt_preserves_body_with_inline_delimiter_in_identity() 
     )
     user_prompt = messages[1]["content"]
 
-    assert "[agent=a.b---c, catégorie=decision, tags=[\"identity\"]]" in user_prompt
+    assert "[agent=a.b---c, category=decision, tags=[\"identity\"]]" in user_prompt
     assert body in user_prompt
     assert 'agent: "a.b---c"' not in user_prompt
 
@@ -1510,6 +1512,86 @@ async def test_consolidator_first_batch_llm_failure_is_error_with_no_writes(
     assert phases.last_phase == "failed"
 
 
+@pytest.mark.parametrize(
+    ("failing_batch", "expected_status", "expected_processed"),
+    [(1, "error", 0), (2, "partial", 1)],
+)
+async def test_unrepairable_completion_is_terminal_and_classified_by_batch_position(
+    monkeypatch: pytest.MonkeyPatch,
+    failing_batch: int,
+    expected_status: str,
+    expected_processed: int,
+) -> None:
+    """PR #303 round 2 (Codex Sol) — what removing the corrective turn costs.
+
+    P13-1C deleted the automatic corrective prompt turn (ADR-0027 §Retry: a
+    malformed response is never replayed, and "the adapter never does so
+    silently"), so an unrepairable completion is terminal for its batch after
+    the network-free ``_repair_json`` rescue.  The sibling tests above inject at
+    the ``_call_llm`` seam, which sits ABOVE the malformed path and therefore
+    cannot see either property this pins:
+
+    - exactly ONE paid application request per batch — the whole point of
+      removing the turn was that a batch could otherwise reach four upstream
+      attempts;
+    - the three-state classification is unchanged by that removal.  A malformed
+      FIRST batch is ``error`` with zero durable mutation; a malformed LATER
+      batch is ``partial``, because earlier batches already wrote.
+    """
+    import json as _json
+
+    from hivemind_inference.records import ChatResult
+
+    storage = GCStorage()
+    sid = f"p13-unrepairable-batch-{failing_batch}"
+    first = _old_key(sid, "first")
+    second = _old_key(sid, "second")
+    _seed_space(storage, sid, first, second)
+    service = _pipeline_service(
+        storage, monkeypatch, [(first, "first"), (second, "second")]
+    )
+    # Exercise the REAL _call_llm: the malformed path lives below the seam the
+    # sibling tests replace.
+    del service._call_llm
+    service._context_window = 131072
+    service._max_tokens = 4096
+
+    def _reply(text: str) -> ChatResult:
+        return ChatResult(
+            text=text,
+            configured_model="test-model",
+            model_evidence="configured_only",
+            finish_reason="stop",
+        )
+
+    usable = _reply(_json.dumps({"file_edits": [], "synthesis": "s"}))
+    # Prose, not truncated JSON: `_repair_json` rescues an unterminated string,
+    # and a rescued batch would prove nothing about the terminal path.
+    unusable = _reply("Je ne peux pas produire ce document.")
+    replies = [unusable] if failing_batch == 1 else [usable, unusable]
+    budgets: list[int] = []
+
+    async def _complete_chat(messages, output_budget):
+        budgets.append(output_budget)
+        return replies[len(budgets) - 1]
+
+    service._complete_chat = _complete_chat
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == expected_status
+    assert result["failed_batch"] == failing_batch
+    assert result["failure_reason"] == "batch_llm_failed"
+    assert result["notes_processed"] == expected_processed
+    assert result["batches_completed"] == failing_batch - 1
+    # ONE paid request per batch, and none after the terminal one.
+    assert len(budgets) == failing_batch
+    # The failed batch never wrote; only the batches before it did.
+    assert service._write_results.await_count == failing_batch - 1
+    # Sources of the failed batch stay durable (never-drop).
+    assert second in storage.objects
+
+
 async def test_consolidator_first_batch_llm_exception_is_error_with_no_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1784,34 +1866,53 @@ async def test_consolidator_full_success_keeps_ok_and_terminal_done_phase(
 # ─────────────────────────────────────────────────────────────
 
 
-class _BudgetCaptureCompletions:
-    """chat.completions double capturing the requested max_tokens."""
+def _chat_result(content: str):
+    """Normalized shared-boundary result (P13-1C) for a scripted completion."""
+    from hivemind_inference.records import ChatResult
+
+    return ChatResult(
+        text=content,
+        configured_model="test-model",
+        model_evidence="configured_only",
+        finish_reason="stop",
+        input_tokens=5,
+        output_tokens=5,
+        total_tokens=10,
+    )
+
+
+class _BudgetCaptureChat:
+    """``_complete_chat`` double capturing the requested output budget.
+
+    P13-1C: the seam is the shared inference boundary, so what is captured is
+    the normalized ``(messages, output_budget)`` pair the consolidator hands
+    to the registered adapter — the model, temperature, and transport are the
+    resolved profile's and cannot be overridden per call.
+    """
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def create(self, **kwargs):
-        self.calls.append(kwargs)
-        from unittest.mock import MagicMock
-
-        message = MagicMock(content='{"file_edits": [], "synthesis": "ok"}')
-        choice = MagicMock(message=message, finish_reason="stop")
-        usage = MagicMock(prompt_tokens=5, completion_tokens=5, total_tokens=10)
-        return MagicMock(choices=[choice], usage=usage)
+    async def __call__(self, messages, output_budget):
+        # Snapshot the prompt at call time: the retry path mutates the live
+        # `messages` list, and a reference would retroactively inflate the
+        # first call's captured input.
+        self.calls.append(
+            {
+                "messages": [dict(m) for m in messages],
+                "max_tokens": output_budget,
+            }
+        )
+        return _chat_result('{"file_edits": [], "synthesis": "ok"}')
 
 
 def _budget_service(max_tokens: int, context_window: int) -> tuple:
-    from unittest.mock import MagicMock
-
     service = object.__new__(ConsolidatorService)
     service._model = "test-model"
-    service._temperature = 0.3
     service._max_tokens = max_tokens
     service._context_window = context_window
-    completions = _BudgetCaptureCompletions()
-    service._client = MagicMock(
-        chat=MagicMock(completions=completions)
-    )
+    completions = _BudgetCaptureChat()
+    service._complete_chat = completions
     return service, completions
 
 
@@ -1862,41 +1963,65 @@ async def test_call_llm_exhausted_window_is_structured_error_without_call() -> N
     assert completions.calls == []
 
 
-class _SequenceCompletions:
-    """chat.completions double returning scripted contents per call."""
+@pytest.mark.parametrize(
+    ("expected_setting", "forbidden_setting"),
+    [
+        ("INFERENCE_CHAT_CONTEXT_WINDOW", "LLMAAS_CONTEXT_WINDOW"),
+        ("LLMAAS_CONTEXT_WINDOW", "INFERENCE_CHAT_CONTEXT_WINDOW"),
+    ],
+)
+async def test_profile_exhaustion_names_only_resolved_context_setting(
+    caplog: pytest.LogCaptureFixture,
+    expected_setting: str,
+    forbidden_setting: str,
+) -> None:
+    service, completions = _budget_service(
+        max_tokens=1024,
+        context_window=4096,
+    )
+    service._context_window_env_name = expected_setting
+
+    result = await service._call_llm(
+        [{"role": "user", "content": "x" * (4 * 4096 + 400)}]
+    )
+
+    assert result["status"] == "error"
+    assert completions.calls == []
+    diagnostics = result["message"] + caplog.text
+    assert expected_setting in diagnostics
+    assert forbidden_setting not in diagnostics
+
+
+class _SequenceChat:
+    """``_complete_chat`` double returning scripted contents per call."""
 
     def __init__(self, contents: list[str]) -> None:
         self.calls: list[dict] = []
         self._contents = list(contents)
 
-    async def create(self, **kwargs):
+    async def __call__(self, messages, output_budget):
         # Snapshot the prompt at call time: the retry path mutates the live
         # `messages` list, and a reference would retroactively inflate the
         # first call's captured input.
-        snapshot = dict(kwargs)
-        snapshot["messages"] = [dict(m) for m in kwargs.get("messages", [])]
-        self.calls.append(snapshot)
-        from unittest.mock import MagicMock
-
+        self.calls.append(
+            {
+                "messages": [dict(m) for m in messages],
+                "max_tokens": output_budget,
+            }
+        )
         content = self._contents[min(len(self.calls) - 1, len(self._contents) - 1)]
-        message = MagicMock(content=content)
-        choice = MagicMock(message=message, finish_reason="stop")
-        usage = MagicMock(prompt_tokens=5, completion_tokens=5, total_tokens=10)
-        return MagicMock(choices=[choice], usage=usage)
+        return _chat_result(content)
 
 
 def _sequence_service(
     max_tokens: int, context_window: int, contents: list[str]
 ) -> tuple:
-    from unittest.mock import MagicMock
-
     service = object.__new__(ConsolidatorService)
     service._model = "test-model"
-    service._temperature = 0.3
     service._max_tokens = max_tokens
     service._context_window = context_window
-    completions = _SequenceCompletions(contents)
-    service._client = MagicMock(chat=MagicMock(completions=completions))
+    completions = _SequenceChat(contents)
+    service._complete_chat = completions
     return service, completions
 
 
@@ -1911,11 +2036,20 @@ def _assert_call_fits_window(call: dict, context_window: int) -> None:
     )
 
 
-async def test_call_llm_invalid_json_retry_recomputes_budget() -> None:
-    # First response: large non-JSON garbage that the repair path cannot fix.
-    # The retry appends it (plus the correction) to the prompt: the budget
-    # must be recomputed from the GROWN messages so every provider request
-    # still fits the context window.
+# P13-1C / PR #303 round 1 (Codex Sol, medium): a malformed completion used to
+# start a second CORRECTIVE prompt turn. ADR-0027 §Retry forbids it — malformed
+# responses are never retried, the policy exists to "prevent duplicate paid
+# work", and "callers may start a new explicit operation after seeing the
+# normalized failure; the adapter never does so silently". Because each turn
+# also re-entered the adapter's permitted transport retry, one consolidation
+# batch could reach FOUR upstream attempts. The three tests below now pin the
+# replacement contract: exactly ONE application request, whatever the response.
+
+
+async def test_call_llm_invalid_json_is_terminal_after_local_repair() -> None:
+    # Large non-JSON garbage that the network-free repair path cannot fix.
+    # The old behavior sent a second corrective turn; the contract is now a
+    # single request and a normalized failure the caller can act on.
     garbage = "this is definitely not json " * 500  # ~14000 chars ≈ 3500 tokens
     service, completions = _sequence_service(
         max_tokens=1024,
@@ -1927,15 +2061,18 @@ async def test_call_llm_invalid_json_retry_recomputes_budget() -> None:
         [{"role": "user", "content": "x" * 400}]
     )
 
-    assert result["status"] == "ok"
-    assert len(completions.calls) == 2
-    for call in completions.calls:
-        _assert_call_fits_window(call, 4096)
+    assert result["status"] == "error"
+    assert result["message"] == "LLM returned invalid JSON"
+    assert len(completions.calls) == 1
+    _assert_call_fits_window(completions.calls[0], 4096)
+    # Safe metadata only — never a fragment of the completion.
+    assert "raw_preview" not in result
+    assert result["raw_len"] == len(garbage)
 
 
-async def test_call_llm_missing_fields_retry_recomputes_budget() -> None:
-    # First response: valid JSON without file_edits/synthesis → structure
-    # retry path. Same recompute requirement as the invalid-JSON path.
+async def test_call_llm_missing_fields_is_terminal_without_a_second_turn() -> None:
+    # Valid JSON without file_edits/synthesis: the structural path must be
+    # terminal for the same reason as the malformed path.
     padded = '{"padding": "' + "y" * 14000 + '"}'
     service, completions = _sequence_service(
         max_tokens=1024,
@@ -1947,28 +2084,70 @@ async def test_call_llm_missing_fields_retry_recomputes_budget() -> None:
         [{"role": "user", "content": "x" * 400}]
     )
 
+    assert result["status"] == "error"
+    assert result["message"] == "LLM response missing file_edits or synthesis"
+    assert len(completions.calls) == 1
+    _assert_call_fits_window(completions.calls[0], 4096)
+
+
+async def test_call_llm_still_consults_the_network_free_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity for the two tests above.
+
+    Removing the corrective TURN must not remove the network-free repair — that
+    is the rescue path that costs nothing, and deleting it would be an easy way
+    to "satisfy" the single-request contract while making consolidation
+    strictly worse. The guard is isolated to what it names: the repair helper is
+    spied at the module seam, and its recovered document is what the caller
+    receives, from a SINGLE request.
+    """
+    recovered = {
+        "file_edits": [
+            {
+                "filename": "facts.md",
+                "action": "edit",
+                "operations": [
+                    {"op": "append", "heading": "## Facts", "content": "kept"}
+                ],
+            }
+        ],
+        "synthesis": "recovered locally",
+    }
+    seen: list[str] = []
+
+    def _spy_repair(json_str, exc):
+        seen.append(json_str)
+        return recovered
+
+    monkeypatch.setattr(consolidator_module, "_repair_json", _spy_repair)
+    service, completions = _sequence_service(
+        max_tokens=1024, context_window=4096, contents=["not json at all"]
+    )
+
+    result = await service._call_llm([{"role": "user", "content": "x" * 400}])
+
+    assert seen, "the malformed-response path no longer consults _repair_json"
     assert result["status"] == "ok"
-    assert len(completions.calls) == 2
-    for call in completions.calls:
-        _assert_call_fits_window(call, 4096)
+    assert result["data"] == recovered
+    assert len(completions.calls) == 1
 
 
-async def test_call_llm_retry_with_exhausted_window_stops_without_second_call() -> None:
-    # The first oversized response leaves no positive output budget for a
-    # retry: return the structured error instead of a doomed provider call.
-    garbage = "still not json at all " * 900  # ~19800 chars ≈ 4950 tokens
+async def test_call_llm_exhausted_window_never_calls_the_provider() -> None:
+    # Estimated input at/over the window: the structured pre-write error is
+    # returned without spending anything at all.
     service, completions = _sequence_service(
         max_tokens=1024,
         context_window=4096,
-        contents=[garbage, '{"file_edits": [], "synthesis": "ok"}'],
+        contents=['{"file_edits": [], "synthesis": "ok"}'],
     )
 
     result = await service._call_llm(
-        [{"role": "user", "content": "x" * 400}]
+        [{"role": "user", "content": "x" * (4 * 4096 + 400)}]
     )
 
     assert result["status"] == "error"
-    assert len(completions.calls) == 1
+    assert completions.calls == []
 
 
 async def test_consolidator_rejected_bank_edit_is_batch_write_failure_not_delete(

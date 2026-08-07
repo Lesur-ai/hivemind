@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -161,26 +161,162 @@ def _assert_mesh_private_key_compose_source_isolated(compose_text: str) -> None:
 
 
 def _assert_mesh_secret_build_context_isolated(dockerignore_text: str) -> None:
-    patterns = {
+    active_lines = [
         line.strip()
         for line in dockerignore_text.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert not any(line.startswith("!") for line in active_lines), (
+        "Dockerignore negation can re-include secrets or worktrees and is "
+        "forbidden at the repository-root build boundary"
+    )
+    patterns = set(active_lines)
+    required = {
+        ".git",
+        ".git/**",
+        ".claude",
+        ".claude/**",
+        ".codex",
+        ".codex/**",
+        ".env",
+        ".env.*",
+        "**/.env",
+        "**/.env.*",
+        "*.key",
+        "**/*.key",
+        "*.pem",
+        "**/*.pem",
+        ".venv",
+        "**/.venv",
+        ".venv-tests",
+        "**/.venv-tests",
+        "venv",
+        "**/venv",
+        "env",
+        "**/env",
+        ".tox",
+        "**/.tox",
+        "__pycache__",
+        "**/__pycache__",
+        "**/*.py[cod]",
+        ".pytest_cache",
+        "**/.pytest_cache",
+        ".mypy_cache",
+        "**/.mypy_cache",
+        ".ruff_cache",
+        "**/.ruff_cache",
+        ".coverage",
+        ".coverage.*",
+        "**/.coverage",
+        "**/.coverage.*",
+        "htmlcov",
+        "**/htmlcov",
+        "build",
+        "**/build",
+        "dist",
+        "**/dist",
+        "*.egg-info",
+        "**/*.egg-info",
+        "proof-artifacts",
+        "**/proof-artifacts",
+        "chantier",
+        "**/chantier",
+        "memory-bank",
+        "**/memory-bank",
+        ".mcp.json",
+        "**/.mcp.json",
     }
-    required = {".git", ".env", ".env.*", "*.key", "*.pem"}
     assert required.issubset(patterns)
+
+    def excluded(path: str) -> bool:
+        # Docker excludes descendants when a parent directory matches. Checking
+        # every ancestor as well as the leaf models that rule for these canaries.
+        pure = PurePosixPath(path)
+        candidates = [path]
+        candidates.extend(
+            parent.as_posix()
+            for parent in pure.parents
+            if parent.as_posix() != "."
+        )
+        return any(
+            fnmatch.fnmatchcase(candidate, pattern)
+            for candidate in candidates
+            for pattern in patterns
+        )
+
     for secret_path in (
         ".env",
         ".env.production",
+        "deploy/private/.env",
+        "deploy/private/.env.production",
         "mesh-identity.key",
+        "deploy/private/mesh-identity.key",
         "mesh-identity.pem",
+        "deploy/private/mesh-identity.pem",
+        ".git/config",
+        ".claude/worktrees/review/private.txt",
+        ".codex/cache/session.json",
+        ".venv/lib/python/site.pyc",
+        "services/graph-memory/.venv/lib/python/site.pyc",
+        ".venv-tests/lib/python/site.pyc",
+        "services/graph-memory/.venv-tests/lib/python/site.pyc",
+        "venv/lib/python/site.pyc",
+        "tools/venv/lib/python/site.pyc",
+        "env/lib/python/site.pyc",
+        "tools/env/lib/python/site.pyc",
+        ".tox/py314/lib/python/site.pyc",
+        "services/graph-memory/.tox/py314/lib/python/site.pyc",
+        "__pycache__/config.cpython-314.pyc",
+        "src/live_mem/__pycache__/server.cpython-314.pyc",
+        ".pytest_cache/v/cache/nodeids",
+        "tests/.pytest_cache/v/cache/nodeids",
+        ".mypy_cache/3.14/cache.json",
+        "src/.mypy_cache/3.14/cache.json",
+        ".ruff_cache/content",
+        "services/.ruff_cache/content",
+        ".coverage",
+        ".coverage.worker-1",
+        "tests/.coverage",
+        "tests/.coverage.worker-1",
+        "htmlcov/index.html",
+        "tests/htmlcov/index.html",
+        "build/lib/live_mem/server.py",
+        "services/graph-memory/build/lib/mcp_memory/server.py",
+        "dist/hivemind.whl",
+        "services/graph-memory/dist/graph-memory.whl",
+        "src/hivemind.egg-info/PKG-INFO",
+        "services/graph-memory/src/graph_memory.egg-info/PKG-INFO",
+        "proof-artifacts/admin-console.png",
+        "tests/proof-artifacts/proof-report.json",
+        "chantier/strategie-produit-open-core-saas.md",
+        "notes/chantier/private-plan.md",
+        "memory-bank/activeContext.md",
+        "services/graph-memory/memory-bank/progress.md",
+        ".mcp.json",
+        "tools/.mcp.json",
     ):
-        assert any(
-            pattern == secret_path or fnmatch.fnmatchcase(secret_path, pattern)
-            for pattern in patterns
-        ), f"{secret_path} would enter the Docker build context"
-    assert not any(
-        fnmatch.fnmatchcase("src/live_mem/server.py", pattern)
-        for pattern in patterns
+        assert excluded(secret_path), (
+            f"{secret_path} would enter the Docker build context"
+        )
+    for shipped_path in (
+        "Dockerfile",
+        "src/live_mem/server.py",
+        "services/graph-memory/src/server.py",
+        "docs/key-management.md",
+    ):
+        assert not excluded(shipped_path), f"{shipped_path} is over-excluded"
+
+
+def _assert_no_dockerfile_specific_dockerignore(paths: list[str]) -> None:
+    overrides = sorted(
+        path
+        for path in paths
+        if path.endswith(".dockerignore")
+        and PurePosixPath(path).name != ".dockerignore"
+    )
+    assert not overrides, (
+        "Dockerfile-specific ignore files override the root .dockerignore: "
+        f"{overrides}"
     )
 
 
@@ -240,6 +376,12 @@ def test_compose_and_build_context_isolate_mesh_private_key() -> None:
     _assert_mesh_secret_build_context_isolated(
         (repository / ".dockerignore").read_text(encoding="utf-8")
     )
+    _assert_no_dockerfile_specific_dockerignore(
+        [
+            path.relative_to(repository).as_posix()
+            for path in repository.rglob("*.dockerignore")
+        ]
+    )
 
 
 def test_mutation_red_compose_mesh_private_key_override_removed() -> None:
@@ -253,15 +395,91 @@ def test_mutation_red_compose_mesh_private_key_override_removed() -> None:
         )
 
 
-@pytest.mark.parametrize("removed", [".git", ".env", ".env.*", "*.key", "*.pem"])
+@pytest.mark.parametrize(
+    "removed",
+    [
+        ".git",
+        ".git/**",
+        ".claude",
+        ".claude/**",
+        ".codex",
+        ".codex/**",
+        ".env",
+        ".env.*",
+        "**/.env",
+        "**/.env.*",
+        "*.key",
+        "**/*.key",
+        "*.pem",
+        "**/*.pem",
+        ".venv",
+        "**/.venv",
+        ".venv-tests",
+        "**/.venv-tests",
+        "venv",
+        "**/venv",
+        "env",
+        "**/env",
+        ".tox",
+        "**/.tox",
+        "__pycache__",
+        "**/__pycache__",
+        "**/*.py[cod]",
+        ".pytest_cache",
+        "**/.pytest_cache",
+        ".mypy_cache",
+        "**/.mypy_cache",
+        ".ruff_cache",
+        "**/.ruff_cache",
+        ".coverage",
+        ".coverage.*",
+        "**/.coverage",
+        "**/.coverage.*",
+        "htmlcov",
+        "**/htmlcov",
+        "build",
+        "**/build",
+        "dist",
+        "**/dist",
+        "*.egg-info",
+        "**/*.egg-info",
+        "proof-artifacts",
+        "**/proof-artifacts",
+        "chantier",
+        "**/chantier",
+        "memory-bank",
+        "**/memory-bank",
+        ".mcp.json",
+        "**/.mcp.json",
+    ],
+)
 def test_mutation_red_mesh_secret_dockerignore_pattern_removed(removed: str) -> None:
     repository = Path(__file__).resolve().parents[1]
     dockerignore = (repository / ".dockerignore").read_text(encoding="utf-8")
     line = removed + "\n"
-    assert dockerignore.count(line) == 1
+    physical_lines = dockerignore.splitlines(keepends=True)
+    assert physical_lines.count(line) == 1
+    physical_lines.remove(line)
+    with pytest.raises(AssertionError):
+        _assert_mesh_secret_build_context_isolated("".join(physical_lines))
+
+
+def test_mutation_red_mesh_secret_dockerignore_negation_added() -> None:
+    repository = Path(__file__).resolve().parents[1]
+    dockerignore = (repository / ".dockerignore").read_text(encoding="utf-8")
     with pytest.raises(AssertionError):
         _assert_mesh_secret_build_context_isolated(
-            dockerignore.replace(line, "", 1)
+            dockerignore + "\n!deploy/private/.env\n"
+        )
+
+
+def test_mutation_red_dockerfile_specific_dockerignore_added() -> None:
+    with pytest.raises(AssertionError):
+        _assert_no_dockerfile_specific_dockerignore(
+            [
+                ".dockerignore",
+                "services/graph-memory/Dockerfile.dockerignore",
+            ]
         )
 
 

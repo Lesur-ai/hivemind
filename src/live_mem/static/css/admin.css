@@ -1381,8 +1381,93 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--hm-cyan); widt
 
 .token-name { font-weight: 600; color: var(--hm-text); }
 .cell-sub { font-size: 11px; color: var(--hm-text-muted); font-family: var(--hm-font-mono); margin-top: 2px; }
-.cell-actions { text-align: right; white-space: nowrap; }
-.cell-actions .btn { margin-left: 6px; }
+.cell-actions { text-align: right; white-space: nowrap; width: 44px; }
+
+/* Native disclosure keeps the per-row menu keyboard-operable without adding a
+   second focus manager beside the shared modal. The table retains horizontal
+   recovery while the viewport-positioned panel escapes its scroll container. */
+.access-token-table .data-table .row-muted { opacity: 1; }
+.access-token-table .data-table .row-muted > td:not(.cell-actions) { opacity: .55; }
+.row-action-menu { display: inline-block; text-align: left; }
+.row-action-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border: 1px solid transparent;
+    border-radius: var(--hm-radius);
+    color: var(--hm-text-muted);
+    cursor: pointer;
+    font-family: var(--hm-font-body);
+    font-size: 14px;
+    letter-spacing: 1px;
+    list-style: none;
+    user-select: none;
+}
+.row-action-trigger::-webkit-details-marker { display: none; }
+.row-action-trigger:hover,
+.row-action-menu[open] .row-action-trigger {
+    background: var(--hm-sunken);
+    border-color: var(--hm-border-strong);
+    color: var(--hm-text);
+}
+.row-action-trigger:focus-visible {
+    background: var(--hm-sunken);
+    border-color: var(--hm-border-strong);
+    color: var(--hm-text);
+    outline: 2px solid var(--hm-focus);
+    outline-offset: 2px;
+}
+.row-action-menu-panel {
+    position: fixed;
+    z-index: 120;
+    top: 0;
+    left: 0;
+    width: 236px;
+    padding: 6px;
+    background: var(--hm-panel);
+    border: 1px solid var(--hm-border-strong);
+    border-radius: var(--hm-radius-card);
+    box-shadow: 0 10px 28px rgba(14,20,31,.16);
+}
+.row-action-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: var(--hm-radius);
+    background: transparent;
+    color: var(--hm-text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.row-action-item:hover:not(:disabled),
+.row-action-item:focus-visible { background: var(--hm-sunken); }
+.row-action-item:focus-visible {
+    outline: 2px solid var(--hm-focus);
+    outline-offset: -2px;
+}
+.row-action-item:disabled { color: var(--hm-text-faint); cursor: not-allowed; }
+.row-action-item small { margin-top: 1px; color: var(--hm-text-muted); font-size: 11px; }
+.row-action-item:disabled small { color: inherit; }
+.row-action-danger { color: var(--hm-red-deep); }
+.row-action-close { display: none; }
+.row-action-separator { height: 1px; margin: 5px 4px; background: var(--hm-border); }
+.replacement-banner { align-items: flex-start; }
+.replacement-steps { margin: 12px 0; padding-left: 22px; color: var(--hm-text); }
+.replacement-steps li { margin: 6px 0; }
+
+@media (max-width: 1100px) {
+    .row-action-menu-panel {
+        max-height: calc(100vh - 32px);
+        overflow-y: auto;
+    }
+    .row-action-close { display: flex; }
+}
 
 .access-all { font-size: 13px; color: var(--hm-text-muted); font-style: italic; }
 .space-chips { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 4px; max-width: 360px; overflow: hidden; white-space: nowrap; vertical-align: middle; }

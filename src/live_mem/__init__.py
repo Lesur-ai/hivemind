@@ -9,4 +9,4 @@
 # normalize the current value to its PEP 440 form in wheel metadata, while
 # MCP serverInfo / system_about report the raw string (matching the `v*` git
 # tag minus the leading `v`).
-__version__ = "1.3.1"
+__version__ = "1.4.0"

@@ -83,6 +83,7 @@ def _run_tool(
                 "degraded",
                 "created",
                 "deleted",
+                "grants_cleaned",
                 "connected",
                 "disconnected",
                 "running",
@@ -443,18 +444,38 @@ def space_export_cmd(ctx, space_id):
 @space_grp.command("delete")
 @click.argument("space_id")
 @click.option("--confirm", is_flag=True, help="Confirm deletion")
+@click.option(
+    "--recover-access-grants",
+    is_flag=True,
+    help=(
+        "Clean grants for a known older/interrupted deletion whose prefix is "
+        "already empty"
+    ),
+)
 @click.pass_context
-def space_delete_cmd(ctx, space_id, confirm):
-    """⚠️ Delete a space (irreversible)."""
+def space_delete_cmd(ctx, space_id, confirm, recover_access_grants):
+    """⚠️ Delete a space and remove its token grants (irreversible)."""
+    args = {
+        "space_id": space_id,
+        "confirm": confirm,
+    }
+    if recover_access_grants:
+        args["recover_access_grants"] = True
     _run_tool(
         ctx,
         "space_delete",
-        {
-            "space_id": space_id,
-            "confirm": confirm,
-        },
+        args,
         lambda r: show_success(
-            f"Space '{space_id}' deleted ({r.get('files_deleted', 0)} files)"
+            (
+                f"Access grants for '{space_id}' cleaned "
+                f"({r.get('access_grants_removed', 0)} grants)"
+                if r.get("status") == "grants_cleaned"
+                else (
+                    f"Space '{space_id}' deleted "
+                    f"({r.get('files_deleted', 0)} files, "
+                    f"{r.get('access_grants_removed', 0)} grants)"
+                )
+            )
         ),
         on_recovery_required=show_space_delete_recovery,
     )

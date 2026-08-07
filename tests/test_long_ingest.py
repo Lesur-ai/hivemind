@@ -31,10 +31,10 @@ This suite drives the REAL tool functions (extracted from a real FastMCP built b
 ``tools.graph.register``) over the same deterministic seam the P4-4 / P4-8 suites
 use: a real :class:`LongEngine` wrapping a real :class:`GraphBridgeService` wired
 to a :class:`FakeGraphTransport`, over an in-memory :class:`FakeStorage`. NO
-network / S3 / Neo4j / Qdrant / LLM. Tool counts: ``register_all_tools`` totals
-61 (including the +2 LM2-11 access tools registered directly and the +2 net-new long_* tools in
-``tools/graph.py``, NOT via ALIAS_MAP, plus the later cross-cutting
-``admin_audit_recent`` tool).
+network / S3 / Neo4j / Qdrant / LLM. This phase suite asserts only that its
+``long_ingest`` / ``long_query`` additions are registered directly by
+``tools/graph.py`` and not via ALIAS_MAP; the global registered surface and
+count are owned by ``test_mcp_tool_surface.py`` and its canonical fixture.
 """
 
 from __future__ import annotations
@@ -44,9 +44,7 @@ import hashlib
 import inspect
 import json
 import logging
-from copy import deepcopy
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -58,64 +56,7 @@ from live_mem.core.graph_bridge import GraphBridgeService
 from live_mem.core.engines.long_engine import LongEngine
 from live_mem.tools import graph as graph_tools
 from live_mem.tools import register_all_tools
-from tests.fakes import FakeGraphTransport
-
-
-# =============================================================================
-# In-memory storage fake — identical idiom to test_long_engine.py /
-# test_graph_push_volatile_tool.py: only the methods the bridge touches
-# (get_json / put_json / list_and_get). Fully deterministic, no S3.
-# =============================================================================
-
-
-class FakeStorage:
-    """Minimal in-memory StorageService stand-in. No S3, fully deterministic."""
-
-    def __init__(self) -> None:
-        self.objects: dict[str, str] = {}
-
-    async def put(self, key: str, content: str, content_type: str = "text/plain") -> None:
-        self.objects[key] = content
-
-    async def put_json(self, key: str, data: dict[str, Any]) -> None:
-        await self.put(key, json.dumps(data, indent=2, ensure_ascii=False))
-
-    async def get(self, key: str) -> str | None:
-        return self.objects.get(key)
-
-    async def get_json(self, key: str) -> dict | None:
-        raw = await self.get(key)
-        return None if raw is None else json.loads(raw)
-
-    async def list_objects(self, prefix: str, max_keys: int = 0) -> list[dict]:
-        out: list[dict] = []
-        for key in sorted(self.objects):
-            if key.startswith(prefix):
-                out.append(
-                    {"Key": key, "Size": len(self.objects[key]), "LastModified": ""}
-                )
-        return out
-
-    async def list_and_get(self, prefix: str, exclude_keep: bool = True) -> list[dict]:
-        results: list[dict] = []
-        for obj in await self.list_objects(prefix):
-            key = obj["Key"]
-            if exclude_keep and key.endswith(".keep"):
-                continue
-            content = self.objects.get(key)
-            if content is not None:
-                results.append(
-                    {
-                        "key": key,
-                        "content": content,
-                        "size": obj["Size"],
-                        "last_modified": "",
-                    }
-                )
-        return results
-
-    def snapshot(self) -> dict[str, str]:
-        return deepcopy(self.objects)
+from tests.fakes import FakeGraphTransport, GraphLongFakeStorage as FakeStorage
 
 
 # =============================================================================
@@ -225,28 +166,20 @@ _DOC_B = {"source_path": "docs/incident-2031.md", "content": "postmortem body"}
 
 
 # =============================================================================
-# (7) TOOL COUNTS — register_all_tools == 61; long_ingest + long_query are
-# net-new long_* tools registered directly in tools/graph.py (NOT via ALIAS_MAP).
+# (7) PHASE DELTA — long_ingest + long_query are net-new long_* tools
+# registered directly in tools/graph.py (NOT via ALIAS_MAP). The global MCP
+# surface/count authority lives in test_mcp_tool_surface.py.
 # =============================================================================
 
 
 def _build_full():
     mcp = FastMCP(name="test")
-    total = register_all_tools(mcp)
-    return mcp, total
-
-
-def test_register_all_tools_totals_59() -> None:
-    """The +2 net-new long_* tools remain direct registrations. The alias pass
-    is untouched (still 13 aliases), graph registers 6 tools (4 + 2), and the
-    later cross-cutting audit tool and LM2-11 access tools bring the surface to 61."""
-    mcp, total = _build_full()
-    assert total == 61
-    assert len(mcp._tool_manager._tools) == 61
+    register_all_tools(mcp)
+    return mcp
 
 
 def test_long_ingest_and_long_query_registered() -> None:
-    mcp, _ = _build_full()
+    mcp = _build_full()
     names = set(mcp._tool_manager._tools)
     assert "long_ingest" in names
     assert "long_query" in names
@@ -254,24 +187,20 @@ def test_long_ingest_and_long_query_registered() -> None:
 
 def test_new_long_tools_are_not_aliases() -> None:
     """long_ingest / long_query are NET-NEW long_* tools with NO graph_* twin:
-    they must NOT be wired through ALIAS_MAP (which is the frozen 3+6+4)."""
+    they must NOT be wired through the compatibility ALIAS_MAP."""
     from live_mem.tools.aliases import ALIAS_MAP
 
     assert "long_ingest" not in ALIAS_MAP.values()
     assert "long_query" not in ALIAS_MAP.values()
-    # And they are registered by the graph module itself, not as a re-registration
-    # of some historical source: no historical source maps to either name.
-    assert len(ALIAS_MAP) == 13
 
 
-def test_graph_register_returns_six() -> None:
-    """tools/graph.py::register now declares 6 tools (the legacy 4 + the 2
-    net-new long_ingest / long_query), registered directly (NOT via ALIAS_MAP)."""
+def test_graph_register_returns_seven() -> None:
+    """The graph category registers the legacy four plus three direct long tools."""
     mcp = FastMCP(name="test-graph-count")
     n = graph_tools.register(mcp)
-    assert n == 6
+    assert n == 7
     names = set(mcp._tool_manager._tools)
-    assert {"long_ingest", "long_query"} <= names
+    assert {"long_ingest", "long_query", "long_reindex"} <= names
     # The legacy four are still there.
     assert {"graph_connect", "graph_push", "graph_status", "graph_disconnect"} <= names
 
@@ -770,36 +699,14 @@ def test_long_path_has_no_commit_authority_symbols(label: str, tree: ast.AST) ->
             assert node.attr != "assert_commit_allowed", label
 
 
-def test_long_engine_surface_has_no_apply_or_commit_method() -> None:
-    """The engine planning surface (plan_ingest, P4-7) adds NO apply/commit/
-    rollback authority method: long stays non-authoritative. A ``long`` call can
-    only fail or return plan / projection data."""
-    public_async = {
-        name
-        for name, member in inspect.getmembers(
-            LongEngine, predicate=inspect.iscoroutinefunction
-        )
-        if not name.startswith("_")
-    }
-    # plan_ingest is the NEW P4-7 planning method (dry-run / check-remote planning,
-    # no commit). The legacy + P4-4 typed surface is unchanged.
-    assert "plan_ingest" in public_async
-    assert public_async == {
-        "connect",
-        "push",
-        "status",
-        "disconnect",
-        "ingest",
-        "list_ontologies",
-        "query",
-        "search",
-        "plan_ingest",
-    }
-    # No commit/rollback/audit authority method crept in.
-    forbidden = ("assert_commit_allowed", "commit", "rollback", "audit", "recover", "apply")
-    all_names = {name for name, _ in inspect.getmembers(LongEngine)}
-    for bad in forbidden:
-        assert bad not in all_names, bad
+def test_plan_ingest_is_async_and_adds_no_apply_authority() -> None:
+    """P4-7 contributes a planner, never an apply seam.
+
+    The complete ten-member public async surface is owned by
+    test_long_engine.py; this phase test asserts only its unique delta.
+    """
+    assert inspect.iscoroutinefunction(LongEngine.plan_ingest)
+    assert not hasattr(LongEngine, "apply")
 
 
 # =============================================================================

@@ -15,6 +15,10 @@ So it exercises the actual client-construction seam, the SSRF guard, the GM
 tool mapping, and the byte-for-byte preservation of connect/push/status/
 disconnect.
 
+This module owns the sole exact assertion for the complete LongEngine public
+async surface. Phase-specific suites assert only the method they introduced or
+the behavior they uniquely protect.
+
 Groups:
 - A — typed methods (ingest/list_ontologies/query/search) + status batch.
 - B — SSRF refused BEFORE any client is built (adapter path).
@@ -28,73 +32,15 @@ from __future__ import annotations
 import ast
 import base64
 import inspect
-import json
-from copy import deepcopy
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import pytest
 
 from live_mem.core.graph_bridge import GraphBridgeService, GraphMemoryClient
 from live_mem.core.engines.long_engine import LongEngine
-from tests.fakes import FakeGraphTransport, RecordedCall
-
-
-# =============================================================================
-# In-memory storage fake (idiom lifted from test_hivemind_state.py) — only the
-# methods the bridge touches: get_json / put_json / list_and_get.
-# =============================================================================
-
-
-class FakeStorage:
-    """Minimal in-memory StorageService stand-in. No S3, fully deterministic."""
-
-    def __init__(self) -> None:
-        self.objects: dict[str, str] = {}
-
-    async def put(self, key: str, content: str, content_type: str = "text/plain") -> None:
-        self.objects[key] = content
-
-    async def put_json(self, key: str, data: dict[str, Any]) -> None:
-        await self.put(key, json.dumps(data, indent=2, ensure_ascii=False))
-
-    async def get(self, key: str) -> str | None:
-        return self.objects.get(key)
-
-    async def get_json(self, key: str) -> dict | None:
-        raw = await self.get(key)
-        return None if raw is None else json.loads(raw)
-
-    async def list_objects(self, prefix: str, max_keys: int = 0) -> list[dict]:
-        out: list[dict] = []
-        for key in sorted(self.objects):
-            if key.startswith(prefix):
-                out.append(
-                    {"Key": key, "Size": len(self.objects[key]), "LastModified": ""}
-                )
-        return out
-
-    async def list_and_get(self, prefix: str, exclude_keep: bool = True) -> list[dict]:
-        results: list[dict] = []
-        for obj in await self.list_objects(prefix):
-            key = obj["Key"]
-            if exclude_keep and key.endswith(".keep"):
-                continue
-            content = self.objects.get(key)
-            if content is not None:
-                results.append(
-                    {
-                        "key": key,
-                        "content": content,
-                        "size": obj["Size"],
-                        "last_modified": "",
-                    }
-                )
-        return results
-
-    def snapshot(self) -> dict[str, str]:
-        return deepcopy(self.objects)
+from live_mem.core.url_guard import validate_gm_url
+from tests.fakes import FakeGraphTransport, GraphLongFakeStorage as FakeStorage, RecordedCall
 
 
 # =============================================================================
@@ -120,6 +66,18 @@ def _meta_connected(url: str = _CONNECTED_URL, memory_id: str = "mem-1") -> dict
     }
 
 
+def _test_url_validator(url: str, *, allow_private_hosts: bool = False):
+    """Keep the fake transport suite hermetic without weakening SSRF coverage.
+
+    The sentinel endpoint has no real DNS record. Only that exact fake transport
+    URL bypasses resolution; every other value still uses the production SSRF
+    validator so hostile URL cases retain their security coverage.
+    """
+    if url == _CONNECTED_URL:
+        return None
+    return validate_gm_url(url, allow_private_hosts=allow_private_hosts)
+
+
 def _build(storage: FakeStorage, **factory_kwargs):
     """Wire a real bridge (fake client factory) under a real engine.
 
@@ -128,7 +86,10 @@ def _build(storage: FakeStorage, **factory_kwargs):
     other suites redirect storage to an in-memory fake.
     """
     factory = FakeGraphTransport.factory(**factory_kwargs)
-    bridge = GraphBridgeService(client_factory=factory)
+    bridge = GraphBridgeService(
+        client_factory=factory,
+        url_validator=_test_url_validator,
+    )
     engine = LongEngine(bridge=bridge)
     return engine, bridge, factory
 
@@ -376,6 +337,21 @@ async def test_valid_https_url_reaches_transport() -> None:
     assert factory.instances[0].tool_names() == ["memory_query"]
 
 
+async def test_fake_transport_never_resolves_sentinel_dns() -> None:
+    """Unit transport tests must not depend on the runner DNS resolver."""
+    storage = FakeStorage()
+    await storage.put_json("space-a/_meta.json", _meta_connected())
+    engine, _bridge, factory = _build(storage)
+
+    with patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        side_effect=AssertionError("test sentinel must not resolve DNS"),
+    ), _patch_storage(storage):
+        await engine.query("space-a", "q")
+
+    assert factory.instances[-1].tool_names() == ["memory_query"]
+
+
 # =============================================================================
 # GROUP C — byte-for-byte for legacy methods (seam regression)
 # =============================================================================
@@ -612,7 +588,7 @@ def test_graph_bridge_no_commit_path_import_ast() -> None:
             assert node.attr != "assert_commit_allowed"
 
 
-def test_long_engine_surface_includes_new_typed_methods() -> None:
+def test_long_engine_public_async_surface_is_canonical() -> None:
     public_async = {
         name
         for name, member in inspect.getmembers(
@@ -629,13 +605,26 @@ def test_long_engine_surface_includes_new_typed_methods() -> None:
         "list_ontologies",
         "query",
         "search",
+        "reindex",
         "plan_ingest",
     }
-    # No commit/rollback/audit authority method crept in.
-    forbidden = ("assert_commit_allowed", "commit", "rollback", "audit", "recover")
+    # No protocol-authority method may exist, async or otherwise.
+    forbidden = (
+        "assert_commit_allowed",
+        "commit",
+        "rollback",
+        "audit",
+        "tombstone",
+        "watermark",
+        "recover",
+        "recovery",
+        "apply",
+        "apply_commit",
+        "validate_commit",
+    )
     all_names = {name for name, _ in inspect.getmembers(LongEngine)}
     for bad in forbidden:
-        assert bad not in all_names
+        assert bad not in all_names, f"LongEngine must not expose {bad!r}"
 
 
 def test_fake_graph_transport_no_network_imports() -> None:
@@ -664,8 +653,12 @@ def test_validate_gm_url_still_importable_from_tools_graph() -> None:
     err = _validate_gm_url("http://127.0.0.1")
     assert err is not None
     assert "loopback" in err
-    # Safe URL passes.
-    assert _validate_gm_url("https://gm.example.com") is None
+    # Safe URL passes without consulting runner DNS.
+    with patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        return_value=[(0, 0, 0, "", ("93.184.216.34", 443))],
+    ):
+        assert _validate_gm_url("https://gm.example.com") is None
 
 
 # =============================================================================

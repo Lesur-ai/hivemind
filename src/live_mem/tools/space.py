@@ -426,6 +426,19 @@ def register(mcp: FastMCP) -> int:
                 ),
             ),
         ] = False,
+        recover_access_grants: Annotated[
+            bool,
+            Field(
+                default=False,
+                description=(
+                    "Explicitly remove surviving token scopes only when the "
+                    "space prefix is already confirmed empty after a known "
+                    "older or interrupted deletion. Never set this merely "
+                    "because an ID is absent: it can destroy intentional "
+                    "future-space pre-grants."
+                ),
+            ),
+        ] = False,
     ) -> dict:
         """
         Supprime un espace et TOUTES ses données (irréversible).
@@ -440,16 +453,31 @@ def register(mcp: FastMCP) -> int:
         and authorize that recovery action explicitly. Corrupted state still
         fails closed.
 
+        A successful deletion also removes this ``space_id`` from every
+        persisted token allowlist. Any registry rewrite is reported as deleted
+        only after a fresh token-store read confirms zero remaining references.
+        If the prefix is already absent, grants are preserved by default because
+        they may be intentional future-space pre-grants. Set
+        ``recover_access_grants=True`` only to resume a known older or
+        interrupted deletion; grants-only success is ``grants_cleaned``.
+
         Args:
             space_id: Identifiant de l'espace à supprimer
             confirm: Doit être True pour confirmer (sécurité)
             unsafe_recovery: Explicitly authorize deletion of a shared space in
                 an unsafe recovery state.
+            recover_access_grants: Explicitly clean surviving scopes for a
+                known deletion whose prefix is already empty.
 
         Returns:
-            Confirmation de suppression avec nombre de fichiers supprimés
+            Confirmation de suppression avec nombres de fichiers supprimés et
+            de grants révoqués, ou recovery typée si une étape est ambiguë.
         """
-        from ..auth.context import check_access, check_manage_permission
+        from ..auth.context import (
+            check_access,
+            check_manage_permission,
+            get_effective_token_info,
+        )
         from ..core.space import get_space_service
 
         try:
@@ -461,6 +489,9 @@ def register(mcp: FastMCP) -> int:
             manage_err = check_manage_permission()
             if manage_err:
                 return manage_err
+            actor = get_effective_token_info()
+            if actor is None:
+                return {"status": "error", "message": "Authentification requise"}
 
             # Sécurité : confirm obligatoire
             if not confirm:
@@ -473,7 +504,14 @@ def register(mcp: FastMCP) -> int:
                 }
 
             return await get_space_service().delete(
-                space_id, unsafe_recovery=unsafe_recovery
+                space_id,
+                unsafe_recovery=unsafe_recovery,
+                recover_access_grants=recover_access_grants,
+                actor_token_hash=actor.get("token_hash", ""),
+                bootstrap_admin=(
+                    actor.get("type") == "bootstrap"
+                    and "admin" in actor.get("permissions", [])
+                ),
             )
         except Exception as e:
             from ..auth.context import safe_error

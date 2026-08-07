@@ -86,11 +86,11 @@ _R = ToolOperation.READ
 _M = ToolOperation.MUTATION
 
 
-# Order is wire-significant for deterministic tools/list responses.  The first
-# 24 entries are the exact frozen agent-core set; remaining entries are hidden
-# from regular MCP discovery but stay registered and callable by exact name.
+# Order is wire-significant for deterministic tools/list responses. Agent-core
+# entries precede the hidden operator/compatibility entries, which stay
+# registered and callable by exact name.
 TOOL_EXPOSURES: tuple[ToolExposure, ...] = (
-    # read discovery (17)
+    # read discovery
     _entry("system_about", audience=_CORE, permission=_PUBLIC, operation=_R),
     _entry("system_health", audience=_CORE, permission=_PUBLIC, operation=_R),
     _entry("system_whoami", audience=_CORE, permission=_READ, operation=_R),
@@ -191,7 +191,7 @@ TOOL_EXPOSURES: tuple[ToolExposure, ...] = (
         operation=_R,
         space_scope_argument="space_id",
     ),
-    # write discovery additions (2)
+    # write discovery additions
     _entry(
         "short_note",
         aliases=("live_note",),
@@ -218,7 +218,7 @@ TOOL_EXPOSURES: tuple[ToolExposure, ...] = (
         operation=_M,
         space_scope_argument="space_id",
     ),
-    # manage discovery additions (4); admin deliberately adds none
+    # manage discovery additions; admin deliberately adds none
     _entry(
         "long_ingest",
         audience=_CORE,
@@ -241,7 +241,7 @@ TOOL_EXPOSURES: tuple[ToolExposure, ...] = (
         operation=_M,
         space_scope_argument="space_id",
     ),
-    # Hidden operator / compatibility surface (24 canonical entries)
+    # Hidden operator / compatibility surface
     _entry(
         "space_update",
         audience=_OPERATOR,
@@ -317,6 +317,19 @@ TOOL_EXPOSURES: tuple[ToolExposure, ...] = (
         space_scope_argument="space_id",
     ),
     _entry(
+        "long_reindex",
+        audience=_OPERATOR,
+        permission=_MANAGE,
+        operation=_M,
+        space_scope_argument="space_id",
+    ),
+    _entry(
+        "inference_self_test",
+        audience=_OPERATOR,
+        permission=_MANAGE,
+        operation=_M,
+    ),
+    _entry(
         "backup_create",
         audience=_OPERATOR,
         permission=_WRITE,
@@ -357,8 +370,6 @@ TOOL_EXPOSURES: tuple[ToolExposure, ...] = (
 
 
 DISCOVERY_SCHEMA_BUDGET_BYTES = 64 * 1024
-FROZEN_REGISTERED_TOOL_COUNT = 61
-FROZEN_EXPOSURE_ENTRY_COUNT = 48
 
 _PERMISSION_RANK: Mapping[ToolPermission, int] = MappingProxyType(
     {
@@ -454,6 +465,8 @@ _FROZEN_OPERATOR_MINIMUMS: Mapping[str, ToolPermission] = MappingProxyType(
         "bank_compact": _MANAGE,
         "long_connect": _WRITE,
         "long_disconnect": _WRITE,
+        "long_reindex": _MANAGE,
+        "inference_self_test": _MANAGE,
         "backup_create": _WRITE,
         "backup_list": _READ,
         "backup_restore": _MANAGE,
@@ -511,6 +524,7 @@ _FROZEN_SPACE_SCOPE_ARGUMENTS: Mapping[str, str] = MappingProxyType(
         "bank_compact": "space_id",
         "long_connect": "space_id",
         "long_disconnect": "space_id",
+        "long_reindex": "space_id",
         "backup_create": "space_id",
         "backup_list": "space_id",
         "admin_gc_notes": "space_id",
@@ -673,13 +687,11 @@ def validate_tool_exposure_registry(
     a startup error: discovery must never silently infer a partial surface.
     """
 
+    # Do not restate global registration counts here. The checks below preserve
+    # relative consistency across frozen classification, alias mapping, unique
+    # ownership, and live FastMCP names. The canonical test fixture owns the
+    # deliberately test-tier-only absolute cardinality pin.
     entries = tuple(registry)
-    if len(entries) != FROZEN_EXPOSURE_ENTRY_COUNT:
-        raise RuntimeError(
-            "ToolExposure registry must contain exactly "
-            f"{FROZEN_EXPOSURE_ENTRY_COUNT} entries, got {len(entries)}"
-        )
-
     owners: dict[str, str] = {}
     for entry in entries:
         if not isinstance(entry, ToolExposure):
@@ -719,12 +731,6 @@ def validate_tool_exposure_registry(
                     f"{previous!r} and {entry.canonical_name!r}"
                 )
             owners[name] = entry.canonical_name
-
-    if len(owners) != FROZEN_REGISTERED_TOOL_COUNT:
-        raise RuntimeError(
-            "ToolExposure registry must cover exactly "
-            f"{FROZEN_REGISTERED_TOOL_COUNT} registered names, got {len(owners)}"
-        )
 
     core_entries = [e for e in entries if e.audience is ToolAudience.AGENT_CORE]
     core_names = tuple(entry.canonical_name for entry in core_entries)

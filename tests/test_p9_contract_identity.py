@@ -1,11 +1,13 @@
 """P9 guards for the public MCP contract and Hivemind identity."""
 
 import ast
+import json
 import os
 import sys
 from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 from click.testing import CliRunner
@@ -14,6 +16,11 @@ from mcp.server.fastmcp import FastMCP
 from live_mem import server as live_mem_server
 from live_mem.tools import graph as graph_tools
 from live_mem.tools import system as system_tools
+from tests.fakes.inference_fakes import (
+    apply_graph_memory_baseline_env,
+    core_inference_runtime,
+    gm_inference_runtime,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +38,7 @@ def _read(relative: str) -> str:
 
 def _system_handler(name: str):
     mcp = FastMCP(name="p9-system-contract")
-    assert system_tools.register(mcp) == 3
+    assert system_tools.register(mcp) == 4
     return mcp._tool_manager._tools[name].fn
 
 
@@ -48,7 +55,7 @@ async def test_system_about_exposes_hivemind_public_metadata(
     assert result["description"] == "Shared memory layer for collaborative AI agents"
     assert result["author"] == "Lesur AI"
     assert result["documentation"] == "https://github.com/Lesur-ai/hivemind"
-    assert result["tools_count"] == len(result["tools"]) == 3
+    assert result["tools_count"] == len(result["tools"]) == 4
 
 
 @pytest.mark.asyncio
@@ -64,19 +71,21 @@ async def test_system_health_uses_real_status_enum_and_hivemind_name(
 
     settings = SimpleNamespace(
         mcp_server_name="Hivemind",
-        llmaas_api_url="",
-        llmaas_api_key="",
-        llmaas_model="unused",
+        proxy_url=None,
     )
     monkeypatch.setattr("live_mem.config.get_settings", lambda: settings)
     monkeypatch.setattr("live_mem.core.storage.get_storage", lambda: Storage())
 
-    result = await _system_handler("system_health")()
+    # P13-1C: "LLM not configured" is now a resolved-profile fact, not a pair
+    # of settings strings. No role configured -> the historical warning block.
+    with core_inference_runtime(chat=False, embedding=False):
+        result = await _system_handler("system_health")()
 
     assert result["status"] == "degraded"
     assert result["service_name"] == "Hivemind"
     assert result["services"]["s3"]["status"] == "ok"
     assert result["services"]["llmaas"]["status"] == "warning"
+    assert result["services"]["llmaas"]["message"] == "LLMaaS non configuré"
     assert result["spaces_count"] == 1
 
 
@@ -110,7 +119,7 @@ def test_long_query_discloses_its_embedding_provider_dependency() -> None:
 
 def test_long_query_registered_schema_discloses_embedding_without_chat() -> None:
     mcp = FastMCP(name="p9-long-query-contract")
-    assert graph_tools.register(mcp) == 6
+    assert graph_tools.register(mcp) == 7
     tool = mcp._tool_manager._tools["long_query"]
     schema_text = str(tool.description) + str(tool.parameters)
 
@@ -121,18 +130,20 @@ def test_long_query_registered_schema_discloses_embedding_without_chat() -> None
 
 def test_public_onboarding_requires_complete_provider_model_configuration() -> None:
     required = (
-        "LLMAAS_API_URL",
-        "LLMAAS_API_KEY",
-        "LLMAAS_MODEL",
-        "LLMAAS_EMBEDDING_MODEL",
-        "LLMAAS_EMBEDDING_DIMENSIONS",
-        "/chat/completions",
-        "/embeddings",
+        "INFERENCE_CHAT_API_URL",
+        "INFERENCE_CHAT_API_KEY",
+        "INFERENCE_CHAT_MODEL",
+        "INFERENCE_EMBEDDING_API_URL",
+        "INFERENCE_EMBEDDING_API_KEY",
+        "INFERENCE_EMBEDDING_MODEL",
+        "INFERENCE_EMBEDDING_DIMENSIONS",
     )
-    for relative in (".env.example", "README.md", "README.fr.md", "docs/DEPLOYMENT.md"):
+    for relative in (".env.example", "docs/INFERENCE_PROVIDER_PROFILES.md"):
         content = _read(relative)
         for item in required:
             assert item in content, f"{relative}: missing {item}"
+    for relative in ("README.md", "README.fr.md", "docs/DEPLOYMENT.md"):
+        assert "INFERENCE_PROVIDER_PROFILES.md" in _read(relative)
 
 
 def test_public_docs_lock_resolved_shared_restore_contract() -> None:
@@ -188,7 +199,15 @@ def test_readme_tool_tables_keep_manage_and_confirmation_contracts() -> None:
         assert "include_graph" in graph_status_row
 
     mapping = _read("docs/TOOL_MAPPING.md")
-    assert "48 direct registry entries plus these\n   13 aliases" in mapping
+    surface = json.loads(_read("tests/fixtures/tool_surface.json"))
+    expected_count_sentence = (
+        "5. The frozen fixture currently records "
+        f"{surface['historical_count']} direct registry entries plus these\n"
+        f"   {surface['alias_count']} aliases, for {surface['total']} "
+        "registered names. The generated exposure inventory must\n"
+        "   remain consistent with that fixture."
+    )
+    assert expected_count_sentence in mapping
     assert "43 historical" not in mapping
     assert "56 registered" not in mapping
 
@@ -265,18 +284,33 @@ def test_embedded_long_about_is_hivemind_derived_and_auth_gated() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embedded_long_about_hides_configuration_until_authenticated() -> None:
+async def test_embedded_long_about_hides_configuration_until_authenticated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Execute the shipped handler in isolation without optional graph clients."""
 
+    apply_graph_memory_baseline_env(monkeypatch)
     server_path = ROOT / "services/graph-memory/src/mcp_memory/server.py"
     module = ast.parse(server_path.read_text(encoding="utf-8"))
-    handler = next(
+    # P13-1C: the handler now reports the RESOLVED role identities through
+    # three module-level helpers, so the isolated module must carry them too —
+    # they are part of the shipped handler, not test scaffolding.
+    wanted = {
+        "system_about",
+        "_resolved_chat_model",
+        "_resolved_embedding_model",
+        "_resolved_embedding_dimensions",
+    }
+    nodes = [
         node
         for node in module.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "system_about"
-    )
-    handler.decorator_list = []
-    isolated = ast.Module(body=[handler], type_ignores=[])
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+        and node.name in wanted
+    ]
+    assert {node.name for node in nodes} == wanted
+    for node in nodes:
+        node.decorator_list = []
+    isolated = ast.Module(body=nodes, type_ignores=[])
     ast.fix_missing_locations(isolated)
 
     auth_context: ContextVar[dict | None] = ContextVar(
@@ -296,12 +330,10 @@ async def test_embedded_long_about_hides_configuration_until_authenticated() -> 
         "__name__": "embedded_about_contract_test",
         "__package__": "mcp_memory",
         "os": os,
+        "Optional": Optional,
         "current_auth": auth_context,
         "settings": SimpleNamespace(
             mcp_server_name="hivemind-graph-memory",
-            llmaas_model="chat-model",
-            llmaas_embedding_model="embedding-model",
-            llmaas_embedding_dimensions=1024,
             rag_score_threshold=0.5,
             chunk_size=800,
             backup_retention_count=10,
@@ -315,17 +347,20 @@ async def test_embedded_long_about_hides_configuration_until_authenticated() -> 
     exec(compile(isolated, os.fspath(server_path), "exec"), namespace)
     about = namespace["system_about"]
 
-    anonymous = await about()
-    assert anonymous["status"] == "ok"
-    assert anonymous["memories"] == []
-    assert anonymous["services"] == {}
-    assert anonymous["configuration"] == {}
+    # P13-1C: model identity now comes from the RESOLVED shared profiles, so
+    # install a runtime the whole embedded service would see.
+    with gm_inference_runtime(chat=True, embedding=True):
+        anonymous = await about()
+        assert anonymous["status"] == "ok"
+        assert anonymous["memories"] == []
+        assert anonymous["services"] == {}
+        assert anonymous["configuration"] == {}
 
-    token = auth_context.set({"type": "token", "permissions": ["read"]})
-    try:
-        authenticated = await about()
-    finally:
-        auth_context.reset(token)
+        token = auth_context.set({"type": "token", "permissions": ["read"]})
+        try:
+            authenticated = await about()
+        finally:
+            auth_context.reset(token)
     assert authenticated["status"] == "ok"
     assert authenticated["services"] == {
         "neo4j": "ok",
@@ -335,13 +370,30 @@ async def test_embedded_long_about_hides_configuration_until_authenticated() -> 
         "embedding": "ok",
     }
     assert authenticated["configuration"] == {
-        "llm_model": "chat-model",
-        "embedding_model": "embedding-model",
+        "llm_model": "test-chat-model",
+        "embedding_model": "test-embedding-model",
         "embedding_dimensions": 1024,
         "rag_score_threshold": 0.5,
         "chunk_size": 800,
         "backup_retention": 10,
     }
+
+
+    # P13-1C: an unconfigured role reports an EMPTY identity, never an error.
+    # ``system_about`` is a diagnostic surface: a deployment with no provider
+    # must still describe itself, so the helpers are total by construction and
+    # the handler cannot degrade to ``status: error`` merely because a role is
+    # absent.
+    with gm_inference_runtime(chat=False, embedding=False):
+        token = auth_context.set({"type": "token", "permissions": ["read"]})
+        try:
+            unconfigured = await about()
+        finally:
+            auth_context.reset(token)
+    assert unconfigured["status"] == "ok"
+    assert unconfigured["configuration"]["llm_model"] == ""
+    assert unconfigured["configuration"]["embedding_model"] == ""
+    assert unconfigured["configuration"]["embedding_dimensions"] is None
 
 
 def test_public_contract_summary_covers_all_operator_cited_decisions() -> None:

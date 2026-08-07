@@ -17,8 +17,8 @@ ADR-0008) AVANT le check hérité « ``{space}/_meta.json`` existe -> refus » :
   ``unsafe_recovery`` (jamais de copie sur un état illisible) ;
 - la garde n'écrit RIEN sous ``_hivemind/`` sur le chemin refusé.
 
-Déterministe, OFFLINE, fake-backed. Réutilise ``FakeStorage`` et le pattern
-seed-healthy-hive de ``tests/test_hive_status_label.py``. On patche
+Déterministe, OFFLINE, fake-backed. Réutilise le ``CopyFakeStorage`` partagé et
+le pattern seed-healthy-hive de ``tests/test_hive_status_label.py``. On patche
 ``live_mem.core.backup.get_storage`` (le service binde le singleton localement
 via ``from .storage import get_storage``).
 """
@@ -38,6 +38,7 @@ from live_mem.core.hivemind import (
     NodeIdentity,
     generate_peer_keypair,
 )
+from tests.fakes.backup_storage import CopyFakeStorage, patch_backup_storage as _patch_storage
 from tests.test_hivemind_state import FakeStorage
 
 SPACE = "p2-5-space"
@@ -45,20 +46,6 @@ NODE_ID = "nodep25000000000000000000000000aa"
 TS = "2026-06-17T12-00-00"
 BACKUP_ID = f"{SPACE}/{TS}"
 BACKUP_PREFIX = f"_backups/{SPACE}/{TS}/"
-
-
-class CopyFakeStorage(FakeStorage):
-    """``FakeStorage`` + ``copy_object`` (absent de la classe partagée).
-
-    Le chemin de copie hérité de ``restore`` appelle ``storage.copy_object``.
-    On l'ajoute UNIQUEMENT dans ce module de test (sans muter la classe
-    partagée, dont d'autres suites épinglent la surface) et on incrémente
-    ``put_calls`` pour que les assertions read-only restent significatives.
-    """
-
-    async def copy_object(self, source_key: str, dest_key: str) -> None:
-        self.put_calls += 1
-        self.objects[dest_key] = self.objects[source_key]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,10 +111,6 @@ async def _seed_healthy_hive(storage: FakeStorage) -> HivemindStateStore:
         {"space_id": SPACE, "version": 1}
     )
     return store
-
-
-def _patch_storage(monkeypatch, storage: FakeStorage) -> None:
-    monkeypatch.setattr("live_mem.core.backup.get_storage", lambda: storage)
 
 
 def _hivemind_keys(storage: FakeStorage) -> set[str]:

@@ -1,7 +1,7 @@
 # 🖥️ CLI, shell et tests Hivemind
 
 > CLI scriptable, shell interactif et scripts de test opérationnels pour
-> Hivemind `1.3.1`.
+> Hivemind `1.4.0`.
 
 🇬🇧 [English version](README.md)
 
@@ -67,13 +67,18 @@ uv run python scripts/mcp_cli.py space summary my-proj               # Synthèse
 uv run python scripts/mcp_cli.py space update my-proj -d "Nouv desc" # Modifie description / owner
 uv run python scripts/mcp_cli.py space update-rules my-proj -f rules.md  # Remplace les rules (manage)
 uv run python scripts/mcp_cli.py space export my-proj                # Export tar.gz
-uv run python scripts/mcp_cli.py space delete my-proj --confirm      # Irréversible (manage)
+uv run python scripts/mcp_cli.py space delete my-proj --confirm      # Irréversible ; retire tous les grants (manage)
+uv run python scripts/mcp_cli.py space delete my-proj --confirm --recover-access-grants  # Ancienne suppression connue/interrompue seulement
 ```
 
 Avant `space delete`, mettre en quiescence tous les writers et jobs de fond du
 space. La CLI rend `status: partial` avec les compteurs exacts, clés échouées,
 état du marker et action de recovery ; elle ne présente ni ne retente ce
-résultat comme un succès. Le `unsafe_recovery` Hivemind avancé reste une
+résultat comme un succès. Une suppression réussie retire l'ID de toutes les
+allowlists. Un préfixe vide avec scopes est préservé par défaut comme possible
+pré-grant intentionnel ; `--recover-access-grants` est une recovery destructive
+des seuls droits pour une ancienne suppression connue ou interrompue et
+retourne `grants_cleaned`. Le `unsafe_recovery` Hivemind avancé reste une
 procédure via client MCP, pas un flag CLI.
 
 ### Live notes (3 outils)
@@ -197,6 +202,8 @@ Compose isolés, prouve la réparation d'un volume détenu par root avec les
 profils de capabilities livrés, recrée le conteneur Hivemind et ne compare que
 des empreintes SHA-256, puis vérifie les entrées refusées. Il n'écrase jamais un
 `.env` existant et ne supprime que ses ressources propres.
+Elle refuse également avant de toucher Docker lorsqu'un autre runner de test
+est actif.
 
 ```bash
 bash scripts/verify_embedded_secret_docker.sh
@@ -249,12 +256,6 @@ uv run python scripts/test_recette.py --suite graph \
 
 > ⚠️ Lorsque Hivemind tourne dans Docker, utilisez `host.docker.internal` au lieu de `localhost` dans `--graph-url` pour un moteur qui tourne sur l'hôte.
 
-### Test compaction bank — `test_bank_compact.py`
-
-Test unitaire direct du moteur de compaction. Exécution : `uv run python scripts/test_bank_compact.py`.
-
----
-
 ## Options communes
 
 | Option          | Description                                                                  |
@@ -278,7 +279,6 @@ Test unitaire direct du moteur de compaction. Exécution : `uv run python script
 scripts/
 ├── mcp_cli.py                # Point d'entrée CLI Click + Shell interactif
 ├── test_recette.py           # 🧪 Recette globale (4 suites, ~44 tests)
-├── test_bank_compact.py      # 🧪 Tests unitaires compaction bank
 ├── configure_dev_env.py      # Générateur local sûr de .env (refuse l'écrasement)
 ├── README.md                 # Documentation (Anglais)
 ├── README.fr.md              # Documentation (Français) ← Vous êtes ici
@@ -292,4 +292,4 @@ scripts/
 
 ---
 
-*CLI Hivemind — 1.3.1*
+*CLI Hivemind — 1.4.0*

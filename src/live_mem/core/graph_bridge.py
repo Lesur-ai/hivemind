@@ -72,6 +72,283 @@ _LONG_AUTHORITY_MARKER: dict = {
     ),
 }
 
+_EMBEDDING_COLLECTION_ERROR_REASONS: dict[str, frozenset[str]] = {
+    # Exact reason/state pairs reachable from
+    # VectorStoreService.get_collection_info(). Mutation, restore, export, and
+    # per-call dynamic-evidence failures are deliberately not status values.
+    "reindex_required": frozenset(
+        {
+            "active_alias_invalid",
+            "fingerprint_mismatch",
+            "invalid_metadata",
+            "legacy_nonempty",
+            "legacy_unreadable",
+            "memory_namespace_mismatch",
+            "payload_ownership_mismatch",
+            "shadow_invalid",
+            "static_profile_mismatch",
+            "vector_config_mismatch",
+        }
+    ),
+    "unavailable": frozenset(
+        {
+            "active_alias_unreadable",
+            "canonical_unreadable",
+            "embedding_profile_unavailable",
+            "qdrant_unreadable",
+            "shadow_validation_failed",
+        }
+    ),
+}
+_LOWER_HEX_DIGITS = frozenset("0123456789abcdef")
+_REINDEX_PHASES = frozenset(
+    {
+        "admission",
+        "snapshot",
+        "rebuild",
+        "validate",
+        "pre_switch",
+        "activated",
+        "verified",
+    }
+)
+_REINDEX_ACTIVE_STATES = frozenset(
+    {"missing", "ready", "reindex_required", "unavailable"}
+)
+_REINDEX_MAX_SOURCE_DOCUMENTS = 10_000
+_REINDEX_MAX_SOURCE_CHUNKS = 250_000
+_REINDEX_ERROR_REASONS = frozenset(
+    {
+        "active_target_changed",
+        "activation_unverified",
+        "backend_unavailable",
+        "chunking_config_changed",
+        "chunking_config_unavailable",
+        "embedding_failed",
+        "embedding_identity_changed",
+        "embedding_invalid",
+        "embedding_profile_changed",
+        "initial_state_invalid",
+        "maintenance_unavailable",
+        "namespace_busy",
+        "post_switch_unverified",
+        "shadow_collision",
+        "shadow_creation_failed",
+        "shadow_invalid",
+        "shadow_write_failed",
+        "source_changed",
+        "source_chunk_accounting_mismatch",
+        "source_chunking_failed",
+        "source_chunks_empty",
+        "source_document_duplicate",
+        "source_extraction_failed",
+        "source_hash_mismatch",
+        "source_inventory_empty",
+        "source_inventory_invalid",
+        "source_inventory_unavailable",
+        "source_metadata_mismatch",
+        "source_object_duplicate",
+        "source_object_mismatch",
+        "source_object_unavailable",
+        "source_ownership_invalid",
+        "source_size_limit_exceeded",
+        "source_size_mismatch",
+        "source_status_invalid",
+    }
+)
+_REINDEX_POST_SWITCH_ERROR_REASONS = frozenset(
+    {"activation_unverified", "post_switch_unverified"}
+)
+_REINDEX_BOUNDARY_ERROR_REASONS = frozenset(
+    {
+        "binding_unavailable",
+        "invalid_result",
+        "reindex_failed",
+        "runtime_unavailable",
+        "space_not_found",
+        "unsupported_runtime",
+    }
+)
+_REINDEX_RESULT_KEYS = frozenset(
+    {
+        "status",
+        "phase",
+        "reason",
+        "operation_id",
+        "source_documents",
+        "source_chunks",
+        "vectors_written",
+        "activated",
+        "active_state",
+    }
+)
+# A bounded source can still require tens of thousands of sequential provider
+# batches. The ordinary 120-second Graph Memory client deadline would make the
+# public maintenance path unusable and manufacture an ambiguous activation.
+# Keep a finite ceiling, but make it maintenance-sized; operator-facing MCP
+# clients and proxies must keep their own request open for the same call.
+_REINDEX_CLIENT_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
+
+
+def _reindex_error(reason: str) -> dict:
+    if reason not in _REINDEX_ERROR_REASONS | _REINDEX_BOUNDARY_ERROR_REASONS:
+        reason = "reindex_failed"
+    return {
+        "status": "error",
+        "phase": "admission",
+        "reason": reason,
+        "operation_id": None,
+        "source_documents": 0,
+        "source_chunks": 0,
+        "vectors_written": 0,
+        "activated": False,
+        "active_state": "unavailable",
+    }
+
+
+def _reindex_uncertain(reason: str) -> dict:
+    """Return a retry-unsafe envelope once non-idempotent dispatch may have run."""
+    result = _reindex_error(reason)
+    result.update({"phase": "activated", "activated": True})
+    return result
+
+
+def _invalid_reindex_result() -> dict:
+    return _reindex_uncertain("invalid_result")
+
+
+def _reindex_result_view(raw: object) -> dict:
+    """Project the embedded maintenance response onto one exact safe schema."""
+    if type(raw) is not dict or set(raw) != _REINDEX_RESULT_KEYS:
+        return _invalid_reindex_result()
+    status = raw.get("status")
+    phase = raw.get("phase")
+    reason = raw.get("reason")
+    operation_id = raw.get("operation_id")
+    active_state = raw.get("active_state")
+    activated = raw.get("activated")
+    counts = (
+        raw.get("source_documents"),
+        raw.get("source_chunks"),
+        raw.get("vectors_written"),
+    )
+    if (
+        status not in {"ok", "error"}
+        or phase not in _REINDEX_PHASES
+        or active_state not in _REINDEX_ACTIVE_STATES
+        or type(activated) is not bool
+        or any(type(value) is not int or value < 0 for value in counts)
+        or counts[0] > _REINDEX_MAX_SOURCE_DOCUMENTS
+        or counts[1] > _REINDEX_MAX_SOURCE_CHUNKS
+        or counts[2] > counts[1]
+        or (
+            operation_id is not None
+            and (
+                type(operation_id) is not str
+                or len(operation_id) != 32
+                or any(character not in _LOWER_HEX_DIGITS for character in operation_id)
+            )
+        )
+    ):
+        return _invalid_reindex_result()
+    if status == "ok":
+        if (
+            phase != "verified"
+            or reason is not None
+            or operation_id is None
+            or activated is not True
+            or active_state != "ready"
+            or counts[0] < 1
+            or counts[1] < 1
+            or counts[1] < counts[0]
+            or counts[1] != counts[2]
+        ):
+            return _invalid_reindex_result()
+    elif (
+        type(reason) is not str
+        or reason not in _REINDEX_ERROR_REASONS
+        or phase == "verified"
+        or (phase == "activated") != activated
+        or (reason in _REINDEX_POST_SWITCH_ERROR_REASONS) != activated
+        or (activated and active_state != "unavailable")
+    ):
+        return _invalid_reindex_result()
+    return {
+        "status": status,
+        "phase": phase,
+        "reason": reason,
+        "operation_id": operation_id,
+        "source_documents": counts[0],
+        "source_chunks": counts[1],
+        "vectors_written": counts[2],
+        "activated": activated,
+        "active_state": active_state,
+    }
+
+
+def _invalid_embedding_collection_view() -> dict:
+    """Return a fresh fixed failure; never reflect malformed backend values."""
+    return {"state": "unavailable", "reason": "invalid_status"}
+
+
+def _embedding_collection_view(raw: object) -> dict:
+    """Project one strict, value-free ``memory_stats`` collection status."""
+    if type(raw) is not dict:
+        return _invalid_embedding_collection_view()
+
+    keys = tuple(dict.keys(raw))
+    if any(type(key) is not str for key in keys):
+        return _invalid_embedding_collection_view()
+    state = dict.get(raw, "state")
+    if type(state) is not str:
+        return _invalid_embedding_collection_view()
+
+    if state == "missing":
+        if len(keys) == 1 and "state" in raw:
+            return {"state": "missing"}
+        return _invalid_embedding_collection_view()
+
+    if state == "ready":
+        if (
+            len(keys) != 3
+            or "state" not in raw
+            or "profile_fingerprint" not in raw
+            or "points_count" not in raw
+        ):
+            return _invalid_embedding_collection_view()
+        fingerprint = dict.get(raw, "profile_fingerprint")
+        points_count = dict.get(raw, "points_count")
+        if (
+            type(fingerprint) is not str
+            or len(fingerprint) != 64
+            or any(character not in _LOWER_HEX_DIGITS for character in fingerprint)
+            or type(points_count) is not int
+            or points_count < 0
+        ):
+            return _invalid_embedding_collection_view()
+        return {
+            "state": "ready",
+            "profile_fingerprint": fingerprint,
+            "points_count": points_count,
+        }
+
+    if state in _EMBEDDING_COLLECTION_ERROR_REASONS:
+        if (
+            len(keys) != 2
+            or "state" not in raw
+            or "reason" not in raw
+        ):
+            return _invalid_embedding_collection_view()
+        reason = dict.get(raw, "reason")
+        if (
+            type(reason) is not str
+            or reason not in _EMBEDDING_COLLECTION_ERROR_REASONS[state]
+        ):
+            return _invalid_embedding_collection_view()
+        return {"state": state, "reason": reason}
+
+    return _invalid_embedding_collection_view()
+
 
 def _watermark_view(gm_config: dict) -> dict:
     """Read-only view of the P4-5 derived watermark recorded in the local
@@ -656,7 +933,32 @@ class GraphBridgeService:
 
         memory_id = derive_memory_id(space_id)
         try:
-            gm = self._make_client(url, token)
+            # Protected certification runs two sequential provider-discovery
+            # probes inside Graph Memory's ``system_health``.  A complete,
+            # validated strict-certification environment grants that one
+            # auto-bind call its reviewed larger bound.  Ordinary runtimes
+            # retain the historical constructor byte-for-byte (no timeout
+            # kwarg, therefore GraphMemoryClient's 120-second default), while
+            # a partial strict environment raises here before any health call.
+            # Route through the existing core inference seam.  This keeps the
+            # long bridge structurally independent of the commit-state
+            # ``live_mem.core.hivemind`` package without hiding a dynamic
+            # import from the negative-import guards.
+            from .inference_runtime import (
+                protected_certification_graph_health_timeout_seconds,
+            )
+
+            graph_health_timeout = (
+                protected_certification_graph_health_timeout_seconds()
+            )
+            if graph_health_timeout is None:
+                gm = self._make_client(url, token)
+            else:
+                gm = self._make_client(
+                    url,
+                    token,
+                    timeout=graph_health_timeout,
+                )
 
             health = await gm.call_tool("system_health", {})
             if not self._health_ok(health):
@@ -1363,6 +1665,7 @@ class GraphBridgeService:
 
         Récupère :
         - Statistiques de la mémoire (documents, entités, relations)
+        - État sûr de la collection d'embeddings
         - Liste des documents ingérés avec leurs métadonnées
         - Top entités du graphe de connaissances
         - Vue graphe plafonnée et assainie quand ``include_graph`` est vrai
@@ -1445,6 +1748,7 @@ class GraphBridgeService:
 
             graph_stats = None
             top_entities = []
+            embedding_collection = _invalid_embedding_collection_view()
             if stats.get("status") == "ok":
                 graph_stats = {
                     "document_count": stats.get("document_count", 0),
@@ -1452,6 +1756,9 @@ class GraphBridgeService:
                     "relation_count": stats.get("relation_count", 0),
                 }
                 top_entities = stats.get("top_entities", [])
+                embedding_collection = _embedding_collection_view(
+                    stats.get("embedding_collection")
+                )
 
             graph_documents = []
             if doc_list.get("status") == "ok":
@@ -1518,6 +1825,7 @@ class GraphBridgeService:
             "push_count": config.push_count,
             "files_pushed": config.files_pushed,
             "graph_stats": graph_stats,
+            "embedding_collection": embedding_collection,
             "graph_documents": graph_documents,
             "top_entities": top_entities,
             **({"graph_view": graph_view} if include_graph else {}),
@@ -1865,6 +2173,74 @@ class GraphBridgeService:
                 "status": "error",
                 "message": f"Erreur memory_ingest : {e}",
             }
+
+    async def reindex(self, space_id: str) -> dict:
+        """Run bounded embedding maintenance on a persisted embedded binding.
+
+        This method never provisions a binding. Custom ``graph_connect``
+        endpoints are unsupported because Hivemind cannot prove their
+        single-runtime maintenance boundary. For a valid embedded binding it
+        constructs one client and issues exactly one non-idempotent
+        ``memory_reindex`` call with the persisted target memory identifier.
+        """
+        try:
+            return await self._reindex_embedded(space_id)
+        except (ConnectionError, TimeoutError):
+            return _reindex_error("runtime_unavailable")
+        except Exception:
+            # This wrapper covers storage, binding resolution, client creation,
+            # and dispatch. Never reflect or log an exception's raw text.
+            logger.error("Embedded long-memory reindex failed")
+            return _reindex_error("reindex_failed")
+
+    async def _reindex_embedded(self, space_id: str) -> dict:
+        """Execute the post-auth embedded-only path under fixed envelopes."""
+        storage = get_storage()
+        meta_data = await storage.get_json(f"{space_id}/_meta.json")
+        if meta_data is None:
+            return _reindex_error("space_not_found")
+
+        persisted = meta_data.get("graph_memory")
+        if (
+            not isinstance(persisted, dict)
+            or persisted.get("binding") != _BINDING_EMBEDDED
+            or persisted.get("token") != EMBEDDED_TOKEN_SENTINEL
+        ):
+            return _reindex_error("unsupported_runtime")
+
+        # Resolve the live embedded token only after the persisted classification
+        # has passed. ``provision=False`` forbids auto-binding or secret creation.
+        config, resolved, err = await self._resolve_or_embedded(
+            space_id, provision=False
+        )
+        if err is not None:
+            return _reindex_error("binding_unavailable")
+        if (
+            config is None
+            or not isinstance(resolved, dict)
+            or resolved.get("binding") != _BINDING_EMBEDDED
+            or resolved.get("token") != EMBEDDED_TOKEN_SENTINEL
+            or config.memory_id != derive_memory_id(space_id)
+        ):
+            # A concurrent binding replacement between the two reads cannot
+            # redirect this maintenance operation to an explicit endpoint.
+            return _reindex_error("unsupported_runtime")
+
+        gm = self._make_client(
+            config.url,
+            config.token,
+            timeout=_REINDEX_CLIENT_TIMEOUT_SECONDS,
+        )
+        try:
+            raw_result = await gm.call_tool(
+                "memory_reindex", {"memory_id": config.memory_id}
+            )
+        except (ConnectionError, TimeoutError):
+            return _reindex_uncertain("runtime_unavailable")
+        except Exception:
+            logger.error("Embedded long-memory reindex dispatch failed")
+            return _reindex_uncertain("reindex_failed")
+        return _reindex_result_view(raw_result)
 
     # ─────────────────────────────────────────────────────────
     # P4-7 — Planification d'ingestion canonique (PLAN-ONLY, downstream-only)

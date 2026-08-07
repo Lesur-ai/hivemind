@@ -5,6 +5,7 @@ StorageService - Client S3 pour le stockage des documents.
 Gère le stockage et la récupération des documents originaux sur S3 Cloud Temple.
 """
 
+import asyncio
 import os
 import hashlib
 import sys
@@ -21,6 +22,13 @@ from .egress import (
     redact_proxy_errors_async,
     redact_proxy_secrets,
 )
+from .maintenance import (
+    MAX_REINDEX_SOURCE_OBJECTS,
+    MAX_REINDEX_SOURCE_TOTAL_BYTES,
+    ReindexSourceLimitExceeded,
+)
+from .validators import MAX_INGEST_SIZE_BYTES
+
 
 # P12-3 (Hivemind #268) : frontière de redaction partagée (voir egress.py) —
 # les erreurs botocore de connexion proxy embarquent l'URL proxy BRUTE.
@@ -178,15 +186,18 @@ class StorageService:
         
         # Métadonnées S3 - doivent être ASCII uniquement
         # On URL-encode les valeurs contenant des caractères non-ASCII
-        s3_metadata = {
+        s3_metadata = {}
+        if metadata:
+            for k, v in metadata.items():
+                s3_metadata[k] = self._sanitize_metadata_value(str(v))
+        # Ownership and retained-source evidence are authoritative outputs of
+        # this method, never caller-overridable user metadata.
+        s3_metadata.update({
             'memory_id': memory_id,
             'original_filename': self._sanitize_metadata_value(filename),
             'doc_hash': doc_hash,
             'uploaded_at': datetime.utcnow().isoformat()
-        }
-        if metadata:
-            for k, v in metadata.items():
-                s3_metadata[k] = self._sanitize_metadata_value(str(v))
+        })
         
         try:
             self._client.put_object(
@@ -481,6 +492,181 @@ class StorageService:
         except ClientError as e:
             print(f"❌ [S3] Erreur listing complet: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return []
+
+    @_redact_proxy_errors
+    async def list_reindex_objects(self, memory_id: str) -> list:
+        """List and HEAD every retained source object without lossy fallback.
+
+        Unlike the historical operator inventory, any LIST/HEAD ambiguity is
+        raised to the maintenance boundary. Returning an empty list on a
+        backend error would make an unverifiable namespace look authoritative.
+        """
+        if type(memory_id) is not str or not memory_id:
+            raise ValueError("memory_id is required")
+        prefix = f"{memory_id}/documents/"
+        objects = []
+        listed_size = 0
+        continuation_token = None
+        seen_continuation_tokens: set[str] = set()
+        seen_keys: set[str] = set()
+        page_count = 0
+        while True:
+            page_count += 1
+            if page_count > MAX_REINDEX_SOURCE_OBJECTS + 1:
+                raise ReindexSourceLimitExceeded(
+                    "source inventory limit exceeded"
+                )
+            params = {
+                "Bucket": self._bucket,
+                "Prefix": prefix,
+                "MaxKeys": 1000,
+            }
+            if continuation_token is not None:
+                params["ContinuationToken"] = continuation_token
+            response = await asyncio.to_thread(
+                self._client_v4.list_objects_v2,
+                **params,
+            )
+            contents = response.get("Contents", [])
+            if type(contents) is not list or len(contents) > params["MaxKeys"]:
+                raise RuntimeError("invalid source inventory")
+            is_truncated = response.get("IsTruncated")
+            if (
+                type(is_truncated) is not bool
+                or (
+                    is_truncated is False
+                    and "NextContinuationToken" in response
+                )
+            ):
+                raise RuntimeError("invalid source inventory")
+            next_token = None
+            if is_truncated is True:
+                next_token = response.get("NextContinuationToken")
+                if (
+                    not contents
+                    or type(next_token) is not str
+                    or not next_token
+                    or next_token in seen_continuation_tokens
+                ):
+                    raise RuntimeError("invalid source inventory")
+            page_objects: list[tuple[str, int]] = []
+            page_keys: set[str] = set()
+            page_size = 0
+            for item in contents:
+                if type(item) is not dict:
+                    raise RuntimeError("invalid source inventory")
+                key = item.get("Key")
+                size = item.get("Size")
+                if (
+                    type(key) is not str
+                    or not key.startswith(prefix)
+                    or key == prefix
+                    or type(size) is not int
+                    or size < 0
+                    or key in seen_keys
+                    or key in page_keys
+                ):
+                    raise RuntimeError("invalid source inventory")
+                if size > MAX_INGEST_SIZE_BYTES:
+                    raise ReindexSourceLimitExceeded(
+                        "source inventory limit exceeded"
+                    )
+                page_objects.append((key, size))
+                page_keys.add(key)
+                page_size += size
+            if (
+                len(objects) + len(page_objects) > MAX_REINDEX_SOURCE_OBJECTS
+                or listed_size + page_size > MAX_REINDEX_SOURCE_TOTAL_BYTES
+            ):
+                # Refuse an over-limit page before any of its per-object HEADs.
+                raise ReindexSourceLimitExceeded(
+                    "source inventory limit exceeded"
+                )
+            listed_size += page_size
+            seen_keys.update(page_keys)
+            for key, size in page_objects:
+                head = await asyncio.to_thread(
+                    self._client_v4.head_object,
+                    Bucket=self._bucket,
+                    Key=key,
+                )
+                head_size = head.get("ContentLength")
+                metadata = head.get("Metadata", {})
+                if (
+                    type(head_size) is not int
+                    or head_size < 0
+                    or head_size != size
+                    or type(metadata) is not dict
+                    or any(
+                        type(meta_key) is not str or type(meta_value) is not str
+                        for meta_key, meta_value in metadata.items()
+                    )
+                ):
+                    raise RuntimeError("invalid source inventory")
+                objects.append(
+                    {
+                        "key": key,
+                        "uri": f"s3://{self._bucket}/{key}",
+                        "size_bytes": size,
+                        "metadata": dict(metadata),
+                    }
+                )
+            if is_truncated is True:
+                continuation_token = next_token
+                seen_continuation_tokens.add(continuation_token)
+                continue
+            break
+        return objects
+
+    @_redact_proxy_errors
+    async def read_reindex_object(
+        self,
+        memory_id: str,
+        key: str,
+        expected_size: int,
+    ) -> bytes:
+        """Read one exact retained source without emitting its key to logs."""
+        if (
+            type(memory_id) is not str
+            or not memory_id
+            or type(key) is not str
+            or not key.startswith(f"{memory_id}/documents/")
+            or key == f"{memory_id}/documents/"
+        ):
+            raise PermissionError("source object is outside the memory namespace")
+        if (
+            type(expected_size) is not int
+            or expected_size < 0
+            or expected_size > MAX_INGEST_SIZE_BYTES
+        ):
+            raise ValueError("source object size is invalid")
+        response = await asyncio.to_thread(
+            self._client.get_object,
+            Bucket=self._bucket,
+            Key=key,
+        )
+        body = response.get("Body")
+        if body is None or not hasattr(body, "read"):
+            raise RuntimeError("invalid source object response")
+
+        def read_and_close() -> bytes:
+            try:
+                content_length = response.get("ContentLength")
+                if (
+                    type(content_length) is not int
+                    or content_length != expected_size
+                ):
+                    raise RuntimeError("invalid source object response")
+                return body.read(expected_size + 1)
+            finally:
+                close = getattr(body, "close", None)
+                if callable(close):
+                    close()
+
+        content = await asyncio.to_thread(read_and_close)
+        if type(content) is not bytes or len(content) != expected_size:
+            raise RuntimeError("invalid source object response")
+        return content
     
     @_redact_proxy_errors
     async def delete_prefix(self, prefix: str) -> dict:

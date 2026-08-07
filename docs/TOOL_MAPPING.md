@@ -4,7 +4,7 @@ This document is the definitive mapping between the historical
 `live_*`/`bank_*`/`graph_*` names and Hivemind's canonical
 `short_*`/`mid_*`/`long_*` grammar. It is deliberately an **alias-only**
 contract: current permissions, audiences, discovery profiles, operations, and
-the complete 61-name surface are generated in
+the complete 63-name surface are generated in
 [`TOOL_EXPOSURE.md`](TOOL_EXPOSURE.md) and specified in
 [`MCP_TOOLS_SPEC.md`](MCP_TOOLS_SPEC.md). They are not duplicated here.
 
@@ -43,9 +43,10 @@ The following mid supervision and maintenance names remain historical-only:
 - `bank_compact`
 
 Cross-cutting `system_*`, `space_*`, `backup_*`, `admin_*`, `token_create`,
-`space_invite_token`, and direct canonical additions such as `long_query` and
-`long_ingest` keep their registered names. They are not missing aliases and are
-not on an implied deprecation track.
+`space_invite_token`, and direct canonical additions such as `long_query`,
+`long_ingest`, and the hidden operator tools `long_reindex` and
+`inference_self_test` keep their registered names. They are not missing aliases
+and are not on an implied deprecation track.
 
 ## Invariants
 
@@ -59,6 +60,6 @@ not on an implied deprecation track.
 4. Destructive semantics do not soften behind an alias. In particular,
    `mid_delete` is exactly `bank_delete` and retains its current manage and
    confirmation contract as specified by the live handler and API reference.
-5. The frozen fixture currently records 48 direct registry entries plus these
-   13 aliases, for 61 registered names. The generated exposure inventory must
+5. The frozen fixture currently records 50 direct registry entries plus these
+   13 aliases, for 63 registered names. The generated exposure inventory must
    remain consistent with that fixture.

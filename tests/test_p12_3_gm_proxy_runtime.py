@@ -1,47 +1,84 @@
 # -*- coding: utf-8 -*-
 """
-P12-3 (#268) — Graph Memory `PROXY_URL`: runtime routing, fail-closed trap,
-client lifecycle.
+P12-3 (#268) baseline re-proven through the P13-1C (#276) shared inference
+boundary — Graph Memory `PROXY_URL`: runtime routing, fail-closed trap, client
+lifecycle.
 
-Runtime evidence complementing ``tests/test_p12_3_gm_proxy_config.py``:
+The frozen P12-3 egress contract is UNCHANGED; what changed is who owns the
+transport. `ExtractorService` / `EmbeddingService` no longer construct an
+`AsyncOpenAI` client each: they consume the registered `hivemind_inference`
+adapters through the service-wide runtime, which owns the proxied transport and
+closes it on the ASGI shutdown path. This file therefore keeps proving the same
+properties against the migrated consumers:
 
-- a deterministic in-process fake HTTP proxy (absolute-form request lines,
-  canned OpenAI-shaped responses, per-request recording) observes every
-  expected Graph Memory extraction, embedding, and provider-health request;
+- a deterministic in-process listener (the shared dual-shape
+  ``InferenceEmulator``, absolute-form request lines, canned OpenAI-shaped
+  responses, per-request recording) observes every expected extraction,
+  embedding, and provider-health request;
 - the LLM origin hostnames use the reserved ``.invalid`` TLD (RFC 2606), so a
   bypassing direct connection cannot succeed even accidentally — any recorded
-  proxy request is positive proof of routing, and any successful call proves
-  no direct path was used;
+  proxy request is positive proof of routing, and any successful call proves no
+  direct path was used;
 - a direct-network trap (live local origin listener + failing proxy) proves
   that proxy connection, authentication (407), and timeout failures raise and
-  NEVER fall back to a direct connection, across the openai and tenacity retry
-  layers;
-- retry attempts re-traverse the proxy (never a direct second attempt);
-- without a proxy the vendored direct behavior is preserved;
-- owned transports exist only when a proxy is configured and close on normal
-  shutdown, double-close, construction failure, and the ASGI lifespan path,
-  while a cancelled in-flight call must NOT tear down the shared service
-  transport.
+  NEVER fall back to a direct connection;
+- retries re-traverse the proxy, never a direct second attempt — under the
+  ADR-0027 contract that now replaces the historical `tenacity` layers: SDK
+  retries are gone with the SDK, and only an explicitly transient rate limit
+  with a bounded ``Retry-After`` (or a pre-send connect failure with NO proxy
+  configured) may retry at all, exactly once;
+- health probes are discovery-only: the proxy records ``/models`` and NEVER a
+  chat completion or an embedding, so a health call spends zero provider
+  tokens;
+- without a proxy the request reaches the origin directly, in path-form;
+- the owned transports live in the service-wide inference runtime: they survive
+  an in-flight cancellation and close on the ASGI lifespan shutdown path.
 
 No real network: every listener binds 127.0.0.1 on an ephemeral port; every
-must-not-resolve origin uses ``.invalid``. tenacity waits are neutralized via
-each decorated method's ``retry.wait`` so retries stay deterministic and fast.
+must-not-resolve origin uses ``.invalid``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-import tenacity
+
+from tests.fakes.inference_emulator import InferenceEmulator, openai_chat_payload
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _LLM_ORIGIN = "http://llm.p12-3-hivemind.invalid"
 _SECRET_PROXY = "http://svc-user:s3cr3t-pw@proxy.internal:3128"
+
+# Legacy LLMAAS_* resolution through the shared boundary: the embedding
+# dimension defaults to the frozen 1.x value, so the emulator must answer with
+# exactly that shape or the adapter fails the batch as ``invalid_response``.
+_LEGACY_EMBEDDING_DIMENSIONS = 1024
+_CERTIFICATION_ENV = (
+    "HIVEMIND_CERTIFICATION_BUDGET_PATH",
+    "HIVEMIND_CERTIFICATION_RUN_ID",
+    "HIVEMIND_CERTIFICATION_SOURCE_SHA",
+    "HIVEMIND_CERTIFICATION_PROFILE_ID",
+)
+_ACTUAL_DISCOVERY_CONTRACT = object()
+_HEALTH_DISCOVERY_IDENTITIES = {
+    "chat": {
+        "role": "chat",
+        "provider_id": "test-chat",
+        "endpoint": "https://chat.p12-3-hivemind.invalid/v1",
+        "configured_model": "configured-chat",
+    },
+    "embedding": {
+        "role": "embedding",
+        "provider_id": "test-embedding",
+        "endpoint": "https://embedding.p12-3-hivemind.invalid/v1",
+        "configured_model": "configured-embedding",
+    },
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -54,7 +91,32 @@ def _gm_baseline_env(monkeypatch):
     module-level ``Settings()`` (required credential fields), so a baseline
     env must exist BEFORE each test body's imports, standalone or full-suite."""
     _set_gm_env(monkeypatch, None)
+    for name in _CERTIFICATION_ENV:
+        monkeypatch.delenv(name, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+async def _gm_runtime_reset():
+    """Close and reset the Graph Memory inference runtime around every test.
+
+    The runtime snapshot is per PROCESS and its adapters own real ``httpx``
+    transports bound to this test's env and emulator, so a leaked runtime would
+    both leak a socket and silently serve the next test the previous test's
+    profiles.
+    """
+    from mcp_memory.core.inference_runtime import (
+        close_inference_runtime_if_initialized,
+        reset_inference_runtime_for_tests,
+    )
+
+    reset_inference_runtime_for_tests()
+    yield
+    # Close FIRST (releasing any real transport), then lift the terminal
+    # shutdown flag: leaving it raised would make every later test in the
+    # session see a service that has already shut down.
+    await close_inference_runtime_if_initialized()
+    reset_inference_runtime_for_tests()
 
 
 def _set_gm_env(monkeypatch, proxy_url, api_url=_LLM_ORIGIN + "/v1"):
@@ -79,27 +141,24 @@ def _set_gm_env(monkeypatch, proxy_url, api_url=_LLM_ORIGIN + "/v1"):
 
 
 def _fresh(monkeypatch, factory, proxy_url, api_url=_LLM_ORIGIN + "/v1", **env):
-    """Build a GM service with fresh settings pinned to this test's env."""
+    """Build a GM service with fresh settings AND a fresh inference runtime
+    pinned to this test's env (both snapshots are per-process)."""
     _set_gm_env(monkeypatch, proxy_url, api_url=api_url)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     from mcp_memory.config import get_settings
+    from mcp_memory.core.inference_runtime import reset_inference_runtime_for_tests
 
     get_settings.cache_clear()
+    reset_inference_runtime_for_tests()
     try:
         return factory()
     finally:
         get_settings.cache_clear()
 
 
-def _quiet_retries(monkeypatch, *decorated_methods):
-    """Neutralize tenacity waits on decorated GM methods (deterministic)."""
-    for method in decorated_methods:
-        monkeypatch.setattr(method.retry, "wait", tenacity.wait_none())
-
-
 # --------------------------------------------------------------------------- #
-# Deterministic fake HTTP proxy / origin listeners                             #
+# Canned payloads                                                             #
 # --------------------------------------------------------------------------- #
 
 _EXTRACTION_JSON = {
@@ -112,155 +171,22 @@ _EXTRACTION_JSON = {
 }
 
 
-def _chat_payload():
-    return {
-        "id": "chatcmpl-p12-3",
-        "object": "chat.completion",
-        "created": 1,
-        "model": "test-model",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": json.dumps(_EXTRACTION_JSON),
-                },
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
+def _extraction_emulator(scripted=None) -> InferenceEmulator:
+    """Emulator whose canned chat answer parses as an extraction result and
+    whose embeddings match the legacy 1024-dimension profile."""
+    emulator = InferenceEmulator(
+        scripted, embedding_dimensions=_LEGACY_EMBEDDING_DIMENSIONS
+    )
+    canned = emulator._canned
 
+    def _extraction_canned(method, target, body):
+        status, payload = canned(method, target, body)
+        if method == "POST" and target.split("?", 1)[0].endswith("/chat/completions"):
+            payload = openai_chat_payload(json.dumps(_EXTRACTION_JSON))
+        return status, payload
 
-def _embeddings_payload(count):
-    return {
-        "object": "list",
-        "data": [
-            {"object": "embedding", "index": i, "embedding": [0.1, 0.2, 0.3, 0.4]}
-            for i in range(count)
-        ],
-        "model": "test-embed-model",
-        "usage": {"prompt_tokens": 1, "total_tokens": 1},
-    }
-
-
-def _models_payload():
-    return {"object": "list", "data": [{"id": "test-model", "object": "model"}]}
-
-
-class _HttpEndpoint:
-    """Minimal deterministic HTTP/1.1 listener (Connection: close per request).
-
-    As a *proxy* it receives absolute-form request targets and answers itself
-    (no upstream connection is ever attempted — fully deterministic). As a
-    *direct origin* it receives path-form targets. ``scripted`` entries
-    override the default responder per request, in order:
-
-    - ``"407"``: proxy-auth failure status with a JSON body;
-    - ``"500"`` / ``"400"``: provider-style error status;
-    - ``"stall"``: read the request then never answer (timeout path);
-    - ``None``: canned success for the requested path.
-    """
-
-    def __init__(self, scripted=None):
-        self.requests = []
-        self.connections = 0
-        self.scripted = list(scripted or [])
-        self._server = None
-        self.port = None
-        self._stall = asyncio.Event()
-
-    async def __aenter__(self):
-        self._server = await asyncio.start_server(
-            self._handle, "127.0.0.1", 0
-        )
-        self.port = self._server.sockets[0].getsockname()[1]
-        return self
-
-    async def __aexit__(self, *exc):
-        self._stall.set()
-        self._server.close()
-        with contextlib.suppress(Exception):
-            await self._server.wait_closed()
-
-    @property
-    def url(self):
-        return f"http://127.0.0.1:{self.port}"
-
-    def _canned(self, target, body):
-        if "/chat/completions" in target:
-            return b"200 OK", _chat_payload()
-        if "/embeddings" in target:
-            try:
-                parsed = json.loads(body or b"{}")
-                raw_input = parsed.get("input", [])
-                count = len(raw_input) if isinstance(raw_input, list) else 1
-            except ValueError:
-                count = 1
-            return b"200 OK", _embeddings_payload(max(count, 1))
-        if "/models" in target:
-            return b"200 OK", _models_payload()
-        return b"404 Not Found", {"error": "unknown path"}
-
-    async def _handle(self, reader, writer):
-        self.connections += 1
-        try:
-            request_line = await reader.readline()
-            if not request_line:
-                return
-            parts = request_line.decode("latin-1").split(" ")
-            method, target = parts[0], parts[1]
-            headers = {}
-            while True:
-                line = await reader.readline()
-                if line in (b"\r\n", b"\n", b""):
-                    break
-                name, _, value = line.decode("latin-1").partition(":")
-                headers[name.strip().lower()] = value.strip()
-            body = b""
-            length = int(headers.get("content-length", "0") or "0")
-            if length:
-                body = await reader.readexactly(length)
-            self.requests.append(
-                {"method": method, "url": target, "body": body}
-            )
-            if method == "CONNECT":
-                # Routing proof for https origins: record the tunnel request
-                # and refuse it (no TLS stack in the fake) — fail-closed.
-                writer.write(
-                    b"HTTP/1.1 502 Bad Gateway\r\n"
-                    b"Content-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                await writer.drain()
-                return
-            action = self.scripted.pop(0) if self.scripted else None
-            if action == "stall":
-                await self._stall.wait()
-                return
-            if action in ("407", "400", "500"):
-                reasons = {
-                    "407": b"407 Proxy Authentication Required",
-                    "400": b"400 Bad Request",
-                    "500": b"500 Internal Server Error",
-                }
-                status, payload = reasons[action], {"error": {"message": "no"}}
-            else:
-                status, payload = self._canned(target, body)
-            data = json.dumps(payload).encode()
-            writer.write(
-                b"HTTP/1.1 " + status + b"\r\n"
-                b"Content-Type: application/json\r\n"
-                b"Content-Length: " + str(len(data)).encode() + b"\r\n"
-                b"Connection: close\r\n"
-                b"\r\n" + data
-            )
-            await writer.drain()
-        except (asyncio.IncompleteReadError, ConnectionError):
-            pass
-        finally:
-            with contextlib.suppress(Exception):
-                writer.close()
-                await writer.wait_closed()
+    emulator._canned = _extraction_canned
+    return emulator
 
 
 def _extractor():
@@ -275,18 +201,163 @@ def _embedder():
     return EmbeddingService()
 
 
+async def _closed_port() -> int:
+    server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    server.close()
+    await server.wait_closed()
+    return port
+
+
+def _runtime():
+    from mcp_memory.core.inference_runtime import get_inference_runtime
+
+    return get_inference_runtime()
+
+
+def _recording_health_service(
+    monkeypatch,
+    role: str,
+    *,
+    discovery_contract: str | None | object = _ACTUAL_DISCOVERY_CONTRACT,
+):
+    """Build one Graph health consumer with a kwarg-recording fake probe."""
+
+    from mcp_memory.core import inference_runtime as gm_runtime
+    from mcp_memory.core import embedder as embedder_module
+    from mcp_memory.core import extractor as extractor_module
+
+    calls: list[dict] = []
+    discovery_calls: list[dict] = []
+
+    class _Probe:
+        async def probe(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(healthy=True)
+
+    probe = _Probe()
+    chat = SimpleNamespace(**_HEALTH_DISCOVERY_IDENTITIES["chat"])
+    embedding = SimpleNamespace(**_HEALTH_DISCOVERY_IDENTITIES["embedding"])
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(chat=chat, embedding=embedding),
+        chat_probe=lambda: probe,
+        embedding_probe=lambda: probe,
+    )
+    monkeypatch.setattr(gm_runtime, "get_inference_runtime", lambda: runtime)
+
+    if role == "chat":
+        consumer_module = extractor_module
+        service = object.__new__(extractor_module.ExtractorService)
+        service._model = chat.configured_model
+    else:
+        consumer_module = embedder_module
+        service = object.__new__(embedder_module.EmbeddingService)
+        service._model = embedding.configured_model
+        service._dimensions = _LEGACY_EMBEDDING_DIMENSIONS
+
+    actual_discovery = consumer_module.protected_certification_model_discovery
+
+    def _discovery(**kwargs):
+        discovery_calls.append(kwargs)
+        if discovery_contract is _ACTUAL_DISCOVERY_CONTRACT:
+            return actual_discovery(**kwargs)
+        return discovery_contract
+
+    monkeypatch.setattr(
+        consumer_module,
+        "protected_certification_model_discovery",
+        _discovery,
+    )
+    return service, calls, discovery_calls
+
+
+def _activate_strict_certification_environment(monkeypatch) -> None:
+    values = {
+        "HIVEMIND_CERTIFICATION_BUDGET_PATH": (
+            "/run/hivemind-provider-certification/budget.sqlite3"
+        ),
+        "HIVEMIND_CERTIFICATION_RUN_ID": "12345.1",
+        "HIVEMIND_CERTIFICATION_SOURCE_SHA": "a" * 40,
+        "HIVEMIND_CERTIFICATION_PROFILE_ID": "public-test-reference",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+
 # --------------------------------------------------------------------------- #
 # Routing through the fake proxy (extraction / embeddings / provider-health)  #
 # --------------------------------------------------------------------------- #
 
+
+@pytest.mark.parametrize("role", ("chat", "embedding"))
+async def test_graph_health_preserves_adapter_probe_default_outside_certification(
+    monkeypatch, role
+):
+    service, calls, discovery_calls = _recording_health_service(monkeypatch, role)
+
+    result = await service.test_connection()
+
+    assert result["status"] == "ok"
+    assert calls == [{}]
+    assert discovery_calls == [_HEALTH_DISCOVERY_IDENTITIES[role]]
+
+
+@pytest.mark.parametrize("role", ("chat", "embedding"))
+async def test_graph_health_uses_exact_strict_certification_discovery_timeout(
+    monkeypatch, role
+):
+    _activate_strict_certification_environment(monkeypatch)
+    service, calls, discovery_calls = _recording_health_service(
+        monkeypatch,
+        role,
+        discovery_contract="available",
+    )
+
+    result = await service.test_connection()
+
+    assert result["status"] == "ok"
+    assert calls == [{"timeout_seconds": 60.0}]
+    assert discovery_calls == [_HEALTH_DISCOVERY_IDENTITIES[role]]
+
+
+@pytest.mark.parametrize("role", ("chat", "embedding"))
+async def test_graph_health_skips_unsupported_catalogue_in_strict_mode(
+    monkeypatch, role
+):
+    _activate_strict_certification_environment(monkeypatch)
+    service, calls, discovery_calls = _recording_health_service(
+        monkeypatch,
+        role,
+        discovery_contract="unsupported",
+    )
+
+    result = await service.test_connection()
+
+    assert result["status"] == "ok"
+    assert calls == []
+    assert discovery_calls == [_HEALTH_DISCOVERY_IDENTITIES[role]]
+    assert "Catalogue" in result["message"]
+
+
+@pytest.mark.parametrize("role", ("chat", "embedding"))
+async def test_graph_health_partial_certification_context_fails_before_probe(
+    monkeypatch, role
+):
+    monkeypatch.setenv("HIVEMIND_CERTIFICATION_RUN_ID", "12345.1")
+    service, calls, discovery_calls = _recording_health_service(monkeypatch, role)
+
+    result = await service.test_connection()
+
+    assert result["status"] == "error"
+    assert calls == []
+    assert discovery_calls == [_HEALTH_DISCOVERY_IDENTITIES[role]]
+
+
 class TestProxiedRouting:
     async def test_extraction_goes_through_proxy(self, monkeypatch):
-        async with _HttpEndpoint() as proxy:
+        async with _extraction_emulator() as proxy:
             svc = _fresh(monkeypatch, _extractor, proxy.url)
-            try:
-                result = await svc.extract_from_text("Hivemind stores memory.")
-            finally:
-                await svc.close()
+            result = await svc.extract_from_text("Hivemind stores memory.")
         assert result.summary == "canned summary"
         assert len(result.entities) == 1
         assert len(proxy.requests) == 1
@@ -298,26 +369,31 @@ class TestProxiedRouting:
         assert request["url"].endswith("/chat/completions")
 
     async def test_embeddings_and_query_go_through_proxy(self, monkeypatch):
-        async with _HttpEndpoint() as proxy:
+        async with _extraction_emulator() as proxy:
             svc = _fresh(monkeypatch, _embedder, proxy.url)
-            try:
-                vectors = await svc.embed_texts(["a", "b", "c"])
-                query_vec = await svc.embed_query("question")
-            finally:
-                await svc.close()
+            vectors = await svc.embed_texts(["a", "b", "c"])
+            query_vec = await svc.embed_query("question")
         assert len(vectors) == 3
-        assert len(query_vec) == 4
+        assert len(query_vec) == _LEGACY_EMBEDDING_DIMENSIONS
         assert len(proxy.requests) == 2
         for request in proxy.requests:
             assert request["url"].startswith(_LLM_ORIGIN)
             assert request["url"].endswith("/embeddings")
 
-    async def test_provider_health_probes_go_through_proxy(self, monkeypatch):
-        """GM ``system_health`` LLM and embedding probes must traverse the
-        proxy; internal graph/qdrant/s3 probes are stubbed direct-local."""
+    async def test_provider_health_probes_go_through_proxy_and_spend_nothing(
+        self, monkeypatch
+    ):
+        """GM ``system_health`` provider probes must traverse the proxy;
+        internal graph/qdrant/s3 probes are stubbed direct-local.
+
+        P13-1C also makes this the zero-cost proof: the probes are
+        discovery-only, so the recorded traffic is ``/models`` and NOTHING
+        else — no chat completion, no embedding, no provider tokens spent by a
+        health call (HM-12 / ADR-0027).
+        """
         import mcp_memory.server as srv
 
-        async with _HttpEndpoint() as proxy:
+        async with _extraction_emulator() as proxy:
             extractor = _fresh(monkeypatch, _extractor, proxy.url)
             embedder = _fresh(monkeypatch, _embedder, proxy.url)
 
@@ -330,74 +406,142 @@ class TestProxiedRouting:
             monkeypatch.setattr(srv, "get_vector_store", lambda: _OkStub())
             monkeypatch.setattr(srv, "get_extractor", lambda: extractor)
             monkeypatch.setattr(srv, "get_embedder", lambda: embedder)
-            try:
-                result = await srv.system_health()
-            finally:
-                await extractor.close()
-                await embedder.close()
+            result = await srv.system_health()
 
         assert result["services"]["llmaas"]["status"] == "ok"
         assert result["services"]["embedding"]["status"] == "ok"
         targets = [r["url"] for r in proxy.requests]
-        assert any(t.endswith("/chat/completions") for t in targets)
-        assert any(t.endswith("/embeddings") for t in targets)
+        assert targets, "no provider request reached the proxy"
         assert all(t.startswith(_LLM_ORIGIN) for t in targets)
+        assert all(t.endswith("/models") for t in targets)
+        assert all(r["method"] == "GET" for r in proxy.requests)
 
-    async def test_retry_attempts_stay_on_proxy(self, monkeypatch):
-        """A failed attempt must be retried through the proxy again, never
-        through a direct fallback: both attempts are recorded by the proxy."""
-        from mcp_memory.core.extractor import ExtractorService
+    @pytest.mark.parametrize(
+        ("schema_ready", "admissions_available", "expected_status"),
+        (
+            (True, True, "ok"),
+            (False, True, "error"),
+            (True, False, "error"),
+        ),
+    )
+    async def test_system_health_includes_process_admission_state(
+        self,
+        monkeypatch,
+        schema_ready,
+        admissions_available,
+        expected_status,
+    ):
+        import mcp_memory.server as srv
+        from mcp_memory.core import maintenance
 
-        _quiet_retries(monkeypatch, ExtractorService.extract_from_text)
-        async with _HttpEndpoint(scripted=["400"]) as proxy:
+        class _Ok:
+            async def test_connection(self):
+                return {"status": "ok"}
+
+        class _Graph(_Ok):
+            def document_schema_status(self):
+                return {
+                    "status": "ok" if schema_ready else "error",
+                    "ready": schema_ready,
+                }
+
+        class _Coordinator:
+            def health_status(self):
+                return {
+                    "status": "ok" if admissions_available else "error",
+                    "admissions_available": admissions_available,
+                }
+
+        monkeypatch.setattr(srv, "get_storage", lambda: _Ok())
+        monkeypatch.setattr(srv, "get_graph", lambda: _Graph())
+        monkeypatch.setattr(srv, "get_vector_store", lambda: _Ok())
+        monkeypatch.setattr(srv, "get_extractor", lambda: _Ok())
+        monkeypatch.setattr(srv, "get_embedder", lambda: _Ok())
+        monkeypatch.setattr(
+            maintenance,
+            "get_maintenance_coordinator",
+            lambda: _Coordinator(),
+        )
+
+        result = await srv.system_health()
+
+        assert result["status"] == expected_status
+        assert result["services"]["document_schema"] == {
+            "status": "ok" if schema_ready else "error",
+            "ready": schema_ready,
+        }
+        assert result["services"]["maintenance"] == {
+            "status": "ok" if admissions_available else "error",
+            "admissions_available": admissions_available,
+        }
+        assert "memory" not in json.dumps(result)
+
+    async def test_retry_attempt_stays_on_proxy(self, monkeypatch):
+        """The single ADR-0027 retry must re-traverse the proxy, never fall
+        back to a direct second attempt.
+
+        Only an EXPLICITLY transient rate limit carrying a bounded
+        ``Retry-After`` authorizes it, so that is what the emulator scripts;
+        every other failure family is terminal (asserted below).
+        """
+        transient = {
+            "status": 429,
+            "headers": {"retry-after": "0"},
+            "body": {
+                "error": {
+                    "message": "slow down",
+                    "code": "rate_limit_exceeded",
+                }
+            },
+        }
+        async with _extraction_emulator(scripted=[transient]) as proxy:
             svc = _fresh(monkeypatch, _extractor, proxy.url)
-            try:
-                result = await svc.extract_from_text("retry me")
-            finally:
-                await svc.close()
+            result = await svc.extract_from_text("retry me")
         assert result.summary == "canned summary"
         assert len(proxy.requests) == 2
         assert all(r["url"].startswith(_LLM_ORIGIN) for r in proxy.requests)
 
-    async def test_https_origin_sends_connect_through_proxy(self, monkeypatch):
-        """HTTPS egress tunnels through the proxy with CONNECT: every retry's
-        tunnel request reaches the proxy with the https origin's authority,
-        and the refused tunnel fails closed (the ``.invalid`` origin leaves no
-        possible direct path)."""
-        from mcp_memory.core.extractor import ExtractorService
+    async def test_terminal_provider_error_is_not_retried(self, monkeypatch):
+        """Companion to the retry proof: a 4xx that is NOT an explicitly
+        transient rate limit issues exactly ONE paid request. The historical
+        3-attempt ``tenacity`` layer would have issued three."""
+        from hivemind_inference import InferenceError
 
-        _quiet_retries(monkeypatch, ExtractorService.extract_from_text)
-        async with _HttpEndpoint() as proxy:
+        async with _extraction_emulator(scripted=[{"status": 400}]) as proxy:
+            svc = _fresh(monkeypatch, _extractor, proxy.url)
+            with pytest.raises(InferenceError) as excinfo:
+                await svc.extract_from_text("terminal")
+        assert excinfo.value.category == "invalid_request"
+        assert len(proxy.requests) == 1
+
+    async def test_https_origin_sends_connect_through_proxy(self, monkeypatch):
+        """HTTPS egress tunnels through the proxy with CONNECT: the tunnel
+        request reaches the proxy with the https origin's authority, and the
+        refused tunnel fails closed (the ``.invalid`` origin leaves no possible
+        direct path). A proxy-hop failure is never retried (ADR-0027), so
+        exactly one tunnel attempt is recorded."""
+        async with _extraction_emulator() as proxy:
             svc = _fresh(
                 monkeypatch,
                 _extractor,
                 proxy.url,
                 api_url="https://llm.p12-3-hivemind.invalid/v1",
             )
-            svc._client.max_retries = 0
-            try:
-                with pytest.raises(Exception):
-                    await svc.extract_from_text("https routing proof")
-            finally:
-                await svc.close()
-        assert len(proxy.requests) == 3
-        for request in proxy.requests:
-            assert request["method"] == "CONNECT"
-            assert request["url"] == "llm.p12-3-hivemind.invalid:443"
+            with pytest.raises(Exception):
+                await svc.extract_from_text("https routing proof")
+        assert len(proxy.requests) == 1
+        request = proxy.requests[0]
+        assert request["method"] == "CONNECT"
+        assert request["url"] == "llm.p12-3-hivemind.invalid:443"
 
     async def test_no_proxy_stays_direct(self, monkeypatch):
-        """Without PROXY_URL the vendored direct behavior is preserved: the
-        request reaches the origin itself, in path-form, with no owned
-        transport."""
-        async with _HttpEndpoint() as origin:
+        """Without PROXY_URL the direct behavior is preserved: the request
+        reaches the origin itself, in path-form."""
+        async with _extraction_emulator() as origin:
             svc = _fresh(
                 monkeypatch, _extractor, None, api_url=origin.url + "/v1"
             )
-            try:
-                assert svc._owned_http_client is None
-                result = await svc.extract_from_text("direct")
-            finally:
-                await svc.close()
+            result = await svc.extract_from_text("direct")
         assert result.summary == "canned summary"
         assert len(origin.requests) == 1
         assert origin.requests[0]["url"] == "/v1/chat/completions"
@@ -407,75 +551,48 @@ class TestProxiedRouting:
 # Direct-network trap — proxy failure must never fall back to direct          #
 # --------------------------------------------------------------------------- #
 
-async def _closed_port() -> int:
-    server = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    server.close()
-    await server.wait_closed()
-    return port
-
-
 class TestDirectFallbackTrap:
     async def test_proxy_connect_failure_never_reaches_direct_origin(
         self, monkeypatch
     ):
         """Dead proxy port + LIVE direct origin: the call must raise and the
-        origin listener must see ZERO connections across every retry layer."""
-        from mcp_memory.core.extractor import ExtractorService
-
-        _quiet_retries(monkeypatch, ExtractorService.extract_from_text)
+        origin listener must see ZERO connections."""
         dead_port = await _closed_port()
-        async with _HttpEndpoint() as origin:
+        async with _extraction_emulator() as origin:
             svc = _fresh(
                 monkeypatch,
                 _extractor,
                 f"http://127.0.0.1:{dead_port}",
                 api_url=origin.url + "/v1",
             )
-            svc._client.max_retries = 0
-            try:
-                with pytest.raises(Exception):
-                    await svc.extract_from_text("must fail closed")
-            finally:
-                await svc.close()
+            with pytest.raises(Exception):
+                await svc.extract_from_text("must fail closed")
             assert origin.connections == 0
             assert origin.requests == []
 
     async def test_proxy_auth_failure_never_reaches_direct_origin(
         self, monkeypatch
     ):
-        """407 from the proxy: every retry stays on the proxy; the direct
+        """407 from the proxy: the failure stays on the proxy and the direct
         origin sees nothing."""
-        from mcp_memory.core.embedder import EmbeddingService
-
-        _quiet_retries(monkeypatch, EmbeddingService.embed_texts)
-        async with _HttpEndpoint(scripted=["407", "407", "407"]) as proxy:
-            async with _HttpEndpoint() as origin:
+        async with _extraction_emulator(scripted=[{"status": 407}]) as proxy:
+            async with _extraction_emulator() as origin:
                 svc = _fresh(
                     monkeypatch,
                     _embedder,
                     proxy.url,
                     api_url=origin.url + "/v1",
                 )
-                svc._client.max_retries = 0
-                try:
-                    with pytest.raises(Exception):
-                        await svc.embed_texts(["x"])
-                finally:
-                    await svc.close()
+                with pytest.raises(Exception):
+                    await svc.embed_texts(["x"])
                 assert origin.connections == 0
-                assert len(proxy.requests) == 3
+                assert len(proxy.requests) == 1
 
     async def test_proxy_timeout_never_reaches_direct_origin(self, monkeypatch):
-        """Stalling proxy + 1 s client timeout: the call times out closed
-        instead of retrying directly."""
-        from mcp_memory.core.extractor import ExtractorService
-
-        _quiet_retries(monkeypatch, ExtractorService.extract_from_text)
-        async with _HttpEndpoint(
-            scripted=["stall", "stall", "stall"]
-        ) as proxy:
-            async with _HttpEndpoint() as origin:
+        """Stalling proxy + 1 s deadline: the call times out closed instead of
+        retrying directly."""
+        async with _extraction_emulator(scripted=[{"action": "stall"}]) as proxy:
+            async with _extraction_emulator() as origin:
                 svc = _fresh(
                     monkeypatch,
                     _extractor,
@@ -483,14 +600,10 @@ class TestDirectFallbackTrap:
                     api_url=origin.url + "/v1",
                     EXTRACTION_TIMEOUT_SECONDS="1",
                 )
-                svc._client.max_retries = 0
-                try:
-                    with pytest.raises(Exception):
-                        await svc.extract_from_text("stalling proxy")
-                finally:
-                    await svc.close()
+                with pytest.raises(Exception):
+                    await svc.extract_from_text("stalling proxy")
                 assert origin.connections == 0
-                assert len(proxy.requests) == 3
+                assert len(proxy.requests) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -498,6 +611,61 @@ class TestDirectFallbackTrap:
 # --------------------------------------------------------------------------- #
 
 class TestHealthRedaction:
+    async def test_ready_reflects_terminal_admission_but_health_stays_liveness(
+        self, monkeypatch
+    ):
+        from mcp_memory.auth.middleware import StaticFilesMiddleware
+        from mcp_memory.core import maintenance
+
+        class _Graph:
+            def document_schema_status(self):
+                return {"status": "ok", "ready": True}
+
+        class _PoisonedCoordinator:
+            def health_status(self):
+                return {"status": "error", "admissions_available": False}
+
+        middleware = StaticFilesMiddleware(None)
+        middleware._graph_service = _Graph()
+        monkeypatch.setattr(
+            maintenance,
+            "get_maintenance_coordinator",
+            lambda: _PoisonedCoordinator(),
+        )
+
+        async def invoke(path: str):
+            sent: list[dict] = []
+
+            async def send(message):
+                sent.append(message)
+
+            await middleware(
+                {"type": "http", "path": path, "method": "GET"},
+                None,
+                send,
+            )
+            status = next(
+                item["status"]
+                for item in sent
+                if item["type"] == "http.response.start"
+            )
+            body = json.loads(
+                next(
+                    item["body"]
+                    for item in sent
+                    if item["type"] == "http.response.body"
+                )
+            )
+            return status, body
+
+        ready_status, ready_body = await invoke("/ready")
+        health_status, health_body = await invoke("/health")
+
+        assert ready_status == 503
+        assert ready_body["status"] == "error"
+        assert health_status == 200
+        assert health_body["status"] == "healthy"
+
     async def test_system_health_redacts_proxy_secrets(self, monkeypatch):
         import mcp_memory.server as srv
 
@@ -600,64 +768,50 @@ def _assert_r8_clean(surface):
 
 class TestInferenceErrorRedaction:
     """R8 (Codex round 8): ordinary extraction/embedding failures log the
-    APIError and re-raise it into the ingestion/server error handlers — both
-    the stderr log and the escaping exception text must be redacted at the
-    service boundary (the shared decorator makes every downstream ``str(e)``
-    consumer — sync results, async job status — inherit the sanitized text)."""
+    provider error and re-raise it into the ingestion/server error handlers —
+    both the stderr log and the escaping exception text must be free of
+    secrets.
+
+    P13-1C strengthens this from "sanitized on the way out" to "never
+    constructed": every failure now escapes as an ``InferenceError``, whose
+    message is assembled exclusively from six registry-bound safe fields, so a
+    provider message cannot be in it at all. Each test therefore injects a
+    secret-bearing provider body and asserts the escaping text carries neither
+    the secret NOR the endpoint.
+    """
 
     async def test_embed_texts_error_boundary_redacts_log_and_raise(
         self, monkeypatch, capsys
     ):
-        import httpx
-        from openai import APIError
+        from hivemind_inference import InferenceError
 
-        from mcp_memory.core.embedder import EmbeddingService
-
-        _quiet_retries(monkeypatch, EmbeddingService.embed_texts)
-        svc = _fresh(monkeypatch, _embedder, _SECRET_PROXY)
-        request = httpx.Request("POST", _LLM_ORIGIN + "/v1/embeddings")
-
-        class _Boom:
-            async def create(self, **_kw):
-                raise APIError(_R8_SECRET_MSG, request, body=None)
-
-        monkeypatch.setattr(svc._client, "embeddings", _Boom())
-        try:
-            with pytest.raises(APIError) as excinfo:
+        secret_body = {"error": {"message": _R8_SECRET_MSG, "type": "server_error"}}
+        async with _extraction_emulator(
+            scripted=[{"status": 500, "body": secret_body}]
+        ) as proxy:
+            svc = _fresh(monkeypatch, _embedder, proxy.url)
+            with pytest.raises(InferenceError) as excinfo:
                 await svc.embed_texts(["x"])
-        finally:
-            await svc.close()
         _assert_r8_clean(capsys.readouterr().err)
         _assert_r8_clean(str(excinfo.value))
-        assert "proxy.internal:3128" in str(excinfo.value)
+        assert "proxy.internal" not in str(excinfo.value)
+        assert excinfo.value.category == "unavailable"
 
     async def test_extract_error_boundary_redacts_log_and_raise(
         self, monkeypatch, capsys
     ):
-        import httpx
-        from openai import APIError
+        from hivemind_inference import InferenceError
 
-        from mcp_memory.core.extractor import ExtractorService
-
-        _quiet_retries(monkeypatch, ExtractorService.extract_from_text)
-        svc = _fresh(monkeypatch, _extractor, _SECRET_PROXY)
-        request = httpx.Request("POST", _LLM_ORIGIN + "/v1/chat/completions")
-
-        class _BoomCompletions:
-            async def create(self, **_kw):
-                raise APIError(_R8_SECRET_MSG, request, body=None)
-
-        class _BoomChat:
-            completions = _BoomCompletions()
-
-        monkeypatch.setattr(svc._client, "chat", _BoomChat())
-        try:
-            with pytest.raises(APIError) as excinfo:
+        secret_body = {"error": {"message": _R8_SECRET_MSG, "type": "server_error"}}
+        async with _extraction_emulator(
+            scripted=[{"status": 500, "body": secret_body}]
+        ) as proxy:
+            svc = _fresh(monkeypatch, _extractor, proxy.url)
+            with pytest.raises(InferenceError) as excinfo:
                 await svc.extract_from_text("boom")
-        finally:
-            await svc.close()
         _assert_r8_clean(capsys.readouterr().err)
         _assert_r8_clean(str(excinfo.value))
+        assert "proxy.internal" not in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -665,127 +819,94 @@ class TestInferenceErrorRedaction:
 # --------------------------------------------------------------------------- #
 
 class TestOwnedTransportLifecycle:
-    async def test_owned_client_only_when_proxy_configured(self, monkeypatch):
-        direct = _fresh(monkeypatch, _extractor, None)
-        assert direct._owned_http_client is None
-        await direct.close()
+    """P13-1C: the owned transports moved from the two services to the ONE
+    service-wide runtime. The per-adapter construction and idempotent-close
+    contracts are proven where the transports are built
+    (``tests/test_p13_inference_adapters.py``); what belongs here is that the
+    Graph Memory runtime is the single owner and that the service shutdown path
+    reaches it.
+    """
 
-        proxied = _fresh(monkeypatch, _extractor, "http://127.0.0.1:9")
-        assert proxied._owned_http_client is not None
-        assert not proxied._owned_http_client.is_closed
-        await proxied.close()
+    async def test_services_own_no_transport(self, monkeypatch):
+        """The per-service owned client is GONE: a proxied service holds no
+        transport attribute at all, so nothing but the runtime can close one."""
+        extractor = _fresh(monkeypatch, _extractor, _SECRET_PROXY)
+        embedder = _fresh(monkeypatch, _embedder, _SECRET_PROXY)
+        for service in (extractor, embedder):
+            assert not hasattr(service, "_owned_http_client")
+            assert not hasattr(service, "_client")
+            # close() stays callable for historical shutdown ordering and is a
+            # no-op, so a stray call can never release the shared transport.
+            await service.close()
+            await service.close()
 
-    async def test_close_closes_owned_client_and_is_idempotent(self, monkeypatch):
-        svc = _fresh(monkeypatch, _embedder, "http://127.0.0.1:9")
-        owned = svc._owned_http_client
-        await svc.close()
-        assert owned.is_closed
-        await svc.close()  # double-close must be safe
-        assert owned.is_closed
-
-    async def test_construction_failure_closes_owned_client(self, monkeypatch):
-        """If the AsyncOpenAI constructor fails after the owned transport was
-        created, the transport must not leak."""
-        import mcp_memory.core.egress as egress
-        import mcp_memory.core.extractor as extractor_mod
-
-        created = []
-        real_builder = egress.build_owned_async_http_client
-
-        def _recording_builder(proxy_url, timeout):
-            client = real_builder(proxy_url, timeout)
-            created.append(client)
-            return client
-
-        monkeypatch.setattr(
-            extractor_mod, "build_owned_async_http_client", _recording_builder
-        )
-
-        def _boom(**_kwargs):
-            raise RuntimeError("constructor exploded")
-
-        monkeypatch.setattr(extractor_mod, "AsyncOpenAI", _boom)
-        with pytest.raises(RuntimeError, match="constructor exploded"):
-            _fresh(monkeypatch, _extractor, "http://127.0.0.1:9")
-        assert len(created) == 1
-        # Dans un contexte async, la fermeture du constructeur est planifiée
-        # sur la boucle courante — lui laisser des ticks déterministes.
-        for _ in range(100):
-            if created[0].is_closed:
-                break
-            await asyncio.sleep(0.01)
-        assert created[0].is_closed
-
-    async def test_construction_failure_closes_owned_client_embedder(
+    async def test_runtime_builds_each_adapter_once_and_closes_them(
         self, monkeypatch
     ):
-        """Same constructor-failure guard on the embedding service."""
-        import mcp_memory.core.egress as egress
-        import mcp_memory.core.embedder as embedder_mod
-
-        created = []
-        real_builder = egress.build_owned_async_http_client
-
-        def _recording_builder(proxy_url, timeout):
-            client = real_builder(proxy_url, timeout)
-            created.append(client)
-            return client
-
-        monkeypatch.setattr(
-            embedder_mod, "build_owned_async_http_client", _recording_builder
-        )
-
-        def _boom(**_kwargs):
-            raise RuntimeError("constructor exploded")
-
-        monkeypatch.setattr(embedder_mod, "AsyncOpenAI", _boom)
-        with pytest.raises(RuntimeError, match="constructor exploded"):
-            _fresh(monkeypatch, _embedder, "http://127.0.0.1:9")
-        assert len(created) == 1
-        for _ in range(100):
-            if created[0].is_closed:
-                break
-            await asyncio.sleep(0.01)
-        assert created[0].is_closed
+        """One transport per role, reused across calls, released by aclose()."""
+        _fresh(monkeypatch, _extractor, _SECRET_PROXY)
+        runtime = _runtime()
+        chat_a = runtime.chat_provider()
+        chat_b = runtime.chat_provider()
+        embedding = runtime.embedding_provider()
+        assert chat_a is chat_b
+        assert chat_a is not embedding
+        transports = [
+            chat_a._owned_http_client,
+            embedding._owned_http_client,
+        ]
+        assert all(not transport.is_closed for transport in transports)
+        await runtime.aclose()
+        assert all(transport.is_closed for transport in transports)
+        await runtime.aclose()  # idempotent
 
     async def test_cancellation_keeps_shared_transport_usable(self, monkeypatch):
-        """Cancelling one in-flight call must not tear down the service-owned
-        transport: the next call still works, then close() releases it."""
-        async with _HttpEndpoint(scripted=["stall"]) as proxy:
+        """Cancelling one in-flight call must not tear down the runtime-owned
+        transport: the next call still works, then aclose() releases it."""
+        async with _extraction_emulator(scripted=[{"action": "stall"}]) as proxy:
             svc = _fresh(monkeypatch, _extractor, proxy.url)
-            try:
-                task = asyncio.create_task(svc.extract_from_text("hang"))
-                # Let the request reach the stalling proxy deterministically.
-                for _ in range(200):
-                    if proxy.requests:
-                        break
-                    await asyncio.sleep(0.01)
-                assert proxy.requests, "in-flight request never reached proxy"
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-                assert not svc._owned_http_client.is_closed
-                result = await svc.extract_from_text("after cancel")
-                assert result.summary == "canned summary"
-            finally:
-                await svc.close()
-            assert svc._owned_http_client.is_closed
+            runtime = _runtime()
+            task = asyncio.create_task(svc.extract_from_text("hang"))
+            # Let the request reach the stalling proxy deterministically.
+            for _ in range(200):
+                if proxy.requests:
+                    break
+                await asyncio.sleep(0.01)
+            assert proxy.requests, "in-flight request never reached proxy"
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            transport = runtime.chat_provider()._owned_http_client
+            assert not transport.is_closed
+            result = await svc.extract_from_text("after cancel")
+            assert result.summary == "canned summary"
+            await runtime.aclose()
+            assert transport.is_closed
 
-    async def test_asgi_lifespan_shutdown_closes_singletons(self, monkeypatch):
-        """The server's lifespan shim must close and reset both inference
-        singletons on lifespan.shutdown (service-shutdown path)."""
+    async def test_asgi_lifespan_shutdown_closes_runtime_transports(
+        self, monkeypatch
+    ):
+        """The shared guard must close the inference runtime (and reset both
+        service singletons) at process shutdown.
+
+        The adapters are built AFTER the lifespan has started, which is both
+        the realistic sequence — a transport is opened lazily by request work
+        inside a serving window — and the only admissible one: the startup hook
+        refuses to open a window over a previous one's unreleased transports
+        (``InferenceRuntimeHolder.validate_startup``), and that refusal path
+        does not run cleanup. Building them first would therefore assert
+        nothing about closing.
+        """
         import mcp_memory.core.embedder as embedder_mod
         import mcp_memory.core.extractor as extractor_mod
         import mcp_memory.server as srv
 
-        extractor = _fresh(monkeypatch, _extractor, "http://127.0.0.1:9")
-        embedder = _fresh(monkeypatch, _embedder, "http://127.0.0.1:9")
+        extractor = _fresh(monkeypatch, _extractor, _SECRET_PROXY)
+        embedder = _fresh(monkeypatch, _embedder, _SECRET_PROXY)
         monkeypatch.setattr(srv, "_extractor_service", extractor)
         monkeypatch.setattr(srv, "_embedding_service", embedder)
         monkeypatch.setattr(extractor_mod, "_extractor_service", extractor)
         monkeypatch.setattr(embedder_mod, "_embedding_service", embedder)
-        extractor_owned = extractor._owned_http_client
-        embedder_owned = embedder._owned_http_client
 
         received = []
 
@@ -800,57 +921,64 @@ class TestOwnedTransportLifecycle:
                     await send({"type": "lifespan.shutdown.complete"})
                     return
 
-        app = srv.EgressLifecycleMiddleware(_inner_app)
-        incoming = [
-            {"type": "lifespan.startup"},
-            {"type": "lifespan.shutdown"},
+        import uvicorn
+        from uvicorn.lifespan.on import LifespanOn
+
+        # The scenario isolates provider-transport shutdown.  Neo4j schema
+        # initialization has its own fail-closed P13 tests and requires the
+        # Graph image's service-only dependencies, which the public top-level
+        # test environment deliberately does not install.
+        monkeypatch.setattr(
+            srv,
+            "_initialize_graph_document_schema",
+            lambda: None,
+        )
+        monkeypatch.setattr(srv.mcp, "streamable_http_app", lambda: _inner_app)
+        app = srv._create_app()
+        state = LifespanOn(
+            uvicorn.Config(app, lifespan="auto", log_config=None)
+        )
+        await asyncio.wait_for(state.startup(), timeout=2.0)
+        assert not state.startup_failed
+
+        # Serving window is open: request work now builds the owned transports.
+        runtime = _runtime()
+        transports = [
+            runtime.chat_provider()._owned_http_client,
+            runtime.embedding_provider()._owned_http_client,
         ]
-        sent = []
+        assert all(not transport.is_closed for transport in transports)
 
-        async def _receive():
-            return incoming.pop(0)
-
-        async def _send(message):
-            sent.append(message)
-
-        await app({"type": "lifespan"}, _receive, _send)
+        await asyncio.wait_for(state.shutdown(), timeout=2.0)
 
         assert received == ["lifespan.startup", "lifespan.shutdown"]
-        assert sent[-1] == {"type": "lifespan.shutdown.complete"}
-        assert extractor_owned.is_closed
-        assert embedder_owned.is_closed
+        assert not state.shutdown_failed
+        # `shutdown_failed` alone does not prove a terminal message reached the
+        # wire: an application that raises out of the scope without sending one
+        # leaves it False and sets `error_occurred` instead.
+        assert not state.error_occurred
+        assert all(transport.is_closed for transport in transports)
         assert srv._extractor_service is None
         assert srv._embedding_service is None
 
-    def test_main_wires_lifecycle_middleware_outermost(self):
-        """Structural guard: ``main()`` must wrap the composed ASGI stack with
-        the egress lifecycle middleware so a real uvicorn shutdown reaches the
-        close path."""
-        import ast as ast_mod
+    def test_main_wires_shared_lifespan_guard_outermost(self, monkeypatch):
+        """The factory returns the shared guard as the outermost object."""
+        from hivemind_inference.asgi_lifespan import LifespanGuard
+        import mcp_memory.server as srv
 
-        source = (
-            _REPO_ROOT
-            / "services"
-            / "graph-memory"
-            / "src"
-            / "mcp_memory"
-            / "server.py"
-        ).read_text(encoding="utf-8")
-        tree = ast_mod.parse(source)
-        main_fn = next(
-            node
-            for node in tree.body
-            if isinstance(node, ast_mod.FunctionDef) and node.name == "main"
-        )
-        wrapped = sorted(
-            (node.lineno, node.func.id)
-            for node in ast_mod.walk(main_fn)
-            if isinstance(node, ast_mod.Call)
-            and isinstance(node.func, ast_mod.Name)
-        )
-        names = [name for _, name in wrapped]
-        assert "EgressLifecycleMiddleware" in names
-        # Outermost = applied after (i.e. wrapping) the auth middleware.
-        assert names.index("EgressLifecycleMiddleware") > names.index(
-            "AuthMiddleware"
-        )
+        async def inner(scope, receive, send):
+            return None
+
+        monkeypatch.setattr(srv.mcp, "streamable_http_app", lambda: inner)
+        app = srv._create_app()
+        assert isinstance(app, LifespanGuard)
+        names = []
+        current = app.app
+        while current is not None:
+            names.append(type(current).__name__)
+            current = getattr(current, "app", None)
+        assert names[:3] == [
+            "AuthMiddleware",
+            "LoggingMiddleware",
+            "StaticFilesMiddleware",
+        ]

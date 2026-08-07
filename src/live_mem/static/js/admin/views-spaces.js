@@ -482,6 +482,9 @@
             const retryHelp = recovery.retry_safe === true
                 ? '<strong>Identical manual retry is permitted; no automatic retry was made.</strong> '
                 : '<strong>Admin recovery required. Retry is disabled in this form; follow recovery.action.</strong> ';
+            const accessRecoveryBoundary = recoveryAction.includes('recover_access_grants=True')
+                ? '<strong>Grant-recovery retry is MCP/CLI-only. This console never sends recover_access_grants.</strong> '
+                : '';
             if (formError) {
                 formError.hidden = false;
                 formError.setAttribute('data-recovery-required', 'true');
@@ -490,6 +493,7 @@
                     retryHelp +
                     `<strong>recovery.retry_safe:</strong> <code>${esc(retrySafe)}</code> ` +
                     `<strong>recovery.action:</strong> ${esc(recoveryAction)} ` +
+                    accessRecoveryBoundary +
                     '<strong>No automatic cleanup or rollback was performed.</strong>';
             }
             if (recovery.retry_safe !== true) _lockCreateRetryForAdminRecovery();

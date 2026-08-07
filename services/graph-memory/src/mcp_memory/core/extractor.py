@@ -1,24 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-ExtractorService - Extraction d'entités et relations via LLMaaS.
+ExtractorService - Extraction d'entités et relations via l'inférence partagée.
 
-Utilise l'API LLMaaS Cloud Temple (compatible OpenAI) pour extraire
-les entités, relations et concepts à partir de texte.
+Consomme le contrat ``ChatProvider`` de ``hivemind_inference`` (P13-1C /
+ADR-0027) : le profil chat résolu — le MÊME que celui du cœur Hivemind —
+porte modèle, température, plafond de sortie, transport (``PROXY_URL``, contrat
+egress P12-3 inchangé) et le retry borné.
 """
 
 import sys
 import json
 from typing import Optional, List
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-from openai import AsyncOpenAI
-from openai import APIError, APITimeoutError
+from hivemind_inference import InferenceError
+from hivemind_inference.certification_budget import (
+    protected_certification_discovery_timeout_seconds,
+    protected_certification_model_discovery,
+)
+from hivemind_inference.records import ChatMessage, ChatRequest
 
 from ..config import get_settings
 from .egress import (
-    build_owned_async_http_client,
-    close_owned_client_from_sync,
-    display_proxy_url,
     redact_proxy_errors_async,
     redact_proxy_secrets,
 )
@@ -66,71 +68,70 @@ Réponds UNIQUEMENT avec un JSON valide:
 
 class ExtractorService:
     """
-    Service d'extraction via LLMaaS.
-    
-    Utilise le modèle gpt-oss:120b de Cloud Temple pour extraire
-    les entités et relations structurées depuis un texte.
-    """
-    
-    def __init__(self):
-        """Initialise le client OpenAI compatible.
+    Service d'extraction via la frontière d'inférence partagée.
 
-        P12-3 (Hivemind #268) : quand ``PROXY_URL`` est configurée, un
-        ``httpx.AsyncClient`` POSSÉDÉ route toutes les requêtes (extraction,
-        Q&A, sonde provider-health) via le proxy. AsyncOpenAI ne prend pas
-        ownership du client injecté : le service le ferme sur échec du
-        constructeur et via ``close()`` au shutdown. Sans proxy, le transport
-        interne historique d'AsyncOpenAI est préservé à l'identique.
+    Aucun SDK provider n'est construit ici : le runtime du service possède
+    l'adapter enregistré, son transport et le retry borné ADR-0027.
+    """
+
+    def __init__(self):
+        """Snapshotte le profil chat résolu de la frontière partagée (P13-1C).
+
+        Un profil chat absent est un démarrage VALIDE : chaque opération
+        échoue alors explicitement, sans accès réseau.
         """
         settings = get_settings()
 
-        self._owned_http_client = None
-        if settings.proxy_url:
-            self._owned_http_client = build_owned_async_http_client(
-                settings.proxy_url,
-                timeout=settings.extraction_timeout_seconds,
-            )
-            # Jamais l'URL brute (potentiellement porteuse de credentials).
-            print(
-                f"🔀 [Extractor] LLM egress via proxy "
-                f"{display_proxy_url(settings.proxy_url)}",
-                file=sys.stderr,
-            )
-        try:
-            self._client = AsyncOpenAI(
-                base_url=settings.llmaas_base_url,
-                api_key=settings.llmaas_api_key,
-                timeout=settings.extraction_timeout_seconds,
-                http_client=self._owned_http_client,
-            )
-        except BaseException:
-            # Échec du constructeur : ne pas fuiter le transport possédé.
-            if self._owned_http_client is not None:
-                close_owned_client_from_sync(self._owned_http_client)
-                self._owned_http_client = None
-            raise
-        self._model = settings.llmaas_model
-        self._max_tokens = settings.llmaas_max_tokens
-        self._temperature = settings.llmaas_temperature
+        from .inference_runtime import get_inference_runtime
+
+        self._chat_profile = get_inference_runtime().config.chat
+        self._model = (
+            self._chat_profile.configured_model if self._chat_profile else ""
+        )
+        self._timeout = settings.extraction_timeout_seconds
         self._max_text_length = settings.extraction_max_text_length
 
     async def close(self) -> None:
-        """Ferme le transport proxy possédé (idempotent, référence conservée).
+        """Compatibilité shutdown : no-op idempotent.
 
-        Appelé au shutdown du service (lifespan ASGI). Une annulation d'appel
-        en vol ne ferme JAMAIS ce transport partagé — seul close() le fait.
-        Sans proxy configuré c'est un no-op — AsyncOpenAI gère son transport
-        interne comme avant.
+        P13-1C : le transport appartient au runtime d'inférence partagé, fermé
+        par le lifespan ASGI via ``close_inference_runtime_if_initialized``.
+        Une annulation d'appel en vol ne peut donc pas le fermer.
         """
-        if self._owned_http_client is not None:
-            await self._owned_http_client.aclose()
-    
+        return None
+
+    async def _complete(
+        self, messages: list[dict], *, max_output_tokens: int | None = None
+    ):
+        """Requête chat normalisée vers l'adapter enregistré (P13-1C).
+
+        Le modèle et la température viennent EXCLUSIVEMENT du profil résolu ;
+        ``max_output_tokens`` ne peut qu'abaisser son plafond (``None`` =
+        plafond du profil). Lève ``InferenceError`` (enveloppe sûre) quand le
+        provider échoue et ``InferenceRoleUnavailable`` quand le rôle chat
+        n'est pas configuré — le retry borné vit dans l'adapter (les
+        décorateurs ``tenacity`` historiques, qui rejouaient jusqu'à 3 fois une
+        requête dont la livraison était ambiguë, sont supprimés).
+        """
+        from .inference_runtime import get_inference_runtime
+
+        provider = get_inference_runtime().chat_provider()
+        effective_max = max_output_tokens
+        if effective_max is not None and self._chat_profile is not None:
+            effective_max = max(
+                1, min(effective_max, self._chat_profile.max_output_tokens)
+            )
+        request = ChatRequest(
+            messages=tuple(
+                ChatMessage(role=message["role"], content=message["content"])
+                for message in messages
+            ),
+            timeout_seconds=self._timeout,
+            max_output_tokens=effective_max,
+        )
+        return await provider.complete(request)
+
     @redact_proxy_errors_async
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True
-    )
     async def extract_from_text(
         self,
         text: str,
@@ -149,9 +150,8 @@ class ExtractorService:
         try:
             print(f"🔍 [Extractor] Extraction en cours ({len(text)} chars)...", file=sys.stderr)
             
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[
+            chat_result = await self._complete(
+                [
                     {
                         "role": "system",
                         "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
@@ -160,38 +160,34 @@ class ExtractorService:
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                max_tokens=self._max_tokens,
-                temperature=self._temperature
+                ]
                 # Note: response_format non supporté par LLMaaS Cloud Temple
             )
-            
-            # Parser la réponse - DEBUG COMPLET
-            print(f"🔍 [Extractor] DEBUG response type: {type(response)}", file=sys.stderr)
-            print(f"🔍 [Extractor] DEBUG choices count: {len(response.choices)}", file=sys.stderr)
-            if response.choices:
-                print(f"🔍 [Extractor] DEBUG message: {response.choices[0].message}", file=sys.stderr)
-                print(f"🔍 [Extractor] DEBUG finish_reason: {response.choices[0].finish_reason}", file=sys.stderr)
-            
-            content = response.choices[0].message.content
-            if content is None:
-                print(f"⚠️ [Extractor] Réponse LLM vide - message complet: {response.choices[0].message}", file=sys.stderr)
+
+            # Diagnostic à métadonnées SÛRES uniquement (ADR-0027) : ni le
+            # message provider brut ni un fragment de complétion.
+            print(f"🔍 [Extractor] DEBUG finish_reason: {chat_result.finish_reason}", file=sys.stderr)
+            content = chat_result.text
+            if not content:
+                print(f"⚠️ [Extractor] Réponse LLM vide (finish_reason={chat_result.finish_reason})", file=sys.stderr)
                 return ExtractionResult(summary=None)
-            
+
             print(f"🔍 [Extractor] DEBUG content length: {len(content)}", file=sys.stderr)
             result = self._parse_extraction(content)
-            
+
             print(f"✅ [Extractor] Extrait: {len(result.entities)} entités, {len(result.relations)} relations", file=sys.stderr)
-            
+
             return result
-            
-        except APITimeoutError:
-            print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
+
+        except InferenceError as e:
+            if e.category == "timeout":
+                print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
+            else:
+                # Enveloppe sûre par construction (ADR-0027) ; redaction
+                # conservée en défense en profondeur.
+                print(f"❌ [Extractor] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
-        except APIError as e:
-            print(f"❌ [Extractor] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
-            raise
-    
+
     def _parse_extraction(
         self,
         content: str,
@@ -254,9 +250,17 @@ class ExtractorService:
                 key_topics=data.get("key_topics", [])
             )
             
-        except json.JSONDecodeError as e:
-            print(f"⚠️ [Extractor] Erreur parsing JSON: {e}", file=sys.stderr)
-            print(f"   Contenu reçu: {content[:200]}...", file=sys.stderr)
+        except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as e:
+            # ADR-0027 : AUCUN fragment de complétion dans les logs. Un JSON
+            # syntaxiquement valide peut encore violer le contrat structurel
+            # (racine non-objet, collections/scalaires inattendus, validation
+            # Pydantic). Il suit le même chemin dégradé qu'un JSON invalide afin
+            # que l'ingestion RAG puisse continuer sans publier la complétion.
+            print(
+                "⚠️ [Extractor] Réponse structurée invalide: "
+                f"kind={type(e).__name__} raw_len={len(content)}",
+                file=sys.stderr,
+            )
             # Retourner un résultat vide plutôt que crasher
             return ExtractionResult(summary=None)
     
@@ -322,11 +326,6 @@ class ExtractorService:
         return "RELATED_TO"
     
     @redact_proxy_errors_async
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True
-    )
     async def extract_with_ontology(
         self,
         text: str,
@@ -360,9 +359,8 @@ class ExtractorService:
         try:
             print(f"🔍 [Extractor] Extraction avec ontologie '{ontology.name}' ({len(text)} chars)...", file=sys.stderr)
             
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[
+            chat_result = await self._complete(
+                [
                     {
                         "role": "system",
                         "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
@@ -371,16 +369,14 @@ class ExtractorService:
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                max_tokens=self._max_tokens,
-                temperature=self._temperature
+                ]
             )
-            
-            content = response.choices[0].message.content
-            if content is None:
+
+            content = chat_result.text
+            if not content:
                 print(f"⚠️ [Extractor] Réponse LLM vide", file=sys.stderr)
                 return ExtractionResult(summary=None)
-            
+
             # Extraire les types depuis l'ontologie chargée
             ontology_relation_types = {
                 rt.name.upper() for rt in ontology.relation_types
@@ -396,14 +392,14 @@ class ExtractorService:
             )
             
             print(f"✅ [Extractor] Extrait ({ontology.name}): {len(result.entities)} entités, {len(result.relations)} relations", file=sys.stderr)
-            
+
             return result
-            
-        except APITimeoutError:
-            print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
-            raise
-        except APIError as e:
-            print(f"❌ [Extractor] Erreur API: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+
+        except InferenceError as e:
+            if e.category == "timeout":
+                print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
+            else:
+                print(f"❌ [Extractor] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
 
     # =========================================================================
@@ -519,9 +515,8 @@ class ExtractorService:
             prompt = ontology.build_prompt(chunk_text, cumulative_context=cumulative_context)
             
             try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=[
+                chat_result = await self._complete(
+                    [
                         {
                             "role": "system",
                             "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
@@ -530,16 +525,14 @@ class ExtractorService:
                             "role": "user",
                             "content": prompt
                         }
-                    ],
-                    max_tokens=self._max_tokens,
-                    temperature=self._temperature
+                    ]
                 )
-                
-                content = response.choices[0].message.content
-                if content is None:
+
+                content = chat_result.text
+                if not content:
                     print(f"⚠️ [Extractor] Chunk {chunk_num}: réponse LLM vide", file=sys.stderr)
                     continue
-                
+
                 result = self._parse_extraction(
                     content,
                     known_relation_types=ontology_relation_types,
@@ -567,12 +560,12 @@ class ExtractorService:
                         "relations_cumul": len(all_relations),
                     })
                 
-            except APITimeoutError:
-                print(f"⏰ [Extractor] Timeout chunk {chunk_num}/{len(chunks)} — on continue", file=sys.stderr)
-                # On continue avec les chunks suivants au lieu de tout perdre
-                continue
-            except APIError as e:
-                print(f"❌ [Extractor] Erreur API chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            except InferenceError as e:
+                if e.category == "timeout":
+                    print(f"⏰ [Extractor] Timeout chunk {chunk_num}/{len(chunks)} — on continue", file=sys.stderr)
+                    # On continue avec les chunks suivants au lieu de tout perdre
+                    continue
+                print(f"❌ [Extractor] Erreur provider chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
                 raise
         
         # Fusionner les résultats
@@ -768,27 +761,69 @@ class ExtractorService:
         )
 
     async def test_connection(self) -> dict:
-        """Teste la connexion au LLMaaS."""
+        """Sonde de santé du provider chat — discovery UNIQUEMENT (P13-1C).
+
+        HM-12 / ADR-0027 : plus AUCUNE complétion réelle ici — l'ancienne
+        sonde envoyait un prompt et dépensait des tokens à CHAQUE appel santé.
+        Une absence de ``/models`` (``discovery="unsupported"``) reste un
+        endpoint joignable, pas une panne. Forme historique préservée :
+        ``{status, model, message}``.
+        """
+        from .inference_runtime import get_inference_runtime
+
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": "Réponds juste 'OK'"}],
-                max_tokens=10
+            runtime = get_inference_runtime()
+            if runtime.config.chat is None:
+                return {
+                    "status": "error",
+                    "model": "",
+                    "message": "Erreur LLMaaS: provider chat non configuré",
+                }
+            discovery_contract = protected_certification_model_discovery(
+                role="chat",
+                provider_id=runtime.config.chat.provider_id,
+                endpoint=runtime.config.chat.endpoint,
+                configured_model=runtime.config.chat.configured_model,
             )
-            
-            return {
-                "status": "ok",
-                "model": self._model,
-                "message": "Connexion LLMaaS réussie"
-            }
-            
-        except APIError as e:
+            if discovery_contract == "unsupported":
+                return {
+                    "status": "ok",
+                    "model": self._model,
+                    "message": (
+                        "Catalogue LLMaaS non disponible pour le profil "
+                        "de certification protégé"
+                    ),
+                }
+            probe = runtime.chat_probe()
+            timeout_seconds = protected_certification_discovery_timeout_seconds()
+            if timeout_seconds is None:
+                # Preserve the adapter-owned ordinary-runtime default exactly.
+                result = await probe.probe()
+            else:
+                result = await probe.probe(timeout_seconds=timeout_seconds)
+        except Exception as e:
             return {
                 "status": "error",
                 "model": self._model,
                 # P12-3 : jamais d'URL proxy brute dans la sortie santé.
-                "message": f"Erreur LLMaaS: {redact_proxy_secrets(str(e))}"
+                "message": f"Erreur LLMaaS: {redact_proxy_secrets(str(e))}",
             }
+        if result.healthy:
+            return {
+                "status": "ok",
+                "model": self._model,
+                "message": "Connexion LLMaaS réussie",
+            }
+        return {
+            "status": "error",
+            "model": self._model,
+            "message": "Erreur LLMaaS: provider unreachable"
+            + (
+                f" ({result.error_category})"
+                if result.error_category is not None
+                else ""
+            ),
+        }
 
 
     async def generate_answer(self, prompt: str) -> str:
@@ -804,9 +839,10 @@ class ExtractorService:
             Réponse générée par le LLM
         """
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[
+            # P13-1C : température per-call supprimée — le profil résolu
+            # gouverne (ADR-0027 : aucun override par opération).
+            chat_result = await self._complete(
+                [
                     {
                         "role": "system",
                         "content": "Tu es un assistant expert qui répond à des questions basées sur un graphe de connaissances. Réponds de manière concise et précise."
@@ -815,13 +851,11 @@ class ExtractorService:
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                temperature=0.3,  # Plus déterministe pour les réponses factuelles
-                max_tokens=self._max_tokens
+                ]
             )
-            
-            return response.choices[0].message.content or "Pas de réponse générée."
-            
+
+            return chat_result.text or "Pas de réponse générée."
+
         except Exception as e:
             # P12-3 R1 : chemin récupéré retourné au client — redaction
             # systématique (no-op sans secret proxy dans le message).
