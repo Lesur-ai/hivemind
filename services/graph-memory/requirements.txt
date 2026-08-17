@@ -30,7 +30,7 @@ neo4j==6.2.0
 qdrant-client==1.18.0
 
 # === S3 Client (AWS SDK) ===
-boto3==1.43.52
+boto3==1.43.71
 
 # === OpenAI-compatible client (pour LLMaaS) ===
 openai==2.46.0
