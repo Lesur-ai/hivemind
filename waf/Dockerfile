@@ -11,7 +11,7 @@
 # caddy-ratelimit testé. Toute mise à jour doit conserver les digests/commits.
 
 # Stage 1 : Build Caddy avec plugins
-FROM caddy:2.11.4-builder@sha256:198d47eaee306d4d0c38a9960c89ff2c959aa29ad51d3e2dafa3e93ac961782a AS builder
+FROM caddy:2.11.4-builder@sha256:c7ae80243a530d532d20062d56d6198b3ab161eb6971d28716ef7ec55599fea4 AS builder
 
 RUN xcaddy build \
     --with github.com/corazawaf/coraza-caddy/v2@55c03d45dc552b6bbb493908d1af5d8969e864e0 \
