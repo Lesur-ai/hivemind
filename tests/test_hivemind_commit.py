@@ -492,6 +492,77 @@ async def test_apply_happy_path_advances_and_emits() -> None:
     assert not await store.has_event("evt1:tombstone")
 
 
+async def test_pairing_fences_refuse_stage_and_apply_before_shared_mutation() -> None:
+    """A pairing's two durable write fences cover both commit boundaries.
+
+    A target reservation must stop creation of a new staging prefix, while a
+    source terminal-confirmation fence must also stop a commit staged before
+    pairing activation.  The latter check is deliberately repeated immediately
+    before the durable commit/pointer transition.
+    """
+
+    from live_mem.core.reservation_guard import (
+        PairingActivationError,
+        SpaceReservedError,
+        clear_pairing_activation_checker,
+        clear_reservation_checker,
+        register_pairing_activation_checker,
+        register_reservation_checker,
+    )
+
+    storage = FakeStorage()
+    clock = DeterministicClock()
+    store, _queue, _lease, commit_rt = _runtime(storage, clock)
+    await seed_holder(store, clock, term=2, bank_version=-1, holder="nodeA")
+
+    async def reserved(space_id: str) -> None:
+        raise SpaceReservedError(space_id)
+
+    register_reservation_checker(reserved)
+    try:
+        with pytest.raises(SpaceReservedError):
+            await _stage_and_commit(
+                commit_rt,
+                bank_version=0,
+                parent_bank_version=-1,
+                term=2,
+                commit_id="reserved-stage",
+                staged={"activeContext.md": "blocked"},
+                event_id="reserved-stage-event",
+            )
+    finally:
+        clear_reservation_checker()
+    assert not any("reserved-stage" in key for key in storage.objects)
+
+    staged = await _stage_and_commit(
+        commit_rt,
+        bank_version=0,
+        parent_bank_version=-1,
+        term=2,
+        commit_id="fenced-apply",
+        staged={"activeContext.md": "blocked-at-apply"},
+        event_id="fenced-apply-event",
+    )
+
+    async def activating(space_id: str, ignore_pair_id: str | None) -> None:
+        del ignore_pair_id
+        raise PairingActivationError(space_id)
+
+    register_pairing_activation_checker(activating)
+    try:
+        with pytest.raises(PairingActivationError):
+            await commit_rt.apply_commit(
+                staged,
+                good_intent_for(staged),
+                local_node_id="nodeA",
+                fencing_token=2,
+            )
+    finally:
+        clear_pairing_activation_checker()
+    assert await store.get_commit(0) is None
+    assert (await store.get_bank_version_pointer()).bank_version == -1
+
+
 async def test_apply_gate_before_append_closes_fencing_hole() -> None:
     """A2 — un intent stale-term fait lever CommitNotAuthorized(STALE_TERM) ET
     aucun commits/{N} n'est écrit ET le pointeur est inchangé. RED si G0 tournait

@@ -12,7 +12,7 @@
  * only cross-links to it.
  *
  * Real data only; no polling (D8). Escaping per §7.3.3 R1–R6: every dynamic
- * value through esc() at the sink; server French text only via serverMessage();
+ * value through esc() at the sink; server text only via serverMessage();
  * all actions via the shell [data-action] delegate (CSP-safe). Permission gates
  * read the cached identity (never a fresh probe); the server stays authoritative.
  *
@@ -28,6 +28,9 @@
         tab: 'backups',
         spaces: null,       // last space_list payload (pickers)
         compactDry: null,   // space id of the last SUCCESSFUL compact dry run
+        // The verified apply response stays visible beside its mandatory
+        // post-apply dry run so its readback hashes/preimage are not lost.
+        compactApplyEvidence: null,
         repairDry: null,    // space id of the last SUCCESSFUL repair dry run
         sessionGeneration: null,
         gcDry: null,        // exact {spaceId,maxAgeDays,count,token,sessionGeneration}
@@ -104,6 +107,7 @@
             // target or opaque delete proof into another authenticated session.
             state.spaces = null;
             state.compactDry = null;
+            state.compactApplyEvidence = null;
             state.repairDry = null;
             state.gcDry = null;
             state.gcMutation = null;
@@ -346,7 +350,7 @@
                     return false;
                 }
                 // UNIFORM fail-closed for EVERY restore error (§5(a)/D7: never
-                // parse the French message to pick cause-specific copy). The
+                // parse the server message to pick cause-specific copy). The
                 // verbatim message states the real cause; the static note is
                 // general, non-causal doctrine.
                 showModal('Restore failed', restoreErrorHtml(data));
@@ -431,10 +435,12 @@
                 // Target changed -> a prior dry run no longer matches; require a
                 // fresh one before Apply (§5.8.2 two-step, bound to the target).
                 state.compactDry = null;
+                state.compactApplyEvidence = null;
                 state.repairDry = null;
                 invalidateGcProof();
-                // A -> B -> A must not resurrect an A response already in flight.
-                _maintReq.gc += 1;
+                // A -> B -> A must not resurrect any prior target's response,
+                // including a compact apply/evidence or repair result in flight.
+                Object.keys(_maintReq).forEach(lane => { _maintReq[lane] += 1; });
             });
         }
     }
@@ -466,7 +472,7 @@
         if (!hasManage()) return requiresPermPanel('Compact', 'manage');
         return panel(`
             <div class="panel-header"><h2>Compact</h2></div>
-            <p class="body-small">Summarizes oversized bank files via the LLM. Run a dry run first; Apply is a separate, explicit step.</p>
+            <p class="body-small">Compacts oversized bank files via the LLM using UTF-8 byte limits. Run a dry run first; Apply is a separate, explicit DirectLocal-only step. Shared Project Mesh routes are refused.</p>
             <div class="op-maint-actions">
                 <button type="button" class="btn btn-secondary btn-sm" data-action="op-compact-dry">Dry run</button>
                 <button type="button" class="btn btn-secondary btn-sm" data-action="op-compact-apply">Apply</button>
@@ -474,12 +480,19 @@
             <div id="opCompactResults"></div>`);
     }
 
-    function runCompact(dryRun, sidArg) {
+    function runCompact(dryRun, sidArg, preserveApplyEvidence) {
         // Apply passes the CAPTURED dry-run target (sidArg); dry reads the picker.
         const sid = sidArg || maintSpace();
         const el = document.getElementById('opCompactResults');
         if (!sid) { if (el) el.innerHTML = `<p class="form-error">${icon('alert')} Select a space first.</p>`; return; }
-        if (el) el.innerHTML = stateLoading(dryRun ? 'Scanning bank files…' : 'Compacting…');
+        if (dryRun && !preserveApplyEvidence) state.compactApplyEvidence = null;
+        if (!dryRun) state.compactApplyEvidence = null;
+        if (el) {
+            const evidence = dryRun && preserveApplyEvidence
+                ? compactApplyEvidenceMarkup(state.compactApplyEvidence)
+                : '';
+            el.innerHTML = evidence + stateLoading(dryRun ? 'Scanning bank files…' : 'Compacting…');
+        }
         // Revoke any prior Apply authorization the moment a NEW dry run starts:
         // it is only re-granted when THIS dry run succeeds (never from a pending
         // or failed newer preview). Keeps Apply bound to a current successful run.
@@ -499,54 +512,151 @@
                 paintCompact(data);
             } else if (data && data.status === 'ok') {
                 // §5.8.2: apply → after-action re-dry-run for the captured target
-                // (shows the post-compaction state; the result stays bound to the
-                // visible target, which stale() has confirmed is still `sid`).
+                // (shows the post-compaction state while retaining the verified
+                // apply evidence; both remain bound to the visible target).
+                state.compactApplyEvidence = data;
                 showToast('ok', 'Compacted');
-                runCompact(true, sid);
+                runCompact(true, sid, true);
             } else {
                 paintCompact(data); // conflict / error still surfaced
             }
         }).catch(() => {
             if (stale()) return;
-            if (el) el.innerHTML = stateError({ title: 'Compact failed' });
+            if (el) {
+                const evidence = dryRun && preserveApplyEvidence
+                    ? compactApplyEvidenceMarkup(state.compactApplyEvidence)
+                    : '';
+                el.innerHTML = evidence + stateError({ title: 'Compact failed' });
+            }
         });
+    }
+
+    function compactByteText(value) {
+        return (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+            ? `${value} UTF-8 bytes`
+            : 'unknown / not asserted';
+    }
+
+    function compactSuccessMarkup(data) {
+        const applied = data.dry_run === false;
+        const files = Array.isArray(data.files) ? data.files : [];
+        const after = data.total_size_after === null
+            ? 'unknown / not asserted'
+            : compactByteText(data.total_size_after);
+        const summary = `<p class="body-small">${applied ? 'Applied' : 'Dry run'} · ${esc(numOr(data.files_total))} files, ${esc(numOr(data.files_over_limit))} over limit · ${esc(compactByteText(data.total_size_before))} → ${esc(after)}.</p>`;
+        const preimage = applied && data.preimage_id
+            ? `<p class="body-small"><strong>preimage_id:</strong> <code>${esc(String(data.preimage_id))}</code></p>`
+            : '';
+        let body;
+        if (!files.length) {
+            body = summary + preimage + stateEmpty({ title: 'No bank files' });
+        } else {
+            const headers = applied
+                ? ['File', 'UTF-8 bytes', 'Max UTF-8 bytes', 'Source SHA-256', 'Result SHA-256', 'Over', 'Ratio', 'Compacted UTF-8 bytes', 'Reduction']
+                : ['File', 'UTF-8 bytes', 'Max UTF-8 bytes', 'Source SHA-256', 'Over', 'Ratio'];
+            const rows = files.map(f => {
+                const over = f.over_limit ? statusDot('warn', 'yes') : statusDot('neutral', 'no');
+                const sourceSha256 = (typeof f.source_sha256 === 'string') ? f.source_sha256 : '—';
+                const resultSha256 = (typeof f.result_sha256 === 'string') ? f.result_sha256 : '—';
+                const hashCells = `<td class="mono">${esc(sourceSha256)}</td>${applied ? `<td class="mono">${esc(resultSha256)}</td>` : ''}`;
+                let extra = '';
+                if (applied) {
+                    const cs = (typeof f.compacted_size === 'number') ? `${f.compacted_size} UTF-8 bytes` : '—';
+                    const rp = (typeof f.reduction_pct === 'number') ? `${f.reduction_pct}%` : (f.error ? '' : '—');
+                    const errCell = f.error ? esc(String(f.error)) : esc(rp);
+                    extra = `<td class="num mono">${esc(cs)}</td><td class="num mono">${errCell}</td>`;
+                }
+                return `<tr><td class="mono">${esc(String(f.filename || ''))}</td><td class="num mono">${esc(String(f.size ?? '—'))}</td><td class="num mono">${esc(String(f.max_size ?? '—'))}</td>${hashCells}<td>${over}</td><td class="num mono">${esc(String(f.ratio ?? '—'))}</td>${extra}</tr>`;
+            }).join('');
+            body = summary + preimage + `<div class="table-scroll"><table class="data-table"><thead><tr>${headers.map(h => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
+        }
+        return body;
+    }
+
+    function compactApplyEvidenceMarkup(data) {
+        if (!data || data.status !== 'ok' || data.dry_run !== false) return '';
+        return `<div class="state state-success" role="status">${icon('check')}<div><h3>Verified compaction apply evidence</h3>${compactSuccessMarkup(data)}</div></div>`;
+    }
+
+    function safeCompactionTargetDetail(failure) {
+        if (!failure || typeof failure !== 'object'
+            || failure.error !== 'ambiguous_or_missing_compaction_target') return '';
+        const index = failure.operation_index;
+        const resolution = failure.target_resolution;
+        const count = failure.target_match_count;
+        const sha256 = failure.target_heading_sha256;
+        if (!Number.isSafeInteger(index) || index < 0
+            || (resolution !== 'missing' && resolution !== 'ambiguous')
+            || !Number.isSafeInteger(count) || count < 0
+            || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)
+            || (resolution === 'missing' && count !== 0)
+            || (resolution === 'ambiguous' && count < 2)) return '';
+        return `operation_index=${index}; target_resolution=${resolution}; target_match_count=${count}; target_heading_sha256=${sha256}`;
+    }
+
+    function safeCompactionFailureRows(failures) {
+        if (!Array.isArray(failures)) return '';
+        return failures.map(f => {
+            if (!f || typeof f !== 'object'
+                || typeof f.filename !== 'string' || typeof f.error !== 'string') return '';
+            const detail = safeCompactionTargetDetail(f);
+            return `<tr><td class="mono">${esc(f.filename)}</td><td class="mono">${esc(f.error)}</td><td class="mono">${esc(detail || '—')}</td></tr>`;
+        }).join('');
     }
 
     function paintCompact(data) {
         const el = document.getElementById('opCompactResults');
         if (!el) return;
+        const applyEvidence = compactApplyEvidenceMarkup(state.compactApplyEvidence);
         if (data && data.status === 'conflict') {
-            el.innerHTML = `<div class="state state-degraded" role="status">${icon('alert')}<div><h3>Consolidation in progress</h3><p class="body-small">Consolidation is running for this space — retry when the lane is idle.</p>${serverMessage(data.message)}</div></div>`;
+            el.innerHTML = applyEvidence + `<div class="state state-degraded" role="status">${icon('alert')}<div><h3>Consolidation in progress</h3><p class="body-small">Consolidation is running for this space — retry when the lane is idle.</p>${serverMessage(data.message)}</div></div>`;
             return;
         }
         if (!data || data.status !== 'ok') {
-            el.innerHTML = stateError({ title: "Couldn't compact", message: data && data.message });
+            const recovery = data && data.status === 'partial' && data.recovery_required === true;
+            const status = data && data.status ? esc(String(data.status)) : 'error';
+            const reason = data && data.failure_reason ? esc(String(data.failure_reason)) : 'unknown';
+            const after = data && data.total_size_after === null
+                ? 'unknown / not asserted'
+                : compactByteText(data && data.total_size_after);
+            const failures = data && Array.isArray(data.failures) ? data.failures : [];
+            const failureRows = safeCompactionFailureRows(failures);
+            const failureTable = failureRows
+                ? `<div class="table-scroll"><table class="data-table"><thead><tr><th scope="col">File</th><th scope="col">Safe failure</th><th scope="col">Target resolution</th></tr></thead><tbody>${failureRows}</tbody></table></div>`
+                : '';
+            const message = data && data.message ? serverMessage(data.message) : '';
+            const remediation = data && data.remediation
+                ? `<p class="body-small"><strong>Remediation:</strong> ${esc(String(data.remediation))}</p>`
+                : '';
+            const preimage = data && data.preimage_id
+                ? `<p class="body-small"><strong>preimage_id:</strong> <code>${esc(String(data.preimage_id))}</code></p>`
+                : '';
+            const applied = data && typeof data.files_applied_before_failure === 'number'
+                ? `<p class="body-small"><strong>files_applied_before_failure:</strong> ${esc(String(data.files_applied_before_failure))}</p>`
+                : '';
+            const phase = data && data.failed_phase
+                ? `<p class="body-small"><strong>failed_phase:</strong> ${esc(String(data.failed_phase))}</p>`
+                : '';
+            const rollback = data && data.rollback_outcome
+                ? `<p class="body-small"><strong>rollback_outcome:</strong> ${esc(String(data.rollback_outcome))}</p>`
+                : '';
+            const mutation = data && data.apply_may_have_mutated === true
+                ? '<p class="body-small"><strong>apply_may_have_mutated:</strong> true</p>'
+                : '';
+            const fileReports = data && Array.isArray(data.files) ? data.files : [];
+            const hashRows = fileReports.map(f => {
+                const source = f && f.source_sha256;
+                const result = f && f.result_sha256;
+                if (!source && !result) return '';
+                return `<tr><td class="mono">${esc(String((f && f.filename) || ''))}</td><td class="mono">${esc(String(source || '—'))}</td><td class="mono">${esc(String(result || '—'))}</td></tr>`;
+            }).join('');
+            const hashTable = hashRows
+                ? `<div class="table-scroll"><table class="data-table"><thead><tr><th scope="col">File</th><th scope="col">Source SHA-256</th><th scope="col">Result SHA-256</th></tr></thead><tbody>${hashRows}</tbody></table></div>`
+                : '';
+            el.innerHTML = applyEvidence + `<div class="state ${recovery ? 'state-degraded' : 'state-error'}" role="${recovery ? 'status' : 'alert'}">${icon('alert')}<div><h3>${recovery ? 'Compaction recovery required' : 'Compaction refused or failed'}</h3><p class="body-small"><strong>status:</strong> ${status} · <strong>failure_reason:</strong> ${reason}</p><p class="body-small"><strong>total_size_after:</strong> ${esc(after)}</p>${phase}${rollback}${applied}${mutation}${preimage}${failureTable}${hashTable}${remediation}${message}<p class="body-small"><strong>No automatic retry or restore was performed.</strong></p></div></div>`;
             return;
         }
-        const applied = data.dry_run === false;
-        const files = Array.isArray(data.files) ? data.files : [];
-        const summary = `<p class="body-small">${applied ? 'Applied' : 'Dry run'} · ${esc(numOr(data.files_total))} files, ${esc(numOr(data.files_over_limit))} over limit · ${esc(numOr(data.total_size_before))} → ${esc(numOr(data.total_size_after))} chars.</p>`;
-        let body;
-        if (!files.length) {
-            body = summary + stateEmpty({ title: 'No bank files' });
-        } else {
-            const headers = applied
-                ? ['File', 'Chars', 'Max', 'Over', 'Ratio', 'Compacted', 'Reduction']
-                : ['File', 'Chars', 'Max', 'Over', 'Ratio'];
-            const rows = files.map(f => {
-                const over = f.over_limit ? statusDot('warn', 'yes') : statusDot('neutral', 'no');
-                let extra = '';
-                if (applied) {
-                    const cs = (typeof f.compacted_size === 'number') ? String(f.compacted_size) : '—';
-                    const rp = (typeof f.reduction_pct === 'number') ? `${f.reduction_pct}%` : (f.error ? '' : '—');
-                    const errCell = f.error ? serverMessage(f.error) : esc(rp);
-                    extra = `<td class="num mono">${esc(cs)}</td><td class="num mono">${errCell}</td>`;
-                }
-                return `<tr><td class="mono">${esc(String(f.filename || ''))}</td><td class="num mono">${esc(String(f.size ?? '—'))}</td><td class="num mono">${esc(String(f.max_size ?? '—'))}</td><td>${over}</td><td class="num mono">${esc(String(f.ratio ?? '—'))}</td>${extra}</tr>`;
-            }).join('');
-            body = summary + `<div class="table-scroll"><table class="data-table"><thead><tr>${headers.map(h => `<th scope="col">${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
-        }
-        el.innerHTML = body;
+        el.innerHTML = applyEvidence + compactSuccessMarkup(data);
     }
 
     function confirmCompactApply() {
@@ -562,7 +672,7 @@
         }
         const captured = sid;
         const epoch = AdminRouter.epoch;
-        showModal('Apply compaction', `<p class="body-small">Compacts oversized bank files in space <code>${esc(captured)}</code> via the LLM. This rewrites bank content.</p>`,
+        showModal('Apply compaction', `<p class="body-small">Compacts oversized bank files in space <code>${esc(captured)}</code> via the LLM. This rewrites bank content only on a DirectLocal route; shared Project Mesh routes are refused.</p>`,
             'Apply', async () => {
                 if (AdminRouter.epoch !== epoch) return false;
                 state.compactDry = null;

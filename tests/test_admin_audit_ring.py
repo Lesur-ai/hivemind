@@ -325,7 +325,7 @@ async def test_admin_tool_permission_boundary_and_read_only_annotation():
     assert tool.annotations.readOnlyHint is True
 
     missing = await _call_as(fn, None)
-    assert missing == {"status": "error", "message": "Authentification requise"}
+    assert missing == {"status": "error", "message": "Authentication required"}
 
     non_admin = await _call_as(
         fn,
@@ -337,7 +337,7 @@ async def test_admin_tool_permission_boundary_and_read_only_annotation():
     )
     assert non_admin == {
         "status": "error",
-        "message": "Permission 'admin' requise pour cette opération",
+            "message": "The 'admin' permission is required for this operation",
     }
 
 

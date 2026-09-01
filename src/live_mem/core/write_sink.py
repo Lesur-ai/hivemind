@@ -132,6 +132,25 @@ class StagedWriteNotImplemented(RuntimeError):
         )
 
 
+class DirectLocalWriteFenced(RuntimeError):
+    """A registry-resolved local sink is no longer allowed to mutate.
+
+    Project Mesh source preparation can change a space from ``DIRECT_LOCAL`` to
+    ``STAGED`` after a caller resolved its sink. Registry-created direct sinks
+    therefore revalidate the durable reservation, current route, and
+    irreversible source provenance at the last typed mutation boundary. This
+    is fail-closed defence in depth, not a claim that the check and following
+    object-store mutation are one transaction.
+    """
+
+    def __init__(self, space_id: str) -> None:
+        super().__init__(
+            f"Direct local mutation for space {space_id!r} is fenced because "
+            "its reservation or Hivemind route changed"
+        )
+        self.space_id = space_id
+
+
 class WriteSink(abc.ABC):
     """Abstract single typed durable-write boundary.
 
@@ -200,23 +219,61 @@ class DirectLocalWriteSink(WriteSink):
     happen at import/def time.
     """
 
-    def __init__(self, storage: "StorageService | None" = None) -> None:
+    def __init__(
+        self,
+        storage: "StorageService | None" = None,
+        *,
+        space_id: str | None = None,
+    ) -> None:
         # Lazy default: only construct/resolve the singleton when no storage was
         # injected. Tests inject a FakeStorage; never builds a real S3 client.
         self._storage = storage if storage is not None else get_storage()
+        self._space_id = space_id
 
     @property
     def storage(self) -> "StorageService":
         return self._storage
 
+    async def _assert_mutation_allowed(self, keys: list[str]) -> None:
+        """Revalidate a registry-bound local sink immediately before mutation.
+
+        Explicitly constructed compatibility/test sinks have no ``space_id`` and
+        retain their byte-for-byte pass-through contract. Production registry
+        sinks are bound to one space: keys cannot escape that prefix, an active
+        Mesh reservation refuses, and either a route/provenance mismatch fences
+        the stale sink.
+        """
+
+        space_id = self._space_id
+        if space_id is None:
+            return
+        prefix = f"{space_id}/"
+        if any(type(key) is not str or not key.startswith(prefix) for key in keys):
+            raise DirectLocalWriteFenced(space_id)
+
+        # Lazy imports avoid a write_sink <-> engine-registry import cycle.
+        from .hivemind.lifecycle import WriteRoute, resolve_write_route
+        from .reservation_guard import (
+            assert_direct_local_allowed,
+            assert_space_not_reserved,
+        )
+
+        await assert_space_not_reserved(space_id)
+        route = await resolve_write_route(self._storage, space_id)
+        if route is not WriteRoute.DIRECT_LOCAL:
+            raise DirectLocalWriteFenced(space_id)
+        await assert_direct_local_allowed(space_id)
+
     async def put(
         self, key: str, content: str, content_type: str = DEFAULT_CONTENT_TYPE
     ) -> None:
+        await self._assert_mutation_allowed([key])
         # Pass content_type straight through so the StorageService default and
         # any explicit value are forwarded byte-identically (no re-defaulting).
         await self._storage.put(key, content, content_type)
 
     async def put_json(self, key: str, data: dict) -> None:
+        await self._assert_mutation_allowed([key])
         # Delegate; do NOT re-serialize. StorageService does
         # json.dumps(data, indent=2, ensure_ascii=False) + application/json.
         # Re-implementing it here would risk a different byte layout and break
@@ -224,9 +281,11 @@ class DirectLocalWriteSink(WriteSink):
         await self._storage.put_json(key, data)
 
     async def delete(self, key: str) -> None:
+        await self._assert_mutation_allowed([key])
         await self._storage.delete(key)
 
     async def delete_many(self, keys: list[str]) -> int:
+        await self._assert_mutation_allowed(keys)
         # Return the int count verbatim (per-key warning-logging behavior is
         # preserved by StorageService).
         return await self._storage.delete_many(keys)

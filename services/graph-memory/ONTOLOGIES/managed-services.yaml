@@ -1,138 +1,138 @@
 # =============================================================================
-# Ontologie Services Managés / Infogérance
+# Managed Services / IT Outsourcing Ontology
 # =============================================================================
-# Spécialisée pour l'extraction d'informations depuis des documents
-# liés à l'infogérance, services managés, MCO, support, RACI.
+# Specialized for extracting information from documents related to IT
+# outsourcing, managed services, operations, support, and RACI.
 
 name: managed-services
 version: "1.0"
 description: |
-  Ontologie spécialisée pour les documents de services managés et infogérance.
-  Optimisée pour extraire les périmètres de responsabilité, SLA de support,
-  processus ITIL, incidents, changements, et matrices RACI.
+  Specialized ontology for managed-services and IT outsourcing documents.
+  Optimized to extract responsibility scopes, support SLAs,
+  ITIL processes, incidents, changes, and RACI matrices.
 
-# Instructions spécifiques pour le LLM
+# LLM-specific instructions
 context: |
-  Tu es un expert en services managés et infogérance IT.
-  Tu dois identifier avec précision :
-  - Les périmètres de responsabilité (client vs prestataire)
-  - Les processus ITIL (incidents, problèmes, changements, mises en production)
-  - Les SLA de support (GTI, GTR, plages horaires)
-  - Les rôles et responsabilités (RACI)
-  - Les escalades et astreintes
-  - Les outils et interfaces de ticketing
-  - Les indicateurs de performance (KPI)
+  You are an expert in managed services and IT outsourcing.
+  You must accurately identify:
+  - Responsibility scopes (customer vs. provider)
+  - ITIL processes (incidents, problems, changes, releases)
+  - Support SLAs (intervention time, restoration time, service windows)
+  - Roles and responsibilities (RACI)
+  - Escalations and on-call coverage
+  - Ticketing tools and interfaces
+  - Performance indicators (KPIs)
   
-  IMPORTANT: La clarté des responsabilités est cruciale en infogérance.
-  Identifie clairement QUI fait QUOI et QUAND.
+  IMPORTANT: Clear responsibilities are crucial in managed services.
+  Clearly identify WHO does WHAT and WHEN.
 
 # =============================================================================
-# Types d'entités spécifiques aux Services Managés
+# Managed-services-specific entity types
 # =============================================================================
 entity_types:
-  # Périmètres et Services
+  # Scopes and services
   - name: ManagedService
-    description: Service managé fourni
+    description: Provided managed service
     examples:
-      - "Administration système"
-      - "Supervision 24/7"
-      - "Gestion des sauvegardes"
+      - "System administration"
+      - "24/7 monitoring"
+      - "Backup management"
       - "Patch management"
 
   - name: ServicePerimeter
-    description: Périmètre de service (inclus/exclus)
+    description: Service scope (included or excluded)
     examples:
-      - "Périmètre MCO"
-      - "Infogérance niveau 1-2-3"
-      - "Administration OS"
-      - "Hors périmètre: développement applicatif"
+      - "Operations Scope"
+      - "Level 1-2-3 IT outsourcing"
+      - "OS administration"
+      - "Out of scope: application development"
 
   - name: SupportLevel
-    description: Niveau de support
+    description: Support level
     examples:
-      - "Support N1 (helpdesk)"
-      - "Support N2 (expertise)"
-      - "Support N3 (éditeur)"
-      - "Astreinte 24/7"
+      - "Level 1 support (help desk)"
+      - "Level 2 support (expertise)"
+      - "Level 3 support (vendor)"
+      - "24/7 on-call coverage"
 
-  # Processus ITIL
+  # ITIL processes
   - name: ITILProcess
-    description: Processus ITIL
+    description: ITIL process
     examples:
-      - "Gestion des incidents"
-      - "Gestion des problèmes"
-      - "Gestion des changements"
-      - "Gestion des mises en production"
+      - "Incident management"
+      - "Problem management"
+      - "Change management"
+      - "Release management"
 
   - name: Incident
-    description: Type ou sévérité d'incident
+    description: Incident type or severity
     examples:
-      - "Incident P1 (critique)"
-      - "Incident P2 (majeur)"
-      - "Incident P3 (mineur)"
-      - "Incident de sécurité"
+      - "P1 incident (critical)"
+      - "P2 incident (major)"
+      - "P3 incident (minor)"
+      - "Security incident"
 
   - name: ChangeType
-    description: Type de changement
+    description: Change type
     examples:
-      - "Changement standard"
-      - "Changement normal"
-      - "Changement urgent"
-      - "Changement d'urgence"
+      - "Standard change"
+      - "Normal change"
+      - "Urgent change"
+      - "Emergency change"
 
-  # SLA et Engagements
+  # SLAs and commitments
   - name: SLA
-    description: Engagement de niveau de service support
+    description: Support service-level commitment
     priority: high
     examples:
-      - "GTI P1: 15 minutes"
-      - "GTR P1: 4 heures"
-      - "Temps de réponse: 1h ouvrable"
-      - "Taux de résolution N1: 80%"
+      - "P1 intervention time: 15 minutes"
+      - "P1 restoration time: 4 hours"
+      - "Response time: 1 business hour"
+      - "Level 1 resolution rate: 80%"
 
   - name: ServiceWindow
-    description: Plage de service
+    description: Service window
     examples:
-      - "HO (heures ouvrées): 8h-18h"
-      - "HNO (heures non ouvrées)"
+      - "Business hours: 8:00-18:00"
+      - "Non-business hours"
       - "24/7/365"
-      - "Jours ouvrés France"
+      - "Business days in France"
 
   - name: Astreinte
-    description: Service d'astreinte
+    description: On-call service
     examples:
-      - "Astreinte 24/7"
-      - "Astreinte week-end"
-      - "Escalade N3"
+      - "24/7 on-call coverage"
+      - "Weekend on-call coverage"
+      - "Level 3 escalation"
 
-  # Rôles et Responsabilités
+  # Roles and responsibilities
   - name: Role
-    description: Rôle dans l'organisation du service
+    description: Role in the service organization
     examples:
       - "Service Delivery Manager"
-      - "Responsable Technique"
-      - "Analyste N2"
+      - "Technical Manager"
+      - "Level 2 Analyst"
       - "DBA"
 
   - name: Team
-    description: Équipe ou groupe
+    description: Team or group
     examples:
-      - "Équipe MCO"
+      - "Operations Team"
       - "NOC (Network Operations Center)"
       - "SOC (Security Operations Center)"
       - "CAB (Change Advisory Board)"
 
   - name: RACIResponsibility
-    description: Responsabilité RACI
+    description: RACI responsibility
     examples:
-      - "R - Responsable"
+      - "R - Responsible"
       - "A - Accountable"
       - "C - Consulted"
       - "I - Informed"
 
-  # Outils et Interfaces
+  # Tools and interfaces
   - name: Tool
-    description: Outil de gestion de service
+    description: Service-management tool
     examples:
       - "ServiceNow"
       - "JIRA Service Management"
@@ -140,155 +140,155 @@ entity_types:
       - "Nagios/Centreon"
 
   - name: Interface
-    description: Interface ou portail
+    description: Interface or portal
     examples:
-      - "Portail client"
-      - "Système de ticketing"
-      - "Dashboard supervision"
+      - "Customer portal"
+      - "Ticketing system"
+      - "Monitoring dashboard"
       - "API ITSM"
 
-  # Livrables et Rapports
+  # Deliverables and reports
   - name: Deliverable
-    description: Livrable de service
+    description: Service deliverable
     examples:
-      - "Rapport mensuel d'activité"
-      - "Comité de pilotage"
-      - "Revue de service"
-      - "Plan de capacité"
+      - "Monthly activity report"
+      - "Steering committee"
+      - "Service review"
+      - "Capacity plan"
 
   - name: KPI
-    description: Indicateur de performance
+    description: Performance indicator
     examples:
       - "MTTR (Mean Time To Repair)"
       - "MTBF (Mean Time Between Failures)"
-      - "Taux de disponibilité"
-      - "Nombre d'incidents/mois"
+      - "Availability rate"
+      - "Number of incidents/month"
 
-  # Personnes et Organisations
+  # People and organizations
   - name: Person
-    description: Contact ou responsable
+    description: Contact or person responsible
     examples:
-      - "Responsable compte client"
-      - "RSSI"
+      - "Customer Account Manager"
+      - "CISO"
       - "DPO"
 
   - name: Organization
-    description: Organisation impliquée
+    description: Organization involved
     examples:
-      - "Cloud Temple MCO"
-      - "Équipe DSI Client"
-      - "Éditeur logiciel"
+      - "Cloud Temple Operations"
+      - "Customer IT Team"
+      - "Software vendor"
 
-  # Activités et Tâches
+  # Activities and tasks
   - name: Activity
-    description: Activité d'exploitation
+    description: Operations activity
     examples:
-      - "Supervision proactive"
-      - "Patch management mensuel"
-      - "Revue de logs sécurité"
-      - "Test de restauration"
+      - "Proactive monitoring"
+      - "Monthly patch management"
+      - "Security log review"
+      - "Restore test"
 
   - name: MaintenanceWindow
-    description: Fenêtre de maintenance
+    description: Maintenance window
     examples:
-      - "Maintenance mensuelle: 1er dimanche"
-      - "Maintenance d'urgence"
-      - "Créneau de mise à jour"
+      - "Monthly maintenance: first Sunday"
+      - "Emergency maintenance"
+      - "Update window"
 
 # =============================================================================
-# Types de relations spécifiques aux Services Managés
+# Managed-services-specific relationship types
 # =============================================================================
 relation_types:
   - name: PROVIDES
-    description: Fournit un service
+    description: Provides a service
     examples:
-      - "Cloud Temple → PROVIDES → Supervision 24/7"
+      - "Cloud Temple → PROVIDES → 24/7 monitoring"
 
   - name: RESPONSIBLE_FOR
-    description: Responsable de (RACI - R)
+    description: Responsible for (RACI - R)
     examples:
-      - "Équipe MCO → RESPONSIBLE_FOR → Gestion incidents"
+      - "Operations Team → RESPONSIBLE_FOR → Incident management"
 
   - name: ACCOUNTABLE_FOR
-    description: Redevable de (RACI - A)
+    description: Accountable for (RACI - A)
     examples:
       - "Service Delivery Manager → ACCOUNTABLE_FOR → SLA"
 
   - name: CONSULTED_FOR
-    description: Consulté pour (RACI - C)
+    description: Consulted for (RACI - C)
     examples:
-      - "Client → CONSULTED_FOR → Changements majeurs"
+      - "Customer → CONSULTED_FOR → Major changes"
 
   - name: INFORMED_OF
-    description: Informé de (RACI - I)
+    description: Informed of (RACI - I)
     examples:
-      - "Direction → INFORMED_OF → Incidents P1"
+      - "Management → INFORMED_OF → P1 incidents"
 
   - name: HAS_SLA
-    description: Possède un SLA
+    description: Has an SLA
     examples:
-      - "Incident P1 → HAS_SLA → GTI 15 min"
+      - "P1 incident → HAS_SLA → P1 intervention time: 15 minutes"
 
   - name: ESCALATES_TO
-    description: Escalade vers
+    description: Escalates to
     examples:
       - "N1 → ESCALATES_TO → N2"
-      - "N2 → ESCALATES_TO → Astreinte"
+      - "N2 → ESCALATES_TO → On-call coverage"
 
   - name: USES_TOOL
-    description: Utilise un outil
+    description: Uses a tool
     examples:
-      - "MCO → USES_TOOL → ServiceNow"
+      - "Operations → USES_TOOL → ServiceNow"
 
   - name: PART_OF
-    description: Fait partie de
+    description: Is part of
     examples:
-      - "Patch management → PART_OF → MCO"
+      - "Patch management → PART_OF → Operations"
 
   - name: REQUIRES_APPROVAL
-    description: Nécessite approbation
+    description: Requires approval
     examples:
-      - "Changement majeur → REQUIRES_APPROVAL → CAB"
+      - "Major change → REQUIRES_APPROVAL → CAB"
 
   - name: PRODUCES
-    description: Produit un livrable
+    description: Produces a deliverable
     examples:
-      - "Comité pilotage → PRODUCES → Compte-rendu"
+      - "Steering committee → PRODUCES → Meeting minutes"
 
   - name: MEASURED_BY
-    description: Mesuré par un KPI
+    description: Measured by a KPI
     examples:
-      - "Qualité support → MEASURED_BY → MTTR"
+      - "Support quality → MEASURED_BY → MTTR"
 
   - name: APPLIES_TO
-    description: S'applique à
+    description: Applies to
     examples:
-      - "SLA P1 → APPLIES_TO → Infrastructure critique"
+      - "P1 SLA → APPLIES_TO → Critical infrastructure"
 
   - name: DURING
-    description: Pendant une plage horaire
+    description: During a service window
     examples:
-      - "Support N1 → DURING → HO 8h-18h"
+      - "Level 1 support → DURING → Business hours 8:00-18:00"
 
   - name: EXCLUDES
-    description: Exclut du périmètre
+    description: Excludes from scope
     examples:
-      - "Périmètre MCO → EXCLUDES → Développement"
+      - "Operations Scope → EXCLUDES → Development"
 
   - name: INCLUDES
-    description: Inclut dans le périmètre
+    description: Includes in scope
     examples:
-      - "Périmètre MCO → INCLUDES → Supervision"
+      - "Operations Scope → INCLUDES → Monitoring"
 
 # =============================================================================
-# Règles d'extraction spécifiques
+# Extraction rules
 # =============================================================================
 extraction_rules:
   max_entities: 60
   max_relations: 80
   include_metrics: true
   include_durations: true
-  include_amounts: false  # Moins pertinent en infogérance pure
+  include_amounts: false  # Less relevant for pure IT outsourcing
   extract_implicit_relations: true
   
   priority_entities:
@@ -300,36 +300,37 @@ extraction_rules:
     - Activity
 
   special_instructions: |
-    - Identifie TOUS les SLA avec leurs valeurs (GTI, GTR, temps de réponse)
-    - Distingue les niveaux de support (N1, N2, N3)
-    - Note les plages horaires de service (HO, HNO, 24/7)
-    - Identifie les responsabilités RACI
-    - Distingue ce qui est INCLUS vs EXCLUS du périmètre
-    - Identifie les processus d'escalade
+    - Identify ALL SLAs with their values (intervention time, restoration time, response time).
+    - Distinguish support levels (N1, N2, N3).
+    - Record service windows (business hours, non-business hours, 24/7).
+    - Identify RACI responsibilities.
+    - Distinguish what is INCLUDED from what is EXCLUDED from scope.
+    - Identify escalation processes.
 
 # =============================================================================
-# Exemples d'extraction
+# Extraction examples
 # =============================================================================
 examples:
   - input: |
-      L'équipe MCO Cloud Temple assure la supervision 24/7 de l'infrastructure.
-      GTI Incident P1: 15 minutes, GTR: 4 heures.
-      Support N1 en heures ouvrées (8h-18h), astreinte N2/N3 en HNO.
-      Rapport mensuel d'activité fourni lors du comité de pilotage.
-      Le patch management mensuel est réalisé le 1er dimanche du mois.
+      The Cloud Temple Operations Team provides 24/7 infrastructure monitoring.
+      P1 intervention time: 15 minutes; restoration time: 4 hours.
+      Level 1 support is available during business hours (8:00-18:00), with
+      Level 2/3 on-call coverage outside business hours.
+      A monthly activity report is provided at the steering committee.
+      Monthly patch management is performed on the first Sunday of each month.
     expected_entities:
-      - {name: "Équipe MCO Cloud Temple", type: "Team"}
-      - {name: "Supervision 24/7", type: "ManagedService"}
-      - {name: "GTI P1: 15 minutes", type: "SLA"}
-      - {name: "GTR P1: 4 heures", type: "SLA"}
-      - {name: "Support N1", type: "SupportLevel"}
-      - {name: "HO 8h-18h", type: "ServiceWindow"}
-      - {name: "Astreinte N2/N3", type: "Astreinte"}
-      - {name: "Rapport mensuel", type: "Deliverable"}
-      - {name: "Comité de pilotage", type: "Deliverable"}
-      - {name: "Patch management mensuel", type: "Activity"}
-      - {name: "1er dimanche du mois", type: "MaintenanceWindow"}
+      - {name: "Cloud Temple Operations Team", type: "Team"}
+      - {name: "24/7 monitoring", type: "ManagedService"}
+      - {name: "P1 intervention time: 15 minutes", type: "SLA"}
+      - {name: "P1 restoration time: 4 hours", type: "SLA"}
+      - {name: "Level 1 support", type: "SupportLevel"}
+      - {name: "Business hours 8:00-18:00", type: "ServiceWindow"}
+      - {name: "Level 2/3 on-call coverage", type: "Astreinte"}
+      - {name: "Monthly activity report", type: "Deliverable"}
+      - {name: "Steering committee", type: "Deliverable"}
+      - {name: "Monthly patch management", type: "Activity"}
+      - {name: "First Sunday of the month", type: "MaintenanceWindow"}
     expected_relations:
-      - {from: "Équipe MCO", to: "Supervision 24/7", type: "RESPONSIBLE_FOR"}
-      - {from: "Incident P1", to: "GTI 15 min", type: "HAS_SLA"}
-      - {from: "Support N1", to: "HO 8h-18h", type: "DURING"}
+      - {from: "Operations Team", to: "24/7 monitoring", type: "RESPONSIBLE_FOR"}
+      - {from: "P1 incident", to: "P1 intervention time: 15 minutes", type: "HAS_SLA"}
+      - {from: "Level 1 support", to: "Business hours 8:00-18:00", type: "DURING"}

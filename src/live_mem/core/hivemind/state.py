@@ -93,7 +93,7 @@ class HivemindStateStore:
 
     def __init__(self, storage: StorageService, space_id: str) -> None:
         if not space_id:
-            raise ValueError("space_id requis")
+            raise ValueError("space_id is required")
         self._storage = storage
         self._space_id = space_id
 
@@ -118,20 +118,28 @@ class HivemindStateStore:
     async def _get_model(
         self, key: str, model_cls: type[BaseModel]
     ) -> Optional[BaseModel]:
-        raw = await self._storage.get(key)
+        try:
+            raw = await self._storage.get(key)
+        except UnicodeDecodeError as e:
+            # StorageService decodes object bodies before returning them.  A
+            # non-UTF-8 protocol record is persisted-state corruption, never a
+            # request-validation error or an availability failure.
+            raise CorruptedStateError(
+                f"Corrupt Hivemind state at '{key}': invalid UTF-8 ({e})"
+            ) from e
         if raw is None:
             return None
         try:
             data = json.loads(raw)
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise CorruptedStateError(
-                f"État Hivemind corrompu sur '{key}' : JSON invalide ({e})"
+                f"Corrupt Hivemind state at '{key}': invalid JSON or UTF-8 ({e})"
             ) from e
         try:
             return model_cls.model_validate(data)
         except ValidationError as e:
             raise CorruptedStateError(
-                f"État Hivemind corrompu sur '{key}' : schéma {model_cls.__name__} invalide ({e})"
+                f"Corrupt Hivemind state at '{key}': invalid {model_cls.__name__} schema ({e})"
             ) from e
 
     # ─────────────────────────────────────────────────────────────────
@@ -152,8 +160,8 @@ class HivemindStateStore:
         existing = await self.get_node_identity()
         if existing and existing.node_id != identity.node_id:
             raise RuntimeError(
-                f"NodeIdentity déjà initialisé avec node_id={existing.node_id!r}, "
-                f"refus d'écrire un node_id différent {identity.node_id!r}"
+                f"NodeIdentity is already initialized with node_id={existing.node_id!r}; "
+                f"refusing to write different node_id {identity.node_id!r}"
             )
         await self._put_model(layout.node_key(self._space_id), identity)
         return identity
@@ -202,8 +210,8 @@ class HivemindStateStore:
         existing = await self.get_membership()
         if existing and view.epoch < existing.epoch:
             raise RuntimeError(
-                f"Refus de descendre l'epoch membership : "
-                f"courant={existing.epoch}, nouveau={view.epoch}"
+                f"Refusing to decrease membership epoch: "
+                f"current={existing.epoch}, new={view.epoch}"
             )
         await self._put_model(layout.members_key(self._space_id), view)
         return view
@@ -226,7 +234,7 @@ class HivemindStateStore:
         current = existing.term if existing else 0
         if new_term < current:
             raise RuntimeError(
-                f"Term monotone : refus de redescendre {current} → {new_term}"
+                f"Monotonic term: refusing to decrease {current} → {new_term}"
             )
         if new_term == current and existing is not None:
             return existing
@@ -263,11 +271,11 @@ class HivemindStateStore:
         if existing:
             if token.term < existing.term:
                 raise RuntimeError(
-                    f"Term monotone sur le token : refus {existing.term} → {token.term}"
+                    f"Monotonic token term: refusing {existing.term} → {token.term}"
                 )
             if token.fencing_token < existing.fencing_token:
                 raise RuntimeError(
-                    f"Fencing token monotone : refus {existing.fencing_token} → {token.fencing_token}"
+                    f"Monotonic fencing token: refusing {existing.fencing_token} → {token.fencing_token}"
                 )
         await self._put_model(layout.token_key(self._space_id), token)
         return token
@@ -287,7 +295,7 @@ class HivemindStateStore:
         existing = await self.get_bank_version_pointer()
         if existing and pointer.bank_version < existing.bank_version:
             raise RuntimeError(
-                f"bank_version monotone : refus {existing.bank_version} → {pointer.bank_version}"
+                f"Monotonic bank_version: refusing {existing.bank_version} → {pointer.bank_version}"
             )
         await self._put_model(layout.bank_version_key(self._space_id), pointer)
         return pointer
@@ -392,9 +400,9 @@ class HivemindStateStore:
             if existing_commit.commit_id == commit.commit_id:
                 return existing_commit
             raise RuntimeError(
-                f"Conflit de commit : bank_version={commit.bank_version} déjà "
-                f"écrit avec commit_id={existing_commit.commit_id!r}, "
-                f"nouveau commit_id={commit.commit_id!r}"
+                f"Commit conflict: bank_version={commit.bank_version} already "
+                f"written with commit_id={existing_commit.commit_id!r}, "
+                f"new commit_id={commit.commit_id!r}"
             )
         await self._put_model(key, commit)
         return commit
@@ -501,8 +509,8 @@ class HivemindStateStore:
         existing = await self.get_watermark(watermark.node_id)
         if existing and watermark.bank_version < existing.bank_version:
             raise RuntimeError(
-                f"Watermark monotone : refus {existing.bank_version} "
-                f"→ {watermark.bank_version} pour node {watermark.node_id}"
+                f"Monotonic watermark: refusing {existing.bank_version} "
+                f"→ {watermark.bank_version} for node {watermark.node_id}"
             )
         key = layout.watermark_key(self._space_id, watermark.node_id)
         await self._put_model(key, watermark)
@@ -693,9 +701,9 @@ class HivemindStateStore:
                 and self_member.public_key != identity.public_key
             ):
                 raise RuntimeError(
-                    "initialize refusé : rotation de public_key non supportée "
-                    f"pour {identity.node_id!r} (node.json et members.json "
-                    "divergeraient au même epoch)"
+                    "initialize refused: public_key rotation is unsupported "
+                    f"for {identity.node_id!r} (node.json and members.json "
+                    "would diverge at the same epoch)"
                 )
 
         await self.set_node_identity(identity)

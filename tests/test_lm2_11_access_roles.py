@@ -367,6 +367,7 @@ async def test_delegated_token_create_rejects_overflow_expiry_before_secret(
         expires_in_days=10**20,
     )
     assert result["status"] == "error"
+    assert result["message"] == "expires_in_days is outside the supported range"
     assert generated == 0
     assert storage.objects == before
 
@@ -515,7 +516,7 @@ async def test_token_store_v1_migrates_once_and_v2_never_rewidens_empty_scope(wi
 async def test_token_store_unknown_or_corrupt_version_fails_closed(wired, version):
     storage, service = wired
     storage.objects[TOKENS_KEY] = json.dumps({"version": version, "tokens": []})
-    with pytest.raises(RuntimeError, match="[Vv]ersion|corrompu"):
+    with pytest.raises(RuntimeError, match="[Vv]ersion|[Cc]orrupt"):
         await service._load_store()
 
 
@@ -584,7 +585,7 @@ async def test_token_store_critical_fields_fail_closed_without_mutation(wired, c
         {"version": 2, "tokens": raw_tokens}
     )
     before = storage.objects[TOKENS_KEY]
-    with pytest.raises(RuntimeError, match="corrompu"):
+    with pytest.raises(RuntimeError, match="Corrupt token registry"):
         await service._load_store()
     assert storage.objects[TOKENS_KEY] == before
 
@@ -608,7 +609,7 @@ async def test_legacy_migration_validates_payload_before_writing_v2_marker(wired
     storage.objects[TOKENS_KEY] = json.dumps({"version": 1, "tokens": [raw]})
     before = storage.objects[TOKENS_KEY]
 
-    with pytest.raises(RuntimeError, match="dupliqué"):
+    with pytest.raises(RuntimeError, match="duplicate space_id"):
         await service.migrate_empty_space_ids(["alpha"])
     assert storage.objects[TOKENS_KEY] == before
 
@@ -620,7 +621,7 @@ async def test_save_store_validates_before_any_put(wired):
     invalid.permissions = ["read", "read"]
     store = TokensStore(tokens=[invalid])
 
-    with pytest.raises(RuntimeError, match="dupliqué"):
+    with pytest.raises(RuntimeError, match="duplicate permission"):
         await service._save_store(store)
     assert TOKENS_KEY not in storage.objects
 
@@ -673,6 +674,10 @@ async def test_historical_token_create_rejects_invalid_expiry_before_secret(
         expires_in_days=expires_in_days,
     )
     assert result["status"] == "error"
+    if expires_in_days == 10**20:
+        assert result["message"] == (
+            "expires_in_days is outside the supported range"
+        )
     assert generated == 0
     assert storage.objects == {}
 
@@ -689,7 +694,7 @@ async def test_admin_create_discards_scope_and_downgrade_cannot_activate_it(wire
     assert created["status"] == "created"
     assert created["space_ids"] == []
     assert created["scope_normalized"] is True
-    assert "scope dormant" in created["info"]
+    assert "dormant scopes" in created["info"]
     stored = _stored_tokens(storage).tokens[0]
     assert stored.space_ids == []
 
@@ -975,7 +980,7 @@ async def test_asgi_lifespan_embedded_preflight_fails_before_serving(
         "resolve_embedded_token",
         lambda *_args, **_kwargs: None if failure == "secret" else "stable-token",
     )
-    with pytest.raises(RuntimeError, match="Secret|Token") as error:
+    with pytest.raises(RuntimeError, match="secret|token") as error:
         async with server._lifespan(None):
             pytest.fail("lifespan must not yield after embedded preflight failure")
     if failure == "secret":
@@ -1026,7 +1031,7 @@ async def test_asgi_lifespan_retry_reuses_persisted_plaintext(
     monkeypatch.setattr(embedded_secret_module, "resolve_embedded_token", _resolve)
     monkeypatch.setattr(consolidator_module, "close_consolidator_if_initialized", _close)
 
-    with pytest.raises(RuntimeError, match="Token"):
+    with pytest.raises(RuntimeError, match="token"):
         async with server._lifespan(None):
             pytest.fail("first registration attempt must block startup")
     async with server._lifespan(None):
@@ -1104,7 +1109,7 @@ async def test_invite_uses_exact_hash_and_one_opaque_ineligible_error(wired, cas
         space_id="alpha",
         target_token_hash=requested,
     )
-    assert result == {"status": "error", "message": "Token cible non invitable"}
+    assert result == {"status": "error", "message": "Target token cannot be invited"}
     assert storage.objects[TOKENS_KEY] == before
 
 
@@ -1384,7 +1389,7 @@ async def test_space_create_refuses_delete_recreate_with_actor_historical_grant(
     assert result["recovery_required"] is True
     assert result["recovery"]["retry_safe"] is False
     assert "space_ids" in result["recovery"]["action"]
-    assert "pré-grant intentionnel" in result["recovery"]["action"]
+    assert "intentional pre-grant" in result["recovery"]["action"]
     assert "space_delete(confirm=True" in result["recovery"]["action"]
     assert "recover_access_grants=True" in result["recovery"]["action"]
     assert storage.objects == before
@@ -1522,7 +1527,7 @@ async def test_space_delete_then_backup_restore_keeps_access_revoked(
     )
     assert denied == {
         "status": "error",
-        "message": "Accès manage actif requis pour cet espace",
+        "message": "Active manage access is required for this space",
     }
 
 
@@ -1570,7 +1575,7 @@ async def test_mcp_delete_restore_and_bootstrap_regrant_flow(
     finally:
         auth_context.current_token_info.reset(manager_context)
     assert denied["status"] == "error"
-    assert "Authentification" in denied["message"]
+    assert "Authentication" in denied["message"]
 
     bootstrap_identity = {
         "type": "bootstrap",
@@ -1812,7 +1817,7 @@ async def test_space_delete_token_save_failure_requires_explicit_empty_prefix_re
     assert bootstrap_retry == {
         "status": "not_found",
         "space_id": "alpha",
-        "message": "Espace 'alpha' introuvable",
+        "message": "Space 'alpha' not found",
     }
 
 
@@ -1833,7 +1838,7 @@ async def test_space_delete_absent_future_pregrant_is_not_destructive_by_default
 
     assert result["status"] == "not_found"
     assert result["space_id"] == "alpha"
-    assert "pré-grants intentionnels" in result["message"]
+    assert "intentional pre-grants" in result["message"]
     assert "recover_access_grants=True" in result["message"]
     assert storage.objects[TOKENS_KEY] == tokens_before
     assert f"put:{TOKENS_KEY}" not in storage.events
@@ -1854,7 +1859,7 @@ async def test_space_delete_absent_without_grants_returns_identified_not_found(
     assert result == {
         "status": "not_found",
         "space_id": "alpha",
-        "message": "Espace 'alpha' introuvable",
+        "message": "Space 'alpha' not found",
     }
 
 
@@ -1975,7 +1980,7 @@ async def test_space_delete_locked_rejects_missing_actor_before_mutation(wired):
 
     assert result == {
         "status": "error",
-        "message": "Identité stockée du manager requise avant toute suppression",
+        "message": "Stored manager identity is required before deletion",
     }
     assert storage.objects == before
     assert storage.events == []
@@ -2165,8 +2170,8 @@ async def test_space_delete_confirmation_regrant_after_actor_revocation_is_not_r
     assert result["marker_preserved"] is False
     assert result["access_grants_pending"] == 2
     assert result["recovery"]["retry_safe"] is False
-    assert "caller ne possède plus" in result["recovery"]["action"]
-    assert "Un admin doit retenter" in result["recovery"]["action"]
+    assert "caller no longer has" in result["recovery"]["action"]
+    assert "An admin must retry" in result["recovery"]["action"]
     assert not any(key.startswith("alpha/") for key in storage.objects)
     assert not [
         record
@@ -2332,7 +2337,7 @@ async def test_space_create_barrier_counts_dormant_admin_scope_defense_in_depth(
 
     assert result["status"] == "partial"
     assert result["recovery_required"] is True
-    assert "tous les tokens" in result["recovery"]["action"]
+    assert "every affected token" in result["recovery"]["action"]
     assert storage.objects == before
 
 
@@ -2351,7 +2356,7 @@ async def test_space_create_actor_grant_requires_cleanup_before_compatible_resum
     )
     assert denied["status"] == "partial"
     assert denied["recovery"]["retry_safe"] is False
-    assert "tous les tokens" in denied["recovery"]["action"]
+    assert "every reported token" in denied["recovery"]["action"]
     assert storage.objects == before
 
     cleaned = _stored_tokens(storage)
@@ -2379,7 +2384,7 @@ async def test_space_create_refuses_compatible_prefix_with_foreign_grant(wired):
         "alpha", "description", "# Rules", actor_token_hash=manager.hash
     )
     assert result["status"] == "partial"
-    assert "référence de scope" in result["message"]
+    assert "scope reference" in result["message"]
     assert storage.objects == before
 
 
@@ -2487,7 +2492,7 @@ async def test_ambiguous_persisted_space_grant_is_not_directly_retryable(wired):
 
     assert result["status"] == "partial"
     assert result["recovery"]["retry_safe"] is False
-    assert "Un admin doit d'abord inspecter" in result["recovery"]["action"]
+    assert "An admin must first inspect" in result["recovery"]["action"]
     assert "alpha/_meta.json" not in storage.objects
     # The timeout happened after persistence, so the durable grant exists even
     # though its immediate reprobe was unreadable.
@@ -2581,7 +2586,7 @@ async def test_post_grant_marker_failure_requires_cleanup_before_identical_retry
     )
     assert first["status"] == "partial"
     assert first["recovery"]["retry_safe"] is False
-    assert "Aucun rollback automatique" in first["recovery"]["action"]
+    assert "No automatic rollback" in first["recovery"]["action"]
     assert "alpha/_meta.json" not in storage.objects
     assert _stored_tokens(storage).tokens[0].space_ids == ["alpha"]
     prepared = {

@@ -299,6 +299,10 @@ async def test_mid_engine_resolves_sink_per_space(
     assert isinstance(direct, MidEngine)
     assert isinstance(direct.write_sink, DirectLocalWriteSink)
     assert isinstance(staged.write_sink, StagedHivemindWriteSink)
+    # Only the registry-issued DirectLocal engine receives a space-bound
+    # compaction authority; a sink's runtime type alone is never proof.
+    assert direct._direct_local_compaction_authority is not None
+    assert staged._direct_local_compaction_authority is None
     # consolidator + queue held verbatim from DI.
     assert direct._consolidator is reg._consolidator
     assert direct._queue is reg._queue

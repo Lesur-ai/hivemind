@@ -25,6 +25,7 @@ via ``from .storage import get_storage``).
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -138,11 +139,11 @@ async def test_restore_over_orphan_hive_without_flag_is_refused_and_unmutated(
     result = await BackupService().restore(BACKUP_ID)  # unsafe_recovery défaut False
 
     assert result["status"] == "error"
-    # Message hive-aware (≠ refus hérité « espace existe déjà »).
+    # Hive-aware message, distinct from the inherited "space already exists" refusal.
     msg = result["message"]
     assert "unsafe" in msg
     assert "unsafe_recovery" in msg
-    assert "existe déjà" not in msg
+    assert "already exists" not in msg
     # Pas un succès : aucun fichier restauré.
     assert "files_restored" not in result
     # Aucune nouvelle clé sous {SPACE}/ ; stockage strictement intact.
@@ -193,8 +194,8 @@ async def test_restore_over_local_only_space_still_refused_existing_behavior(
     result = await BackupService().restore(BACKUP_ID)
 
     assert result["status"] == "error"
-    # C'est le refus HÉRITÉ « espace existe déjà », PAS le message hive-aware.
-    assert "existe déjà" in result["message"]
+    # This is the inherited "space already exists" refusal, not the hive-aware message.
+    assert "already exists" in result["message"]
     assert "unsafe_recovery" not in result["message"]
 
 
@@ -214,7 +215,7 @@ async def test_restore_over_local_only_with_unsafe_recovery_still_hits_inherited
     result = await BackupService().restore(BACKUP_ID, unsafe_recovery=True)
 
     assert result["status"] == "error"
-    assert "existe déjà" in result["message"]
+    assert "already exists" in result["message"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -237,6 +238,47 @@ async def test_restore_into_not_a_space_target_proceeds_unchanged(monkeypatch):
     )
     assert storage.objects[f"{SPACE}/_rules.md"] == "# rules"
     assert storage.objects[f"{SPACE}/live/note-1.md"] == "hello"
+
+
+async def test_restore_waits_for_lifecycle_then_observes_preparation_fence(
+    monkeypatch,
+) -> None:
+    """A prepare that wins lifecycle cannot be crossed by a stale restore."""
+
+    from live_mem.core.locks import get_lock_manager
+    from live_mem.core.reservation_guard import SpaceReservedError
+
+    storage = CopyFakeStorage()
+    _seed_backup(storage)
+    _patch_storage(monkeypatch, storage)
+    preparing = False
+    checks = 0
+
+    async def preparation_checker(space_id: str) -> None:
+        nonlocal checks
+        checks += 1
+        if space_id == SPACE and preparing:
+            raise SpaceReservedError(space_id)
+
+    monkeypatch.setattr(
+        "live_mem.core.backup.assert_space_not_reserved", preparation_checker
+    )
+    lifecycle = get_lock_manager().space_lifecycle(SPACE)
+    await lifecycle.acquire()
+    task = asyncio.create_task(BackupService().restore(BACKUP_ID))
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert checks == 0
+        preparing = True
+    finally:
+        lifecycle.release()
+
+    before = storage.snapshot()
+    with pytest.raises(SpaceReservedError):
+        await task
+    assert checks == 1
+    assert storage.objects == before
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,7 +308,7 @@ async def test_restore_over_corrupted_target_is_refused_fail_closed_regardless_o
     result = await BackupService().restore(BACKUP_ID, unsafe_recovery=flag)
 
     assert result["status"] == "error"
-    assert "corrompu" in result["message"] or "illisible" in result["message"]
+    assert "corrupt" in result["message"] or "unreadable" in result["message"]
     # Jamais de copie : aucune nouvelle clé de contenu sous {SPACE}/.
     assert storage.objects == before
     assert storage.put_calls == puts_before
@@ -482,7 +524,7 @@ async def test_p10_3_unsafe_recovery_aborts_on_same_epoch_concurrent_advance(mon
         clear_pairing_activation_checker()
 
     assert result["status"] == "error"
-    assert "avanc" in result["message"]  # "a avancé pendant la fenêtre de recovery"
+    assert "advanced" in result["message"]
     # No split: the concurrent two-member roster at epoch 2 survives intact — the
     # restore did NOT overwrite it with [self] at the same epoch.
     final = await HivemindStateStore(storage=storage, space_id=SPACE).get_membership()  # type: ignore[arg-type]

@@ -835,12 +835,14 @@ async def bank_consolidate(
 finishes, its `result` carries a three-state status:
 
 - `status="ok"` — every selected operation completed successfully;
-- `status="error"` — a batch failed **before any durable mutation could have
-  started** and zero batches were applied (no bank file, note, or metadata was
-  modified);
+- `status="error"` — a batch failed before any live bank, note, or metadata
+  mutation, or compaction failed after every attempted bank write was
+  read-back and restored to its verified preimage; zero ordinary batches were
+  applied. The retained preimage may still be available for audit;
 - `status="partial"` — work was already applied, a durable write started or
-  may have started, or durable state is ambiguous. Any failure raised from or
-  after the bank-write step stays `partial`, **including on the first batch**.
+  may have started, or durable state is ambiguous. In particular, a compaction
+  whose attempted writes cannot all be verified back to their preimage stays
+  `partial`, **including on the first batch**.
 
 Additional result fields:
 
@@ -853,10 +855,77 @@ Additional result fields:
   incomplete (the retained notes stay eligible for a controlled retry).
 - `failure_reason` — stable structured token: `batch_prompt_failed`,
   `batch_llm_failed`, `batch_refresh_failed`, `batch_write_failed`,
-  `bank_compact_failed`, `note_delete_failed`, `exact_selection_truncated`,
-  or `metadata_update_failed`. A consolidation that crashes before
-  producing any result is reported by the queue as
+  `compaction_prepare_failed`, `compaction_apply_reverted`,
+  `compaction_apply_recovery_unverified`, the attributable
+  `compaction_preimage_*` / `compaction_prewrite_*` diagnostics,
+  `direct_local_route_required`,
+  `bank_compact_failed`, `consolidation_cancelled`, `note_delete_failed`,
+  `exact_selection_truncated`,
+  or `metadata_update_failed`. `compaction_prepare_failed` means the complete
+  compaction batch was rejected before any compaction or ordinary-consolidation
+  write; `compaction_failures` names the safe target/error diagnostics and the
+  additive `remediation` field points to `bank_repair` for a canonical-name
+  collision or `bank_write` for a document repair. `compaction_apply_reverted`
+  means a DirectLocal write may have been attempted but every transaction-owned
+  result was restored and read back from its verified preimage; source notes
+  remain untouched. `compaction_apply_recovery_unverified` is `partial`: a
+  target could not be proved restored, so the source notes remain untouched and
+  the live-bank ambiguity is retained rather than guessed.
+  `consolidation_cancelled` is also `partial`: the queue records a terminal
+  failure and any safe rollback diagnostics rather than leaving the job running.
+  `direct_local_route_required` means the defense-in-depth DirectLocal
+  compaction route proof was unavailable; restore that route before retrying.
+  A consolidation that crashes before producing any result is reported by the
+  queue as
   `failure_reason="consolidation_crashed"`.
+- `compaction_failures` — safe per-file diagnostics when strict compaction
+  refused the complete batch. Every item begins with `filename` and `error`. For
+  `error="ambiguous_or_missing_compaction_target"`, a complete additive tuple
+  may identify the rejected model operation without exposing its heading:
+  `operation_index` (zero-based), `target_resolution` (`missing` or
+  `ambiguous`), `target_match_count` (zero for `missing`, at least two for
+  `ambiguous`), and `target_heading_sha256` (lowercase SHA-256 of the
+  requested UTF-8 heading). The hash is a stable correlation aid with a
+  residual dictionary-guessing risk; no raw heading, reason, source, prompt,
+  completion, or exception text is returned. Clients must treat the tuple as
+  absent unless all four fields meet that contract.
+- `operation_failures` — safe normal-consolidation validation diagnostics.
+  Every item contains a stable server-owned `reason` and may contain the
+  zero-based `bank_file_index`, zero-based `file_index`, zero-based
+  `operation_index`, and a validated bank-relative `filename`, as applicable.
+  For
+  `reason="ambiguous_or_missing_normal_target"` or
+  `reason="ambiguous_or_missing_normal_after"`, a complete additive tuple may
+  also contain `target_resolution` (`missing` or `ambiguous`),
+  `target_match_count` (zero for `missing`, at least two for `ambiguous`), and
+  `target_heading_sha256` (lowercase SHA-256 of the requested UTF-8 heading).
+  Normal edits resolve the raw heading first and, only after zero raw matches,
+  may accept one source span matching the same level/case after NFC, the closed
+  dash substitutions, and ASCII horizontal-whitespace normalization. A
+  normalized collision, case/punctuation/invisible change, truncation, or
+  fuzzy match remains fail-closed. The digest has residual dictionary-guessing
+  risk; raw heading, source, prompt, completion, model reason, exception, and
+  provider detail are never returned. Public relays drop every field outside
+  this closed schema. `operations_failed` remains the semantic failure count
+  before projection, so it may exceed the displayed list if an unknown internal
+  diagnostic is safely omitted.
+- `recovery_required` — present and `true` on an unresolved DirectLocal
+  compaction recovery, including a cancellation whose rollback could not be
+  verified. It is a stop signal: clients must not automatically retry,
+  restore, or continue ordinary consolidation.
+- `failed_phase` / `rollback_outcome` — additive compaction diagnostics when
+  a compaction terminates the job. They use the same bounded enum contract as
+  `bank_compact`: `prepare`, `preimage`, `apply`, or `unknown`; and
+  `not_needed`, `verified`, `unverified`, or `unknown`, respectively. They
+  describe only the compaction sub-operation and never convert a failed job
+  into success.
+- `preimage_id` — an opaque identifier for the retained, complete-space
+  snapshot in the existing
+  `_backups/{space_id}/{timestamp}-{operation-suffix}/` layout. A direct/manual
+  apply may include it even after verified success; automatic consolidation
+  forwards it only when compaction fails. It is required recovery attribution
+  whenever `recovery_required=true`, and is an operator-inspection handle,
+  not an automatic or newly public restore route.
 - `message` — safe generic client text; raw provider/exception detail stays
   server-side, including on the queue crash path.
 
@@ -1022,8 +1091,18 @@ async def bank_delete(
 Compacts oversized bank files via LLM. Files exceeding the universal size limit
 (`BANK_FILE_MAX_SIZE`, default 15 KB) are summarized/cleaned using the space rules
 to understand each file's role. Default `dry_run=True` scans and reports without
-modifying. When `dry_run=False`, the operation is protected by the per-space
-consolidation lock and returns `conflict` if a consolidation is in progress.
+modifying. The logical per-file limit is a hard safety gate even below the
+aggregate `COMPACT_THRESHOLD` context-pressure signal. When `dry_run=False`, the
+operation is protected by the per-space consolidation lock and returns `conflict`
+if a consolidation is in progress.
+
+All historical size fields — `size`, `max_size`, `total_size_before`,
+`total_size_after`, and `compacted_size` — are persisted UTF-8 byte counts, not
+characters. `COMPACT_THRESHOLD` must be finite and in `(0, 1]`; it is only an
+aggregate admission signal. `BANK_FILE_MAX_SIZE` must be a positive byte limit
+and remains a hard per-file gate. An oversized or context-incompatible source
+fails closed rather than being split. Multipart compaction and crash-durable
+recovery are deferred to v1.5.0.
 
 ```python
 @mcp.tool()
@@ -1032,6 +1111,93 @@ async def bank_compact(
     dry_run: bool = True     # True = scan/report only, False = compact via LLM
 ) -> dict:
 ```
+
+The scan validates the coherent bank snapshot and every provider-free planner
+precondition for each candidate above its individual byte limit too: a
+normalized filename collision, invalid Markdown source structure, or
+context-fit refusal returns `status="error"`,
+`failure_reason="compaction_prepare_failed"`, safe `failures`, and
+`remediation` without calling the provider or mutating storage. An apply first
+prepares every candidate in memory, then rechecks the current DirectLocal route
+and reservation at the prepared-apply boundary before it creates a preimage or
+touches the bank. A changed shared-space route is staged/refused before this
+local path has durable effects. A manual apply is therefore DirectLocal-only;
+it never silently falls back from a shared Project Mesh route.
+
+Before the first bank write, the apply rechecks every frozen target's
+UTF-8/SHA-256 source condition; drift there returns a safe error without a
+preimage or bank mutation. It then creates one complete-space snapshot through
+the existing `BackupService` layout:
+`_backups/{space_id}/{timestamp}-{operation-suffix}/`. The opaque suffix makes
+same-second operations distinct. After that snapshot, the apply reads back the
+corresponding raw `bank/` object and the live target for every prepared file,
+again verifying the frozen source condition; it rechecks the live source once
+more immediately before each bank write. It does not create a separate
+compaction namespace or a new recovery API.
+
+For each target, the apply re-reads the source immediately before writing and
+reads back the resulting bytes against the frozen postcondition. On failure or
+cancellation, recovery is bounded to attempted targets: it first verifies the
+currently observed transaction result, reads the matching entry from the
+complete-space preimage, restores it, and verifies the source readback.
+
+Dell ECS does not provide a reliable conditional-PUT transaction primitive for
+this path. The established per-space consolidation lock serializes Hivemind
+work **within one process only**; source checks and readbacks do not claim a
+cross-process object-store CAS guarantee or cross-process exclusion. An
+unreadable, drifted, or otherwise unverified observed state is therefore
+retained as an operator-visible partial result rather than treated as success.
+
+A fully verified rollback returns `status="error"` with
+`failure_reason="compaction_apply_reverted"`. It does not claim an aggregate
+`total_size_after`, because another target may have drifted before the failed
+apply; that field is `null`. An unresolved recovery returns `status="partial"`
+with `files_applied_before_failure`, `apply_may_have_mutated=true`,
+`recovery_required=true`, `preimage_id`, `failures`, and
+`total_size_after: null`. `preimage_id` is the opaque full-space backup
+identifier for manual operator inspection; clients must not automatically
+restore or retry it. It can be supplied as `backup_id` only to the existing
+manage-and-confirm-gated whole-space `backup_restore` or `backup_delete`
+operations; it does not introduce a targeted or automatic recovery API. A
+direct/manual verified apply may return the same additive field without
+requiring recovery.
+
+All compact diagnostics are safe server-owned categories, filenames, byte
+counts, preimage identifiers, and remediation. They never include raw space
+rules, source content, prompts, provider completions, or exception text — even
+when server debug logging is enabled.
+
+For the stable error token
+`ambiguous_or_missing_compaction_target`, a safe `failures[]` item may also
+carry the complete target-resolution tuple defined in the consolidation job
+contract: zero-based `operation_index`, `target_resolution`,
+`target_match_count`, and `target_heading_sha256`. The strict resolver tries a
+raw exact heading first. Only after a zero-match exact lookup, it may accept
+one source heading matching the same ATX level and case after NFC, a closed set
+of dash substitutions, and ASCII horizontal-whitespace normalization. It never
+case-folds, deletes punctuation/invisibles, truncates, or fuzzy-matches; a
+normalized collision still fails closed. The source heading text and spans stay
+raw. `target_heading_sha256` has the same residual dictionary-guessing risk as
+above and is not a source-content disclosure exception.
+
+The outer tool boundary has two additional stable refusal tokens. A
+`hivemind_state_corrupt` error means critical Hivemind state must be repaired
+or resynchronised before retrying; it is reported as
+`failed_phase="prepare"`, `rollback_outcome="not_needed"`. A
+`compaction_tool_failure` error uses the same values if the compactor was not
+entered; if its mutating boundary was entered, it is terminal `partial` with
+`failed_phase="unknown"`, `rollback_outcome="unknown"`, and
+`total_size_after: null`. Clients must use the provided safe fields rather
+than infer a more precise cause, retry, or restore automatically.
+
+The additive integrity diagnostics are intentionally machine-readable:
+`files[].source_sha256` is the SHA-256 of the frozen persisted UTF-8 source;
+`files[].result_sha256` is present only on a fully successful readback-verified
+result. `failed_phase` is one of `prepare`, `preimage`, `apply`, or `unknown`;
+`unknown` means an unexpected boundary failure could not safely identify a
+more precise phase. `rollback_outcome` is `not_needed`, `verified`,
+`unverified`, or `unknown`. A verified rollback does not make a failed
+compaction successful, and an unverified outcome remains terminal partial.
 
 > Implemented in (`bank.py:1142`,
 > `check_manage_permission`). The original spec listed its minimum as `write`; the
@@ -1723,7 +1889,12 @@ Completion is explicit and count-honest:
   per-agent `consolidation_details`. Agent details always expose requested and
   processed counts when that agent was selected; after a notice attempt they
   may also expose `notice_written`, `notice_processed`, `notice_cleaned`, and
-  `notice_cleanup_reason`, plus bank-file counts and a server message;
+  `notice_cleanup_reason`, plus bank-file counts and a server message. When a
+  selected consolidation safely refuses compaction, its per-agent detail also
+  carries the safe `failure_reason`, `compaction_failures` (the same
+  filename/error contract and optional complete target-resolution tuple as a
+  consolidation job), and `remediation` so unattended GC does not hide the
+  operator recovery path;
 - delete returns `status:"deleted"` or `status:"partial"` plus
   `delete_requested`, `deleted`, `delete_failed`; partial delete uses
   `reason:"partial_delete"` and may add `failure_reason` when a later

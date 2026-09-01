@@ -225,26 +225,26 @@ class GraphService:
                     "database": self._database,
                     "node_count": stats["nodeCount"] if stats else 0,
                     "rel_count": stats["relCount"] if stats else 0,
-                    "message": "Connexion Neo4j réussie"
+                    "message": "Neo4j connection succeeded"
                 }
                 
         except AuthError:
             return {
                 "status": "error",
                 "database": self._database,
-                "message": "Authentification Neo4j échouée"
+                "message": "Neo4j authentication failed"
             }
         except ServiceUnavailable:
             return {
                 "status": "error",
                 "database": self._database,
-                "message": "Neo4j non disponible"
+                "message": "Neo4j is unavailable"
             }
         except Exception as e:
             return {
                 "status": "error",
                 "database": self._database,
-                "message": f"Erreur Neo4j: {str(e)}"
+                "message": f"Neo4j error: {str(e)}"
             }
     
     # =========================================================================
@@ -278,7 +278,7 @@ class GraphService:
             existing = await check.single()
             
             if existing:
-                raise ValueError(f"La mémoire '{memory_id}' existe déjà")
+                raise ValueError(f"Memory '{memory_id}' already exists")
             
             # Créer la mémoire avec l'URI de l'ontologie
             result = await session.run(
@@ -307,7 +307,7 @@ class GraphService:
             record = await result.single()
             node = record["m"]
             
-            print(f"🧠 [Graph] Mémoire créée: {memory_id} (ns: {ns}, ontology: {ontology}, uri: {ontology_uri})", file=sys.stderr)
+            print(f"🧠 [Graph] Memory created: {memory_id} (ns: {ns}, ontology: {ontology}, uri: {ontology_uri})", file=sys.stderr)
             
             return Memory(
                 id=memory_id,
@@ -385,7 +385,7 @@ class GraphService:
                 return None
             
             node = record["m"]
-            print(f"✏️ [Graph] Mémoire mise à jour: {memory_id} ({', '.join(set_parts)})", file=sys.stderr)
+            print(f"✏️ [Graph] Memory updated: {memory_id} ({', '.join(set_parts)})", file=sys.stderr)
             return Memory(
                 id=node["id"],
                 name=node["name"],
@@ -431,7 +431,7 @@ class GraphService:
             deleted = record["deleted"] > 0 if record else False
             
             if deleted:
-                print(f"🗑️ [Graph] Mémoire supprimée: {memory_id}", file=sys.stderr)
+                print(f"🗑️ [Graph] Memory deleted: {memory_id}", file=sys.stderr)
             
             return deleted
     
@@ -510,7 +510,7 @@ class GraphService:
                     await result.consume()
         except Exception:
             print(
-                "⚠️ [Graph] Index (memory_id, id) non créé",
+                "⚠️ [Graph] Index (memory_id, id) was not created",
                 file=sys.stderr,
             )
 
@@ -536,7 +536,7 @@ class GraphService:
             )
         except Exception:
             print(
-                "⚠️ [Graph] Contrainte de migration documentaire NON vérifiée",
+                "⚠️ [Graph] Document migration constraint was NOT verified",
                 file=sys.stderr,
             )
             raise DocumentSchemaUnavailable() from None
@@ -625,7 +625,7 @@ class GraphService:
                 await result.consume()
         except Exception:
             print(
-                "⚠️ [Graph] Marqueur de migration documentaire NON vérifié",
+                "⚠️ [Graph] Document migration marker was NOT verified",
                 file=sys.stderr,
             )
             raise DocumentSchemaUnavailable() from None
@@ -646,7 +646,7 @@ class GraphService:
             or marker["version"] != _DOCUMENT_SCHEMA_MIGRATION_VERSION
         ):
             print(
-                "⚠️ [Graph] Marqueur de migration documentaire invalide",
+                "⚠️ [Graph] Invalid document migration marker",
                 file=sys.stderr,
             )
             raise DocumentSchemaUnavailable()
@@ -673,7 +673,7 @@ class GraphService:
                 await result.consume()
         except Exception:
             print(
-                "⚠️ [Graph] Marqueur de migration documentaire NON publié",
+                "⚠️ [Graph] Document migration marker was NOT published",
                 file=sys.stderr,
             )
             raise DocumentSchemaUnavailable() from None
@@ -692,7 +692,7 @@ class GraphService:
             or marker_version != _DOCUMENT_SCHEMA_MIGRATION_VERSION
         ):
             print(
-                "⚠️ [Graph] Marqueur de migration documentaire invalide",
+                "⚠️ [Graph] Invalid document migration marker",
                 file=sys.stderr,
             )
             raise DocumentSchemaUnavailable()
@@ -720,16 +720,16 @@ class GraphService:
                 properties=("memory_id", "source_path"),
             )
         except Exception:
-            print("⚠️ [Graph] Contrainte source_path NON créée (doublons legacy à résoudre ?)", file=sys.stderr)
-            print("   ⚠️ L'unicité n'est PAS garantie par la base tant que la contrainte n'existe pas.", file=sys.stderr)
-            print("   → Résoudre les doublons (memory_id, source_path) puis relancer pour activer la contrainte.", file=sys.stderr)
+            print("⚠️ [Graph] source_path constraint was NOT created (legacy duplicates may require repair)", file=sys.stderr)
+            print("   ⚠️ The database does NOT guarantee uniqueness until the constraint exists.", file=sys.stderr)
+            print("   → Resolve duplicate (memory_id, source_path) pairs, then restart to enable the constraint.", file=sys.stderr)
             raise DocumentSchemaUnavailable() from None
         else:
             # Neo4j may defer data/constraint errors until PULL/commit. Publish
             # readiness only after the result was explicitly consumed; the
             # driver's implicit session close can suppress those failures.
             self._doc_constraints_ready = True
-            print("🔒 [Graph] Contrainte d'unicité (memory_id, source_path) créée/vérifiée", file=sys.stderr)
+            print("🔒 [Graph] Verified unique (memory_id, source_path) constraint", file=sys.stderr)
 
     async def initialize_document_schema(self) -> None:
         """Run the one global legacy-data migration during ASGI startup.
@@ -783,7 +783,7 @@ class GraphService:
                                 break
                 except Exception:
                     print(
-                        "⚠️ [Graph] Normalisation source_path NON vérifiée",
+                        "⚠️ [Graph] source_path normalization was NOT verified",
                         file=sys.stderr,
                     )
                     raise DocumentSchemaUnavailable() from None
@@ -902,7 +902,7 @@ class GraphService:
             record = await result.single()
             node = record["d"]
 
-            print(f"📄 [Graph] Document ajouté: {filename} ({doc_id}) [status={ingestion_status}]", file=sys.stderr)
+            print(f"📄 [Graph] Document added: {filename} ({doc_id}) [status={ingestion_status}]", file=sys.stderr)
 
             return Document(
                 id=doc_id,
@@ -1253,9 +1253,9 @@ class GraphService:
             deleted = record["deleted"] > 0 if record else False
             
             if deleted:
-                print(f"🗑️ [Graph] Document supprimé: {doc_id}", file=sys.stderr)
-                print(f"   Entités orphelines supprimées: {entities_deleted}", file=sys.stderr)
-                print(f"   Relations MENTIONS supprimées: {mentions_count}", file=sys.stderr)
+                print(f"🗑️ [Graph] Document deleted: {doc_id}", file=sys.stderr)
+                print(f"   Orphaned entities deleted: {entities_deleted}", file=sys.stderr)
+                print(f"   MENTIONS relations deleted: {mentions_count}", file=sys.stderr)
             
             return {
                 "deleted": deleted,
@@ -1382,8 +1382,8 @@ class GraphService:
         
         total_entities = entities_created + entities_merged
         total_relations = relations_created + relations_merged
-        print(f"🔗 [Graph] Entités: {entities_created} nouvelles + {entities_merged} fusionnées = {total_entities}", file=sys.stderr)
-        print(f"🔗 [Graph] Relations: {relations_created} nouvelles + {relations_merged} fusionnées = {total_relations}", file=sys.stderr)
+        print(f"🔗 [Graph] Entities: {entities_created} new + {entities_merged} merged = {total_entities}", file=sys.stderr)
+        print(f"🔗 [Graph] Relations: {relations_created} new + {relations_merged} merged = {total_relations}", file=sys.stderr)
         
         return {
             "entities_created": entities_created,
@@ -1422,13 +1422,13 @@ class GraphService:
                     ),
                 )
                 self._fulltext_index_ready = True
-                print("🔍 [Graph] Index fulltext 'entity_fulltext' créé/vérifié (standard-folding)", file=sys.stderr)
+                print("🔍 [Graph] Verified full-text index 'entity_fulltext' (standard-folding)", file=sys.stderr)
         except Exception:
             print(
-                "⚠️ [Graph] Impossible de créer l'index fulltext",
+                "⚠️ [Graph] Could not create the full-text index",
                 file=sys.stderr,
             )
-            print("   La recherche utilisera le mode CONTAINS (dégradé)", file=sys.stderr)
+            print("   Search will use degraded CONTAINS mode", file=sys.stderr)
     
     @staticmethod
     def _escape_lucene(text: str) -> str:
@@ -1496,7 +1496,7 @@ class GraphService:
                     })
                 return entities
         except Exception as e:
-            print(f"⚠️ [Search] Erreur fulltext: {e}", file=sys.stderr)
+            print(f"⚠️ [Search] Full-text search error: {e}", file=sys.stderr)
             return []
     
     async def _search_contains(
@@ -1595,10 +1595,10 @@ class GraphService:
         meaningful_raw = [t for t in raw_tokens_all if len(t) > 2 and t not in STOP_WORDS]
         meaningful_normalized = [_normalize(t) for t in meaningful_raw]
         
-        print(f"🔤 [Search] Tokenisation: '{search_query}' → raw={meaningful_raw}, normalized={meaningful_normalized}", file=sys.stderr)
+        print(f"🔤 [Search] Tokenization: '{search_query}' → raw={meaningful_raw}, normalized={meaningful_normalized}", file=sys.stderr)
         
         if not meaningful_raw:
-            print(f"⚠️ [Search] Aucun token significatif → résultat vide", file=sys.stderr)
+            print("⚠️ [Search] No significant token found → empty result", file=sys.stderr)
             return []
         
         # === Stratégie 1: Fulltext index (accent-insensitive, scoring Lucene) ===
@@ -1613,15 +1613,15 @@ class GraphService:
                 e["name"] + "=" + str(e.get("score", 0))
                 for e in entities[:3]
             )
-            print(f"✅ [Search] Fulltext: {len(entities)} résultats (scores: {top3}...)",
+            print(f"✅ [Search] Full-text: {len(entities)} results (scores: {top3}...)",
                   file=sys.stderr)
             return entities
         
         # === Stratégie 2: CONTAINS fallback (raw + normalized tokens) ===
-        print(f"🔄 [Search] Fulltext: 0 résultats → fallback CONTAINS", file=sys.stderr)
+        print("🔄 [Search] Full-text: 0 results → CONTAINS fallback", file=sys.stderr)
         entities = await self._search_contains(memory_id, meaningful_raw, meaningful_normalized, limit)
         
-        print(f"{'✅' if entities else '❌'} [Search] CONTAINS fallback: {len(entities)} résultats "
+        print(f"{'✅' if entities else '❌'} [Search] CONTAINS fallback: {len(entities)} results "
               f"(tokens: {list(set(meaningful_raw + meaningful_normalized))})", file=sys.stderr)
         return entities
     
@@ -1918,7 +1918,7 @@ class GraphService:
             )
             mem_record = await mem_result.single()
             if not mem_record:
-                raise ValueError(f"Mémoire '{memory_id}' non trouvée")
+                raise ValueError(f"Memory '{memory_id}' not found")
             
             memory_props = dict(mem_record["m"])
             # Convertir les types Neo4j en types sérialisables
@@ -2004,7 +2004,7 @@ class GraphService:
                 })
             
             print(f"📦 [Graph Export] {memory_id}: {len(documents)} docs, "
-                  f"{len(entities)} entités, {len(relations)} relations, "
+                  f"{len(entities)} entities, {len(relations)} relations, "
                   f"{len(mentions)} mentions", file=sys.stderr)
             
             return {
@@ -2036,8 +2036,8 @@ class GraphService:
         existing = await self.get_memory(memory_id)
         if existing:
             raise ValueError(
-                f"La mémoire '{memory_id}' existe déjà. "
-                f"Supprimez-la d'abord avant de restaurer."
+                f"Memory '{memory_id}' already exists. "
+                "Delete it before restoring."
             )
         
         counters = {

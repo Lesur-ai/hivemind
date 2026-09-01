@@ -16,9 +16,11 @@ ROOT = Path(__file__).parent.parent
 VIEW_PATH = ROOT / "src/live_mem/static/js/admin/views-space-detail.js"
 CSS_PATH = ROOT / "src/live_mem/static/css/admin.css"
 APP_PATH = ROOT / "src/live_mem/static/js/admin-app.js"
+API_PATH = ROOT / "src/live_mem/static/js/admin-api.js"
 HTML_PATH = ROOT / "src/live_mem/static/admin.html"
 DELETE_RUNTIME_PATH = ROOT / "tests/js/admin_space_delete_runtime.mjs"
 PRELOAD_RUNTIME_PATH = ROOT / "tests/js/admin_space_detail_preload_runtime.mjs"
+MESH_RUNTIME_PATH = ROOT / "tests/js/admin_space_detail_mesh_runtime.mjs"
 
 
 def _source() -> str:
@@ -89,6 +91,44 @@ def test_permission_gate_mirrors_server_hierarchy() -> None:
     body = _function("hasPermission")
     assert "['read', 'write', 'manage', 'admin']" in body
     assert "hierarchy.indexOf(candidate) >= required" in body
+
+
+def test_mesh_readiness_is_targeted_authoritative_and_navigation_only() -> None:
+    source = _source()
+    api = API_PATH.read_text(encoding="utf-8")
+    loader = _function("loadMeshReadiness", source)
+    action = _function("meshReadinessAction", source)
+
+    assert "async function meshAdminSourceReadiness(spaceId)" in api
+    assert "_meshFetch('source-readiness/' + encodeURIComponent(spaceId))" in api
+    assert "meshReadinessAvailable(view)" in loader
+    assert "meshAdminSourceReadiness(view.spaceId)" in loader
+    assert "authoritativeMeshSource(view, result)" in loader
+    assert "hive_status_label" not in loader
+    assert "hive_status_label" not in action
+    assert "source.state === 'local_only_can_prepare'" in action
+    assert "source.source_initializable === true" in action
+    assert "source.state === 'preparing'" in action
+    assert "source.resumable === true" in action
+    assert "meshAdminAction(" not in source
+    assert "prepare-source" not in source
+    assert 'href="#/mesh"' in _function("renderMeshReadiness", source)
+
+
+def test_mesh_readiness_runtime_gates_and_stale_response_pass() -> None:
+    node = shutil.which("node") or shutil.which("nodejs")
+    if node is None:
+        pytest.skip("Node.js runtime unavailable; source contract remains pinned")
+
+    completed = subprocess.run(
+        [node, str(MESH_RUNTIME_PATH), str(VIEW_PATH)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "admin space detail mesh readiness runtime: ok" in completed.stdout
 
 
 def test_payload_heavy_and_out_of_scope_tools_never_appear() -> None:
@@ -562,6 +602,25 @@ def test_activity_job_drilldown_is_field_mapped_manual_and_guarded() -> None:
         "result.duration_seconds",
     ):
         assert field in result
+
+
+def test_failed_job_inspector_exposes_only_safe_compaction_attribution() -> None:
+    source = _source()
+    detail = _function("safeCompactionTargetDetail", source)
+    failures = _function("renderSafeCompactionFailures", source)
+    inspector = _function("renderJobInspector", source)
+    for field in (
+        "operation_index",
+        "target_resolution",
+        "target_match_count",
+        "target_heading_sha256",
+    ):
+        assert field in detail
+    assert "failure.heading" not in detail
+    assert "failure.reason" not in detail
+    assert "result.compaction_failures" in failures
+    assert "renderSafeCompactionFailures(job.result)" in inspector
+    assert "Refresh job" in inspector
 
 
 def test_forbidden_sinks_and_mock_markers_are_absent() -> None:

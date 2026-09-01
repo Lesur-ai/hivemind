@@ -608,6 +608,46 @@ member and provisions exactly a **two-node mesh**. It fails closed if the
 source already has more than one active member. Adding a third node, or using
 this workflow to enroll into an existing two-node mesh, is not supported in V1.
 
+### Prepare an existing local source
+
+An existing committed space created through the normal local flow must be
+prepared explicitly before it can create an invitation. In `/admin#/mesh`, a
+source reported **Local only** exposes **Prepare for Project Mesh**; a source
+reported `ready` exposes **Create invitation**. The two operations remain
+distinct, and Create never initializes or repairs a source.
+
+Preparation is a one-way, quiesced maintenance operation. Before confirming:
+
+1. stop every agent and direct writer for that exact `space_id`;
+2. let every consolidation queue/job finish, and stop repair, restore, GC, and
+   other same-space maintenance;
+3. type the exact space id and confirm that all same-space writers/jobs are
+   quiesced.
+
+The server binds the confirmation to the displayed readiness token and
+re-inspects state under its locks before the first write. It persists a durable
+preparation intent, writes local `UNSAFE` before the genesis objects, validates
+their exact readback and bootstrap-source invariants, then writes `HEALTHY` as
+the final protocol marker. Existing `_meta.json`, rules, SHORT, MID, and local
+long-binding bytes are not rewritten, and no historical `BANK_COMMIT` is
+fabricated.
+
+This is not an online or cross-process atomic conversion. The durable intent
+and typed mutation guards fence known work, but object storage does not provide
+one transaction spanning the final route check and mutation; operator
+quiescence remains mandatory. If an exact preparation prefix is interrupted,
+use **Resume preparation** after restoring quiescence. If the console reports
+recovery-required, identity mismatch, unsafe, or resync-required, do not edit or
+delete `_hivemind/` objects manually and do not retry under a different key;
+keep the space fail-closed for explicit recovery.
+
+A successful preparation does not manufacture a HELD token and does not imply
+that every shared mutation is immediately available. Shared writes still
+require the existing durable queue, real local HELD lease, term/fencing,
+staging, manifest, `BANK_COMMIT`, and full-mesh ACK path. Unsupported SHORT,
+delete, or other shared mutation paths continue to refuse rather than falling
+back to DirectLocal.
+
 Generate one instance-wide Ed25519 identity on the deployment host:
 
 ```bash

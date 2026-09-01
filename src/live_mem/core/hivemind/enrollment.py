@@ -108,9 +108,9 @@ class EnrollmentPeer(_HivemindBase):
     @classmethod
     def _validate_node_id(cls, v: str) -> str:
         if not v:
-            raise ValueError("node_id ne peut pas être vide")
+            raise ValueError("node_id cannot be empty")
         if "/" in v:
-            raise ValueError("node_id ne doit pas contenir '/'")
+            raise ValueError("node_id must not contain '/'")
         return v
 
     @field_validator("scopes")
@@ -122,7 +122,7 @@ class EnrollmentPeer(_HivemindBase):
             sv = s.value if isinstance(s, PeerScope) else s
             if sv not in allowed:
                 raise ValueError(
-                    "scope hors vocabulaire fermé {read,propose,commit}: "
+                    "scope is outside the closed {read,propose,commit} vocabulary: "
                     f"{sv!r}"
                 )
             if sv not in out:
@@ -166,11 +166,11 @@ class EnrollmentManifest(_HivemindBase):
         for p in v:
             if p.node_id in ids:
                 raise ValueError(
-                    f"node_id dupliqué dans le manifest: {p.node_id!r}"
+                    f"duplicate node_id in manifest: {p.node_id!r}"
                 )
             if p.public_key in keys:
                 raise ValueError(
-                    "public_key dupliquée dans le manifest — identité ambiguë"
+                    "duplicate public_key in manifest — ambiguous identity"
                 )
             ids.add(p.node_id)
             keys.add(p.public_key)
@@ -203,7 +203,7 @@ def peer_scope_guard(
     if tenancy_context:
         raise PeerChannelError(
             PeerErrorCode.INSUFFICIENT_SCOPE,
-            "contexte de tenancy non reconnu (OSS mono-tenant) — refus",
+            "unrecognized tenancy context (single-tenant OSS) — refused",
             {
                 "signer_node_id": member.node_id,
                 "tenancy_context": "unrecognized",
@@ -212,7 +212,7 @@ def peer_scope_guard(
     if not member.has_scope(required_scope):
         raise PeerChannelError(
             PeerErrorCode.INSUFFICIENT_SCOPE,
-            f"peer {member.node_id!r} sans scope {required_scope.value!r}",
+            f"peer {member.node_id!r} lacks scope {required_scope.value!r}",
             {
                 "signer_node_id": member.node_id,
                 "required_scope": required_scope.value,
@@ -320,8 +320,8 @@ class EnrollmentService:
             isinstance(raw_manifest, (str, bytes)) and len(raw_manifest) == 0
         ):
             raise EnrollmentError(
-                "manifest d'enrôlement absent/vide — fail-closed, aucun "
-                "enrôlement ouvert"
+                "enrollment manifest is absent/empty — fail-closed, no "
+                "open enrollment"
             )
 
         # --- Porte 2 : JSON + schéma ----------------------------------------
@@ -329,27 +329,27 @@ class EnrollmentService:
             data = json.loads(raw_manifest)
         except (json.JSONDecodeError, ValueError) as exc:
             raise EnrollmentError(
-                f"manifest d'enrôlement JSON invalide — fail-closed ({exc})"
+                f"invalid enrollment manifest JSON — fail-closed ({exc})"
             ) from exc
         try:
             manifest = EnrollmentManifest.model_validate(data)
         except Exception as exc:  # pydantic ValidationError + autres
             raise EnrollmentError(
-                f"manifest d'enrôlement schéma invalide — fail-closed ({exc})"
+                f"invalid enrollment manifest schema — fail-closed ({exc})"
             ) from exc
 
         # --- Porte 3 : protocol_version -------------------------------------
         if manifest.protocol_version != PROTOCOL_VERSION:
             raise EnrollmentError(
-                "protocol_version incompatible dans le manifest "
+                "incompatible protocol_version in manifest "
                 f"({manifest.protocol_version} != {PROTOCOL_VERSION})"
             )
 
         # --- Porte 4 : signature de l'enrôleur autorisé ---------------------
         if manifest.enroller_public_key not in self._trusted_enroller_keys:
             raise EnrollmentError(
-                "enrôleur non autorisé — fail-closed (clé absente de la racine "
-                "de confiance)"
+                "unauthorized enroller — fail-closed (key is absent from the "
+                "trust root)"
             )
         try:
             signature = _b64decode(manifest.signature, 64)
@@ -360,15 +360,15 @@ class EnrollmentService:
             raise
         except Exception as exc:
             raise EnrollmentError(
-                f"signature manifest invalide — fail-closed ({exc})"
+                f"invalid manifest signature — fail-closed ({exc})"
             ) from exc
 
         # --- Porte 5 : garde mono-tenant (space_id) -------------------------
         if manifest.space_id != self._store.space_id:
             raise EnrollmentError(
-                "space_id du manifest divergent de la space cible "
+                "manifest space_id diverges from target space "
                 f"({manifest.space_id!r} != {self._store.space_id!r}) — "
-                "garde mono-tenant"
+                "single-tenant guard"
             )
 
         # --- Lecture + plan + application ATOMIQUE sous UN verrou membership --
@@ -391,8 +391,8 @@ class EnrollmentService:
             view = await self._store.get_membership()
             if view is None:
                 raise EnrollmentError(
-                    "membership absente — la réconciliation exige un space "
-                    "Hivemind déjà initialisé (fail-closed)"
+                    "membership is absent — reconciliation requires an already "
+                    "initialized Hivemind space (fail-closed)"
                 )
             epoch_before = view.epoch
 
@@ -431,8 +431,8 @@ class EnrollmentService:
                     # écriture n'a eu lieu (la vue cible est construite EN MÉMOIRE
                     # avant le write unique).
                     raise EnrollmentError(
-                        f"application du plan refusée fail-closed ({exc}) — "
-                        "aucune mutation"
+                        f"plan application refused fail-closed ({exc}) — "
+                        "no mutation"
                     ) from exc
                 epoch_after = after.epoch if after is not None else epoch_before
 
@@ -503,10 +503,10 @@ class EnrollmentService:
                     # DOIT citer la clé courante du membre.
                     if current.public_key != peer.public_key:
                         raise EnrollmentError(
-                            f"révocation du membre ACTIVE {peer.node_id!r} avec "
-                            "une public_key ne correspondant pas à la clé "
-                            "persistée — tuple d'identité incohérent, manifest "
-                            "refusé fail-closed (aucune mutation)"
+                            f"revocation of ACTIVE member {peer.node_id!r} uses "
+                            "a public_key that does not match the persisted key — "
+                            "inconsistent identity tuple, manifest refused "
+                            "fail-closed (no mutation)"
                         )
                     revoke.append(peer.node_id)
                 else:
@@ -525,10 +525,10 @@ class EnrollmentService:
             # misconfiguration DOIT être corrigée dans le manifest).
             if PeerScope.READ.value not in peer.scopes:
                 raise EnrollmentError(
-                    f"membre ACTIVE {peer.node_id!r} enrôlé/rescopé sans le "
-                    f"scope plancher 'read' (scopes={sorted(peer.scopes)!r}) — "
-                    "un ACTIVE sans 'read' ne peut servir/ACK et bloquerait "
-                    "l'all-ACK, manifest refusé fail-closed (aucune mutation)"
+                    f"ACTIVE member {peer.node_id!r} is enrolled/rescoped without "
+                    f"minimum 'read' scope (scopes={sorted(peer.scopes)!r}) — "
+                    "an ACTIVE member without 'read' cannot serve/ACK and would "
+                    "block all-ACK; manifest refused fail-closed (no mutation)"
                 )
 
             if current is None:
@@ -538,9 +538,9 @@ class EnrollmentService:
                 owner = surviving_keys.get(peer.public_key)
                 if owner is not None and owner != peer.node_id:
                     raise EnrollmentError(
-                        "public_key déjà active pour un autre node "
-                        f"({owner!r}) — identité ambiguë, manifest refusé "
-                        "(aucune mutation)"
+                        "public_key is already active for another node "
+                        f"({owner!r}) — ambiguous identity, manifest refused "
+                        "(no mutation)"
                     )
                 surviving_keys[peer.public_key] = peer.node_id
                 endpoints[peer.node_id] = peer.endpoint
@@ -556,9 +556,9 @@ class EnrollmentService:
                 # FEATURE future séparée ; en V1 on REFUSE fail-closed AVANT toute
                 # écriture — jamais de swap implicite, aucune mutation (ADR-0008).
                 raise EnrollmentError(
-                    f"public_key change pour le membre ACTIVE {peer.node_id!r} — "
-                    "rotation de clé implicite non supportée en V1, manifest "
-                    "refusé fail-closed (aucune mutation)"
+                    f"public_key changes for ACTIVE member {peer.node_id!r} — "
+                    "implicit key rotation is unsupported in V1, manifest "
+                    "refused fail-closed (no mutation)"
                 )
             elif current.scopes != narrowed:
                 rescope.append((peer.node_id, narrowed))
@@ -573,9 +573,9 @@ class EnrollmentService:
         }
         if not remaining_active:
             raise EnrollmentError(
-                "réconciliation refusée : le manifest retirerait le dernier "
-                "membre ACTIVE — un space sans actif paraîtrait non-Hivemind "
-                "(aucune mutation)"
+                "reconciliation refused: manifest would remove the final "
+                "ACTIVE member — a space without an active member would appear "
+                "non-Hivemind (no mutation)"
             )
 
         # Note (limite S3, transaction multi-clés) : le cas « remplacer le SEUL

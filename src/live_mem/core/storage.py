@@ -47,6 +47,41 @@ logger = logging.getLogger("live_mem.storage")
 _EMPTY_CONTINUE_HANDLER_ID = "hivemind-no-empty-s3-expect-continue"
 
 
+class StorageInventoryLimitError(RuntimeError):
+    """A bounded LIST could not prove an exhaustive inventory."""
+
+
+class StorageInventoryMetadataError(RuntimeError):
+    """An object listing contains unusable inventory metadata."""
+
+
+def inventory_object_size(
+    obj: object,
+    *,
+    missing_as_zero: bool = False,
+) -> int:
+    """Return one validated non-negative object size.
+
+    ``list_objects`` deliberately preserves an absent backend ``Size`` as
+    ``None`` so callers that use it as a mutation or resource bound can fail
+    closed.  Purely informational legacy payloads may retain their historical
+    zero fallback by opting into ``missing_as_zero``.  Other malformed values
+    (including ``bool``, strings, and negative integers) are never emitted or
+    used in arithmetic.
+    """
+
+    if not isinstance(obj, dict):
+        raise StorageInventoryMetadataError("object inventory entry is malformed")
+    size = obj.get("Size")
+    if size is None and missing_as_zero:
+        return 0
+    if type(size) is not int or size < 0:
+        raise StorageInventoryMetadataError(
+            "object inventory size metadata is invalid"
+        )
+    return size
+
+
 def _redact_proxy_errors(func):
     """P12-3 R8 (#268) : frontière de redaction des erreurs S3 sortantes.
 
@@ -200,7 +235,7 @@ class StorageService:
             self._client_meta = client_v4
 
         logger.info(
-            "StorageService initialisé — bucket=%s endpoint=%s signature_mode=%s",
+            "StorageService initialized — bucket=%s endpoint=%s signature_mode=%s",
             self.bucket,
             self._endpoint,
             self.signature_mode,
@@ -362,7 +397,7 @@ class StorageService:
                 deleted += 1
             except Exception as e:
                 # VULN-13 fix : logger les erreurs au lieu de les ignorer
-                logger.warning("delete_many: échec suppression '%s': %s", key, e)
+                logger.warning("delete_many: failed to delete '%s': %s", key, e)
 
         return deleted
 
@@ -384,12 +419,29 @@ class StorageService:
         """
         all_objects = []
         continuation_token = None
+        # A bounded inventory must also bound backend round-trips. A malformed
+        # or hostile S3-compatible service can otherwise return an endless
+        # sequence of empty truncated pages with fresh continuation tokens.
+        page_budget: int | None = max_keys + 1 if max_keys > 0 else None
+        seen_tokens: set[str] = set()
 
         while True:
+            if page_budget is not None:
+                if page_budget <= 0:
+                    raise StorageInventoryLimitError(
+                        "bounded object inventory did not converge"
+                    )
+                page_budget -= 1
+            page_size = 1000
+            if max_keys > 0:
+                remaining = max_keys - len(all_objects)
+                if remaining <= 0:
+                    return all_objects[:max_keys]
+                page_size = min(page_size, remaining)
             params = {
                 "Bucket": self.bucket,
                 "Prefix": prefix,
-                "MaxKeys": 1000,
+                "MaxKeys": page_size,
             }
             if continuation_token:
                 params["ContinuationToken"] = continuation_token
@@ -404,7 +456,10 @@ class StorageService:
                 all_objects.append(
                     {
                         "Key": obj["Key"],
-                        "Size": obj.get("Size", 0),
+                        # Preserve absent/malformed metadata for bounded callers
+                        # to reject; silently normalizing it to zero would defeat
+                        # every pre-GET object-size proof.
+                        "Size": obj.get("Size"),
                         "LastModified": obj.get("LastModified", ""),
                     }
                 )
@@ -416,12 +471,28 @@ class StorageService:
             # Pagination : continuer si tronqué
             if not response.get("IsTruncated", False):
                 break
-            continuation_token = response.get("NextContinuationToken")
+            next_token = response.get("NextContinuationToken")
+            if (
+                type(next_token) is not str
+                or not next_token
+                or next_token == continuation_token
+                or next_token in seen_tokens
+            ):
+                raise StorageInventoryLimitError(
+                    "object inventory pagination did not advance"
+                )
+            seen_tokens.add(next_token)
+            continuation_token = next_token
 
         return all_objects
 
     @_redact_proxy_errors
-    async def list_prefixes(self, prefix: str, delimiter: str = "/") -> list[str]:
+    async def list_prefixes(
+        self,
+        prefix: str,
+        delimiter: str = "/",
+        max_prefixes: int = 0,
+    ) -> list[str]:
         """
         Liste les "dossiers" (préfixes communs) sous un préfixe S3.
 
@@ -430,19 +501,28 @@ class StorageService:
         Args:
             prefix: Préfixe S3 (ex: "" pour la racine)
             delimiter: Délimiteur (défaut: '/')
+            max_prefixes: Nombre max de préfixes (0 = tous)
 
         Returns:
             Liste des préfixes communs (ex: ["space-alpha/", "space-beta/"])
         """
         all_prefixes = []
         continuation_token = None
+        raw_remaining = max_prefixes
 
         while True:
+            page_size = 1000
+            if max_prefixes > 0:
+                if raw_remaining <= 0:
+                    raise StorageInventoryLimitError(
+                        "bounded prefix inventory was truncated"
+                    )
+                page_size = min(page_size, raw_remaining)
             params = {
                 "Bucket": self.bucket,
                 "Prefix": prefix,
                 "Delimiter": delimiter,
-                "MaxKeys": 1000,
+                "MaxKeys": page_size,
             }
             if continuation_token:
                 params["ContinuationToken"] = continuation_token
@@ -453,12 +533,38 @@ class StorageService:
             )
 
             common_prefixes = response.get("CommonPrefixes", [])
+            if max_prefixes > 0:
+                key_count = response.get("KeyCount")
+                consumed = (
+                    key_count
+                    if type(key_count) is int and key_count >= 0
+                    else len(response.get("Contents", [])) + len(common_prefixes)
+                )
+                # A truncated page consumes at least one unit even when a
+                # malformed backend reports KeyCount=0 and no entries. This
+                # closes an otherwise unbounded empty-page pagination loop.
+                raw_remaining -= max(1, consumed)
             for cp in common_prefixes:
                 all_prefixes.append(cp["Prefix"])
+                if max_prefixes > 0 and len(all_prefixes) >= max_prefixes:
+                    return all_prefixes[:max_prefixes]
 
             if not response.get("IsTruncated", False):
                 break
-            continuation_token = response.get("NextContinuationToken")
+            if max_prefixes > 0 and raw_remaining <= 0:
+                raise StorageInventoryLimitError(
+                    "bounded prefix inventory was truncated"
+                )
+            next_token = response.get("NextContinuationToken")
+            if (
+                type(next_token) is not str
+                or not next_token
+                or next_token == continuation_token
+            ):
+                raise StorageInventoryLimitError(
+                    "prefix inventory pagination did not advance"
+                )
+            continuation_token = next_token
 
         return all_prefixes
 
@@ -517,13 +623,14 @@ class StorageService:
             if exclude_keep and key.endswith(".keep"):
                 continue
 
+            size = inventory_object_size(obj, missing_as_zero=True)
             content = await self.get(key)
             if content is not None:
                 results.append(
                     {
                         "key": key,
                         "content": content,
-                        "size": obj["Size"],
+                        "size": size,
                         "last_modified": str(obj.get("LastModified", "")),
                     }
                 )

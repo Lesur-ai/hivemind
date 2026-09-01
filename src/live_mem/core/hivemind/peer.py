@@ -170,21 +170,21 @@ class SignedPeerEvent(_PeerBase):
         if self.algorithm != PEER_SIGNATURE_ALGORITHM:
             raise ValueError(f"algorithm incompatible: {self.algorithm!r}")
         if self.event_id != self.event.event_id:
-            raise ValueError("event_id top-level et event.event_id divergent")
+            raise ValueError("top-level event_id and event.event_id diverge")
         if self.signer_node_id != self.event.origin_node_id:
-            raise ValueError("signer_node_id doit correspondre a event.origin_node_id")
+            raise ValueError("signer_node_id must match event.origin_node_id")
         if self.protocol_version != self.event.protocol_version:
             raise ValueError(
-                "protocol_version top-level et event.protocol_version divergent"
+                "top-level protocol_version and event.protocol_version diverge"
             )
         if self.membership_epoch != self.event.membership_epoch:
             raise ValueError(
-                "membership_epoch top-level et event.membership_epoch divergent"
+                "top-level membership_epoch and event.membership_epoch diverge"
             )
         if self.term != self.event.term:
-            raise ValueError("term top-level et event.term divergent")
+            raise ValueError("top-level term and event.term diverge")
         if self.bank_version != self.event.bank_version:
-            raise ValueError("bank_version top-level et event.bank_version divergent")
+            raise ValueError("top-level bank_version and event.bank_version diverge")
 
 
 class PeerReceiveStatus(str, Enum):
@@ -222,7 +222,7 @@ class InMemoryPeerTransport:
         if peer.node_id in self.unavailable_peers:
             raise PeerChannelError(
                 PeerErrorCode.TRANSPORT_UNAVAILABLE,
-                f"transport indisponible pour peer {peer.node_id!r}",
+                f"transport unavailable for peer {peer.node_id!r}",
                 {"peer_node_id": peer.node_id},
             )
         self.inboxes.setdefault(peer.node_id, []).append(message)
@@ -281,12 +281,12 @@ def _b64decode(value: str, expected_len: int) -> bytes:
     except Exception as e:
         raise PeerChannelError(
             PeerErrorCode.INVALID_KEY,
-            "cle Ed25519 invalide: base64 illisible",
+            "invalid Ed25519 key: unreadable base64",
         ) from e
     if len(raw) != expected_len:
         raise PeerChannelError(
             PeerErrorCode.INVALID_KEY,
-            f"cle Ed25519 invalide: {len(raw)} octets au lieu de {expected_len}",
+            f"invalid Ed25519 key: {len(raw)} bytes instead of {expected_len}",
         )
     return raw
 
@@ -325,7 +325,7 @@ def _parse_iso(value: str) -> datetime:
     except ValueError as e:
         raise PeerChannelError(
             PeerErrorCode.STALE_TIMESTAMP,
-            f"timestamp invalide: {value!r}",
+            f"invalid timestamp: {value!r}",
         ) from e
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -352,7 +352,7 @@ class HivemindPeerChannel:
         clock: Callable[[], datetime] = _now_utc,
     ) -> None:
         if replay_window_seconds <= 0:
-            raise ValueError("replay_window_seconds doit etre > 0")
+            raise ValueError("replay_window_seconds must be > 0")
         self._state = state
         self._local_node_id = local_node_id
         self._private_key = private_key
@@ -369,7 +369,7 @@ class HivemindPeerChannel:
         if event.origin_node_id != self._local_node_id:
             raise PeerChannelError(
                 PeerErrorCode.UNKNOWN_PEER,
-                "un noeud local ne peut signer que ses propres events",
+                "a local node may only sign its own events",
                 {
                     "local_node_id": self._local_node_id,
                     "origin_node_id": event.origin_node_id,
@@ -400,7 +400,7 @@ class HivemindPeerChannel:
         if self._transport is None:
             raise PeerChannelError(
                 PeerErrorCode.TRANSPORT_UNAVAILABLE,
-                "aucun transport Hivemind configure",
+                "no Hivemind transport is configured",
             )
         peer = await self._member(peer_node_id)
         message = await self.sign_event(event)
@@ -411,7 +411,7 @@ class HivemindPeerChannel:
         except Exception as e:
             raise PeerChannelError(
                 PeerErrorCode.TRANSPORT_UNAVAILABLE,
-                f"transport Hivemind indisponible: {e}",
+                f"Hivemind transport unavailable: {e}",
                 {"peer_node_id": peer_node_id},
             ) from e
 
@@ -424,7 +424,7 @@ class HivemindPeerChannel:
             if existing_hash != message.payload_hash:
                 raise PeerChannelError(
                     PeerErrorCode.REPLAY_CONFLICT,
-                    "event_id rejoue avec un payload different",
+                    "event_id was replayed with a different payload",
                     {"event_id": message.event_id},
                 )
             return PeerReceiveResult(
@@ -443,7 +443,7 @@ class HivemindPeerChannel:
             ):
                 raise PeerChannelError(
                     PeerErrorCode.REPLAY_CONFLICT,
-                    "event_id rejoue avec un payload different",
+                    "event_id was replayed with a different payload",
                     {"event_id": message.event_id},
                 )
             return PeerReceiveResult(
@@ -477,7 +477,7 @@ class HivemindPeerChannel:
         if computed_hash != message.payload_hash:
             raise PeerChannelError(
                 PeerErrorCode.PAYLOAD_HASH_MISMATCH,
-                "payload_hash ne correspond pas a l'event canonique",
+                "payload_hash does not match the canonical event",
                 {"event_id": message.event_id},
             )
 
@@ -486,7 +486,7 @@ class HivemindPeerChannel:
         if abs(now - signed_at) > self._replay_window:
             raise PeerChannelError(
                 PeerErrorCode.STALE_TIMESTAMP,
-                "timestamp peer hors fenetre de rejeu",
+                "peer timestamp is outside the replay window",
                 {
                     "event_id": message.event_id,
                     "signed_at": message.signed_at,
@@ -498,7 +498,7 @@ class HivemindPeerChannel:
         if membership is None:
             raise PeerChannelError(
                 PeerErrorCode.UNKNOWN_PEER,
-                "membership Hivemind absente",
+                "Hivemind membership is absent",
                 {"signer_node_id": message.signer_node_id},
             )
         member = next(
@@ -512,7 +512,7 @@ class HivemindPeerChannel:
         ):
             raise PeerChannelError(
                 PeerErrorCode.UNKNOWN_PEER,
-                "peer inconnu ou inactif",
+                "unknown or inactive peer",
                 {"signer_node_id": message.signer_node_id},
             )
 
@@ -526,8 +526,8 @@ class HivemindPeerChannel:
         if not member.has_scope(required):
             raise PeerChannelError(
                 PeerErrorCode.INSUFFICIENT_SCOPE,
-                f"peer {message.signer_node_id!r} sans scope "
-                f"{required.value!r} pour event {message.event.type!r}",
+                f"peer {message.signer_node_id!r} lacks scope "
+                f"{required.value!r} for event {message.event.type!r}",
                 {
                     "signer_node_id": message.signer_node_id,
                     "event_type": message.event.type,
@@ -539,7 +539,7 @@ class HivemindPeerChannel:
         if message.membership_epoch != membership.epoch:
             raise PeerChannelError(
                 PeerErrorCode.WRONG_MEMBERSHIP_EPOCH,
-                "epoch membership incompatible",
+                "incompatible membership epoch",
                 {
                     "expected": membership.epoch,
                     "received": message.membership_epoch,
@@ -551,7 +551,7 @@ class HivemindPeerChannel:
         if term is not None and message.term < term.term:
             raise PeerChannelError(
                 PeerErrorCode.STALE_TERM,
-                "term Hivemind stale",
+                "stale Hivemind term",
                 {
                     "current_term": term.term,
                     "received": message.term,
@@ -570,7 +570,7 @@ class HivemindPeerChannel:
         except InvalidSignature as e:
             raise PeerChannelError(
                 PeerErrorCode.INVALID_SIGNATURE,
-                "signature peer Ed25519 invalide",
+                "invalid peer Ed25519 signature",
                 {"signer_node_id": message.signer_node_id},
             ) from e
 
@@ -579,7 +579,7 @@ class HivemindPeerChannel:
         if membership is None:
             raise PeerChannelError(
                 PeerErrorCode.UNKNOWN_PEER,
-                "membership Hivemind absente",
+                "Hivemind membership is absent",
                 {"peer_node_id": node_id},
             )
         member = next((m for m in membership.members if m.node_id == node_id), None)
@@ -590,7 +590,7 @@ class HivemindPeerChannel:
         ):
             raise PeerChannelError(
                 PeerErrorCode.UNKNOWN_PEER,
-                "peer inconnu ou inactif",
+                "unknown or inactive peer",
                 {"peer_node_id": node_id},
             )
         return member

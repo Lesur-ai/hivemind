@@ -42,6 +42,7 @@ from .display import (
     show_bank_delete_result,
     show_bank_repair_result,
     show_bank_compact_result,
+    show_bank_compact_failure,
     show_graph_connected,
     show_graph_status,
     show_graph_push_result,
@@ -90,7 +91,7 @@ SHELL_COMMANDS = {
     "bank write": "Write a bank file (bank write <space> <file> -f <path.md>) manage",
     "bank delete": "Delete a bank file (bank delete <space> <file> --confirm) manage",
     "bank repair": "Repair corrupted names (bank repair <space> [--apply]) manage",
-    "bank compact": "Compact oversized files (bank compact <space> [--apply]) manage",
+    "bank compact": "Scan files; apply only on DirectLocal routes (bank compact <space> [--apply]) manage",
     "token create": "Create a token (token create <name> -p <read|read,write|read,write,manage|...admin> [--email <email>])",
     "token update": "Update a token (token update <hash> [--permissions ...] [--space-ids ... | --add-spaces ... --remove-spaces ...])",
     "token list": "List tokens (token list [--name-contains x] [--has-space y] [--no-revoked])",
@@ -683,9 +684,16 @@ async def _handle_bank(client, args, json_out):
                 "dry_run": dry_run,
             },
         )
-        (show_json if json_out else show_bank_compact_result)(result) if result.get(
-            "status"
-        ) == "ok" else show_error(result.get("message", "?"))
+        if json_out:
+            show_json(result)
+        elif result.get("status") == "ok":
+            show_bank_compact_result(result)
+        elif result.get("status") == "conflict":
+            # Lock contention is a normal, retryable result.  It is not a
+            # failed compaction and must not receive recovery instructions.
+            show_error(result.get("message", "Compaction is currently busy"))
+        else:
+            show_bank_compact_failure(result)
 
     elif sub == "consolidation-status" and len(args) >= 2:
         result = await client.call_tool(

@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+from live_mem.core.engines import EngineRegistry
 from live_mem.core.engines.long_engine import LongEngine
 from live_mem.core.graph_bridge import GraphBridgeService
 from live_mem.core.models import meta_local_complement, meta_shared_projection
@@ -86,8 +87,10 @@ async def test_consolidation_of_connected_space_makes_zero_graph_contact() -> No
     consolidator = _make_stubbed_consolidator()
     storage = ConsolidatorFakeStorage()
     await _seed_connected(storage)
+    registry = EngineRegistry(storage=storage)
     with (
         patch("live_mem.core.consolidator.get_storage", return_value=storage),
+        patch("live_mem.core.engines.get_engine_registry", return_value=registry),
         patch("live_mem.core.consolidator.datetime", _Dt),
         # If consolidation EVER reaches the graph, this tripwire raises.
         patch("live_mem.core.graph_bridge.GraphMemoryClient", _GraphTripwire),

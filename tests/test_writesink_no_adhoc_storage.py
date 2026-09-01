@@ -161,8 +161,9 @@ def test_bank_delete_routes_delete_many_through_sink() -> None:
 
 def test_bank_compact_apply_gated_dry_run_read_stays() -> None:
     src = _tool_func_source(_module_source("bank.py"), "bank_compact")
-    # Apply branch: SINGLE-resolution gate on the engine's OWN sink (codex PR
-    # #64; no separate resolve_sink double-call), delegates to the mid engine.
+    # Apply branch: initial tool-gate resolution on the engine's OWN sink
+    # (codex PR #64), then delegation to the mid engine. The compactor's later
+    # final transaction-boundary route check remains below this tool layer.
     assert _has(src, "mid_engine(space_id)")
     assert _has(src, "engine.write_sink")
     assert not _has(src, "resolve_sink(space_id)")  # no double-resolution

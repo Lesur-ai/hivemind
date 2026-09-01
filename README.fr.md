@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.4.0-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.4.1-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -493,7 +493,7 @@ transformer les notes live `short` en bank `mid` structurée.
 | Variable                  | Défaut            | Description                     |
 | ------------------------- | ----------------- | ------------------------------- |
 | `MCP_SERVER_PORT`         | `8002`            | Port d'écoute du serveur MCP    |
-| `MCP_SERVER_DEBUG`        | `false`           | Logs détaillés (messages d'erreur complets) |
+| `MCP_SERVER_DEBUG`        | `false`           | Logs détaillés ; les diagnostics terminaux de l'outil de compaction bank restent filtrés et n'exposent jamais source, prompt ou completion LLM |
 | `CONSOLIDATION_TIMEOUT`   | `600`             | Timeout par appel LLM (secondes) |
 | `CONSOLIDATION_MAX_NOTES` | `200`             | Max de notes par consolidation  |
 | `CONSOLIDATION_BATCH_SIZE`| `5`               | Notes par batch LLM (petit = précis, grand = plus rapide) |
@@ -501,8 +501,8 @@ transformer les notes live `short` en bank `mid` structurée.
 | `CONSOLIDATION_COOLDOWN_SECONDS` | `60`      | Cooldown anti-spam par space pour `bank_consolidate` (`0` désactive) |
 | `CONSOLIDATION_VALIDATION_ENABLED` | `false` | Vérification optionnelle post-consolidation des claims non sourcés |
 | `CONSOLIDATION_VALIDATION_MAX_EXAMPLES` | `20` | Nombre max d'exemples retournés par la validation |
-| `COMPACT_THRESHOLD`       | `0.6`             | Déclenchement de l'auto-compaction (0.6 = compacter si bank > 60% du budget) |
-| `BANK_FILE_MAX_SIZE`      | `15360`           | Taille max par fichier bank (octets, 15 KB). Au-dessus = candidat à la compaction |
+| `COMPACT_THRESHOLD`       | `0.6`             | Signal agrégé de pression de contexte ; nombre fini dans `(0, 1]` (0.6 = bank > 60% du budget). Les plans restent soumis aux gardes par fichier et de contexte |
+| `BANK_FILE_MAX_SIZE`      | `15360`           | Limite dure positive par fichier bank, en octets UTF-8 persistés (15 KiB). Au-dessus = candidat, jamais découpage implicite |
 | `RESPONSE_MAX_BYTES`      | `524288`          | Taille max des réponses non-MCP avant troncature |
 | `API_TOOL_MAX_BODY_BYTES` | `1048576`         | Taille max du corps accepté par `/api/tool` |
 | `ADMIN_AUDIT_RING_SIZE`   | `500`             | Capacité par instance du buffer d'audit console/auth en mémoire ; validée dans `1..500` au démarrage |
@@ -688,10 +688,18 @@ grant concurrent ou ultérieur peut réintroduire la barrière fail-closed et do
 | `bank_consolidation_status` | `job_id`                          | Check de statut manuel uniquement pour un job retourné par `bank_consolidate`                                     |
 | `bank_consolidation_queues` | `space_ids?`                      | Résumé read-only des files de consolidation par space                                                             |
 | `bank_stale_spaces`         | `min_notes?=5`, `min_age_days?=5`, `space_ids?` | Liste les spaces avec ≥N notes non consolidées dont la plus ancienne a ≥D jours (supervision)        |
-| `bank_compact`              | `space_id`, `dry_run?`            | Compacte les fichiers bank surdimensionnés via LLM. `dry_run=True` par défaut (**manage**)                        |
+| `bank_compact`              | `space_id`, `dry_run?`            | Compacte les fichiers bank surdimensionnés via LLM, tailles en octets UTF-8. `dry_run=True` par défaut (**manage**) ; apply DirectLocal seulement |
 | `bank_repair`               | `space_id`, `dry_run?`            | Répare les noms de fichiers corrompus (Unicode, préfixes parasites). `dry_run=True` par défaut (**manage**)       |
 | `bank_write`                | `space_id`, `filename`, `content` | Écrit/remplace un fichier bank directement — contourne la consolidation LLM (**manage**)                         |
 | `bank_delete`               | `space_id`, `filename`, `confirm?=False` | Supprime un fichier bank et ses doublons Unicode (**manage**, irréversible) ; `confirm=True` est requis |
+
+`bank_compact --apply` ne peut écrire que sur une route DirectLocal. Une route
+Project Mesh partagée est refusée avant l'appel fournisseur, le préimage ou une
+écriture bank — sans repli local. Les documents surdimensionnés ou incompatibles
+avec le contexte échouent fermé au lieu d'être découpés. La compaction multipart
+et la reprise durable après crash sont reportées à v1.5.0 ; le contrat détaillé
+de diagnostic et de récupération est dans la
+[spécification MCP](docs/MCP_TOOLS_SPEC.md).
 
 ### `long` — ontologie / graphe de connaissances (historiquement `graph_*`)
 

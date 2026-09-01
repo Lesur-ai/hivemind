@@ -26,13 +26,14 @@ the SAME fake. No real S3 / boto3 / network / LLM.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from unittest.mock import patch
 
 import pytest
 from mcp.server.fastmcp import FastMCP
 
 from live_mem.auth.context import current_token_info
-from live_mem.core.engines import EngineRegistry
+from live_mem.core.engines import EngineRegistry, RegistryRefused
 from live_mem.core.hivemind import (
     HiveNodeStatus,
     HivemindStateStore,
@@ -43,7 +44,10 @@ from live_mem.core.hivemind import (
     generate_peer_keypair,
     layout,
 )
+from live_mem.core.hivemind.lifecycle import WriteRoute
+from live_mem.core.hivemind.models import CorruptedStateError
 from live_mem.core.live import LiveService
+from live_mem.core.write_sink import StagedWriteNotImplemented
 from live_mem.tools.bank import register as register_bank_tools
 from live_mem.tools.graph import register as register_graph_tools
 from live_mem.tools.live import register as register_live_tools
@@ -85,6 +89,13 @@ def _tool(register, name: str):
         if callable(fn):
             return fn
     raise AssertionError(f"Tool {name} has no callable")
+
+
+def test_bank_compact_apply_is_not_idempotent() -> None:
+    mcp = FastMCP(name="test")
+    register_bank_tools(mcp)
+
+    assert mcp._tool_manager._tools["bank_compact"].annotations.idempotentHint is False
 
 
 async def _seed_meta(storage: WriteSinkFakeStorage, space_id: str) -> None:
@@ -386,6 +397,195 @@ async def test_bank_compact_apply_healthy_hive_fails_closed_before_consolidator(
     assert storage.objects == before
 
 
+async def test_bank_compact_staged_refusal_is_typed_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The shared route fence remains attributable without logging its raw exception."""
+
+    caplog.set_level(logging.ERROR)
+
+    class StagedEngine:
+        write_sink = object()
+
+    class StagedRegistry:
+        async def mid_engine(self, space_id: str) -> StagedEngine:
+            assert space_id == "hive-a"
+            return StagedEngine()
+
+    monkeypatch.setattr(
+        "live_mem.core.engines.get_engine_registry", lambda: StagedRegistry()
+    )
+    result = await _tool(register_bank_tools, "bank_compact")(
+        space_id="hive-a", dry_run=False
+    )
+
+    assert result["status"] == "error"
+    assert result["failure_reason"] == "direct_local_route_required"
+    assert result["failed_phase"] == "prepare"
+    assert result["rollback_outcome"] == "not_needed"
+    assert result["failures"] == [
+        {"filename": "", "error": "direct_local_route_required"}
+    ]
+    assert "op=compact" not in str(result)
+    assert "op=compact" not in caplog.text
+
+
+async def test_bank_compact_terminal_exception_never_echoes_raw_content(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Even debug-mode terminal handling never publishes provider/input text."""
+
+    marker = "secret-compaction-completion-9f8e7d6c"
+
+    class ExplodingConsolidator:
+        async def compact_bank(self, space_id: str, dry_run: bool = True) -> dict:
+            assert (space_id, dry_run) == ("space-a", True)
+            raise RuntimeError(marker)
+
+    caplog.set_level(logging.ERROR)
+    monkeypatch.setattr(
+        "live_mem.core.consolidator.get_consolidator",
+        lambda: ExplodingConsolidator(),
+    )
+    monkeypatch.setattr(
+        "live_mem.config.get_settings",
+        lambda: type("DebugSettings", (), {"mcp_server_debug": True})(),
+    )
+
+    result = await _tool(register_bank_tools, "bank_compact")(
+        space_id="space-a", dry_run=True
+    )
+
+    assert result["status"] == "error"
+    assert result["failure_reason"] == "compaction_tool_failure"
+    assert result["failed_phase"] == "prepare"
+    assert result["rollback_outcome"] == "not_needed"
+    assert result["failures"] == [
+        {"filename": "", "error": "compaction_tool_failure"}
+    ]
+    assert marker not in str(result)
+    assert marker not in caplog.text
+
+
+async def test_bank_compact_mutation_path_exception_is_partial_and_redacted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An unclassified post-route failure never claims the apply was harmless."""
+
+    marker = "secret-compaction-source-after-apply-3c1a4d"
+
+    class ExplodingConsolidator:
+        calls = 0
+
+        async def compact_bank(self, space_id: str, dry_run: bool = True) -> dict:
+            self.calls += 1
+            assert (space_id, dry_run) == ("space-a", False)
+            raise RuntimeError(marker)
+
+    storage = WriteSinkFakeStorage()
+    consolidator = ExplodingConsolidator()
+    caplog.set_level(logging.ERROR)
+    with _Patched(storage, consolidator=consolidator):
+        result = await _tool(register_bank_tools, "bank_compact")(
+            space_id="space-a", dry_run=False
+        )
+
+    assert consolidator.calls == 1
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "compaction_tool_failure"
+    # The engine can still be in preparation, preimage, apply, or rollback;
+    # the tool wrapper must not invent a more precise phase.
+    assert result["failed_phase"] == "unknown"
+    assert result["rollback_outcome"] == "unknown"
+    assert result["apply_may_have_mutated"] is True
+    assert result["recovery_required"] is True
+    assert result["total_size_after"] is None
+    assert marker not in str(result)
+    assert marker not in caplog.text
+    # The stable event remains content-free, but recovery can be correlated to
+    # the already-authorized space and whether the mutating boundary was entered.
+    assert "space=space-a" in caplog.text
+    assert "mutation_path_entered=True" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("exception_factory", "failure_reason"),
+    (
+        (
+            lambda: StagedWriteNotImplemented(op="compact", key="space-a/bank/"),
+            "direct_local_route_required",
+        ),
+        (
+            lambda: RegistryRefused("space-a", WriteRoute.REFUSE),
+            "direct_local_route_required",
+        ),
+        (lambda: CorruptedStateError("injected after mutation boundary"), "hivemind_state_corrupt"),
+    ),
+)
+async def test_bank_compact_typed_terminal_exception_after_mutation_boundary_is_partial(
+    exception_factory,
+    failure_reason: str,
+) -> None:
+    """Typed exceptions must not later reintroduce a false ``not_needed`` claim."""
+
+    class ExplodingConsolidator:
+        async def compact_bank(self, space_id: str, dry_run: bool = True) -> dict:
+            assert (space_id, dry_run) == ("space-a", False)
+            raise exception_factory()
+
+    storage = WriteSinkFakeStorage()
+    with _Patched(storage, consolidator=ExplodingConsolidator()):
+        result = await _tool(register_bank_tools, "bank_compact")(
+            space_id="space-a", dry_run=False
+        )
+
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == failure_reason
+    assert result["failed_phase"] == "unknown"
+    assert result["rollback_outcome"] == "unknown"
+    assert result["apply_may_have_mutated"] is True
+    assert result["recovery_required"] is True
+    assert result["total_size_after"] is None
+
+
+@pytest.mark.parametrize("route_state", ["unsafe", "resync", "corrupt"])
+async def test_bank_compact_apply_non_direct_routes_fail_before_provider_or_compactor(
+    route_state: str,
+) -> None:
+    """REFUSE and corrupt routes never reach the compactor/provider boundary.
+
+    The route resolver necessarily reads Hivemind state; the assertion concerns
+    everything after that decision: no consolidator call, backup/staging/apply,
+    or mutation is possible on a non-DirectLocal route.
+    """
+    storage = WriteSinkFakeStorage()
+    rec = _RecordingConsolidator()
+    with _Patched(storage, consolidator=rec):
+        if route_state == "unsafe":
+            await _seed_meta(storage, "hive-route")
+            store = HivemindStateStore(storage=storage, space_id="hive-route")  # type: ignore[arg-type]
+            await store.set_node_status(NodeHealth(status=HiveNodeStatus.UNSAFE))
+        elif route_state == "resync":
+            await _seed_meta(storage, "hive-route")
+            store = HivemindStateStore(storage=storage, space_id="hive-route")  # type: ignore[arg-type]
+            await store.set_node_status(
+                NodeHealth(status=HiveNodeStatus.RESYNC_REQUIRED)
+            )
+        else:
+            await _seed_meta(storage, "hive-route")
+            storage.objects[layout.node_key("hive-route")] = "{not valid json"
+        before = storage.snapshot()
+        res = await _tool(register_bank_tools, "bank_compact")(
+            space_id="hive-route", dry_run=False
+        )
+
+    assert res["status"] == "error"
+    assert rec.compact_calls == []
+    assert storage.objects == before
+
+
 async def test_bank_compact_dry_run_is_read_only_ungated() -> None:
     """bank_compact dry_run=True is a read-only scan: it stays on
     get_consolidator() (NOT routed through resolve_sink), so it works even on a
@@ -546,13 +746,12 @@ async def test_graph_connect_ssrf_check_rejects_private_url_no_gate() -> None:
 
 
 # =============================================================================
-# Single-resolution guard (codex PR #64): the route must be resolved EXACTLY
-# ONCE per mutating call. The prior code resolved twice (a standalone
-# resolve_sink gate + a second resolve inside short_engine/mid_engine), and the
-# write delegated to the inert legacy path keyed off the FIRST resolve — so an
-# observed STAGED on the second resolve could still fall through to a direct
-# write. Gating on the engine's OWN resolved sink makes check and use atomic.
-# These count resolutions; they go RED (count == 2) on the double-resolve code.
+# Initial tool-gate single-resolution guard (codex PR #64): the tool must not
+# resolve once on its own and again while building its engine, because the old
+# two-step code could observe STAGED second yet write through the first direct
+# path. Gating on the engine's own resolved sink keeps the initial tool check
+# coherent. #395 and #413 deliberately add separate service-owned final route
+# fences immediately before their true durable mutation boundaries.
 # =============================================================================
 
 
@@ -569,7 +768,7 @@ def _count_resolves(pp: "_Patched") -> list[str]:
 
 
 async def test_live_note_resolves_route_exactly_once() -> None:
-    """live_note (non-Hivemind, succeeds) must resolve the route ONCE."""
+    """live_note builds exactly one registry sink at its initial tool gate."""
     storage = WriteSinkFakeStorage()
     with _Patched(storage) as pp:
         calls = _count_resolves(pp)
@@ -581,13 +780,13 @@ async def test_live_note_resolves_route_exactly_once() -> None:
         )
     assert res.get("status") != "error", res
     assert len(calls) == 1, (
-        f"route resolved {len(calls)}x; must be exactly 1 — a 2nd resolution "
-        "reintroduces the observed-STAGED-falls-through-to-direct hole"
+        f"registry sink resolved {len(calls)}x; the initial tool gate must build "
+        "exactly one sink (the service-owned final route fence is separate)"
     )
 
 
-async def test_bank_compact_apply_resolves_route_exactly_once() -> None:
-    """bank_compact apply (non-Hivemind) must resolve the route ONCE."""
+async def test_bank_compact_tool_gate_resolves_route_exactly_once() -> None:
+    """The tool's initial gate resolves once; compactor owns its final fence."""
     storage = WriteSinkFakeStorage()
     rec = _RecordingConsolidator()
     with _Patched(storage, consolidator=rec) as pp:
@@ -598,5 +797,5 @@ async def test_bank_compact_apply_resolves_route_exactly_once() -> None:
     assert res.get("status") != "error", res
     assert rec.compact_calls == [("space-once", False)]
     assert len(calls) == 1, (
-        f"route resolved {len(calls)}x; must be exactly 1 (no double-resolution)"
+        f"tool gate resolved {len(calls)}x; must be exactly 1 before delegation"
     )

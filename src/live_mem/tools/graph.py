@@ -581,11 +581,11 @@ def register(mcp: FastMCP) -> int:
                     return {
                         "status": "error",
                         "message": (
-                            "Fichiers volatils (activeContext.md / progress.md) "
-                            "REJETÉS de l'ingestion canonique long-tier par "
-                            "défaut. Ces fichiers volatile sont continuellement "
-                            "réécrits ; utilisez include_volatile=True (permission "
-                            "'manage' requise) pour forcer leur admission."
+                            "Volatile files (activeContext.md / progress.md) are "
+                            "REJECTED from canonical long-tier ingestion by "
+                            "default. These files are continuously rewritten; "
+                            "use include_volatile=True (the 'manage' permission "
+                            "is required) to force their admission."
                         ),
                         "rejected_volatile": offending,
                     }

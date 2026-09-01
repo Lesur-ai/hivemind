@@ -26,6 +26,7 @@ FIFO en mémoire par espace. Un seul job à la fois mute la bank d'un espace
 Voir CONSOLIDATION_LLM.md pour le pipeline détaillé.
 """
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Annotated
@@ -36,6 +37,52 @@ from pydantic import Field
 
 
 _LIVE_NOTE_TS_RE = re.compile(r"^(\d{8}T\d{6})_")
+_logger = logging.getLogger("live_mem.tools.bank")
+
+
+def _safe_bank_compact_failure(
+    *,
+    failure_reason: str,
+    message: str,
+    remediation: str,
+    mutation_path_entered: bool = False,
+) -> dict:
+    """Return a content-free terminal compact result.
+
+    ``bank_compact`` is intentionally stricter than the generic tool error
+    handler: a provider/source exception can include a prompt or completion,
+    and an exception after entering the mutating compactor cannot prove that a
+    durable write had no effect. Its exact phase is therefore ``unknown``.
+    This helper accepts only server-owned literals and never receives the
+    exception object or its traceback.
+    """
+
+    result = {
+        "status": "error",
+        "message": message,
+        "failure_reason": failure_reason,
+        # Before entering the compactor the wrapper knows no compaction
+        # mutation could have started.  This is a truthful, bounded phase—not
+        # a reconstruction from the caught exception.
+        "failed_phase": "prepare",
+        "rollback_outcome": "not_needed",
+        "failures": [{"filename": "", "error": failure_reason}],
+        "remediation": remediation,
+    }
+    if mutation_path_entered:
+        result.update(
+            {
+                "status": "partial",
+                "apply_may_have_mutated": True,
+                "recovery_required": True,
+                "failed_phase": "unknown",
+                "rollback_outcome": "unknown",
+                # A terminal tool-layer failure cannot assert the aggregate
+                # post-apply size. Preserve that uncertainty explicitly.
+                "total_size_after": None,
+            }
+        )
+    return result
 
 
 def _parse_live_note_timestamp(filename: str) -> datetime | None:
@@ -74,23 +121,23 @@ def _validate_bank_filename(filename: str) -> dict | None:
     Retourne None si OK, sinon un dict d'erreur prêt à être renvoyé.
     """
     if not filename or not filename.strip():
-        return {"status": "error", "message": "Nom de fichier requis"}
+        return {"status": "error", "message": "Filename is required"}
     if ".." in filename:
         return {
             "status": "error",
-            "message": "Nom de fichier invalide : '..' interdit",
+            "message": "Invalid filename: '..' is not allowed",
         }
     if filename.startswith("/"):
         return {
             "status": "error",
-            "message": "Nom de fichier invalide : ne peut pas commencer par '/'",
+            "message": "Invalid filename: it cannot start with '/'",
         }
     if _BANK_FILENAME_DANGEROUS.search(filename):
         return {
             "status": "error",
             "message": (
-                "Caractères dangereux dans le nom de fichier "
-                "(< > \" ' \\ ou caractères de contrôle interdits)"
+                "The filename contains unsafe characters "
+                "(< > \" ' \\ or control characters are not allowed)"
             ),
         }
     return None
@@ -170,15 +217,15 @@ def register(mcp: FastMCP) -> int:
                             "content": content,
                             "size": len(content.encode("utf-8")),
                             "note": (
-                                f"Fichier trouvé via fallback Unicode "
-                                f"(clé S3 réelle: {matched_key.split('/')[-1]!r}). "
-                                f"Utilisez bank_repair pour corriger."
+                                "File found through the Unicode fallback "
+                                f"(actual S3 key: {matched_key.split('/')[-1]!r}). "
+                                "Use bank_repair to correct it."
                             ),
                         }
 
                 return {
                     "status": "not_found",
-                    "message": f"Fichier '{filename}' introuvable dans '{space_id}'",
+                    "message": f"File '{filename}' not found in '{space_id}'",
                 }
 
             return {
@@ -223,7 +270,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Lire tous les fichiers bank
@@ -269,7 +316,7 @@ def register(mcp: FastMCP) -> int:
             Filenames, sizes, and modification times.
         """
         from ..auth.context import check_access
-        from ..core.storage import get_storage
+        from ..core.storage import get_storage, inventory_object_size
 
         try:
             access_err = check_access(space_id)
@@ -281,7 +328,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Lister les objets bank (sans les .keep)
@@ -291,7 +338,7 @@ def register(mcp: FastMCP) -> int:
             files = [
                 {
                     "filename": bank_relpath(o["Key"], space_id),
-                    "size": o["Size"],
+                    "size": inventory_object_size(o, missing_as_zero=True),
                     "last_modified": str(o.get("LastModified", "")),
                 }
                 for o in objects
@@ -395,8 +442,8 @@ def register(mcp: FastMCP) -> int:
                 return {
                     "status": "error",
                     "message": (
-                        "Identité client_name non vide requise pour "
-                        "consolider des notes"
+                        "A non-empty client_name identity is required to "
+                        "consolidate notes"
                     ),
                 }
 
@@ -414,31 +461,28 @@ def register(mcp: FastMCP) -> int:
                     return {
                         "status": "error",
                         "message": (
-                            f"Permission 'manage' requise pour consolider "
-                            f"les notes de l'agent '{agent}'. "
-                            f"Vous pouvez consolider vos propres notes "
-                            f"en omettant agent ou avec agent='{caller}'."
+                            f"The 'manage' permission is required to consolidate "
+                            f"agent '{agent}' notes. "
+                            f"You can consolidate your own notes by omitting "
+                            f"agent or by using agent='{caller}'."
                         ),
                     }
 
             # P3-7 ROUTE-FIRST GATE (fail-closed-routing mandatory correction):
             # bank_consolidate enqueues a job whose BACKGROUND WORKER performs
-            # the durable bank/_synthesis/_meta writes (ConsolidatorService
-            # get_storage call sites). The worker runs OUTSIDE the MCP auth/route
-            # context, so the WriteSink seam cannot intercept it later. If we let
-            # a Hivemind-space consolidation enqueue, the worker would write to S3
-            # DIRECTLY, bypassing the single-writer seam this gate exists to
-            # protect. We therefore resolve the per-space route BEFORE enqueue:
+            # the durable bank/_synthesis/_meta writes. Rejecting shared/unsafe
+            # routes here means they are never queued. #394 then re-resolves a
+            # successful DirectLocal job at worker time, so a lifecycle change
+            # after enqueue cannot inherit this earlier verdict. We resolve the
+            # per-space route BEFORE enqueue:
             #   - DIRECT_LOCAL (non-Hivemind) -> proceed to enqueue: the worker's
             #     direct get_storage writes are the legacy, byte-for-byte path.
             #   - STAGED (Hivemind-healthy) -> raise StagedWriteNotImplemented
             #     BEFORE enqueue, so NO job is queued and NO worker write occurs.
             #   - REFUSE (unsafe/resync) / corrupt -> resolve_sink raises
             #     (RegistryRefused / CorruptedStateError) before enqueue.
-            # This makes the gate fire at the tool entrypoint (the only point in
-            # the auth/route context), keeping the worker write path fail-closed
-            # for shared spaces. resolve_sink is a read-only route check; it
-            # queues nothing and writes nothing on the non-Hivemind path.
+            # resolve_sink is a read-only route check; it queues nothing and
+            # writes nothing on the non-Hivemind path.
             sink = await get_engine_registry().resolve_sink(space_id)
             if not isinstance(sink, DirectLocalWriteSink):
                 # STAGED: surface the typed refusal before the job is queued so
@@ -448,10 +492,9 @@ def register(mcp: FastMCP) -> int:
                 )
 
             # DIRECT_LOCAL only: enqueue the job VERBATIM on the queue singleton.
-            # The gate above already proved the space is non-Hivemind, so the
-            # worker's eventual direct get_storage writes are the legacy path
-            # (byte-for-byte). The enqueue call itself is unchanged (same kwargs
-            # the merged suite pins) — only the route-first gate is new.
+            # The worker will take a fresh DirectLocal proof immediately before
+            # collecting inputs. The enqueue call itself remains unchanged (same
+            # kwargs the merged suite pins).
             # Le worker de fond utilise l'agent effectif capturé ici, sans
             # dépendre du contexte d'auth MCP.
             # agent="" → consolide TOUTES les notes (demande explicite,
@@ -536,7 +579,7 @@ def register(mcp: FastMCP) -> int:
         try:
             token_info = _get_effective_token_info()
             if token_info is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             requested_ids = [
                 sid.strip() for sid in space_ids.split(",") if sid.strip()
@@ -665,7 +708,7 @@ def register(mcp: FastMCP) -> int:
         try:
             token_info = _get_effective_token_info()
             if token_info is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             requested_ids = [
                 sid.strip() for sid in space_ids.split(",") if sid.strip()
@@ -775,16 +818,19 @@ def register(mcp: FastMCP) -> int:
 
             return safe_error(e, "bank")
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
+    @mcp.tool(
+        description="Scan for or repair malformed Memory Bank paths and duplicates.",
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True),
+    )
     async def bank_repair(
         space_id: Annotated[
-            str, Field(description="Identifiant de l'espace à réparer")
+            str, Field(description="Identifier of the space to repair")
         ],
         dry_run: Annotated[
             bool,
             Field(
                 default=True,
-                description="True = scan seul (liste les fichiers à réparer), False = applique les corrections",
+                description="True = scan only (list files to repair); False = apply the repairs",
             ),
         ] = True,
     ) -> dict:
@@ -816,7 +862,11 @@ def register(mcp: FastMCP) -> int:
             Liste des fichiers réparés + doublons détectés
         """
         from ..auth.context import check_access, check_manage_permission
-        from ..core.storage import get_storage, bank_relpath
+        from ..core.storage import (
+            bank_relpath,
+            get_storage,
+            inventory_object_size,
+        )
         from ..core.consolidator import _sanitize_filename
         from ..core.engines import get_engine_registry
 
@@ -835,7 +885,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Lister les vrais fichiers bank sur S3 (READ — stays on storage)
@@ -858,7 +908,9 @@ def register(mcp: FastMCP) -> int:
                     {
                         "key": key,
                         "relpath": relpath,
-                        "size": obj["Size"],
+                        "size": inventory_object_size(
+                            obj, missing_as_zero=True
+                        ),
                         "last_modified": str(obj.get("LastModified", "")),
                     }
                 )
@@ -959,20 +1011,20 @@ def register(mcp: FastMCP) -> int:
                 "repairs": repairs,
                 "duplicates": duplicates,
                 "message": (
-                    f"{len(repairs)} fichier(s) à déplacer, "
-                    f"{len(duplicates)} doublon(s) à supprimer "
-                    f"sur {len(groups)} fichiers uniques. "
+                    f"{len(repairs)} file(s) to move, "
+                    f"{len(duplicates)} duplicate(s) to delete "
+                    f"across {len(groups)} unique files. "
                     + (
-                        "Passez dry_run=False pour appliquer."
+                        "Set dry_run=False to apply the repairs."
                         if dry_run and total_issues > 0
                         else ""
                     )
                     + (
-                        "Corrections appliquées."
+                        "Repairs applied."
                         if not dry_run and total_issues > 0
                         else ""
                     )
-                    + ("Tous les fichiers sont OK." if total_issues == 0 else "")
+                    + ("All files are OK." if total_issues == 0 else "")
                 ),
             }
         except Exception as e:
@@ -980,14 +1032,17 @@ def register(mcp: FastMCP) -> int:
 
             return safe_error(e, "bank")
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
+    @mcp.tool(
+        description="Write or replace a Memory Bank file directly.",
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True),
+    )
     async def bank_write(
-        space_id: Annotated[str, Field(description="Identifiant de l'espace")],
+        space_id: Annotated[str, Field(description="Space identifier")],
         filename: Annotated[
-            str, Field(description="Nom du fichier bank (ex: 'activeContext.md')")
+            str, Field(description="Bank filename (for example, 'activeContext.md')")
         ],
         content: Annotated[
-            str, Field(description="Contenu Markdown complet du fichier")
+            str, Field(description="Complete Markdown file content")
         ],
     ) -> dict:
         """
@@ -1035,7 +1090,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             # Sanitiser le filename
@@ -1043,7 +1098,7 @@ def register(mcp: FastMCP) -> int:
             if not sanitized:
                 return {
                     "status": "error",
-                    "message": f"Nom de fichier invalide : '{filename}'",
+                    "message": f"Invalid filename: '{filename}'",
                 }
 
             # Re-valider après sanitisation Unicode (défense en profondeur :
@@ -1155,8 +1210,8 @@ def register(mcp: FastMCP) -> int:
                 return {
                     "status": "error",
                     "message": (
-                        "Suppression refusée : confirm=True requis pour "
-                        "supprimer un fichier bank (sécurité, irréversible)."
+                        "Deletion refused: confirm=True is required to delete "
+                        "a bank file (this action is irreversible)."
                     ),
                 }
 
@@ -1166,7 +1221,7 @@ def register(mcp: FastMCP) -> int:
             if not await storage.exists(f"{space_id}/_meta.json"):
                 return {
                     "status": "not_found",
-                    "message": f"Espace '{space_id}' introuvable",
+                    "message": f"Space '{space_id}' not found",
                 }
 
             sanitized = _sanitize_filename(filename)
@@ -1186,7 +1241,7 @@ def register(mcp: FastMCP) -> int:
             if not keys_to_delete:
                 return {
                     "status": "not_found",
-                    "message": f"Fichier '{filename}' introuvable dans '{space_id}'",
+                    "message": f"File '{filename}' not found in '{space_id}'",
                 }
 
             # P3-7 ROUTE-FIRST: resolve the per-space WriteSink BEFORE the
@@ -1222,53 +1277,56 @@ def register(mcp: FastMCP) -> int:
 
             return safe_error(e, "bank")
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
+    @mcp.tool(
+        description="Scan for or compact oversized Memory Bank files with the LLM.",
+        # A real compaction creates a fresh persistent preimage snapshot before
+        # applying its verified bank edits, so retrying is not idempotent even
+        # when the resulting bank text would be equivalent.
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False),
+    )
     async def bank_compact(
         space_id: Annotated[
-            str, Field(description="Identifiant de l'espace à compacter")
+            str, Field(description="Identifier of the space to compact")
         ],
         dry_run: Annotated[
             bool,
             Field(
                 default=True,
-                description="True = scan seul (rapport sans modification), False = compaction effective via LLM",
+                description="True = scan only (report without changes); False = run LLM compaction",
             ),
         ] = True,
     ) -> dict:
         """
-        Compacte les fichiers bank surdimensionnés via LLM (manage).
+        Compact oversized bank files through a strict LLM plan (manage).
 
-        Analyse chaque fichier bank et compare sa taille à la limite
-        universelle configurée (BANK_FILE_MAX_SIZE, par défaut 15 KB).
-        Les fichiers dépassant cette limite sont résumés/nettoyés par le LLM.
+        File limits and result sizes are persisted UTF-8 bytes. `dry_run=True`
+        scans without mutation. An apply prepares every candidate before the
+        first write, is permitted only on a DirectLocal route, and refuses a
+        shared Project Mesh route before provider, preimage, or bank effects.
+        Context-incompatible documents fail closed; there is no implicit split
+        or multipart/crash-durable recovery mode.
 
-        Le LLM utilise les rules de l'espace pour comprendre le rôle de
-        chaque fichier et applique des règles de compaction adaptées :
-        fusionne les redondances, supprime les détails obsolètes,
-        résume les entrées anciennes en une ligne par jalon.
-
-        ⚠️ Par défaut dry_run=True : scanne et rapporte sans modifier.
-        Passez dry_run=False pour compacter effectivement.
-
-        ⚠️ La compaction est protégée par le lock de consolidation.
-        Si une consolidation est en cours, retourne "conflict".
+        The per-space consolidation lock protects the local apply. If a
+        consolidation is in progress, the result is `conflict`.
 
         Args:
-            space_id: Espace à compacter
-            dry_run: True = scan seul, False = compaction effective
+            space_id: Space to compact.
+            dry_run: True = read-only scan, False = guarded local apply.
 
         Returns:
-            Rapport de compaction avec détails par fichier (taille, ratio, réduction)
+            Safe compaction report with per-file byte metrics and diagnostics.
         """
         from ..auth.context import check_access, check_manage_permission
         from ..core.locks import get_lock_manager
         from ..core.consolidator import get_consolidator
-        from ..core.engines import get_engine_registry
+        from ..core.engines import RegistryRefused, get_engine_registry
+        from ..core.hivemind.models import CorruptedStateError
         from ..core.write_sink import (
             DirectLocalWriteSink,
             StagedWriteNotImplemented,
         )
 
+        mutation_path_entered = False
         try:
             access_err = check_access(space_id)
             if access_err:
@@ -1285,13 +1343,14 @@ def register(mcp: FastMCP) -> int:
             # P3-7 ROUTE-FIRST-THEN-DELEGATE: the consolidation LOCK +
             # conflict-check STAY in the tool layer (the engine adds no lock —
             # mid.py invariant: single-writer-per-space). Only the dry_run=False
-            # (write) branch is gated. The compact PUTs live INSIDE
-            # ConsolidatorService.compact_bank, which calls get_storage()
-            # directly — the held sink is INERT (wrap-don't-rewrite; we do NOT
-            # edit consolidator.py). So we resolve the route FIRST and:
-            #   - DIRECT_LOCAL (non-Hivemind) -> delegate to mid_engine().
-            #     compact_bank: the consolidator's verbatim get_storage path
-            #     (byte-identical).
+            # (write) branch is gated. #394 forwards the engine's initially
+            # resolved DirectLocal sink into the compactor's read/prepare
+            # boundary; it must not fall back to an unproven writer. #395 then
+            # performs its own fresh final route/reservation recheck after
+            # planning and before creating a preimage or applying the bank.
+            # So we resolve the route FIRST and:
+            #   - DIRECT_LOCAL (non-Hivemind) -> delegate to mid_engine(), whose
+            #     compactor consumes the same DirectLocal authority.
             #   - STAGED (Hivemind-healthy) -> raise StagedWriteNotImplemented
             #     BEFORE the consolidator runs, so NO compact PUT happens.
             #   - REFUSE (unsafe/resync) / corrupt -> resolve_sink raises
@@ -1306,32 +1365,90 @@ def register(mcp: FastMCP) -> int:
                     return {
                         "status": "conflict",
                         "message": (
-                            f"Consolidation en cours pour '{space_id}'. "
-                            "Réessayez dans quelques minutes."
+                            f"Consolidation is in progress for '{space_id}'. "
+                            "Try again in a few minutes."
                         ),
                     }
                 async with lock:
-                    # SINGLE resolution: build the engine (resolves once) and
-                    # gate on the ENGINE's own resolved sink, so an observed
-                    # STAGED can never fall through to the inert legacy compact
-                    # write. REFUSE/corrupt raise inside mid_engine() first.
+                    # Initial tool-gate resolution: build the engine and gate
+                    # on the ENGINE's own resolved sink, so an observed STAGED
+                    # can never fall through to the inert legacy compact
+                    # write. The compactor owns the second, final route check
+                    # at its prepared-apply boundary. REFUSE/corrupt raise
+                    # inside mid_engine() first.
                     registry = get_engine_registry()
                     engine = await registry.mid_engine(space_id)
                     if not isinstance(engine.write_sink, DirectLocalWriteSink):
                         # STAGED: surface the typed refusal before the legacy
                         # consolidator (which writes via get_storage) ever runs.
                         raise StagedWriteNotImplemented(
-                            op="put", key=f"{space_id}/bank/"
+                            op="compact", key=f"{space_id}/bank/"
                         )
-                    return await engine.compact_bank(space_id, dry_run=False)
+                    # Scope the initial registry verdict to this immediate
+                    # tool action. A retained MidEngine must not carry it into
+                    # a later public compact_bank call after lifecycle changes.
+                    with engine._tool_compaction_authority(space_id):
+                        # A terminal exception after entering the mutating
+                        # compactor can occur during preparation, preimage,
+                        # apply, or recovery. The wrapper cannot honestly
+                        # name that phase, but it must not claim the bank is
+                        # intact, so its fallback is a partial with phase
+                        # ``unknown``.
+                        mutation_path_entered = True
+                        return await engine.compact_bank(space_id, dry_run=False)
             else:
                 # Dry-run : pas besoin de lock (lecture seule). READ-ONLY scan —
                 # not routed through resolve_sink (reads-stay).
                 return await get_consolidator().compact_bank(space_id, dry_run=True)
 
-        except Exception as e:
-            from ..auth.context import safe_error
-
-            return safe_error(e, "bank")
+        except StagedWriteNotImplemented:
+            return _safe_bank_compact_failure(
+                failure_reason="direct_local_route_required",
+                message="Bank compaction is available only on a DirectLocal route.",
+                remediation=(
+                    "Use the shared-space staged workflow or restore an eligible "
+                    "DirectLocal route before retrying."
+                ),
+                mutation_path_entered=mutation_path_entered,
+            )
+        except RegistryRefused:
+            return _safe_bank_compact_failure(
+                failure_reason="direct_local_route_required",
+                message="Bank compaction was refused because no safe DirectLocal route is available.",
+                remediation=(
+                    "Resolve the shared-space route or recovery state before retrying; "
+                    "do not use a DirectLocal fallback."
+                ),
+                mutation_path_entered=mutation_path_entered,
+            )
+        except CorruptedStateError:
+            return _safe_bank_compact_failure(
+                failure_reason="hivemind_state_corrupt",
+                message="Bank compaction was refused because critical Hivemind state is corrupt.",
+                remediation=(
+                    "Repair or resync the Hivemind state before retrying; "
+                    "do not use a DirectLocal fallback."
+                ),
+                mutation_path_entered=mutation_path_entered,
+            )
+        except Exception:
+            # Do not pass this exception to the generic handler: in debug mode
+            # it logs and returns raw exception text, which can contain source
+            # or completion content. The stable event is intentionally the only
+            # log record here; no traceback or exception representation is safe.
+            _logger.error(
+                "bank_compact failed closed — space=%s, mutation_path_entered=%s",
+                space_id,
+                mutation_path_entered,
+            )
+            return _safe_bank_compact_failure(
+                failure_reason="compaction_tool_failure",
+                message="Bank compaction could not be completed safely.",
+                remediation=(
+                    "Inspect the server health and retained backups before any "
+                    "manual recovery or retry."
+                ),
+                mutation_path_entered=mutation_path_entered,
+            )
 
     return 11  # Nombre d'outils enregistrés

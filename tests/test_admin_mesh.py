@@ -57,7 +57,9 @@ def test_router_wires_mesh_routes_and_nav_gating() -> None:
     assert "raw === '/mesh'" in source
     assert "_matchMeshDetail(segments[1], raw)" in source
     assert "function _refreshMeshNav(" in source
-    assert "meshAdminStatus()" in source
+    probe = source[source.index("async function _refreshMeshNav("):]
+    assert "meshAdminAvailability()" in probe
+    assert "meshAdminStatus()" not in probe.split("\n}", 1)[0]
     # Nav must be probed only when the session already resolves admin, and the
     # sidebar item must be ABSENT (never a disabled control) otherwise.
     assert "isAdmin" in source[source.index("function _refreshMeshNav("):]
@@ -65,6 +67,8 @@ def test_router_wires_mesh_routes_and_nav_gating() -> None:
 
 def test_admin_api_exposes_a_direct_rest_client_not_calltool() -> None:
     source = _read(API_PATH)
+    assert "async function meshAdminAvailability()" in source
+    assert "_meshFetch('availability')" in source
     assert "async function meshAdminStatus()" in source
     assert "async function meshAdminMembers(" in source
     assert "async function meshAdminAction(" in source
@@ -89,3 +93,50 @@ def test_mesh_runtime_scenarios_pass() -> None:
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "admin mesh runtime: ok" in completed.stdout
+
+
+def test_mesh_runtime_kills_readiness_and_stale_guard_mutants(tmp_path: Path) -> None:
+    """The runtime must fail if any client-side fail-closed guard is weakened."""
+
+    node = shutil.which("node") or shutil.which("nodejs")
+    if node is None:
+        pytest.skip("Node.js runtime unavailable; source contract pins remain")
+    source = _read(VIEW_PATH)
+
+    token_guard = "\n            && SOURCE_STATE_TOKEN_RE.test(entry.state_token)"
+    coherence_guard = "\n            && sourceReadinessIsCoherent(entry)"
+    string_projection = """            if (typeof item !== 'string' || !SPACE_ID_RE.test(item)) return;
+            const spaceId = item;"""
+    object_projection = """            const spaceId = typeof item === 'string'
+                ? item
+                : (item && typeof item.space_id === 'string' ? item.space_id : '');
+            if (!SPACE_ID_RE.test(spaceId)) return;"""
+    close_guard = "if (_modalGen === generation) _modalGen += 1;"
+    prepare_guard = "if (prepareContextIsStale(ctx)) return false;"
+
+    mutants = {
+        "token-format": source.replace(token_guard, "", 1),
+        "semantic-coherence": source.replace(coherence_guard, "", 1),
+        "string-only-eligible-ids": source.replace(string_projection, object_projection, 1),
+        "explicit-close-generation": source.replace(close_guard, "void generation;", 1),
+    }
+    last_prepare_guard = source.rfind(prepare_guard)
+    assert last_prepare_guard >= 0
+    mutants["post-await-prepare-guard"] = (
+        source[:last_prepare_guard]
+        + "/* mutant removed post-await preparation guard */"
+        + source[last_prepare_guard + len(prepare_guard):]
+    )
+
+    for name, mutant in mutants.items():
+        assert mutant != source, f"{name} mutation did not apply"
+        mutant_path = tmp_path / f"views-mesh-{name}.js"
+        mutant_path.write_text(mutant, encoding="utf-8")
+        completed = subprocess.run(
+            [node, str(RUNTIME_PATH), str(mutant_path)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode != 0, f"runtime survived {name} mutant"

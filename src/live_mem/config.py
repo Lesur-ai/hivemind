@@ -13,6 +13,7 @@ Usage :
 """
 
 import logging
+import math
 import re
 from functools import lru_cache
 
@@ -238,14 +239,16 @@ class Settings(BaseSettings):
 
 
     # ─── Bank Compaction ──────────────────────────────────────
-    # Compaction automatique des fichiers bank avant consolidation
-    # quand le contexte total est trop gros pour le LLM.
-    # Voir DESIGN/live-mem/CONTEXT_COMPACTION.md pour les détails.
+    # The aggregate context-pressure signal is a ratio of the resolved chat
+    # output budget. A strictly positive, finite value no greater than one is
+    # required so a malformed setting cannot silently disable the admission
+    # guard. The independent per-file limit below is the persisted UTF-8-byte
+    # safety boundary; strict planning may still refuse an incompatible file.
     compact_threshold: float = (
-        0.6  # Ratio input/max_tokens au-delà duquel on compacte (0.6 = 60%)
+        0.6  # 60% of the resolved output budget
     )
     bank_file_max_size: int = (
-        15360  # Taille max universelle pour tout fichier bank (bytes)
+        15360  # Universal per-file persisted UTF-8-byte maximum
     )
 
     # ─── Graph Push — Volatile-file guardrail (P4-8) ──────────
@@ -374,6 +377,23 @@ class Settings(BaseSettings):
         if self.consolidation_batch_size < 1:
             errors.append(
                 f"CONSOLIDATION_BATCH_SIZE={self.consolidation_batch_size} must be ≥1"
+            )
+
+        # Compaction admission and persisted-byte limits. ``nan`` would make
+        # every threshold comparison false, so it must fail at startup rather
+        # than silently weakening the context-pressure signal.
+        if not (
+            math.isfinite(self.compact_threshold)
+            and 0.0 < self.compact_threshold <= 1.0
+        ):
+            errors.append(
+                "COMPACT_THRESHOLD="
+                f"{self.compact_threshold!r} must be finite and in (0, 1]"
+            )
+        if self.bank_file_max_size < 1:
+            errors.append(
+                "BANK_FILE_MAX_SIZE="
+                f"{self.bank_file_max_size} must be ≥1 UTF-8 byte"
             )
 
         # Temperature range

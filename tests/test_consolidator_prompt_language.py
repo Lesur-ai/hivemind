@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -23,8 +24,14 @@ class RecordingCompletion:
     text: str = "merged"
     calls: list[dict] = field(default_factory=list)
 
-    async def __call__(self, messages, output_budget):
-        self.calls.append({"messages": messages, "output_budget": output_budget})
+    async def __call__(self, messages, output_budget, *, retry_policy="bounded"):
+        self.calls.append(
+            {
+                "messages": messages,
+                "output_budget": output_budget,
+                "retry_policy": retry_policy,
+            }
+        )
         return ChatResult(
             text=self.text,
             configured_model="test-model",
@@ -36,6 +43,9 @@ class RecordingCompletion:
 def _service(*, legacy_french: bool) -> ConsolidatorService:
     service = object.__new__(ConsolidatorService)
     service._legacy_french_prompts = legacy_french
+    service._max_tokens = 4096
+    service._context_window = 131_072
+    service._timeout = 1
     service._complete_chat = RecordingCompletion()
     return service
 
@@ -158,6 +168,10 @@ def test_english_default_main_prompt_preserves_source_material_verbatim() -> Non
     assert "The residual synthesis must summarize the processed notes in English" in (
         user_prompt
     )
+    assert (
+        "file_edits MUST contain at least one valid, note-supported edit; "
+        "NEVER invent an edit solely to satisfy this rule"
+    ) in user_prompt
 
     # Prompt language changes; operator-owned inputs do not.
     assert "# Règles exactes" in user_prompt
@@ -179,6 +193,10 @@ def test_legacy_flag_preserves_the_historical_french_main_prompts() -> None:
     assert "[agent=agent-a, catégorie=decision]" in user_prompt
     assert '"content": "Nouveau contenu de la section..."' in user_prompt
     assert "La synthèse résiduelle doit résumer les notes traitées" in user_prompt
+    assert (
+        "file_edits DOIT contenir au moins une édition valide fondée sur les notes ; "
+        "n'invente JAMAIS une édition uniquement pour satisfaire cette règle"
+    ) in user_prompt
 
 
 @pytest.mark.parametrize(
@@ -273,11 +291,33 @@ async def test_compaction_uses_the_selected_prompt_language(
     forbidden: str,
 ) -> None:
     service = _service(legacy_french=legacy_french)
-    service._complete_chat.text = "# Compacted"
+    source = "# Bank\n\n## Details\n" + "verbose detail " * 30
+    service._complete_chat.text = json.dumps(
+        {
+            "file_edits": [
+                {
+                    "filename": "activeContext.md",
+                    "action": "edit",
+                    "operations": [
+                        {
+                            "type": "replace_section",
+                            "heading": "## Details",
+                            "content": "condensed",
+                            "reason": "Remove repeated detail.",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
 
     assert await service._compact_single_file(
-        "activeContext.md", "content", 100, "# Rules"
-    ) == "# Compacted"
-    prompt = service._complete_chat.calls[0]["messages"][0]["content"]
+        "activeContext.md", source, 100, "# Rules"
+    ) == "# Bank\n\n## Details\ncondensed"
+    prompt = "\n".join(
+        message["content"]
+        for message in service._complete_chat.calls[0]["messages"]
+    )
     assert required in prompt
     assert forbidden not in prompt
+    assert service._complete_chat.calls[0]["retry_policy"] == "none"

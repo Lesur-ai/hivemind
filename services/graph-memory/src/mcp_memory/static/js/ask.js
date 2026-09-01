@@ -45,7 +45,7 @@ async function submitQuestion() {
     const btn = document.getElementById('askSubmitBtn');
 
     // Afficher le loading (classes CSS au lieu de styles inline)
-    body.innerHTML = '<div class="ask-loading"><div class="spinner ask-spinner-sm"></div>Réflexion en cours…</div>';
+    body.innerHTML = '<div class="ask-loading"><div class="spinner ask-spinner-sm"></div>Thinking…</div>';
     btn.disabled = true;
     lastAnswerEntities = [];
     lastAnswerResult = null;
@@ -63,10 +63,10 @@ async function submitQuestion() {
                 highlightEntities(result.entities);
             }
         } else {
-            body.innerHTML = `<div class="text-error">❌ ${result.message || 'Erreur'}</div>`;
+            body.innerHTML = `<div class="text-error">❌ ${result.message || 'Error'}</div>`;
         }
     } catch (err) {
-        body.innerHTML = `<div class="text-error">❌ Erreur réseau: ${err.message}</div>`;
+        body.innerHTML = `<div class="text-error">❌ Network error: ${err.message}</div>`;
     } finally {
         btn.disabled = false;
     }
@@ -83,9 +83,9 @@ function displayAnswer(result) {
 
     // Entités trouvées (cliquables → focus dans le graphe)
     if (result.entities && result.entities.length > 0) {
-        html += '<div class="ask-entities"><span class="ask-entities-label">🔗 Entités:</span>';
+        html += '<div class="ask-entities"><span class="ask-entities-label">🔗 Entities:</span>';
         result.entities.forEach(name => {
-            html += `<span class="ask-entity-tag" data-action="focus-node" data-node-id="${escapeHtml(name)}" title="Voir dans le graphe">${escapeHtml(name)}</span>`;
+            html += `<span class="ask-entity-tag" data-action="focus-node" data-node-id="${escapeHtml(name)}" title="View in graph">${escapeHtml(name)}</span>`;
         });
         html += '</div>';
     }
@@ -105,13 +105,13 @@ function displayAnswer(result) {
     html += '<div class="ask-actions">';
 
     if (result.entities && result.entities.length > 0) {
-        html += `<button class="ask-isolate-btn" data-action="isolate-from-ask" title="Afficher uniquement le sous-graphe lié à cette question">
-            🔬 Isoler le sujet
+        html += `<button class="ask-isolate-btn" data-action="isolate-from-ask" title="Show only the subgraph related to this question">
+            🔬 Isolate topic
         </button>`;
     }
 
     // Bouton Export HTML (toujours visible quand il y a une réponse)
-    html += `<button class="ask-export-btn" data-action="export-answer-html" title="Télécharger la réponse en HTML">
+    html += `<button class="ask-export-btn" data-action="export-answer-html" title="Download the answer as HTML">
         📥 Export HTML
     </button>`;
 
@@ -140,14 +140,14 @@ function exportAnswerHtml() {
     const result = lastAnswerResult;
     const answerHtml = marked.parse(result.answer || '', { breaks: true, gfm: true });
     const now = new Date();
-    const dateStr = now.toLocaleDateString('fr-FR', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const memoryId = appState.currentMemory || 'inconnu';
+    const dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const memoryId = appState.currentMemory || 'unknown';
 
     // Construire les sections optionnelles
     let entitiesSection = '';
     if (result.entities && result.entities.length > 0) {
         const tags = result.entities.map(e => `<span class="entity-tag">${escapeHtml(e)}</span>`).join(' ');
-        entitiesSection = `<div class="section"><h3>🔗 Entités identifiées</h3><div class="entities">${tags}</div></div>`;
+        entitiesSection = `<div class="section"><h3>🔗 Identified entities</h3><div class="entities">${tags}</div></div>`;
     }
 
     let sourcesSection = '';
@@ -156,15 +156,15 @@ function exportAnswerHtml() {
             const name = doc.filename || doc.id || '?';
             return `<div class="source-item">📄 ${escapeHtml(name)}</div>`;
         }).join('');
-        sourcesSection = `<div class="section"><h3>📄 Documents sources</h3>${items}</div>`;
+        sourcesSection = `<div class="section"><h3>📄 Source documents</h3>${items}</div>`;
     }
 
     const htmlContent = `<!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Graph Memory — Réponse</title>
+    <title>Graph Memory — Answer</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -271,19 +271,19 @@ function exportAnswerHtml() {
 <body>
     <div class="container">
         <div class="header-bar">
-            <h1>Graph Memory — Réponse</h1>
+            <h1>Graph Memory — Answer</h1>
             <span class="brand">Cloud Temple</span>
         </div>
         <div class="meta">
             <span>📅 ${escapeHtml(dateStr)}</span>
-            <span>🧠 Mémoire : <strong>${escapeHtml(memoryId)}</strong></span>
+            <span>🧠 Memory: <strong>${escapeHtml(memoryId)}</strong></span>
         </div>
         <div class="question-box">💬 ${escapeHtml(lastQuestion)}</div>
         <div class="answer">${answerHtml}</div>
         ${entitiesSection}
         ${sourcesSection}
         <div class="footer">
-            Généré par Graph Memory — Cloud Temple — ${escapeHtml(dateStr)}
+            Generated by Graph Memory — Cloud Temple — ${escapeHtml(dateStr)}
         </div>
     </div>
 </body>

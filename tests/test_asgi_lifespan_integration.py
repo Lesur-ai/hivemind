@@ -698,10 +698,11 @@ class TestOperatorLifecycleContract:
 
         for changelog_path in changelogs:
             changelog = changelog_path.read_text(encoding="utf-8")
-            current_start = changelog.index("## [Unreleased]")
-            current_end = changelog.index("\n## [", current_start + 1)
+            lifecycle_heading = "## [1.4.0] — 2026-08-07"
+            section_start = changelog.index(lifecycle_heading)
+            section_end = changelog.index("\n## [", section_start + 1)
             current = " ".join(
-                changelog[current_start:current_end].split()
+                changelog[section_start:section_end].split()
             )
             for required in (
                 "Process-scoped ASGI lifecycle is now explicit and fail-closed",

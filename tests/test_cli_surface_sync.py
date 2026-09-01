@@ -258,7 +258,7 @@ def test_recipe_three_e2e_paths_use_terminal_wait_helper():
             in source
         )
     assert source.count("outcome = await _consolidate_and_wait(agent,") == 3
-    assert "aucun push long exécuté" in source
+    assert "no long-memory push was run" in source
 
 
 def test_click_exposes_consolidation_queues():
@@ -1165,6 +1165,250 @@ def test_click_space_create_surfaces_actionable_partial_recovery(monkeypatch):
     assert success_rendered == []
 
 
+def test_click_bank_compact_uses_structured_failure_renderer(monkeypatch):
+    partial = {
+        "status": "partial",
+        "recovery_required": True,
+        "failure_reason": "compaction_apply_recovery_unverified",
+        "total_size_after": None,
+        "failed_phase": "apply",
+        "rollback_outcome": "unverified",
+        "preimage_id": "project-a/2026-08-18T12-00-00-deadbeef",
+        "failures": [{"filename": "facts.md", "error": "compaction_apply_failed"}],
+        "files": [{"filename": "facts.md", "source_sha256": "a" * 64}],
+        "remediation": "Inspect the retained preimage; do not retry automatically.",
+    }
+    failed = {
+        "status": "error",
+        "failure_reason": "compaction_prepare_failed",
+        "failures": [{"filename": "facts.md", "error": "invalid_compaction_json"}],
+        "remediation": "Correct the document before retrying.",
+    }
+    responses = [partial, failed]
+    structured, successes, generic_errors = [], [], []
+
+    class FakeClient:
+        def __init__(self, url, token):
+            pass
+
+        async def call_tool(self, name, args):
+            assert name == "bank_compact"
+            assert args == {"space_id": "project-a", "dry_run": True}
+            return responses.pop(0)
+
+    monkeypatch.setattr(commands, "MCPClient", FakeClient)
+    monkeypatch.setattr(
+        commands, "show_bank_compact_failure", structured.append, raising=False
+    )
+    monkeypatch.setattr(
+        commands, "show_bank_compact_result", successes.append, raising=False
+    )
+    monkeypatch.setattr(commands, "show_error", generic_errors.append)
+
+    runner = CliRunner()
+    partial_result = runner.invoke(cli, ["bank", "compact", "project-a"])
+    failed_result = runner.invoke(cli, ["bank", "compact", "project-a"])
+
+    assert partial_result.exit_code == failed_result.exit_code == 0
+    assert structured == [partial, failed]
+    assert successes == []
+    assert generic_errors == []
+
+
+def test_click_bank_compact_conflict_is_not_rendered_as_failure(monkeypatch):
+    conflict = {
+        "status": "conflict",
+        "message": "Compaction is already running for project-a",
+    }
+    structured, successes, generic_errors = [], [], []
+
+    class FakeClient:
+        def __init__(self, url, token):
+            pass
+
+        async def call_tool(self, name, args):
+            assert name == "bank_compact"
+            assert args == {"space_id": "project-a", "dry_run": True}
+            return conflict
+
+    monkeypatch.setattr(commands, "MCPClient", FakeClient)
+    monkeypatch.setattr(
+        commands, "show_bank_compact_failure", structured.append, raising=False
+    )
+    monkeypatch.setattr(
+        commands, "show_bank_compact_result", successes.append, raising=False
+    )
+    monkeypatch.setattr(commands, "show_error", generic_errors.append)
+
+    result = CliRunner().invoke(cli, ["bank", "compact", "project-a"])
+
+    assert result.exit_code == 0, result.output
+    assert structured == []
+    assert successes == []
+    assert generic_errors == [conflict["message"]]
+
+
+def test_click_generic_conflict_fallback_is_operation_neutral(monkeypatch):
+    """The shared CLI helper must not call a message-less lock a compaction."""
+
+    generic_errors, successes = [], []
+
+    class ConflictClient:
+        def __init__(self, url, token):
+            assert (url, token) == ("http://localhost", "token")
+
+        async def call_tool(self, name, args):
+            assert (name, args) == ("bank_consolidate", {"space_id": "project-a"})
+            return {"status": "conflict"}
+
+    monkeypatch.setattr(commands, "MCPClient", ConflictClient)
+    monkeypatch.setattr(commands, "show_error", generic_errors.append)
+
+    ctx = type("Context", (), {"obj": {"url": "http://localhost", "token": "token"}})()
+    commands._run_tool(
+        ctx,
+        "bank_consolidate",
+        {"space_id": "project-a"},
+        successes.append,
+    )
+
+    assert successes == []
+    assert generic_errors == ["Operation is currently busy"]
+
+
+def test_bank_compact_failure_renderer_keeps_recovery_non_success_and_safe(
+    monkeypatch,
+):
+    stream = io.StringIO()
+    monkeypatch.setattr(
+        display,
+        "console",
+        display.Console(file=stream, color_system=None, width=180),
+    )
+    payload = {
+        "status": "partial",
+        "recovery_required": True,
+        "failure_reason": "compaction_apply_recovery_unverified",
+        "total_size_after": None,
+        "failed_phase": "apply",
+        "rollback_outcome": "unverified",
+        "preimage_id": "project-a/2026-08-18T12-00-00-deadbeef",
+        "failures": [
+            {
+                "filename": "facts[unsafe].md",
+                "error": "ambiguous_or_missing_compaction_target",
+                "operation_index": 3,
+                "target_resolution": "missing",
+                "target_match_count": 0,
+                "target_heading_sha256": "a" * 64,
+                "heading": "CLI_RAW_COMPLETION_SECRET_4f27",
+            }
+        ],
+        "files": [{"filename": "facts[unsafe].md", "source_sha256": "a" * 64}],
+        "remediation": "Inspect the retained preimage; do not retry automatically.",
+        "message": "A [server] message",
+    }
+
+    display.show_bank_compact_failure(payload)
+
+    output = stream.getvalue()
+    assert "Recovery Required (not successful)" in output
+    assert "failure_reason: compaction_apply_recovery_unverified" in output
+    assert "total_size_after: unknown / not asserted" in output
+    assert "failed_phase: apply" in output
+    assert "rollback_outcome: unverified" in output
+    assert "preimage_id: project-a/2026-08-18T12-00-00-deadbeef" in output
+    assert "facts[unsafe].md" in output
+    assert "operation_index=3" in output
+    assert "target_resolution=missing" in output
+    assert "target_match_count=0" in output
+    assert "target_heading_sha256=" + "a" * 64 in output
+    assert "CLI_RAW_COMPLETION_SECRET_4f27" not in output
+    assert "source_sha256=" + "a" * 64 in output
+    assert "No automatic retry or restore was performed." in output
+    assert "Bank Compact" not in output
+
+
+def test_consolidation_job_renderer_shows_only_safe_compaction_failures(monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.setattr(
+        display,
+        "console",
+        display.Console(file=stream, color_system=None, width=180),
+    )
+    display.show_consolidation_job(
+        {
+            "status": "failed",
+            "job_id": "consol_123",
+            "space_id": "project-a",
+            "agent": "alice",
+            "requested_by": "alice",
+            "queue_position": 0,
+            "error": "Consolidation stopped safely.",
+            "result": {
+                "compaction_failures": [
+                    {
+                        "filename": "facts.md",
+                        "error": "ambiguous_or_missing_compaction_target",
+                        "operation_index": 0,
+                        "target_resolution": "ambiguous",
+                        "target_match_count": 2,
+                        "target_heading_sha256": "b" * 64,
+                        "heading": "CLI_JOB_RAW_COMPLETION_SECRET_9a31",
+                    }
+                ]
+            },
+        }
+    )
+
+    output = stream.getvalue()
+    assert "Compaction failures:" in output
+    assert "operation_index=0" in output
+    assert "target_resolution=ambiguous" in output
+    assert "target_match_count=2" in output
+    assert "target_heading_sha256=" + "b" * 64 in output
+    assert "CLI_JOB_RAW_COMPLETION_SECRET_9a31" not in output
+
+
+def test_bank_compact_success_renderer_does_not_invent_nullable_post_size(monkeypatch):
+    stream = io.StringIO()
+    monkeypatch.setattr(
+        display,
+        "console",
+        display.Console(file=stream, color_system=None, width=180),
+    )
+
+    display.show_bank_compact_result(
+        {
+            "status": "ok",
+            "dry_run": False,
+            "space_id": "project-a",
+            "files_total": 1,
+            "files_over_limit": 1,
+            "total_size_before": 400,
+            "total_size_after": None,
+            "files": [
+                {
+                    "filename": "facts.md",
+                    "size": 400,
+                    "max_size": 100,
+                    "source_sha256": "a" * 64,
+                    "result_sha256": "b" * 64,
+                    "ratio": 4.0,
+                    "over_limit": True,
+                    "compacted_size": 60,
+                }
+            ],
+        }
+    )
+
+    output = stream.getvalue()
+    assert "UTF-8 bytes" in output
+    assert "unknown / not asserted" in output
+    assert "Source SHA-256" in output
+    assert "Result SHA-256" in output
+
+
 def test_space_recovery_renderer_preserves_typed_values_and_is_not_success(
     monkeypatch,
 ):
@@ -1219,6 +1463,61 @@ async def test_shell_surfaces_partial_recovery_credential(monkeypatch):
     await shell.dispatch(PartialClient(), "token create uncertain -p read,write", False)
 
     assert rendered == [payload]
+
+
+async def test_shell_bank_compact_uses_structured_failure_renderer(monkeypatch):
+    payload = {
+        "status": "partial",
+        "recovery_required": True,
+        "failure_reason": "compaction_apply_recovery_unverified",
+        "total_size_after": None,
+        "preimage_id": "project-a/2026-08-18T12-00-00-deadbeef",
+        "failures": [{"filename": "facts.md", "error": "compaction_apply_failed"}],
+        "remediation": "Inspect the retained preimage; do not retry automatically.",
+    }
+    structured, successes, generic_errors = [], [], []
+
+    class PartialClient:
+        async def call_tool(self, name, args):
+            assert name == "bank_compact"
+            assert args == {"space_id": "project-a", "dry_run": True}
+            return payload
+
+    monkeypatch.setattr(
+        shell, "show_bank_compact_failure", structured.append, raising=False
+    )
+    monkeypatch.setattr(shell, "show_bank_compact_result", successes.append)
+    monkeypatch.setattr(shell, "show_error", generic_errors.append)
+    await shell.dispatch(PartialClient(), "bank compact project-a", False)
+
+    assert structured == [payload]
+    assert successes == []
+    assert generic_errors == []
+
+
+async def test_shell_bank_compact_conflict_is_not_rendered_as_failure(monkeypatch):
+    conflict = {
+        "status": "conflict",
+        "message": "Compaction is already running for project-a",
+    }
+    structured, successes, generic_errors = [], [], []
+
+    class ConflictClient:
+        async def call_tool(self, name, args):
+            assert name == "bank_compact"
+            assert args == {"space_id": "project-a", "dry_run": True}
+            return conflict
+
+    monkeypatch.setattr(
+        shell, "show_bank_compact_failure", structured.append, raising=False
+    )
+    monkeypatch.setattr(shell, "show_bank_compact_result", successes.append)
+    monkeypatch.setattr(shell, "show_error", generic_errors.append)
+    await shell.dispatch(ConflictClient(), "bank compact project-a", False)
+
+    assert structured == []
+    assert successes == []
+    assert generic_errors == [conflict["message"]]
 
 
 async def test_shell_space_partial_uses_only_recovery_renderer(monkeypatch):

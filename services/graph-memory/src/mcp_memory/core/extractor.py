@@ -31,10 +31,10 @@ from .models import (
 from .ontology import Ontology, get_ontology_manager
 
 
-# Prompt d'extraction MINIMAL (fallback sans ontologie).
-# Toute la logique métier (types d'entités, relations, règles) vient de l'ontologie.
-# Ce prompt n'est utilisé que par extract_from_text() quand aucune ontologie n'est chargée.
-EXTRACTION_PROMPT = """Tu es un expert en extraction d'information structurée. Analyse le document suivant et extrait les entités et relations importantes.
+# Minimal extraction prompt used as a fallback without an ontology.
+# Domain logic (entity types, relations, and rules) comes from the ontology.
+# This prompt is used only by extract_from_text() when no ontology is loaded.
+EXTRACTION_PROMPT = """You are an expert in structured information extraction. Analyze the following document and extract important entities and relations.
 
 DOCUMENT:
 ---
@@ -42,25 +42,26 @@ DOCUMENT:
 ---
 
 INSTRUCTIONS:
-1. Identifie les entités nommées (personnes, organisations, lieux, concepts, valeurs)
-2. Identifie les relations entre ces entités
-3. Fournis un bref résumé
+1. Identify named entities such as people, organizations, places, concepts, and values.
+2. Identify relations between those entities.
+3. Provide a short summary.
 
-Les noms d'entités doivent être explicites et inclure les valeurs quand pertinent.
-Crée des relations ENTRE les entités les plus spécifiques, pas tout vers une entité centrale.
-Utilise des types de relations descriptifs (SIGNED_BY, HAS_DURATION, DEFINES, etc.) plutôt que RELATED_TO.
+Entity names must be explicit and include values when relevant.
+Create relations between the most specific entities instead of connecting
+everything to a central entity. Prefer descriptive relation types such as
+SIGNED_BY, HAS_DURATION, and DEFINES over RELATED_TO.
 
-Réponds UNIQUEMENT avec un JSON valide:
+Return ONLY valid JSON:
 ```json
 {{
   "entities": [
-    {{"name": "Nom de l'entité", "type": "Person|Organization|Concept|Other", "description": "Description courte"}}
+    {{"name": "Entity name", "type": "Person|Organization|Concept|Other", "description": "Short description"}}
   ],
   "relations": [
-    {{"from_entity": "Nom entité source", "to_entity": "Nom entité cible", "type": "TYPE_RELATION", "description": "Description"}}
+    {{"from_entity": "Source entity", "to_entity": "Target entity", "type": "RELATION_TYPE", "description": "Description"}}
   ],
-  "summary": "Résumé du document en 2-3 phrases",
-  "key_topics": ["sujet1", "sujet2"]
+  "summary": "A 2-3 sentence document summary",
+  "key_topics": ["topic1", "topic2"]
 }}
 ```
 """
@@ -148,13 +149,13 @@ class ExtractorService:
         prompt = EXTRACTION_PROMPT.format(document_text=text)
         
         try:
-            print(f"🔍 [Extractor] Extraction en cours ({len(text)} chars)...", file=sys.stderr)
+            print(f"🔍 [Extractor] Extracting ({len(text)} chars)...", file=sys.stderr)
             
             chat_result = await self._complete(
                 [
                     {
                         "role": "system",
-                        "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
+                        "content": "You specialize in structured information extraction. Reply with valid JSON only."
                     },
                     {
                         "role": "user",
@@ -169,23 +170,23 @@ class ExtractorService:
             print(f"🔍 [Extractor] DEBUG finish_reason: {chat_result.finish_reason}", file=sys.stderr)
             content = chat_result.text
             if not content:
-                print(f"⚠️ [Extractor] Réponse LLM vide (finish_reason={chat_result.finish_reason})", file=sys.stderr)
+                print(f"⚠️ [Extractor] Empty LLM response (finish_reason={chat_result.finish_reason})", file=sys.stderr)
                 return ExtractionResult(summary=None)
 
             print(f"🔍 [Extractor] DEBUG content length: {len(content)}", file=sys.stderr)
             result = self._parse_extraction(content)
 
-            print(f"✅ [Extractor] Extrait: {len(result.entities)} entités, {len(result.relations)} relations", file=sys.stderr)
+            print(f"✅ [Extractor] Extracted: {len(result.entities)} entities, {len(result.relations)} relations", file=sys.stderr)
 
             return result
 
         except InferenceError as e:
             if e.category == "timeout":
-                print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
+                print("⏰ [Extractor] Timeout — the document may be too long", file=sys.stderr)
             else:
                 # Enveloppe sûre par construction (ADR-0027) ; redaction
                 # conservée en défense en profondeur.
-                print(f"❌ [Extractor] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [Extractor] Provider error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
 
     def _parse_extraction(
@@ -257,7 +258,7 @@ class ExtractorService:
             # Pydantic). Il suit le même chemin dégradé qu'un JSON invalide afin
             # que l'ingestion RAG puisse continuer sans publier la complétion.
             print(
-                "⚠️ [Extractor] Réponse structurée invalide: "
+                "⚠️ [Extractor] Invalid structured response: "
                 f"kind={type(e).__name__} raw_len={len(content)}",
                 file=sys.stderr,
             )
@@ -288,7 +289,7 @@ class ExtractorService:
                 return kt  # Casse exacte de l'ontologie
         
         # LOG: capturer les types LLM rejetés pour analyse
-        print(f"⚠️ [Normalize] Type LLM rejeté: '{type_str}' → Other (known: {len(known_types)} types)", file=sys.stderr)
+        print(f"⚠️ [Normalize] Rejected LLM type: '{type_str}' → Other (known: {len(known_types)} types)", file=sys.stderr)
         return "Other"
     
     # Types de base (utilisés quand aucune ontologie n'est chargée)
@@ -348,22 +349,22 @@ class ExtractorService:
         if not ontology:
             available = [o["name"] for o in ontology_manager.list_ontologies()]
             raise ValueError(
-                f"Ontologie '{ontology_name}' introuvable. "
-                f"Ontologies disponibles: {available}. "
-                f"Chaque mémoire DOIT avoir une ontologie valide."
+                f"Ontology '{ontology_name}' not found. "
+                f"Available ontologies: {available}. "
+                "Every memory MUST have a valid ontology."
             )
         
         # Construire le prompt avec l'ontologie
         prompt = ontology.build_prompt(text)
         
         try:
-            print(f"🔍 [Extractor] Extraction avec ontologie '{ontology.name}' ({len(text)} chars)...", file=sys.stderr)
+            print(f"🔍 [Extractor] Extracting with ontology '{ontology.name}' ({len(text)} chars)...", file=sys.stderr)
             
             chat_result = await self._complete(
                 [
                     {
                         "role": "system",
-                        "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
+                        "content": "You specialize in structured information extraction. Reply with valid JSON only."
                     },
                     {
                         "role": "user",
@@ -374,7 +375,7 @@ class ExtractorService:
 
             content = chat_result.text
             if not content:
-                print(f"⚠️ [Extractor] Réponse LLM vide", file=sys.stderr)
+                print("⚠️ [Extractor] Empty LLM response", file=sys.stderr)
                 return ExtractionResult(summary=None)
 
             # Extraire les types depuis l'ontologie chargée
@@ -383,7 +384,7 @@ class ExtractorService:
             } | self.BASE_RELATION_TYPES  # Union avec les types de base
             ontology_entity_types = {et.name for et in ontology.entity_types}
             
-            print(f"🔗 [Extractor] Types ontologie '{ontology.name}': {len(ontology_entity_types)} entités, {len(ontology_relation_types)} relations", file=sys.stderr)
+            print(f"🔗 [Extractor] Ontology '{ontology.name}' types: {len(ontology_entity_types)} entities, {len(ontology_relation_types)} relations", file=sys.stderr)
             
             result = self._parse_extraction(
                 content,
@@ -391,15 +392,15 @@ class ExtractorService:
                 known_entity_types=ontology_entity_types,
             )
             
-            print(f"✅ [Extractor] Extrait ({ontology.name}): {len(result.entities)} entités, {len(result.relations)} relations", file=sys.stderr)
+            print(f"✅ [Extractor] Extracted ({ontology.name}): {len(result.entities)} entities, {len(result.relations)} relations", file=sys.stderr)
 
             return result
 
         except InferenceError as e:
             if e.category == "timeout":
-                print(f"⏰ [Extractor] Timeout - le document est peut-être trop long", file=sys.stderr)
+                print("⏰ [Extractor] Timeout — the document may be too long", file=sys.stderr)
             else:
-                print(f"❌ [Extractor] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [Extractor] Provider error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
 
     # =========================================================================
@@ -438,15 +439,15 @@ class ExtractorService:
         max_text_length = settings.extraction_max_text_length
         if len(text) > max_text_length:
             raise ValueError(
-                f"Document trop volumineux pour l'extraction : {len(text):,} caractères "
-                f"(limite : {max_text_length:,} caractères, configurable via EXTRACTION_MAX_TEXT_LENGTH). "
-                f"Avec des chunks de {chunk_size:,} chars, cela représenterait "
-                f"~{len(text) // chunk_size} appels LLM."
+                f"Document is too large for extraction: {len(text):,} characters "
+                f"(limit: {max_text_length:,}, configurable through EXTRACTION_MAX_TEXT_LENGTH). "
+                f"With {chunk_size:,}-character chunks, this would require about "
+                f"{len(text) // chunk_size} LLM calls."
             )
         
         # Si le texte tient dans un seul chunk, pas besoin de découper
         if len(text) <= chunk_size:
-            print(f"📄 [Extractor] Document court ({len(text)} chars ≤ {chunk_size}) → extraction simple",
+            print(f"📄 [Extractor] Short document ({len(text)} chars ≤ {chunk_size}) → single extraction",
                   file=sys.stderr)
             if progress_callback:
                 await progress_callback("extraction_start", {
@@ -466,7 +467,7 @@ class ExtractorService:
         
         # Découper le texte en chunks aux frontières de sections
         chunks = self._split_text_for_extraction(text, chunk_size)
-        print(f"📐 [Extractor] Document long ({len(text)} chars) → {len(chunks)} chunks d'extraction",
+        print(f"📐 [Extractor] Long document ({len(text)} chars) → {len(chunks)} extraction chunks",
               file=sys.stderr)
         
         # Notifier le début de l'extraction multi-chunk
@@ -483,8 +484,8 @@ class ExtractorService:
         if not ontology:
             available = [o["name"] for o in ontology_manager.list_ontologies()]
             raise ValueError(
-                f"Ontologie '{ontology_name}' introuvable. "
-                f"Ontologies disponibles: {available}."
+                f"Ontology '{ontology_name}' not found. "
+                f"Available ontologies: {available}."
             )
         
         # Types depuis l'ontologie (entités et relations)
@@ -508,7 +509,7 @@ class ExtractorService:
                 cumulative_context = self._build_cumulative_context(all_entities, all_relations)
             
             print(f"🔄 [Extractor] Chunk {chunk_num}/{len(chunks)} "
-                  f"({len(chunk_text)} chars, contexte cumulatif: {len(all_entities)} entités, "
+                  f"({len(chunk_text)} chars, cumulative context: {len(all_entities)} entities, "
                   f"{len(all_relations)} relations)", file=sys.stderr)
             
             # Construire le prompt avec contexte cumulatif
@@ -519,7 +520,7 @@ class ExtractorService:
                     [
                         {
                             "role": "system",
-                            "content": "Tu es un assistant spécialisé dans l'extraction d'information structurée. Tu réponds uniquement en JSON valide."
+                            "content": "You specialize in structured information extraction. Reply with valid JSON only."
                         },
                         {
                             "role": "user",
@@ -530,7 +531,7 @@ class ExtractorService:
 
                 content = chat_result.text
                 if not content:
-                    print(f"⚠️ [Extractor] Chunk {chunk_num}: réponse LLM vide", file=sys.stderr)
+                    print(f"⚠️ [Extractor] Chunk {chunk_num}: empty LLM response", file=sys.stderr)
                     continue
 
                 result = self._parse_extraction(
@@ -539,7 +540,7 @@ class ExtractorService:
                     known_entity_types=ontology_entity_types,
                 )
                 
-                print(f"✅ [Extractor] Chunk {chunk_num}: +{len(result.entities)} entités, "
+                print(f"✅ [Extractor] Chunk {chunk_num}: +{len(result.entities)} entities, "
                       f"+{len(result.relations)} relations", file=sys.stderr)
                 
                 # Accumuler les résultats
@@ -562,18 +563,18 @@ class ExtractorService:
                 
             except InferenceError as e:
                 if e.category == "timeout":
-                    print(f"⏰ [Extractor] Timeout chunk {chunk_num}/{len(chunks)} — on continue", file=sys.stderr)
+                    print(f"⏰ [Extractor] Chunk {chunk_num}/{len(chunks)} timed out — continuing", file=sys.stderr)
                     # On continue avec les chunks suivants au lieu de tout perdre
                     continue
-                print(f"❌ [Extractor] Erreur provider chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [Extractor] Provider error for chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
                 raise
         
         # Fusionner les résultats
         merged = self._merge_extraction_results(all_entities, all_relations, all_summaries, all_key_topics)
         
-        print(f"🏁 [Extractor] Extraction chunked terminée: "
-              f"{len(merged.entities)} entités, {len(merged.relations)} relations "
-              f"(depuis {len(chunks)} chunks)", file=sys.stderr)
+        print(f"🏁 [Extractor] Chunked extraction completed: "
+              f"{len(merged.entities)} entities, {len(merged.relations)} relations "
+              f"(from {len(chunks)} chunks)", file=sys.stderr)
         
         return merged
 
@@ -673,14 +674,14 @@ class ExtractorService:
             entity_lines = []
             for e in entities:
                 entity_lines.append(f"- {e.name} ({e.type})")
-            parts.append("ENTITÉS DÉJÀ EXTRAITES:\n" + "\n".join(entity_lines))
+            parts.append("ENTITIES ALREADY EXTRACTED:\n" + "\n".join(entity_lines))
         
         # Liste compacte des relations (from --TYPE--> to)
         if relations:
             relation_lines = []
             for r in relations:
                 relation_lines.append(f"- {r.from_entity} --{r.type}--> {r.to_entity}")
-            parts.append("RELATIONS DÉJÀ EXTRAITES:\n" + "\n".join(relation_lines))
+            parts.append("RELATIONS ALREADY EXTRACTED:\n" + "\n".join(relation_lines))
         
         return "\n\n".join(parts)
 
@@ -777,7 +778,7 @@ class ExtractorService:
                 return {
                     "status": "error",
                     "model": "",
-                    "message": "Erreur LLMaaS: provider chat non configuré",
+                    "message": "LLMaaS error: chat provider is not configured",
                 }
             discovery_contract = protected_certification_model_discovery(
                 role="chat",
@@ -790,8 +791,8 @@ class ExtractorService:
                     "status": "ok",
                     "model": self._model,
                     "message": (
-                        "Catalogue LLMaaS non disponible pour le profil "
-                        "de certification protégé"
+                        "LLMaaS catalog unavailable for the protected "
+                        "certification profile"
                     ),
                 }
             probe = runtime.chat_probe()
@@ -806,18 +807,18 @@ class ExtractorService:
                 "status": "error",
                 "model": self._model,
                 # P12-3 : jamais d'URL proxy brute dans la sortie santé.
-                "message": f"Erreur LLMaaS: {redact_proxy_secrets(str(e))}",
+                "message": f"LLMaaS error: {redact_proxy_secrets(str(e))}",
             }
         if result.healthy:
             return {
                 "status": "ok",
                 "model": self._model,
-                "message": "Connexion LLMaaS réussie",
+                "message": "LLMaaS connection successful",
             }
         return {
             "status": "error",
             "model": self._model,
-            "message": "Erreur LLMaaS: provider unreachable"
+            "message": "LLMaaS error: provider unreachable"
             + (
                 f" ({result.error_category})"
                 if result.error_category is not None
@@ -845,7 +846,7 @@ class ExtractorService:
                 [
                     {
                         "role": "system",
-                        "content": "Tu es un assistant expert qui répond à des questions basées sur un graphe de connaissances. Réponds de manière concise et précise."
+                        "content": "You are an expert assistant answering questions from a knowledge graph. Answer concisely and accurately."
                     },
                     {
                         "role": "user",
@@ -854,17 +855,17 @@ class ExtractorService:
                 ]
             )
 
-            return chat_result.text or "Pas de réponse générée."
+            return chat_result.text or "No answer was generated."
 
         except Exception as e:
             # P12-3 R1 : chemin récupéré retourné au client — redaction
             # systématique (no-op sans secret proxy dans le message).
             safe_message = redact_proxy_secrets(str(e))
             print(
-                f"❌ [Extractor] Erreur génération réponse: {safe_message}",
+                f"❌ [Extractor] Answer-generation error: {safe_message}",
                 file=sys.stderr,
             )
-            return f"Erreur lors de la génération de la réponse: {safe_message}"
+            return f"Error generating the answer: {safe_message}"
 
 
 # Singleton pour usage global

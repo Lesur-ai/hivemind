@@ -771,8 +771,8 @@ async def test_restore_over_local_only_space_unchanged_passthrough(monkeypatch):
     result = await BackupService().restore(BACKUP_ID, unsafe_recovery=False)
 
     assert result["status"] == "error"
-    # Message hérité (PAS hive-aware) : « espace existe déjà »
-    assert "existe déjà" in result["message"]
+    # Legacy (non-hive-aware) message: the space already exists.
+    assert "already exists" in result["message"]
     assert "unsafe_recovery" not in result["message"]
 
 
@@ -918,7 +918,7 @@ async def test_restore_corrupt_backup_critical_file_refused_fail_closed(
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg or "invalide" in msg
+    assert "corrupt" in msg or "invalid" in msg
     # ZÉRO mutation : le refus est AVANT toute écriture durable (en
     # particulier AVANT le marker RESYNC_REQUIRED, donc node_status reste tel
     # qu'il était).
@@ -947,7 +947,7 @@ async def test_restore_corrupt_backup_tombstone_refused_fail_closed(monkeypatch)
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "tombstone" in msg or "corrompu" in msg
+    assert "tombstone" in msg or "corrupt" in msg
     # ZÉRO mutation : le live reste tel quel.
     assert storage.objects == before
     health = await store.get_node_status()
@@ -971,7 +971,7 @@ async def test_restore_corrupt_live_token_refused_no_mutation(monkeypatch):
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg
+    assert "corrupt" in msg
     # ZÉRO mutation : marker RESYNC_REQUIRED NON posé.
     assert storage.objects == before
 
@@ -1000,7 +1000,7 @@ async def test_restore_corrupt_live_queue_refused_no_mutation(monkeypatch):
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg
+    assert "corrupt" in msg
     # ZÉRO mutation
     assert storage.objects == before
 
@@ -1028,7 +1028,7 @@ async def test_restore_corrupt_live_watermark_refused_no_mutation(monkeypatch):
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg
+    assert "corrupt" in msg
     # ZÉRO mutation : marker NON posé.
     assert storage.objects == before
 
@@ -1176,7 +1176,7 @@ async def test_restore_schema_violation_in_backup_refused_fail_closed(
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg or "schéma" in msg or "invariant" in msg
+    assert "corrupt" in msg or "schema" in msg or "invariant" in msg
     # ZÉRO mutation : refus AVANT marker.
     assert storage.objects == before
     # node_status pas marqué RESYNC_REQUIRED.
@@ -1223,7 +1223,7 @@ async def test_restore_refuses_live_token_held_without_lease_until(monkeypatch):
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg
+    assert "corrupt" in msg
     assert storage.objects == before
     health = await store.get_node_status()
     assert health is None or health.status != HiveNodeStatus.RESYNC_REQUIRED.value
@@ -1260,7 +1260,7 @@ async def test_restore_refuses_live_token_held_without_holder_node_id(monkeypatc
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg
+    assert "corrupt" in msg
     assert storage.objects == before
 
 
@@ -1297,7 +1297,7 @@ async def test_restore_refuses_live_token_term_in_future(monkeypatch):
 
     assert result["status"] == "error"
     msg = result["message"].lower()
-    assert "corrompu" in msg
+    assert "corrupt" in msg
     assert storage.objects == before
 
 

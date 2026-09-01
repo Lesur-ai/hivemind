@@ -146,6 +146,14 @@ class WriteSinkFakeStorage(FakeStorage):
                 pass
         return deleted
 
+    async def copy_object(self, source_key: str, dest_key: str) -> None:
+        """Mirror the backup primitive without broadening ``FakeStorage``."""
+
+        content = await self.get(source_key)
+        if content is None:
+            raise FileNotFoundError(source_key)
+        await self.put(dest_key, content)
+
 
 class RecordingFakeStorage(WriteSinkFakeStorage):
     """Captures the exact args forwarded to ``put`` so the test can assert the

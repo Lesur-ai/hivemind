@@ -11,11 +11,42 @@
     const CATEGORIES = ['', 'observation', 'decision', 'todo', 'insight', 'question', 'progress', 'issue'];
     const SENTINEL_STATUSES = new Set(['read_only', 'rate_limited', 'truncated']);
     const RULES_LIMIT = 50000;
+    const SOURCE_STATE_TOKEN_RE = /^[0-9a-f]{64}$/;
     const JOB_GUARANTEE_TOOLTIP = 'Job state lives in server memory: it does not survive a restart and history is trimmed.';
     let currentView = null;
 
     function safe(value) {
         return esc(String(value ?? ''));
+    }
+
+    function safeCompactionTargetDetail(failure) {
+        if (!failure || typeof failure !== 'object'
+            || failure.error !== 'ambiguous_or_missing_compaction_target') return '';
+        const index = failure.operation_index;
+        const resolution = failure.target_resolution;
+        const count = failure.target_match_count;
+        const sha256 = failure.target_heading_sha256;
+        if (!Number.isSafeInteger(index) || index < 0
+            || (resolution !== 'missing' && resolution !== 'ambiguous')
+            || !Number.isSafeInteger(count) || count < 0
+            || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)
+            || (resolution === 'missing' && count !== 0)
+            || (resolution === 'ambiguous' && count < 2)) return '';
+        return `operation_index=${index}; target_resolution=${resolution}; target_match_count=${count}; target_heading_sha256=${sha256}`;
+    }
+
+    function renderSafeCompactionFailures(result) {
+        const failures = result && Array.isArray(result.compaction_failures)
+            ? result.compaction_failures : [];
+        const rows = failures.map(failure => {
+            if (!failure || typeof failure !== 'object'
+                || typeof failure.filename !== 'string' || typeof failure.error !== 'string') return '';
+            const detail = safeCompactionTargetDetail(failure);
+            return `<tr><td class="mono-data">${safe(failure.filename)}</td><td class="mono-data">${safe(failure.error)}</td><td class="mono-data">${safe(detail || '—')}</td></tr>`;
+        }).join('');
+        return rows
+            ? `<div class="sd-job-result"><h4>Compaction failures</h4>${dataTable(['File', 'Safe failure', 'Target resolution'], rows)}</div>`
+            : '';
     }
 
     function guaranteeBadge(value) {
@@ -32,6 +63,64 @@
 
     function guarded(view, epochAtCall) {
         return currentView === view && epochAtCall === AdminRouter.epoch;
+    }
+
+    function meshReadinessAvailable(view) {
+        return hasPermission(view, 'admin')
+            && typeof meshIsAvailable === 'function'
+            && meshIsAvailable() === true;
+    }
+
+    function authoritativeMeshSource(view, result) {
+        const source = result && result.status === 'ok' ? result.source : null;
+        if (!source || source.space_id !== view.spaceId || !SPACE_ID_RE.test(source.space_id)) return null;
+        if (typeof source.state !== 'string'
+            || typeof source.source_ready !== 'boolean'
+            || typeof source.source_initializable !== 'boolean'
+            || typeof source.can_create_invitation !== 'boolean'
+            || typeof source.resumable !== 'boolean'
+            || typeof source.reason_code !== 'string'
+            || typeof source.message !== 'string'
+            || typeof source.state_token !== 'string'
+            || !SOURCE_STATE_TOKEN_RE.test(source.state_token)) return null;
+        return source;
+    }
+
+    function meshReadinessAction(source) {
+        if (!source) return null;
+        if (source.state === 'local_only_can_prepare' && source.source_initializable === true) {
+            return { label: 'Prepare for Project Mesh', kind: 'prepare' };
+        }
+        if (source.state === 'preparing'
+            && source.source_initializable === true
+            && source.resumable === true) {
+            return { label: 'Resume preparation', kind: 'resume' };
+        }
+        return null;
+    }
+
+    function renderMeshReadiness(view) {
+        if (!meshReadinessAvailable(view)) return '';
+        if (view.meshReadinessLoading) return '<p class="form-hint">Checking Project Mesh readiness…</p>';
+        if (view.meshReadinessError) {
+            return `<p class="form-hint">${safe(view.meshReadinessError)}</p><button type="button" class="btn btn-ghost btn-sm" data-action="sd-retry-mesh-readiness">Retry readiness</button>`;
+        }
+        const source = view.meshReadiness;
+        if (!source) return '';
+        const action = meshReadinessAction(source);
+        if (action) {
+            return `<a class="sd-link" data-mesh-source-action="${action.kind}" href="#/mesh">${safe(action.label)}</a><p class="form-hint">${safe(source.message)}</p>`;
+        }
+        const href = source.source_ready === true
+            ? `#/mesh/${encodeURIComponent(view.spaceId)}`
+            : '#/mesh';
+        return `<a class="sd-link" href="${href}">${source.can_create_invitation === true ? 'View in Project Mesh' : 'Inspect Project Mesh readiness'}</a><p class="form-hint">${safe(source.message)}</p>`;
+    }
+
+    function updateMeshReadiness(view) {
+        const target = document.getElementById('sdMeshReadiness');
+        if (!target || currentView !== view) return;
+        target.innerHTML = renderMeshReadiness(view);
     }
 
     function unavailableOrError(result, retryAction) {
@@ -109,9 +198,7 @@
                     ${status.marker}
                     <span class="mono-data">${safe(status.raw || 'missing')}</span>
                     ${helper}
-                    ${typeof meshIsAvailable === 'function' && meshIsAvailable()
-                        ? `<a class="sd-link" href="#/mesh/${encodeURIComponent(view.spaceId)}">View in Mesh</a>`
-                        : ''}
+                    <div id="sdMeshReadiness">${renderMeshReadiness(view)}</div>
                 </div>
             </div>
             <div class="metric-grid sd-metrics">
@@ -565,6 +652,7 @@
         }
         const failure = job.status === 'failed'
             ? stateError({ title: 'Consolidation failed', message: job.error || '' }) : '';
+        const compactionFailures = renderSafeCompactionFailures(job.result);
         const message = job.message ? serverMessage(job.message) : '';
         return `<div class="item-card sd-job-inspector">
             <div class="panel-header"><div><span class="micro-label">JOB INSPECTOR</span><h3>${safe(job.scope_label || 'Consolidation job')}</h3></div><div class="sd-inline">${statusDot(laneSeverity(job.status), job.status)} ${guaranteeBadge(job.guarantee)}</div></div>
@@ -579,7 +667,7 @@
                 ${keyValue('started', job.started_at, { timestamp: true })}
                 ${keyValue('finished', job.finished_at, { timestamp: true })}
             </div>
-            ${renderJobProgress(job)}${message}${failure}${job.status === 'succeeded' ? renderJobResult(job) : ''}
+            ${renderJobProgress(job)}${message}${failure}${compactionFailures}${job.status === 'succeeded' ? renderJobResult(job) : ''}
             <button type="button" class="btn btn-secondary" data-action="sd-load-job" data-job-id="${safe(view.jobId)}">Refresh job</button>
         </div>`;
     }
@@ -648,6 +736,7 @@
         view.rulesLoading = true;
         view.backupsLoading = true;
         view.accessLoading = hasPermission(view, 'admin');
+        view.meshReadinessLoading = meshReadinessAvailable(view);
         return true;
     }
 
@@ -661,6 +750,13 @@
         void loadRules(view);
         void loadBackups(view);
         if (hasPermission(view, 'admin')) void loadAccess(view);
+        startMeshReadiness(view);
+    }
+
+    function startMeshReadiness(view) {
+        if (!view.info || view.meshReadinessStarted || !meshReadinessAvailable(view)) return;
+        view.meshReadinessStarted = true;
+        void loadMeshReadiness(view);
     }
 
     async function loadSpace(view) {
@@ -809,6 +905,30 @@
         view.accessLoading = false;
         view.accessData = result;
         renderAuxiliary(view);
+    }
+
+    async function loadMeshReadiness(view) {
+        if (!meshReadinessAvailable(view)) return;
+        const seqAtCall = ++view.meshReadinessSeq;
+        view.meshReadinessLoading = true;
+        view.meshReadinessError = '';
+        updateMeshReadiness(view);
+        const epochAtCall = view.ctx.epoch;
+        let result;
+        try {
+            result = await meshAdminSourceReadiness(view.spaceId);
+        } catch {
+            result = { status: 'error', message: 'Request failed.' };
+        }
+        if (!guarded(view, epochAtCall) || !meshReadinessAvailable(view)) return;
+        if (seqAtCall !== view.meshReadinessSeq) return;
+        view.meshReadinessLoading = false;
+        const source = authoritativeMeshSource(view, result);
+        view.meshReadiness = source;
+        view.meshReadinessError = source
+            ? ''
+            : String(result && result.message || 'Project Mesh readiness is unavailable.');
+        updateMeshReadiness(view);
     }
 
     async function loadBackups(view) {
@@ -1126,6 +1246,7 @@
     registerAction('sd-retry-rules', () => { const view = getView(); if (view) loadRules(view); });
     registerAction('sd-retry-access', () => { const view = getView(); if (view) loadAccess(view); });
     registerAction('sd-retry-backups', () => { const view = getView(); if (view) loadBackups(view); });
+    registerAction('sd-retry-mesh-readiness', () => { const view = getView(); if (view) loadMeshReadiness(view); });
     registerAction('sd-load-job', data => { const view = getView(); if (view) loadJob(view, data.jobId); });
     registerAction('sd-read-bank', data => { const view = getView(); if (view) readBankFile(view, Number(data.fileIndex)); });
     registerAction('sd-confirm-backup-delete', data => { const view = getView(); if (view) confirmBackupDelete(view, Number(data.backupIndex)); });
@@ -1156,6 +1277,12 @@
         row.click();
     });
 
+    document.addEventListener('admin:mesh-availability', event => {
+        if (!event.detail || event.detail.available !== true) return;
+        const view = currentView;
+        if (view) startMeshReadiness(view);
+    });
+
     function render(contentEl, params, ctx) {
         const spaceId = params && typeof params.spaceId === 'string' ? params.spaceId : '';
         if (!SPACE_ID_RE.test(spaceId)) {
@@ -1175,6 +1302,8 @@
             rulesData: null, rulesLoading: false,
             accessData: null, accessLoading: false,
             backupsData: null, backupsLoading: false,
+            meshReadiness: null, meshReadinessLoading: false,
+            meshReadinessError: '', meshReadinessStarted: false, meshReadinessSeq: 0,
             preloadStarted: false, consolidating: false,
             jobId: '', jobData: null, jobLoading: false, jobSeq: 0,
         };

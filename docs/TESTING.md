@@ -83,17 +83,49 @@ second suite. It does not merge distinct CI jobs: the Python 3.11, native
 Python 3.14.6 arm64, Playwright, Docker, and public-stage jobs remain separate
 because they prove different environments or deliverables.
 
-## CI timing and runtime policy
+## Fast correctness, focused coverage, and exhaustive trend evidence (TQ-12)
 
-The primary private x64 job runs pytest exactly once under branch coverage via
-the TQ-7 quality runner. It publishes to the job log and GitHub step summary:
+TQ-12 (#350) split what used to be one combined job into three tiers, because
+whole-repository branch-coverage instrumentation was the dominant cost on the
+critical path every PR waited on:
+
+1. **Fast correctness** — the private `Tests` job runs a plain, uninstrumented
+   `pytest tests/ -q --strict-markers --durations=50` on native
+   GitHub-hosted arm64 with an in-job CPython 3.11/architecture assertion. No
+   coverage, no policy report; this is the required PR gate and the fastest of
+   the three. The complete suite, flags, Node-backed harnesses, and fail-closed
+   public-export structural proof remain unchanged.
+2. **Focused guarded coverage** — the parallel `Coverage floors (focused,
+   TQ-12)` job runs the TQ-7 quality runner
+   (`scripts/test_quality_ci.py --coverage-mode=focused`), enforcing the eight
+   critical-surface floors and three required mutation families below. Also
+   PR-blocking (wired into `required_ci`/`build` the same way
+   `test_python314_arm64`/`public_tree` already were), but off the `Tests`
+   job's own timing. Its coverage command is byte-identical to what the
+   combined job used to run — an `--include`-based narrower trace scope was
+   tried during implementation and reverted: `coverage.py` silently ignores
+   `--include` whenever `--source` is also set, and dropping `--source`
+   loses the directory-walk that makes an entirely-unexecuted critical file
+   still fail its floor instead of silently vanishing from the measured
+   denominator.
+3. **Exhaustive trend evidence** — `.github/workflows/exhaustive-coverage.yml`
+   runs the identical coverage command with `--coverage-mode=exhaustive` on a
+   weekly schedule, on manual `workflow_dispatch` (optionally against an exact
+   `source_sha`, usable as one of the checks an operator cites in an RC's
+   `RC-VALIDATION` comment — see `docs/WORKFLOW_GIT_EPIC.md`), and never on
+   `pull_request`/`push`. It additionally reports `overall_coverage`: a
+   repo-wide aggregate across every measured file, not just the eight
+   groups — informational only, never merge-blocking, never a floor.
+
+Both coverage-mode runs publish to the job log and GitHub step summary:
 
 - collected cases, authored functions, parameter expansions, and outcomes;
 - cases/functions/expansions per primary marker;
 - cases/functions/expansions and outcomes for `slow` and `optional` markers;
 - wall-clock duration, runtime by file, and the 50 slowest cases;
-- targeted branch coverage and its floor per critical surface; and
-- collected case counts for the required mutation families.
+- targeted branch coverage and its floor per critical surface;
+- collected case counts for the required mutation families; and
+- exhaustive mode only: the repo-wide `overall_coverage` trend summary.
 
 The CI invocation uses pytest's quiet progress output rather than one line per
 case. JUnit still carries every stable case identity and duration, while the
@@ -101,38 +133,95 @@ analyzer prints the 50 slowest cases and the complete policy report at the end.
 This keeps the report and runtime annotation below the GitHub step-log limit as
 the suite grows.
 
-Other nominal Python jobs use `--durations=50 --strict-markers` so architecture
-or public-runner variance stays visible without applying a foreign hard budget.
+Other nominal Python jobs (including the fast `Tests` job above) use
+`--durations=50 --strict-markers` so architecture or public-runner variance
+stays visible without applying a foreign hard budget.
 
-The canonical private policy is derived from the reviewed TQ-0 #284 baseline:
-136.053 seconds at 3,590 collected cases. The effective reference never drops
+The canonical private policy's `reference` is derived from the exact
+private-x64 focused-coverage run on TQ-12 #350 PR head `d110635`: 587.395
+seconds at 5,704 collected cases (`docs/testing/test-quality-policy.json`).
+This field was named
+`nominal_wall_seconds` through TQ-7 but was always compared against a
+coverage-INSTRUMENTED `wall_seconds` — reusing an uninstrumented TQ-0 baseline
+as the budget for an instrumented run made healthy `coverage_floors` runs
+alert far more often than intended (the exact mismatch behind "489.5s versus
+a 317.7s warning-only budget" at TQ-12's own baseline measurement). The field
+is renamed `reference_wall_seconds` and recalibrated so its name matches what
+it has always been compared against. The effective reference never drops
 below that value; when the executed suite grows, it scales by
-`collected_cases / 3590` before the variance multiplier is applied. This
-keeps the historical reference immutable without enforcing an arm64 absolute
-time against a larger x64 workload. The heterogeneous private x64 fleet uses
-an explicit alert-only profile:
+`collected_cases / 5704` before the variance multiplier is applied. This keeps
+the reference immutable without enforcing a smaller-suite absolute time
+against a larger workload. The heterogeneous private x64 fleet and the
+exhaustive-coverage workflow share an explicit alert-only profile:
 
 - above the workload-adjusted reference by 50%: visible alert, job remains
-  green and emits a GitHub Actions warning annotation.
+  green (`focused` mode) and emits a GitHub Actions warning annotation.
+  Exhaustive mode records `wall_seconds` for visibility but never evaluates a
+  budget against it (`runtime.budget_evaluated: false`) — it is a
+  schedule/manual trend job, not a PR gate with a "healthy run" budget to
+  violate.
 
-For the 5,321-case integration head, the effective reference is 201.654
-seconds and the alert is 302.481 seconds. The report publishes the historical
-reference, case scale, effective reference, threshold, and enforcement mode so
+For an illustrative 8,000-case head, the effective reference is 823.836
+seconds and the alert is 1,235.754 seconds. The report publishes the reference,
+case scale, effective reference, threshold, and enforcement mode so
 recalibration cannot be silent. Test failures, targeted coverage floors, and
-mutation evidence remain hard failures independently of runtime alerts.
+mutation evidence remain hard failures independently of runtime alerts, and
+identically so in both coverage modes.
 
 The alert is an investigation trigger, not authorization to delete tests. A
 sustained alert is resolved by interleaved same-host measurements, as TQ-4 did,
 or by a reviewed profile recalibration with recorded evidence. Never raise or
 remove a threshold merely to make a run green. Two same-workload candidate
-runs on different self-hosted x64 groups measured 308.981 and 455.831 seconds,
-a 47.5% spread; a single-run wall clock is therefore evidence to alert on, not
-a sound cross-runner hard-failure oracle.
+runs on different self-hosted x64 groups once measured 308.981 and 455.831
+seconds under the pre-TQ-12 combined job, a 47.5% spread; a single-run wall
+clock is therefore evidence to alert on, not a sound cross-runner
+hard-failure oracle.
+
+## Fail-closed heavyweight PR routing (TQ-13)
+
+TQ-13 (#351) lets the private CI avoid only environment-specific work when a
+repository-owned classifier has complete, versioned evidence. `Tests`,
+`Dependency audit (pip-audit)`, and `Coverage floors` always run for pull
+requests and manual dispatches. The classifier may selectively skip only the
+native Python 3.14.6 arm64 suite, Admin Playwright suite, embedded-secret Docker
+proof, and staged public-tree check.
+
+For a documentation-only change, the minimal safe PR matrix is therefore the
+classifier, those three always-on gates, the protected Compose validation in
+`Build Docker Image`, and `Required CI`; the four routed environment jobs can
+be skipped. UI/static paths select Playwright/public-tree, while public-stage
+paths select public-tree only; embedded runtime paths select
+arm64/public-tree/Docker; platform and dependency paths select every routed job.
+Selection is the union when paths overlap.
+
+This is intentionally not an impact inference service. The CI log prints a
+machine-readable classifier state, reason, and selected checks. Unknown paths,
+renames with incomplete old-path data, a shallow or inconsistent checkout,
+partial/malformed GitHub API responses (including the API's file-list cap),
+invalid output, or any classifier error select all four checks. The first pull
+request introducing the classifier also selects all four because the base copy
+is unavailable. On normal runs, the classifier/aggregate-validator script comes
+from the base-SHA copy rather than trusting a candidate script edit; the PR-head
+workflow and its contract tests remain subject to protected review and branch
+protection.
+`Build Docker Image` and `Required CI` accept a skipped routed job only when its
+exact successful classifier evidence says `false`; a missing, cancelled, failed,
+or mismatched result is a hard failure.
+
+The introducing PR's green run therefore proves the conservative bootstrap
+fallback, not the normal base-script runtime. The first deliberately
+documentation-only PR after TQ-13 merges is the live checkpoint: inspect a
+`classified`/`documentation-only` output with all four selectors `false`, the
+four expected skips, and successful normal Build and `Required CI` validators.
+Any failure remains merge-blocking and must be corrected or rerun rather than
+treated as a selective skip.
 
 ## Targeted coverage expectations
 
 Coverage is branch-aware and enforced per critical surface. There is no
-misleading repository-wide floor.
+misleading repository-wide floor: exhaustive mode's `overall_coverage`
+(TQ-12, #350) is a repo-wide trend number for schedule/manual/RC visibility,
+never a gate, and never rounds down into a floor here.
 
 | Surface | Minimum |
 | --- | ---: |

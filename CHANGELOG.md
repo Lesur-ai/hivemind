@@ -17,6 +17,112 @@ are not installation steps or public architecture contracts.
 > boundary. Downstream extension seams are described in
 > `docs/EXTENSION_POINTS.md`.
 
+Upgrading from separate Live Memory and Graph Memory services is covered by the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+---
+
+## [1.4.1] — 2026-09-02
+
+> Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
+> boundary. Downstream extension seams are described in
+> `docs/EXTENSION_POINTS.md`.
+
+Upgrading from separate Live Memory and Graph Memory services is covered by the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### Changed
+
+- **Release identity.** Hivemind now reports runtime version `1.4.1`.
+
+- **Project Mesh readiness and activation recovery.** Source readiness
+  classifies availability failures during bounded product-storage probes as
+  non-actionable `unavailable` and malformed or ambiguous product state as
+  `unsafe`.
+  Mesh-local pairing-store read failures remain fail-closed as `unsafe`;
+  `unavailable` is not a blanket classification for every transient dependency
+  failure. A Mesh-local I/O ambiguity poisons the process-local pairing store
+  until restart. Subsequent pairing-store reads, including the admin Mesh
+  status inventory, can fail closed before a readiness projection is available;
+  they are not guaranteed to degrade to an `unsafe` entry. Restore backend
+  health and restart before using status or retrying.
+  Target ordinary-write fencing uses a signed, durable per-space authority
+  instead of scanning append-only pairing-session history. Before accepting an
+  invitation, same-space writers/jobs must be quiesced. An independently lost
+  raw target reservation remains fail-closed until the exact all-ACK terminal
+  chain is retained. Coordinated loss or restoration of that reservation
+  together with every direct target authority is a storage-integrity incident:
+  use bucket Object Lock/versioning and resync or rebuild explicitly. The admin
+  control plane exposes an explicitly confirmed recovery for a verified blank
+  orphaned target-reservation prefix.
+
+- **English is the consistent default across product surfaces.** Consolidation
+  and extraction prompts, MCP tool metadata and client-facing messages, the
+  Hivemind operator UI, and the embedded Graph Memory UI use English by
+  default. Existing French documentation remains available in `*.fr.md` guides.
+
+- **Compaction configuration upgrade validation.** Before upgrading, replace
+  any previously accepted non-finite `COMPACT_THRESHOLD` or value outside
+  `(0, 1]` (including `0`, negative values, and values above `1`) with an
+  appropriate finite value in `(0, 1]` (for example, `1.0` for the full
+  resolved output budget), and any `BANK_FILE_MAX_SIZE` below `1` with a
+  positive UTF-8 byte limit (for example, `15360`). Startup now fails closed
+  for either invalid setting rather than silently weakening the
+  compaction-admission signal or accepting a nonsensical per-file limit.
+
+- **Bank-compaction and normal-consolidation safety converged.** Compaction
+  prevalidates complete immutable batches before any DirectLocal write, retains
+  verified preimages and readback diagnostics, and treats unresolved recovery as
+  explicit. Normal consolidation accepts only direct strict JSON or one bounded
+  terminal fenced JSON envelope, validates a complete logical batch before
+  persistence, and retains source notes on later failures.
+
+### Fixed
+
+- **Reasoning-aware compaction and duplicate-merge budgets.** Strict
+  compaction planning and duplicate-section body merging retain bounded visible
+  output admission floors, then use the configured reasoning-inclusive
+  chat-profile budget capped by the remaining context window. Provider calls
+  remain single-attempt and fail closed; malformed output, oversized results,
+  and insufficient context still produce no bank mutation, and prompts and
+  completions are not logged.
+
+- **Bounded model-output recovery and heading attribution.** Normal
+  consolidation accepts either direct strict JSON or one bounded fenced JSON
+  envelope with a short preface and no suffix; generic extraction, repair,
+  multiple fences, trailing prose, and truncated JSON remain rejected. Strict
+  compaction and normal consolidation now share exact-first heading resolution
+  with a uniquely matched fallback limited to NFC, a closed dash set, and ASCII
+  horizontal whitespace. Unresolved targets keep the batch fail-closed while
+  adding content-free attribution through operation index,
+  missing-versus-ambiguous classification, match count, and a requested-heading
+  hash.
+
+- **Existing local spaces can become Project Mesh invitation sources.** The
+  admin console supplies a server-owned source-readiness view and an explicit
+  quiesced preparation action. It validates additive genesis objects before
+  publishing `HEALTHY`; ambiguous or divergent state remains recovery-required
+  and is never silently repaired. This is a one-way, quiesced maintenance
+  operation, not an online or cross-process atomic conversion; operators must
+  stop all same-space writers/jobs. It creates no `HELD` lease, and unsupported
+  shared mutations remain fail-closed. Invitation creation remains a distinct
+  action.
+
+### Security
+
+- **Patched HTTP/2 and PDF dependencies.** The core lock resolves `h2` 4.4.1,
+  and the embedded Graph Memory image pins `pypdf` 6.15.0. These replace the
+  affected 4.4.0 and 6.14.2 releases with the first fixed releases identified
+  by the corresponding upstream advisories.
+
+---
+
+## [1.4.0] — 2026-08-07
+
+> Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
+> boundary. Downstream extension seams are described in
+> `docs/EXTENSION_POINTS.md`.
+
 ### Added
 
 - **v1.4.0 release preparation.** Runtime identity now reports `1.4.0` for the

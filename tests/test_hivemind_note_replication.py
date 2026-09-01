@@ -773,7 +773,7 @@ async def test_N_writer_guard_skips_tombstoned_note() -> None:
     # Defense-in-depth : le RUNTIME refuse lui-même de construire le payload d'une
     # note tombstonée, indépendamment du skip caller ci-dessus. RED sans la garde
     # ``get_tombstone`` dans ``build_replicated_note``.
-    with pytest.raises(ValueError, match="anti-résurrection"):
+    with pytest.raises(ValueError, match="anti-resurrection"):
         await rt.build_replicated_note(filename=filename, local_node_id="node-a")
 
 
@@ -1144,7 +1144,12 @@ class _ConsolidatorHiveFakeStorage(LiveFakeStorage):
     (``_collect_inputs`` lit via ``list_and_get`` ; la purge des notes consommées
     passe par ``delete_many``)."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleted_batches: list[list[str]] = []
+
     async def delete_many(self, keys: list[str]) -> int:
+        self.deleted_batches.append(list(keys))
         n = 0
         for k in keys:
             if k in self.objects:
@@ -1220,6 +1225,7 @@ def _make_stubbed_consolidator():
                         "filename": "activeContext.md",
                         "action": "create",
                         "content": "# Active Context\n\n## Focus\n\n- seeded\n",
+                        "reason": "Record the replicated legacy note.",
                     }
                 ],
                 "synthesis": "Consolidated the replicated note.",
@@ -1269,17 +1275,43 @@ async def test_P5_7_consolidation_skips_and_preserves_origin_sidecar() -> None:
 
     consolidator = _make_stubbed_consolidator()
     with (
-        _patch("live_mem.core.consolidator.get_storage", return_value=storage),
         _patch("live_mem.core.consolidator.datetime", _FrozenDt),
     ):
-        res = await consolidator.consolidate(SPACE, enforce_cooldown=False)
+        inputs = await consolidator._collect_inputs(
+            SPACE, agent="", storage=storage
+        )
+        result = await consolidator._write_results(
+            space_id=SPACE,
+            llm_output={
+                "file_edits": [
+                    {
+                        "filename": "activeContext.md",
+                        "action": "create",
+                        "content": "# Active Context\n\n## Focus\n\n- consolidated\n",
+                        "reason": "Record the selected real live note.",
+                    }
+                ],
+                "synthesis": "Consolidated note.",
+            },
+            bank_files=inputs["bank_files"],
+            notes_keys=inputs["notes_keys"],
+            notes_count=len(inputs["notes"]),
+            usage={},
+            skip_meta=True,
+            storage=storage,
+        )
 
-    assert res.get("status") == "ok", res
-    # Seule la vraie note est consommée — le sidecar n'est PAS compté comme note.
-    assert res.get("notes_processed") == 1, res
-    # La vraie note a bien été supprimée (atomicité conso).
+    # Seule la vraie note est sélectionnée, intégrée, puis supprimée. Le test
+    # appelle explicitement l'étape privée d'écriture : le chemin public d'une
+    # hive reste route-refused, mais cette preuve doit couvrir le delete final.
+    assert [note["key"] for note in inputs["notes"]] == [note_key]
+    assert result["status"] == "ok"
+    assert result["notes_processed"] == 1
+    assert result["notes_deleted"] == 1
+    assert storage.deleted_batches == [[note_key]]
     assert note_key not in storage.objects
-    # Le sidecar de provenance SURVIT byte-for-byte (cœur du fix P5-7).
+    # Le sidecar de provenance SURVIT byte-for-byte : il n'entre jamais dans
+    # notes_keys et ne peut donc pas rejoindre la suppression finale.
     assert sidecar_key in storage.objects
     assert storage.objects[sidecar_key] == sidecar_bytes
 
@@ -1303,8 +1335,12 @@ async def test_P5_7_consolidation_origin_skip_only_on_confirmed_hive() -> None:
     await storage.put(legacy_key, "legacy content under _origin\n")
 
     consolidator = _make_stubbed_consolidator()
+    from live_mem.core.engines import EngineRegistry
+
+    registry = EngineRegistry(storage=storage)  # type: ignore[arg-type]
     with (
         _patch("live_mem.core.consolidator.get_storage", return_value=storage),
+        _patch("live_mem.core.engines.get_engine_registry", return_value=registry),
         _patch("live_mem.core.consolidator.datetime", _FrozenDt),
     ):
         res = await consolidator.consolidate(SPACE, enforce_cooldown=False)

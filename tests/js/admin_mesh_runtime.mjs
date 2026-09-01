@@ -28,6 +28,13 @@
  *     pairing's space_id.
  *   G A stale continuation (route navigated away while the action request was
  *     in flight) drops its effect — no toast, no refresh.
+ *   O–R Authoritative source readiness, neutral typed/quiesced preparation,
+ *     no auto-invite, route/modal/session preflight staleness, exact resume,
+ *     and a no-retry server stale-token refusal.
+ *   W Bounded diagnostic pairing/session slices are rendered as explicitly
+ *     truncated, never as exhaustive counts or fabricated empty history.
+ *   X Unavailable source readiness hides only source actions while preserving
+ *     pairing history and recovery controls, with safe bounded copy.
  *
  * Contract: DESIGN/hivemind/P10_DESIGN_PACK.md §4 (three-action flow, one-time
  * secret display/teardown, purpose-specific confirmation), P10_THREAT_MODEL.md T5/T15.
@@ -51,6 +58,33 @@ function flushTasks() {
     return new Promise(resolve => setImmediate(resolve));
 }
 
+function sourceEntry(spaceId, state, overrides = {}) {
+    const base = {
+        space_id: spaceId,
+        state,
+        source_ready: state === 'ready',
+        source_initializable: state === 'local_only_can_prepare' || state === 'preparing',
+        resumable: state === 'preparing',
+        can_create_invitation: state === 'ready',
+        reason_code: state,
+        message: state === 'ready' ? 'Ready to create an invitation.' : 'Preparation is available.',
+        state_token: (spaceId.charCodeAt(0).toString(16) || 'a').padStart(2, '0').repeat(32).slice(0, 64),
+    };
+    return { ...base, ...overrides };
+}
+
+function statusWithSources(entries, overrides = {}) {
+    return {
+        status: 'ok', enabled: true, healthy: true, display_name: 'peer-a',
+        public_url: 'https://a.test', fingerprint: 'hm1:' + 'a'.repeat(64), pairings: [],
+        source_readiness: entries,
+        eligible_spaces: entries
+            .filter(entry => entry.can_create_invitation === true)
+            .map(entry => entry.space_id),
+        ...overrides,
+    };
+}
+
 function classList(initial = []) {
     const values = new Set(initial);
     return {
@@ -72,10 +106,16 @@ function makeElement(extra = {}) {
         classList: classList(),
         dataset: {},
         _click: [],
+        _listeners: Object.create(null),
         focus() {},
         setAttribute(k, v) { this[k] = v; },
         removeAttribute(k) { delete this[k]; },
-        addEventListener(type, fn) { if (type === 'click') this._click.push(fn); },
+        addEventListener(type, fn) {
+            if (!this._listeners[type]) this._listeners[type] = [];
+            this._listeners[type].push(fn);
+            if (type === 'click') this._click.push(fn);
+        },
+        dispatch(type) { (this._listeners[type] || []).forEach(fn => fn({ target: this })); },
         removeEventListener() {},
         querySelector() { return null; },
         querySelectorAll() { return []; },
@@ -95,6 +135,8 @@ function esc(s) {
 
 function createHarness() {
     let epoch = 1;
+    let sessionGeneration = 1;
+    let refreshCount = 0;
     let hash = '#/mesh';
     const LOCKED_PREFIX = '#/mesh';
 
@@ -166,6 +208,7 @@ function createHarness() {
         adminModal.style.display = '';
         closeControls.forEach(c => { c.disabled = false; c._click = []; });
         renderModalBody(body || '');
+        if (verb) modalEls.modalConfirmBtn = makeElement({ textContent: verb });
         modals.push({ title, body: body || '', verb, onConfirm });
     }
 
@@ -177,8 +220,13 @@ function createHarness() {
     let meshMembersResponse = { status: 'ok', space_id: 'demo', membership_epoch: 3, members: [] }; // set per-scenario
     let meshActionQueue = []; // FIFO of deferreds, only populated while auto-resolve is off
     let meshActionAutoResolve = true; // default: resolve immediately with a canned response
+    const meshActionResponses = new Map();
+    let spaceListResponse = { status: 'ok', spaces: [{ space_id: 'demo' }, { space_id: 'other' }] };
+    let spaceListAutoResolve = true;
+    const spaceListQueue = [];
 
     function defaultMeshActionResponse(action, args) {
+        if (meshActionResponses.has(action)) return meshActionResponses.get(action);
         if (action === 'invitation') {
             return {
                 status: 'ok', pair_id: 'pair_new', secret: 'SECRET-VALUE-XYZ',
@@ -221,14 +269,19 @@ function createHarness() {
         registerAction(name, fn) { actions[name] = fn; },
         AdminRouter: {
             get epoch() { return epoch; },
-            refresh() { epoch += 1; },
+            refresh() { refreshCount += 1; epoch += 1; },
             current() { return { view: hash.startsWith('#/mesh/') ? 'mesh-detail' : 'mesh', params: hash.startsWith('#/mesh/') ? { spaceId: decodeURIComponent(hash.slice('#/mesh/'.length)) } : {}, raw: hash.slice(1) }; },
         },
         AdminViews: { register(name, fn) { views[name] = fn; } },
         _ctx: () => ({ identity, epoch, caches: context.cache }),
         callTool(tool, args) {
             toolCalls.push({ tool, args });
-            if (tool === 'space_list') return Promise.resolve({ status: 'ok', spaces: [{ space_id: 'demo' }, { space_id: 'other' }] });
+            if (tool === 'space_list') {
+                if (spaceListAutoResolve) return Promise.resolve(spaceListResponse);
+                const d = deferred();
+                spaceListQueue.push(d);
+                return d.promise;
+            }
             return Promise.resolve({ status: 'error' });
         },
         meshAdminStatus() {
@@ -257,20 +310,32 @@ function createHarness() {
     return {
         location, modals, toasts, toolCalls, meshActionCalls, contentEl,
         setIdentity(v) { identity = v; },
+        setSessionGeneration(v) { sessionGeneration = v; },
         setStatusResponse(v) { meshStatusResponse = v; },
         setStatusAutoResolve(v) { meshStatusAutoResolve = v; },
         setMembersResponse(v) { meshMembersResponse = v; },
         meshStatusCallCount() { return meshStatusCalls; },
+        refreshCallCount() { return refreshCount; },
         bumpEpoch() { epoch += 1; },
-        renderOverview() { hash = '#/mesh'; views['mesh'](contentEl, {}, { epoch, identity, sessionGeneration: 1, caches: context.cache }); },
-        renderDetail(spaceId) { hash = '#/mesh/' + encodeURIComponent(spaceId); views['mesh-detail'](contentEl, { spaceId }, { epoch, identity, sessionGeneration: 1, caches: context.cache }); },
+        renderOverview() { hash = '#/mesh'; views['mesh'](contentEl, {}, { epoch, identity, sessionGeneration, caches: context.cache }); },
+        renderDetail(spaceId) { hash = '#/mesh/' + encodeURIComponent(spaceId); views['mesh-detail'](contentEl, { spaceId }, { epoch, identity, sessionGeneration, caches: context.cache }); },
         lastModal() { return modals[modals.length - 1]; },
         setMeshActionAutoResolve(v) { meshActionAutoResolve = v; },
+        setMeshActionResponse(action, payload) { meshActionResponses.set(action, payload); },
         settleLastAction(payload) { meshActionQueue[meshActionQueue.length - 1].resolve(payload); },
+        setSpaceListResponse(payload) { spaceListResponse = payload; },
+        setSpaceListAutoResolve(v) { spaceListAutoResolve = v; },
+        settleLastSpaceList(payload) { spaceListQueue[spaceListQueue.length - 1].resolve(payload); },
         flushHashQueue,
         el: getEl,
         act(name, data) { actions[name](data || {}); },
-        closeViaControl() { closeControls[0]._click.forEach(fn => fn()); },
+        closeControlsEnabled() { return closeControls.every(control => control.disabled !== true); },
+        closeViaControl() {
+            if (closeControls[0].disabled) return false;
+            closeControls[0]._click.forEach(fn => fn());
+            adminModal.style.display = 'none';
+            return true;
+        },
     };
 }
 
@@ -340,7 +405,7 @@ async function scenarioC() {
 
 async function scenarioD() {
     const h = createHarness();
-    h.setStatusResponse({ status: 'ok', enabled: true, healthy: true, display_name: 'peer-a', public_url: 'https://a.test', fingerprint: 'hm1:' + 'a'.repeat(64), pairings: [] });
+    h.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
     h.renderOverview();
     await flushTasks();
     h.act('mesh-create-invitation', {});
@@ -368,7 +433,7 @@ async function scenarioD() {
 
 async function scenarioE() {
     const h = createHarness();
-    h.setStatusResponse({ status: 'ok', enabled: true, healthy: true, pairings: [] });
+    h.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
     h.renderOverview();
     await flushTasks();
     h.act('mesh-create-invitation', {});
@@ -513,7 +578,7 @@ async function scenarioL() {
     // click time and refuse rather than firing a mutation the process-lock
     // middleware is guaranteed to 503.
     const h = createHarness();
-    h.setStatusResponse({ status: 'ok', enabled: true, healthy: true, pairings: [] });
+    h.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
     h.renderOverview();
     await flushTasks();
     h.act('mesh-create-invitation', {});
@@ -571,7 +636,7 @@ async function scenarioN() {
     // back to an earlier (possibly no-longer-true) healthy reading just
     // because it happens to still be sitting in state.status.
     const h = createHarness();
-    h.setStatusResponse({ status: 'ok', enabled: true, healthy: true, pairings: [] });
+    h.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
     h.renderOverview();
     await flushTasks();
     h.act('mesh-create-invitation', {});
@@ -590,6 +655,473 @@ async function scenarioN() {
     console.log('scenario N (click-time guard fails closed while a post-navigation status reload is still pending): ok');
 }
 
+async function scenarioO() {
+    // The Create/source picker consumes only authoritative readiness. Ready
+    // entries may create, exact local/preparing entries may prepare/resume,
+    // and unsafe entries expose their reason without an action.
+    const h = createHarness();
+    const entries = [
+        sourceEntry('demo', 'local_only_can_prepare'),
+        sourceEntry('ready-one', 'ready'),
+        sourceEntry('resume-me', 'preparing'),
+        sourceEntry('blocked-resume', 'preparing', { resumable: false }),
+        sourceEntry('broken', 'unsafe', {
+            source_initializable: false, can_create_invitation: false,
+            message: 'Manual recovery is required.',
+        }),
+        sourceEntry('temporarily-offline', 'unavailable', {
+            message: 'This source could not be inspected; retry when its storage is available.',
+        }),
+    ];
+    h.setStatusResponse(statusWithSources(entries));
+    h.renderOverview();
+    await flushTasks();
+    const overview = h.contentEl.innerHTML;
+    assert.ok(overview.includes('data-action="mesh-prepare-source" data-space-id="demo"'), 'initializable source must offer Prepare');
+    assert.ok(overview.includes('data-action="mesh-prepare-source" data-space-id="resume-me"'), 'exact preparing source must offer Resume');
+    assert.ok(overview.includes('aria-label="Prepare for Project Mesh for demo"'), 'Prepare must have a space-specific accessible name');
+    assert.ok(overview.includes('aria-label="Resume preparation for resume-me"'), 'Resume must have a space-specific accessible name');
+    assert.ok(overview.includes('Resume preparation'), 'preparing action must use the honest resume label');
+    assert.ok(!overview.includes('data-action="mesh-prepare-source" data-space-id="blocked-resume"'), 'non-resumable preparing state must expose no action');
+    assert.ok(overview.includes('ready-one') && overview.includes('ready'), 'ready source state must be visible');
+    assert.ok(!overview.includes('data-action="mesh-prepare-source" data-space-id="broken"'), 'unsafe source must expose no repair action');
+    assert.ok(overview.includes('temporarily-offline') && overview.includes('unavailable'), 'unavailable source state must be visible');
+    assert.ok(!overview.includes('data-action="mesh-prepare-source" data-space-id="temporarily-offline"'), 'unavailable source must expose no action');
+
+    h.act('mesh-create-invitation', {});
+    const picker = h.lastModal();
+    assert.equal(picker.title, 'Create invitation');
+    assert.ok(picker.body.includes('<option value="ready-one"'), 'eligible ready source must be selectable');
+    assert.ok(!picker.body.includes('<option value="demo"'), 'initializable source must not be selectable as ready');
+    assert.ok(!picker.body.includes('<option value="temporarily-offline"'), 'unavailable source must not be selectable');
+    assert.ok(picker.body.includes('Prepare for Project Mesh'), 'picker must offer explicit preparation');
+    assert.ok(picker.body.includes('Resume preparation'), 'picker must offer exact resume');
+    assert.ok(picker.body.includes('Manual recovery is required.'), 'unsafe refusal reason must remain visible');
+    assert.equal(h.toolCalls.length, 0, 'Create/source picker must never call space_list');
+    console.log('scenario O (authoritative source picker: prepare/ready/resume/unsafe): ok');
+}
+
+async function scenarioP() {
+    // Neutral, purpose-specific confirmation: exact id + quiescence, one POST,
+    // no invitation chaining, and a refresh only after success.
+    const h = createHarness();
+    const entry = sourceEntry('demo', 'local_only_can_prepare');
+    h.setStatusResponse(statusWithSources([entry]));
+    h.renderOverview();
+    await flushTasks();
+    h.act('mesh-prepare-source', { spaceId: 'demo' });
+    const modal = h.lastModal();
+    assert.equal(modal.title, 'Prepare for Project Mesh');
+    assert.equal(modal.typedConfirmation, undefined, 'preparation must use the neutral modal, not destructive red');
+    assert.ok(modal.body.includes('One-way transition in v1.4.1'));
+    assert.ok(modal.body.includes('every same-space writer'));
+    assert.equal(h.el('modalConfirmBtn').disabled, true, 'confirm starts disabled');
+
+    h.el('meshPrepareConfirmInput').value = 'demo';
+    h.el('meshPrepareConfirmInput').dispatch('input');
+    assert.equal(h.el('modalConfirmBtn').disabled, true, 'typed id alone is insufficient');
+    h.el('meshPrepareQuiesced').checked = true;
+    h.el('meshPrepareQuiesced').dispatch('change');
+    assert.equal(h.el('modalConfirmBtn').disabled, false, 'exact id plus quiescence enables confirm');
+
+    h.setMeshActionAutoResolve(false);
+    const first = modal.onConfirm();
+    const duplicate = await modal.onConfirm();
+    assert.equal(duplicate, false, 'duplicate submit must be refused while preparation is in flight');
+    assert.equal(h.meshActionCalls.length, 1, 'double submit must produce one request');
+    assert.equal(h.meshActionCalls[0].action, 'prepare-source');
+    assert.equal(h.meshActionCalls[0].args.space_id, 'demo');
+    assert.equal(h.meshActionCalls[0].args.quiesced, true);
+    assert.equal(h.meshActionCalls[0].args.expected_state_token, entry.state_token);
+    assert.deepEqual(Object.keys(h.meshActionCalls[0].args).sort(),
+        ['expected_state_token', 'quiesced', 'space_id']);
+    assert.ok(!h.meshActionCalls.some(call => call.action === 'invitation'), 'preparation must never auto-create an invitation');
+    h.settleLastAction({ status: 'ok', result: 'prepared', source: sourceEntry('demo', 'ready') });
+    assert.equal(await first, true);
+    assert.equal(h.refreshCallCount(), 1, 'successful preparation refreshes authoritative readiness once');
+    assert.ok(h.toasts.some(t => t.text.includes('prepared for Project Mesh')));
+    assert.ok(!h.meshActionCalls.some(call => call.action === 'invitation'), 'success still must not chain into invitation creation');
+    console.log('scenario P (neutral prepare confirmation, exact payload, no auto-invite, refresh): ok');
+}
+
+async function scenarioQ() {
+    // Route, modal, and session staleness are checked before fetch. The server
+    // state token is not a substitute for those browser ownership guards.
+    for (const staleKind of ['route', 'modal', 'session']) {
+        const h = createHarness();
+        h.setStatusResponse(statusWithSources([sourceEntry('demo', 'local_only_can_prepare')]));
+        h.renderOverview();
+        await flushTasks();
+        h.act('mesh-prepare-source', { spaceId: 'demo' });
+        const staleModal = h.lastModal();
+        h.el('meshPrepareConfirmInput').value = 'demo';
+        h.el('meshPrepareQuiesced').checked = true;
+
+        if (staleKind === 'route') {
+            h.bumpEpoch();
+        } else if (staleKind === 'modal') {
+            h.act('mesh-create-invitation', {}); // replaces the preparation modal
+        } else {
+            h.setIdentity({ client_name: 'admin-2', permissions: ['admin'] });
+            h.setSessionGeneration(2);
+            h.renderOverview();
+            await flushTasks();
+        }
+
+        assert.equal(await staleModal.onConfirm(), false, `${staleKind} modal must refuse`);
+        assert.equal(h.meshActionCalls.length, 0, `${staleKind} modal must cause zero POST`);
+        assert.equal(h.refreshCallCount(), 0, `${staleKind} refusal must not refresh`);
+    }
+    console.log('scenario Q (route/modal/session stale preparation causes zero POST): ok');
+}
+
+async function scenarioR() {
+    // Backend optimistic-concurrency refusal is displayed once, never retried
+    // and never followed by invitation or automatic refresh.
+    const h = createHarness();
+    h.setStatusResponse(statusWithSources([sourceEntry('resume-me', 'preparing')]));
+    h.setMeshActionResponse('prepare-source', {
+        status: 'error', code: 'source_state_changed', message: 'Source state changed.',
+    });
+    h.renderOverview();
+    await flushTasks();
+    h.act('mesh-prepare-source', { spaceId: 'resume-me' });
+    const modal = h.lastModal();
+    assert.equal(modal.title, 'Resume preparation');
+    h.el('meshPrepareConfirmInput').value = 'resume-me';
+    h.el('meshPrepareQuiesced').checked = true;
+    assert.equal(await modal.onConfirm(), false);
+    assert.equal(h.meshActionCalls.length, 1, 'stale-token refusal must not auto-retry');
+    assert.equal(h.meshActionCalls[0].action, 'prepare-source');
+    assert.equal(h.refreshCallCount(), 0, 'stale-token refusal requires an explicit operator refresh');
+    assert.ok(h.el('meshPrepareErr').textContent.includes('not retried automatically'));
+    assert.ok(!h.meshActionCalls.some(call => call.action === 'invitation'));
+    console.log('scenario R (resume + backend stale refusal: no retry/refresh/invite): ok');
+}
+
+async function scenarioS() {
+    // Malformed, missing, duplicate, or semantically incoherent readiness is
+    // omitted fail-closed.  eligible_spaces is the documented list[str]
+    // projection; legacy/object-shaped lookalikes are not accepted.
+    const missingToken = sourceEntry('missing-token', 'local_only_can_prepare');
+    delete missingToken.state_token;
+    const invalidEntries = [
+        sourceEntry('bad-token', 'local_only_can_prepare', { state_token: 'not-a-token' }),
+        missingToken,
+        sourceEntry('false-ready', 'ready', { source_ready: false }),
+        sourceEntry('false-local', 'local_only_can_prepare', { source_initializable: false }),
+        sourceEntry('wrong-reason', 'local_only_can_prepare', { reason_code: 'ready' }),
+        sourceEntry('duplicate', 'local_only_can_prepare'),
+        sourceEntry('duplicate', 'local_only_can_prepare', { state_token: 'd'.repeat(64) }),
+    ];
+    const h = createHarness();
+    h.setStatusResponse(statusWithSources(invalidEntries, {
+        eligible_spaces: ['false-ready'],
+    }));
+    h.renderOverview();
+    await flushTasks();
+    for (const spaceId of invalidEntries.map(entry => entry.space_id)) {
+        assert.ok(!h.contentEl.innerHTML.includes(spaceId), `${spaceId} malformed readiness must be omitted entirely`);
+    }
+    h.act('mesh-create-invitation', {});
+    assert.equal(h.lastModal().verb, '', 'malformed readiness must yield no Create confirmation');
+    assert.equal(h.lastModal().onConfirm, null, 'malformed readiness must yield no mutation callback');
+
+    const objectProjection = createHarness();
+    const ready = sourceEntry('ready-one', 'ready');
+    objectProjection.setStatusResponse(statusWithSources([ready], {
+        eligible_spaces: [{ space_id: 'ready-one' }],
+    }));
+    objectProjection.renderOverview();
+    await flushTasks();
+    objectProjection.act('mesh-create-invitation', {});
+    assert.equal(objectProjection.lastModal().verb, '', 'eligible_spaces objects must not be treated as string ids');
+    assert.ok(!objectProjection.lastModal().body.includes('<option value="ready-one"'));
+    console.log('scenario S (malformed/incoherent readiness and non-string eligibility fail closed): ok');
+}
+
+async function scenarioT() {
+    // Invitation issuance is one-shot: the navigation/close lock starts before
+    // the POST, blocks duplicate submit and dismissal, and is transferred to
+    // the secret display.  Refusal and stale-session paths release it.
+    const h = createHarness();
+    h.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
+    h.renderOverview();
+    await flushTasks();
+    h.act('mesh-create-invitation', {});
+    h.el('meshInvSpace').value = 'demo';
+    h.setMeshActionAutoResolve(false);
+    const pending = h.lastModal().onConfirm();
+    assert.equal(h.meshActionCalls.length, 1);
+    assert.equal(h.closeControlsEnabled(), false, 'dismiss controls must be disabled before the invitation POST settles');
+    assert.equal(await h.lastModal().onConfirm(), false, 'direct duplicate submit must be refused');
+    assert.equal(h.meshActionCalls.length, 1, 'duplicate confirm must not issue a second one-shot POST');
+    assert.equal(h.closeViaControl(), false, 'the pending invitation modal cannot be explicitly dismissed');
+    const lockedHash = h.location.hash;
+    h.location.hash = '#/dashboard';
+    h.flushHashQueue();
+    assert.equal(h.location.hash, lockedHash, 'navigation is locked while the one-shot response is pending');
+    h.settleLastAction({
+        status: 'ok', pair_id: 'pair_new', secret: 'SECRET-VALUE-XYZ',
+        invitation: 'SIGNED_INVITATION_B64', source_endpoint: 'https://a.test',
+        source_fingerprint: 'hm1:' + 'a'.repeat(64),
+    });
+    assert.equal(await pending, false);
+    assert.equal(h.lastModal().title, 'Invitation created — save the code now');
+    assert.equal(h.closeControlsEnabled(), true, 'the secret step restores its own dismissal controls');
+    h.location.hash = '#/spaces';
+    h.flushHashQueue();
+    assert.equal(h.location.hash, lockedHash, 'the same lock remains active while the secret is displayed');
+    assert.equal(h.closeViaControl(), true);
+    h.location.hash = '#/dashboard';
+    h.flushHashQueue();
+    assert.equal(h.location.hash, '#/dashboard', 'dismissing the secret releases the transferred lock');
+
+    const refused = createHarness();
+    refused.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
+    refused.renderOverview();
+    await flushTasks();
+    refused.act('mesh-create-invitation', {});
+    refused.el('meshInvSpace').value = 'demo';
+    refused.setMeshActionAutoResolve(false);
+    const refusedPending = refused.lastModal().onConfirm();
+    refused.settleLastAction({ status: 'error', message: 'Invitation refused.' });
+    assert.equal(await refusedPending, false);
+    assert.equal(refused.closeControlsEnabled(), true, 'refusal re-enables dismissal');
+    assert.match(refused.el('meshInvErr').textContent, /refused/);
+    refused.location.hash = '#/dashboard';
+    refused.flushHashQueue();
+    assert.equal(refused.location.hash, '#/dashboard', 'refusal releases navigation');
+
+    const stale = createHarness();
+    stale.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
+    stale.renderOverview();
+    await flushTasks();
+    stale.act('mesh-create-invitation', {});
+    stale.el('meshInvSpace').value = 'demo';
+    stale.setMeshActionAutoResolve(false);
+    const stalePending = stale.lastModal().onConfirm();
+    stale.setIdentity({ client_name: 'admin-2', permissions: ['admin'] });
+    stale.settleLastAction({
+        status: 'ok', secret: 'LATE-SECRET', invitation: 'LATE-INVITATION',
+        source_endpoint: 'https://late.test', source_fingerprint: 'hm1:' + 'b'.repeat(64),
+    });
+    assert.equal(await stalePending, false);
+    assert.equal(stale.lastModal().title, 'Create invitation', 'late cross-session response must never display the secret');
+    assert.equal(stale.el('meshInvCode'), null);
+    assert.deepEqual(stale.toasts, []);
+    assert.equal(stale.refreshCallCount(), 0);
+    stale.location.hash = '#/dashboard';
+    stale.flushHashQueue();
+    assert.equal(stale.location.hash, '#/dashboard', 'stale-session discard releases navigation without DOM effects');
+
+    const superseded = createHarness();
+    superseded.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
+    superseded.renderOverview();
+    await flushTasks();
+    superseded.act('mesh-create-invitation', {});
+    superseded.el('meshInvSpace').value = 'demo';
+    superseded.setMeshActionAutoResolve(false);
+    const abandoned = superseded.lastModal().onConfirm();
+    superseded.setIdentity({ client_name: 'admin-2', permissions: ['admin'] });
+    superseded.setSessionGeneration(2);
+    superseded.renderOverview();
+    await flushTasks();
+    superseded.act('mesh-create-invitation', {});
+    superseded.el('meshInvSpace').value = 'demo';
+    superseded.setMeshActionAutoResolve(true);
+    assert.equal(await superseded.lastModal().onConfirm(), false);
+    assert.equal(superseded.lastModal().title, 'Invitation created — save the code now', 'an abandoned old-session request must not poison a new login');
+    const newSessionCode = superseded.el('meshInvCode').textContent;
+    superseded.settleLastAction({
+        status: 'ok', secret: 'OLD-LATE-SECRET', invitation: 'OLD-LATE-INVITATION',
+        source_endpoint: 'https://old.test', source_fingerprint: 'hm1:' + 'c'.repeat(64),
+    });
+    assert.equal(await abandoned, false);
+    assert.equal(superseded.el('meshInvCode').textContent, newSessionCode, 'the old response must not replace the new session secret');
+    console.log('scenario T (one-shot invitation pre-POST lock, transfer, release, stale fail-close): ok');
+}
+
+async function scenarioU() {
+    // Accept's target picker is independently authoritative: only a fresh,
+    // status:'ok' space_list response may create a confirmable modal, and an
+    // awaited response cannot resurrect after route/session ownership changes.
+    for (const response of [
+        { status: 'error', message: 'List failed.' },
+        { status: 'ok', spaces: [] },
+        { status: 'ok' },
+    ]) {
+        const h = createHarness();
+        h.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
+        h.setSpaceListResponse(response);
+        h.renderOverview();
+        await flushTasks();
+        h.act('mesh-accept-invitation', {});
+        await flushTasks();
+        assert.equal(h.lastModal().title, 'Accept invitation');
+        assert.equal(h.lastModal().verb, '', 'error/empty target responses must expose no confirm');
+        assert.equal(h.lastModal().onConfirm, null, 'error/empty target responses must expose no mutation callback');
+    }
+
+    for (const staleKind of ['route', 'session', 'modal']) {
+        const h = createHarness();
+        h.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')]));
+        h.setSpaceListAutoResolve(false);
+        h.renderOverview();
+        await flushTasks();
+        h.act('mesh-accept-invitation', {});
+        if (staleKind === 'route') h.bumpEpoch();
+        else if (staleKind === 'session') h.setIdentity({ client_name: 'admin-2', permissions: ['admin'] });
+        else h.act('mesh-create-invitation', {});
+        const modalCount = h.modals.length;
+        h.settleLastSpaceList({ status: 'ok', spaces: [{ space_id: 'demo' }] });
+        await flushTasks();
+        assert.equal(h.modals.length, modalCount, `${staleKind} stale space_list must not open an Accept modal`);
+        assert.equal(h.meshActionCalls.length, 0);
+    }
+
+    const good = createHarness();
+    good.setStatusResponse(statusWithSources([sourceEntry('source-ready', 'ready')]));
+    good.setSpaceListResponse({ status: 'ok', spaces: [{ space_id: 'target-one' }, { nope: true }] });
+    good.renderOverview();
+    await flushTasks();
+    good.act('mesh-accept-invitation', { spaceId: 'target-one' });
+    await flushTasks();
+    assert.equal(good.lastModal().verb, 'Accept');
+    assert.ok(good.lastModal().body.includes('<option value="target-one"'));
+    assert.ok(!good.lastModal().body.includes('source-ready'), 'source readiness must never populate the target picker');
+    assert.ok(good.lastModal().body.includes('every same-space writer'), 'Accept must explain the target quiescence precondition');
+    assert.equal(good.el('modalConfirmBtn').disabled, true, 'Accept starts disabled until quiescence is attested');
+    good.el('meshAccCode').value = Buffer.from(JSON.stringify({
+        v: 1, secret: 'one-time-secret', source_endpoint: 'https://source.test', invitation: 'signed-invitation',
+    })).toString('base64url');
+    // The dependency-free DOM harness does not materialize <option selected>,
+    // unlike the browser proof below, so choose the rendered target explicitly.
+    good.el('meshAccSpace').value = 'target-one';
+    assert.equal(await good.lastModal().onConfirm(), false, 'unchecked quiescence causes zero accept POST');
+    assert.equal(good.meshActionCalls.length, 0);
+    good.el('meshAccQuiesced').checked = true;
+    good.el('meshAccQuiesced').dispatch('change');
+    assert.equal(good.el('modalConfirmBtn').disabled, false, 'quiescence attestation enables Accept');
+    assert.equal(await good.lastModal().onConfirm(), true);
+    assert.equal(good.meshActionCalls.length, 1);
+    assert.equal(good.meshActionCalls[0].action, 'accept');
+    assert.equal(good.meshActionCalls[0].args.quiesced, true);
+    assert.deepEqual(Object.keys(good.meshActionCalls[0].args).sort(),
+        ['invitation', 'quiesced', 'scopes', 'secret', 'source_endpoint', 'target_space_id']);
+    console.log('scenario U (Accept target picker status/route/session/modal guards): ok');
+}
+
+async function scenarioV() {
+    // Every post-await ownership change, including an explicit close routed
+    // through _openModal's shell controls, suppresses all late preparation
+    // effects (DOM, toast, refresh, and invitation chaining).
+    for (const staleKind of ['route', 'session', 'replacement', 'close']) {
+        const h = createHarness();
+        h.setStatusResponse(statusWithSources([sourceEntry('demo', 'local_only_can_prepare')]));
+        h.renderOverview();
+        await flushTasks();
+        h.act('mesh-prepare-source', { spaceId: 'demo' });
+        const modal = h.lastModal();
+        const errorEl = h.el('meshPrepareErr');
+        h.el('meshPrepareConfirmInput').value = 'demo';
+        h.el('meshPrepareQuiesced').checked = true;
+        h.setMeshActionAutoResolve(false);
+        const pending = modal.onConfirm();
+        if (staleKind === 'route') h.bumpEpoch();
+        else if (staleKind === 'session') h.setIdentity({ client_name: 'admin-2', permissions: ['admin'] });
+        else if (staleKind === 'replacement') h.act('mesh-create-invitation', {});
+        else assert.equal(h.closeViaControl(), true, 'Prepare close control must remain usable while its POST is pending');
+        h.settleLastAction({ status: 'ok', result: 'prepared', source: sourceEntry('demo', 'ready') });
+        assert.equal(await pending, false, `${staleKind} late prepare response must be discarded`);
+        assert.equal(errorEl.textContent, '', `${staleKind} discard must not mutate the old modal DOM`);
+        assert.deepEqual(h.toasts, [], `${staleKind} discard must not toast`);
+        assert.equal(h.refreshCallCount(), 0, `${staleKind} discard must not refresh`);
+        assert.ok(!h.meshActionCalls.some(call => call.action === 'invitation'));
+    }
+    console.log('scenario V (post-await prepare route/session/modal/close staleness has no side effects): ok');
+}
+
+async function scenarioW() {
+    const overview = createHarness();
+    overview.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')], {
+        pairings: [],
+        pairings_truncated: true,
+    }));
+    overview.renderOverview();
+    await flushTasks();
+    let html = overview.contentEl.innerHTML;
+    assert.ok(html.includes('Pairing history is truncated'));
+    assert.ok(html.includes('absent session') && html.includes('not authoritative'));
+    assert.ok(!html.includes('No pairings yet'), 'a diagnostic slice must not fabricate an exhaustive empty history');
+    assert.ok(!html.includes('Every pairing on this instance is settled'));
+    assert.ok(html.includes('No pairing in the loaded slice'));
+
+    const detail = createHarness();
+    detail.setStatusResponse(statusWithSources([sourceEntry('demo', 'ready')], {
+        pairings: [],
+        pairings_truncated: true,
+    }));
+    detail.setMembersResponse({
+        status: 'ok', space_id: 'demo', membership_epoch: 0,
+        members: [{ node_id: 'node0', display_name: 'local', endpoint: '', fingerprint: '', scopes: null }],
+        pairing_metadata_truncated: true,
+    });
+    detail.renderDetail('demo');
+    await flushTasks();
+    html = detail.contentEl.innerHTML;
+    assert.ok(html.includes('LOADED PAIRING SESSIONS'));
+    assert.ok(html.includes('No session for this space in the loaded slice'));
+    detail.act('mesh-detail-tab', { tab: 'members' });
+    html = detail.contentEl.innerHTML;
+    assert.ok(html.includes('Pairing metadata is truncated'));
+    assert.ok(html.includes('pairing-derived actions may be missing'));
+    detail.act('mesh-detail-tab', { tab: 'invitations' });
+    html = detail.contentEl.innerHTML;
+    assert.ok(html.includes('No invitation or session for this space in the loaded slice'));
+    assert.ok(!html.includes('No invitations or pairing sessions for this space'));
+    console.log('scenario W (bounded diagnostic history is explicitly non-authoritative): ok');
+}
+
+async function scenarioX() {
+    const h = createHarness();
+    const unsafeBackendReason = '<img src=x onerror=alert(1)>';
+    h.setStatusResponse(statusWithSources([], {
+        pairings: [{
+            pair_id: 'pair_blocked', role: 'source', state: 'blocked_recovery',
+            space_id: 'demo', updated_at_ms: 3000, next_action: 'evict',
+            granted_scopes: ['read'],
+        }],
+        source_readiness_unavailable: true,
+        source_readiness_truncated: true,
+        source_readiness_unavailable_reason: unsafeBackendReason,
+    }));
+
+    h.renderOverview();
+    await flushTasks();
+    let html = h.contentEl.innerHTML;
+    assert.ok(html.includes('Source readiness is unavailable'));
+    assert.ok(html.includes('bounded source inventory limit was exceeded'));
+    assert.ok(!html.includes(unsafeBackendReason), 'backend reason must never render verbatim');
+    assert.ok(!html.includes('No committed spaces reported'), 'unavailable readiness is not an empty source inventory');
+    assert.ok(!html.includes('data-action="mesh-create-invitation"'), 'Create must be hidden while readiness is unavailable');
+    assert.ok(!html.includes('data-action="mesh-prepare-source"'), 'Prepare must be hidden while readiness is unavailable');
+    assert.ok(html.includes('data-pair-id="pair_blocked"'), 'pairing history must remain visible');
+    assert.ok(html.includes('data-mesh-action="evict"'), 'blocked recovery action must remain available');
+
+    h.renderDetail('demo');
+    await flushTasks();
+    h.act('mesh-detail-tab', { tab: 'invitations' });
+    html = h.contentEl.innerHTML;
+    assert.ok(html.includes('Source readiness is unavailable'));
+    assert.ok(html.includes('data-pair-id="pair_blocked"'), 'detail pairing history must remain visible');
+    assert.ok(html.includes('data-mesh-action="evict"'), 'detail recovery action must remain available');
+    assert.ok(!html.includes('data-action="mesh-create-invitation"'));
+    assert.ok(!html.includes('data-action="mesh-prepare-source"'));
+    assert.ok(!html.includes(unsafeBackendReason));
+    console.log('scenario X (source-readiness degradation preserves recovery without source actions): ok');
+}
+
 async function main() {
     await scenarioA();
     await scenarioB();
@@ -605,6 +1137,16 @@ async function main() {
     await scenarioL();
     await scenarioM();
     await scenarioN();
+    await scenarioO();
+    await scenarioP();
+    await scenarioQ();
+    await scenarioR();
+    await scenarioS();
+    await scenarioT();
+    await scenarioU();
+    await scenarioV();
+    await scenarioW();
+    await scenarioX();
     console.log('admin mesh runtime: ok');
 }
 

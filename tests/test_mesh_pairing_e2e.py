@@ -14,6 +14,8 @@ import base64
 import contextlib
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -26,8 +28,12 @@ from live_mem.core.hivemind import (
     HivemindStateStore,
     Member,
     MembershipView,
+    NodeHealth,
     NodeIdentity,
+    TokenLeaseState,
+    TokenState,
 )
+from live_mem.core.hivemind import layout
 from live_mem.mesh.config import (
     MESH_BOOTSTRAP_MAX_BYTES_ENV,
     MESH_BOOTSTRAP_MAX_OBJECTS_ENV,
@@ -39,6 +45,7 @@ from live_mem.mesh.config import (
     MESH_PUBLIC_URL_ENV,
     load_mesh_config,
 )
+from live_mem.mesh.canonical import canonical_dumps
 from live_mem.mesh.identity import (
     MESH_PRIVATE_KEY_PREFIX,
     decode_mesh_public_key,
@@ -46,7 +53,12 @@ from live_mem.mesh.identity import (
     parse_mesh_private_key,
 )
 from live_mem.mesh.pairing_client import PeerResponse
-from live_mem.mesh.pairing_service import MeshPairingService
+from live_mem.mesh.pairing_service import MeshPairingService, MeshPairingServiceError
+from live_mem.mesh.pairing_state import (
+    MeshPairingState,
+    SignedSourceBootstrapEvidence,
+    SignedTargetTerminalConfirmationReceipt,
+)
 from live_mem.mesh.router import MeshNamespaceRouter
 from tests.test_hivemind_state import FakeStorage
 from tests.test_mesh_router import FakeProcessLock, FakeReplayLedger, _invoke
@@ -55,6 +67,12 @@ NOW_MS = 1_800_000_000_000
 SPACE = "meshspace"
 A_URL = "https://a.mesh.test"
 B_URL = "https://b.mesh.test"
+
+# These proofs deliberately schedule nested ASGI peer exchanges while holding
+# test-controlled events.  They detect a deadlock, rather than asserting a
+# performance budget, so leave enough headroom for coverage-instrumented CI
+# runners without allowing a genuinely stuck task to hang the suite.
+ASYNC_RACE_TIMEOUT_SECONDS = 5
 
 
 def _config(private, url: str):
@@ -109,6 +127,10 @@ class AsgiPeerSender:
 
 
 async def _seed_source(storage: FakeStorage, config) -> None:
+    # Legacy pairing fixtures used to seed only protocol objects. Source
+    # readiness now (correctly) requires the same committed-space marker as the
+    # product, so layer legacy Hivemind state onto a real committed space.
+    await _seed_blank_target(storage)
     store = HivemindStateStore(storage=storage, space_id=SPACE)  # type: ignore[arg-type]
     legacy = _legacy(config.public_key)
     node_id = "sourcenode0000000000000000000000"
@@ -268,7 +290,9 @@ async def _admin_tcp_post(base_url: str, action: str, data: dict) -> tuple[int, 
     return response.status_code, json.loads(response.body)
 
 
-async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog: pytest.LogCaptureFixture) -> None:
+async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """P10-5: prove the three actions cross two real ASGI/TCP boundaries.
 
     The older P10-3 tests intentionally use an in-process sender to make the
@@ -284,7 +308,32 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog
     b_private = MESH_PRIVATE_KEY_PREFIX + base64.urlsafe_b64encode(bytes([112]) * 32).decode().rstrip("=")
     a_config, b_config = _config(a_private, A_URL), _config(b_private, B_URL)
     a_storage, b_storage = FakeStorage(), FakeStorage()
-    await _seed_source(a_storage, a_config)
+    # Start from the real product creation path: no private node/membership seed.
+    from live_mem.core import locks as locks_module
+    from live_mem.core import space as space_module
+    from live_mem.core import tokens as tokens_module
+    from live_mem.core.locks import LockManager
+    from live_mem.core.space import SpaceService
+    from live_mem.core.tokens import TokenService
+
+    monkeypatch.setattr(space_module, "get_storage", lambda: a_storage)
+    monkeypatch.setattr(tokens_module, "get_storage", lambda: a_storage)
+    monkeypatch.setattr(tokens_module, "_token_service", TokenService())
+    monkeypatch.setattr(locks_module, "_lock_manager", LockManager())
+    created = await SpaceService().create(
+        SPACE,
+        "TCP Project Mesh source",
+        "# TCP source rules",
+        owner="source-admin",
+        bootstrap_admin=True,
+    )
+    assert created["status"] == "created"
+    await a_storage.put(f"{SPACE}/bank/activeContext.md", "# TCP source content")
+    business_before = {
+        key: value
+        for key, value in a_storage.snapshot().items()
+        if key.startswith(f"{SPACE}/") and "/_hivemind/" not in key
+    }
     await _seed_blank_target(b_storage)
 
     endpoints: dict[str, str] = {}
@@ -327,6 +376,33 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog
     async with _loopback_asgi_server(a_app) as a_url, _loopback_asgi_server(b_app) as b_url:
         endpoints.update(A=a_url, B=b_url)
 
+        # #413 prerequisite: readiness and preparation also traverse the real
+        # authenticated admin/TCP boundary. It must not mutate business bytes or
+        # create an invitation as a hidden continuation.
+        status_response = await _tcp_http_request(
+            a_url, "GET", "/api/admin/mesh/status"
+        )
+        assert status_response.status_code == 200
+        mesh_status = json.loads(status_response.body)
+        source = next(
+            item
+            for item in mesh_status["source_readiness"]
+            if item["space_id"] == SPACE
+        )
+        assert source["state"] == "local_only_can_prepare"
+        status, prepared = await _admin_tcp_post(
+            a_url,
+            "prepare-source",
+            {
+                "space_id": SPACE,
+                "quiesced": True,
+                "expected_state_token": source["state_token"],
+            },
+        )
+        assert status == 200 and prepared["result"] == "prepared"
+        assert prepared["source"]["state"] == "ready"
+        assert not await a_service.store.list_sessions()
+
         # Action 1: only this response may hold the display-once invitation
         # secret.  Durable pairing storage must retain the hash/digests only.
         status, invitation = await _admin_tcp_post(
@@ -355,6 +431,7 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog
             {
                 "invitation": invitation["invitation"], "target_space_id": SPACE,
                 "secret": canary, "source_endpoint": A_URL, "scopes": ["read", "commit"],
+                "quiesced": True,
             },
         )
         assert status == 400 and canary not in json.dumps(refused)
@@ -368,11 +445,12 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog
             {
                 "invitation": invitation["invitation"], "target_space_id": SPACE,
                 "secret": secret, "source_endpoint": A_URL, "scopes": ["read", "commit"],
+                "quiesced": True,
             },
         )
         assert status == 200 and accepted["state"] == "claimed"
         status, approved = await _admin_tcp_post(a_url, "approve", {"pair_id": invitation["pair_id"]})
-        assert status == 200 and approved["epoch"] == 2
+        assert status == 200 and approved["epoch"] == 1
         status, enrolled = await _admin_tcp_post(b_url, "enroll", {"pair_id": invitation["pair_id"]})
         assert status == 200 and enrolled["state"] == "active"
 
@@ -382,7 +460,7 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog
     a_members = await HivemindStateStore(storage=a_storage, space_id=SPACE).get_membership()  # type: ignore[arg-type]
     b_members = await HivemindStateStore(storage=b_storage, space_id=SPACE).get_membership()  # type: ignore[arg-type]
     target_id = b_config.fingerprint.split(":", 1)[1]
-    assert a_members.epoch == b_members.epoch == 3
+    assert a_members.epoch == b_members.epoch == 2
     assert any(member.node_id == target_id and member.status == "active" for member in a_members.members)
     assert any(member.node_id == target_id and member.status == "active" for member in b_members.members)
     assert any(path == "/mesh/v1/pair/claim" for _method, path in b_transcript)
@@ -390,6 +468,13 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog
     persisted = "\n".join([*a_storage.objects.values(), *b_storage.objects.values()])
     assert secret not in persisted and a_private not in persisted and b_private not in persisted
     assert snapshot_canary not in persisted
+    business_after = {
+        key: value
+        for key, value in a_storage.snapshot().items()
+        if key.startswith(f"{SPACE}/") and "/_hivemind/" not in key
+    }
+    assert business_after == business_before
+    assert b_storage.objects[f"{SPACE}/bank/activeContext.md"] == "# TCP source content"
 
     audit_entries = [
         json.loads(record.getMessage())
@@ -397,6 +482,7 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(caplog
         if record.name == "live_mem.audit"
     ]
     assert any(entry["path"] == "/api/admin/mesh/invitation" for entry in audit_entries)
+    assert any(entry["path"] == "/api/admin/mesh/prepare-source" for entry in audit_entries)
     assert any(entry["path"] == "/mesh/v1/pair/claim" for entry in audit_entries)
     audit_blob = json.dumps(audit_entries, sort_keys=True)
     for canary in (invitation_canary, a_private, b_private, snapshot_canary):
@@ -445,7 +531,7 @@ async def test_two_asgi_instances_pair_and_converge(monkeypatch):
     accept = await b_service.accept_invitation(
         invite["invitation_bytes"], SPACE,
         secret=invite["secret"], source_endpoint=A_URL,
-        requested_scopes=("read", "propose", "commit"),
+        requested_scopes=("read", "propose", "commit"), quiesced=True,
     )
     assert accept["state"] == "claimed"
     # A now has a claimed source session.
@@ -482,7 +568,7 @@ async def test_two_asgi_instances_pair_and_converge(monkeypatch):
     )
 
     assert await b_service.store.get_reservation(SPACE) is None
-    register_reservation_checker(b_service.store.assert_space_not_reserved)
+    register_reservation_checker(b_service.assert_space_not_reserved)
     try:
         await assert_space_not_reserved(SPACE)  # must NOT raise — no longer reserved
     finally:
@@ -553,7 +639,7 @@ async def test_target_loss_after_final_ack_recovers_on_resume(monkeypatch):
 
     invite = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
     pair_id = invite["pair_id"]
-    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"))
+    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True)
     await a_service.approve(pair_id)
 
     # Simulate lost activation delivery: temporarily point A's outbound sender at
@@ -604,9 +690,533 @@ async def _drive_to_approved(a_seed, b_seed):
     peers["A"], peers["B"] = a_router, b_router
     invite = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
     pair_id = invite["pair_id"]
-    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"))
+    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True)
     await a_service.approve(pair_id)
     return a_service, b_service, a_config, b_config, a_storage, b_storage, peers, pair_id
+
+
+async def _advance_completed_pair_head(a_storage, b_storage, *, commit_id: str):
+    """Advance both peers once after all-ACK without changing membership."""
+
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    source_node = await source_store.get_node_identity()
+    assert source_node is not None
+    for store in (source_store, target_store):
+        membership = await store.get_membership()
+        term = await store.get_term()
+        assert membership is not None and term is not None
+        commit = BankCommit(
+            bank_version=2,
+            parent_bank_version=1,
+            term=term.term,
+            membership_epoch=membership.epoch,
+            commit_id=commit_id,
+            committed_by_node_id=source_node.node_id,
+            manifest=[],
+        )
+        await store.append_commit(commit)
+        await store.set_bank_version_pointer(
+            BankVersionPointer(bank_version=2, commit_id=commit_id)
+        )
+    return source_store, target_store
+
+
+async def _drive_prepared_source_to_approved(a_seed, b_seed):
+    """Reach e+1 from the real existing-space preparation path."""
+
+    a_config = _config(
+        MESH_PRIVATE_KEY_PREFIX
+        + base64.urlsafe_b64encode(bytes([a_seed]) * 32).decode().rstrip("="),
+        A_URL,
+    )
+    b_config = _config(
+        MESH_PRIVATE_KEY_PREFIX
+        + base64.urlsafe_b64encode(bytes([b_seed]) * 32).decode().rstrip("="),
+        B_URL,
+    )
+    a_storage, b_storage = FakeStorage(), FakeStorage()
+    await _seed_blank_target(a_storage)
+    await _seed_blank_target(b_storage)
+    clock = lambda: NOW_MS
+    peers: dict = {}
+    a_service = MeshPairingService(
+        a_config,
+        a_storage,
+        clock_ms=clock,
+        sender_factory=lambda _endpoint: AsgiPeerSender(peers, "B"),
+    )
+    b_service = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=clock,
+        sender_factory=lambda _endpoint: AsgiPeerSender(peers, "A"),
+    )
+    a_router = MeshNamespaceRouter(
+        _fallback(),
+        config=a_config,
+        process_lock=FakeProcessLock(),
+        storage_factory=lambda: a_storage,
+        replay_ledger=FakeReplayLedger(),
+        clock_ms=clock,
+        pairing_service=a_service,
+    )
+    b_router = MeshNamespaceRouter(
+        _fallback(),
+        config=b_config,
+        process_lock=FakeProcessLock(),
+        storage_factory=lambda: b_storage,
+        replay_ledger=FakeReplayLedger(),
+        clock_ms=clock,
+        pairing_service=b_service,
+    )
+    peers["A"], peers["B"] = a_router, b_router
+
+    readiness = await a_service.inspect_source_eligibility(SPACE)
+    assert readiness["state"] == "local_only_can_prepare"
+    prepared = await a_service.prepare_source(
+        SPACE, expected_state_token=readiness["state_token"], quiesced=True
+    )
+    assert prepared["result"] == "prepared"
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read", "commit")
+    )
+    pair_id = invitation["pair_id"]
+    accepted = await b_service.accept_invitation(
+        invitation["invitation_bytes"],
+        SPACE,
+        secret=invitation["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read", "commit"), quiesced=True,
+    )
+    assert accepted["state"] == MeshPairingState.CLAIMED.value
+    approved = await a_service.approve(pair_id)
+    assert approved["epoch"] == 1
+    return a_service, b_service, a_config, b_config, a_storage, b_storage, peers, pair_id
+
+
+@pytest.mark.parametrize("mutation", ["term", "token", "pointer", "commit"])
+async def test_export_snapshot_authority_change_blocks_final_ack(mutation: str) -> None:
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(67, 68)
+    store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+
+    if mutation == "term":
+        await store.bump_term(3, updated_by_node_id="sourcenode0000000000000000000000")
+    elif mutation == "token":
+        await store.set_token(
+            TokenLeaseState(
+                state=TokenState.FREE,
+                term=2,
+                fencing_token=1,
+                membership_epoch=2,
+                bank_version=1,
+            )
+        )
+    elif mutation == "pointer":
+        await store.append_commit(
+            BankCommit(
+                bank_version=2,
+                parent_bank_version=1,
+                term=2,
+                commit_id="c2",
+                committed_by_node_id="sourcenode0000000000000000000000",
+            )
+        )
+        await store.set_bank_version_pointer(
+            BankVersionPointer(bank_version=2, commit_id="c2")
+        )
+    else:
+        commit = await store.get_commit(1)
+        assert commit is not None
+        changed = commit.model_copy(update={"term": 3})
+        await a_storage.put(
+            layout.commit_key(SPACE, 1),
+            json.dumps(changed.model_dump(mode="json")),
+        )
+
+    result = await b_service.run_target_enrollment(pair_id)
+    assert result["state"] != "active"
+    source_session = await a_service.store.get_session(pair_id)
+    assert source_session is not None
+    assert source_session.state == "blocked_recovery"
+    evidence = await a_service.store.get_evidence(pair_id)
+    assert evidence is not None
+    assert evidence.evidence.phase == "bootstrap_source_changed"
+    source_membership = await store.get_membership()
+    target_node_id = b_config.fingerprint.split(":", 1)[1]
+    assert source_membership.epoch == 2
+    assert any(
+        member.node_id == target_node_id and member.status == "pending"
+        for member in source_membership.members
+    )
+    target_health = await HivemindStateStore(
+        storage=b_storage, space_id=SPACE
+    ).get_node_status()  # type: ignore[arg-type]
+    assert HiveNodeStatus(target_health.status) == HiveNodeStatus.UNSAFE
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+
+async def test_prepared_source_health_and_provenance_loss_blocks_final_ack() -> None:
+    """A prepared source cannot regain legacy no-marker compatibility at e+1."""
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_prepared_source_to_approved(69, 70)
+    target = await b_service.store.get_session(pair_id)
+    assert target is not None and target.state == MeshPairingState.CLAIMED.value
+
+    # Import while the source's preparation/health proof is still exact, then
+    # delete *both* records.  Looking only at live absence would incorrectly
+    # reclassify this former prepared source as legacy and permit e+2.
+    signed_env = await b_service._fetch_and_verify_approval(target)
+    transferring = target.transition(
+        MeshPairingState.APPROVED, now_ms=NOW_MS
+    ).transition(
+        MeshPairingState.TRANSFERRING,
+        now_ms=NOW_MS,
+        bootstrap_manifest_digest=signed_env.envelope.manifest_digest,
+        bootstrap_bank_version=signed_env.envelope.bank_version,
+    )
+    await b_service.store.put_session(transferring)
+    awaiting = await b_service._import_and_await(transferring, signed_env)
+    await a_storage.delete(layout.node_status_key(SPACE))
+    await a_storage.delete(a_service.store._source_preparation_key(SPACE))
+
+    assert not await a_service._source_is_healthy_for_bootstrap(
+        await a_service.store.get_session(pair_id)
+    )
+    assert not await a_service._source_health_marker_allows_bootstrap(
+        await a_service.store.get_session(pair_id)
+    )
+    result = await b_service._final_ack_and_activate(pair_id, awaiting)
+
+    assert result["ack_status"] != 200
+    source_membership = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_membership()  # type: ignore[arg-type]
+    assert source_membership is not None and source_membership.epoch == 1
+    target_node_id = b_config.fingerprint.split(":", 1)[1]
+    assert any(
+        member.node_id == target_node_id
+        and member.status == "pending"
+        for member in source_membership.members
+    )
+    target_health = await HivemindStateStore(
+        storage=b_storage, space_id=SPACE
+    ).get_node_status()  # type: ignore[arg-type]
+    assert target_health is not None and target_health.status == HiveNodeStatus.UNSAFE.value
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+
+async def test_export_snapshot_binds_signed_commit_content_not_only_commit_id() -> None:
+    """A rewritten local evidence record cannot bless bytes different from the
+    signed e+1 bootstrap, even when the selected commit id stays unchanged."""
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(68, 69)
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    commit = await source_store.get_commit(1)
+    assert commit is not None
+    rewritten = commit.model_copy(update={"event_id": "same-id-rewritten"})
+    await a_storage.put(
+        layout.commit_key(SPACE, 1), json.dumps(rewritten.model_dump(mode="json"))
+    )
+    evidence = await a_service.store.get_source_bootstrap_evidence(pair_id)
+    assert evidence is not None
+    # Simulate a valid-schema corruption of the local operational record too.
+    # The original source-signed envelope/payload must still reject this pair.
+    tampered_evidence = replace(
+        evidence.evidence,
+        selected_commit_digest=a_service._canonical_model_digest(rewritten),
+    )
+    tampered = SignedSourceBootstrapEvidence.sign(
+        tampered_evidence, a_service._config.private_key
+    )
+    await a_storage.put(
+        a_service.store._source_bootstrap_evidence_key(pair_id),
+        tampered.canonical_bytes().decode("utf-8"),
+    )
+
+    result = await b_service.run_target_enrollment(pair_id)
+    assert result["state"] != "active"
+    source_session = await a_service.store.get_session(pair_id)
+    assert source_session is not None
+    assert source_session.state == "blocked_recovery"
+    blocked = await a_service.store.get_evidence(pair_id)
+    assert blocked is not None
+    assert blocked.evidence.phase == "bootstrap_source_changed"
+    source_membership = await source_store.get_membership()
+    assert source_membership is not None and source_membership.epoch == 2
+
+
+async def test_pairing_authority_helpers_reject_missing_or_mutated_bindings() -> None:
+    """All retained authority helpers fail closed instead of trusting sessions."""
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(68, 69)
+    source = await a_service.store.get_session(pair_id)
+    claimed = await b_service.store.get_session(pair_id)
+    assert source is not None and claimed is not None
+
+    # Both the wire caller and its persisted session must match the immutable
+    # signed approval, not merely each other.
+    request = SimpleNamespace(
+        source_public_key=source.target_public_key,
+        source_fingerprint=source.target_fingerprint,
+    )
+    assert await a_service._source_request_is_enrolled_target(source, request)
+    request.source_fingerprint = "mesh:wrong"
+    assert not await a_service._source_request_is_enrolled_target(source, request)
+
+    source_approval = await a_service.store.get_blob(pair_id, "approval")
+    assert source_approval is not None
+    await a_storage.delete(a_service.store._blob_key(pair_id, "approval"))
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await a_service._source_enrollment_approval(source)
+    assert exc.value.code == "missing_artifacts"
+    await a_service.store.put_blob(pair_id, "approval", source_approval)
+
+    signed_env = await b_service._fetch_and_verify_approval(claimed)
+    transferring = claimed.transition(
+        MeshPairingState.APPROVED, now_ms=NOW_MS
+    ).transition(
+        MeshPairingState.TRANSFERRING,
+        now_ms=NOW_MS,
+        bootstrap_manifest_digest=signed_env.envelope.manifest_digest,
+        bootstrap_bank_version=signed_env.envelope.bank_version,
+    )
+    await b_service.store.put_session(transferring)
+    awaiting = await b_service._import_and_await(transferring, signed_env)
+    assert (await b_service._target_enrollment_approval(awaiting)).pair_id == pair_id
+    await b_storage.delete(b_service.store._blob_key(pair_id, "validated_approval"))
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await b_service._target_enrollment_approval(awaiting)
+    assert exc.value.code == "missing_artifacts"
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await b_service._signed_pairing_binding(SimpleNamespace(role="invalid"))
+    assert exc.value.code == "bad_binding"
+    assert not await b_service._import_validation_matches(awaiting, base=1)
+
+    # A source serving an explicit unsafe marker is not bootstrap-ready, and
+    # neither a session-field substitution nor payload rewrite can pass the
+    # retained signed snapshot checker.
+    _signed, snapshot = await a_service._retained_bootstrap_snapshot(
+        source,
+        envelope_blob="bootstrap_envelope",
+        payload_blob="bootstrap_payload",
+    )
+    missing_members = dict(snapshot.files)
+    missing_members.pop("_hivemind/members.json")
+    with pytest.raises(MeshPairingServiceError) as exc:
+        a_service._bootstrap_snapshot_authority_models(
+            SimpleNamespace(files=missing_members, manifest=snapshot.manifest),
+            space_id=SPACE,
+        )
+    assert exc.value.code == "bootstrap_authority_mismatch"
+    missing_commit = dict(snapshot.files)
+    missing_commit.pop(
+        layout.commit_key(SPACE, snapshot.manifest.bank_version)[len(SPACE) + 1 :]
+    )
+    with pytest.raises(MeshPairingServiceError) as exc:
+        a_service._bootstrap_snapshot_authority_models(
+            SimpleNamespace(files=missing_commit, manifest=snapshot.manifest),
+            space_id=SPACE,
+        )
+    assert exc.value.code == "bootstrap_authority_mismatch"
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await a_service._capture_source_bootstrap_evidence(
+            source,
+            membership_epoch=source.base_epoch + 99,
+            manifest_digest=source.bootstrap_manifest_digest,
+            bank_version=source.bootstrap_bank_version,
+            commit_id="c1",
+            recorded_at_ms=NOW_MS,
+        )
+    assert exc.value.code == "source_snapshot_changed"
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    await source_store.set_node_status(
+        NodeHealth(status=HiveNodeStatus.UNSAFE, reason="test")
+    )
+    assert not await a_service._source_is_healthy_for_bootstrap(source)
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await a_service._retained_bootstrap_snapshot(
+            source.with_fields(
+                now_ms=source.updated_at_ms + 1,
+                target_fingerprint=generate_mesh_identity().fingerprint
+            ),
+            envelope_blob="bootstrap_envelope",
+            payload_blob="bootstrap_payload",
+    )
+    assert exc.value.code == "bootstrap_authority_mismatch"
+    await a_service.store.put_blob(pair_id, "bootstrap_payload", b"tampered")
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await a_service._retained_bootstrap_snapshot(
+            source,
+            envelope_blob="bootstrap_envelope",
+            payload_blob="bootstrap_payload",
+        )
+    assert exc.value.code == "bootstrap_authority_mismatch"
+    assert not await a_service._source_bootstrap_evidence_matches(source)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "tampered", "commit_rewrite"])
+async def test_target_import_authority_is_required_at_activation(mutation: str) -> None:
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(69, 70)
+    real_final_ack = b_service._final_ack_and_activate
+
+    async def strip_or_tamper_marker(pair: str, session):
+        key = b_service.store._import_validation_key(pair)
+        if mutation == "missing":
+            await b_storage.delete(key)
+        elif mutation == "tampered":
+            authority = await b_service.store.get_import_validation(pair)
+            assert authority is not None
+            tampered = replace(authority, manifest_digest="f" * 64)
+            await b_storage.put(key, tampered.canonical_bytes().decode("utf-8"))
+        else:
+            target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+            commit = await target_store.get_commit(1)
+            assert commit is not None
+            rewritten = commit.model_copy(update={"event_id": "same-id-rewritten"})
+            await b_storage.put(
+                layout.commit_key(SPACE, 1),
+                json.dumps(rewritten.model_dump(mode="json")),
+            )
+        return await real_final_ack(pair, session)
+
+    b_service._final_ack_and_activate = strip_or_tamper_marker  # type: ignore[method-assign]
+    result = await b_service.run_target_enrollment(pair_id)
+    assert result["state"] != "active"
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    target_membership = await target_store.get_membership()
+    target_node_id = (await target_store.get_node_identity()).node_id
+    assert target_membership.epoch == 2
+    assert any(
+        member.node_id == target_node_id and member.status == "pending"
+        for member in target_membership.members
+    )
+    target_health = await target_store.get_node_status()
+    assert HiveNodeStatus(target_health.status) == HiveNodeStatus.UNSAFE
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+
+async def test_import_authority_readback_rejects_conflict_pointer_and_corruption() -> None:
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(71, 72)
+    claimed = await b_service.store.get_session(pair_id)
+    assert claimed is not None and claimed.state == "claimed"
+    signed_env = await b_service._fetch_and_verify_approval(claimed)
+    transferring = claimed.transition(
+        MeshPairingState.APPROVED, now_ms=NOW_MS
+    ).transition(
+        MeshPairingState.TRANSFERRING,
+        now_ms=NOW_MS,
+        bootstrap_manifest_digest=signed_env.envelope.manifest_digest,
+        bootstrap_bank_version=signed_env.envelope.bank_version,
+    )
+    await b_service.store.put_session(transferring)
+    awaiting = await b_service._import_and_await(transferring, signed_env)
+    assert await b_service._import_validation_matches(awaiting, base=1)
+
+    imported = SimpleNamespace(
+        target_space_id=SPACE,
+        local_node_id=b_service._config.fingerprint.split(":", 1)[1],
+        membership_epoch=2,
+        bank_version=1,
+        commit_id="c1",
+    )
+    # The exact retry retains the original readback authority.
+    await b_service._persist_import_validation(awaiting, signed_env, imported)
+    authority = await b_service.store.get_import_validation(pair_id)
+    assert authority is not None
+    marker_key = b_service.store._import_validation_key(pair_id)
+    original_marker = authority.canonical_bytes().decode("utf-8")
+
+    await b_storage.put(
+        marker_key,
+        replace(authority, manifest_digest="f" * 64).canonical_bytes().decode("utf-8"),
+    )
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await b_service._persist_import_validation(awaiting, signed_env, imported)
+    assert exc.value.code == "import_validation_failed"
+    await b_storage.put(marker_key, original_marker)
+
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    selected = await target_store.get_commit(1)
+    assert selected is not None
+    rewritten = selected.model_copy(update={"event_id": "same-id-rewritten"})
+    await b_storage.put(
+        layout.commit_key(SPACE, 1), json.dumps(rewritten.model_dump(mode="json"))
+    )
+    assert not await b_service._import_validation_matches(awaiting, base=1)
+    # Restore the imported bytes before independently proving pointer drift.
+    await b_storage.put(
+        layout.commit_key(SPACE, 1), json.dumps(selected.model_dump(mode="json"))
+    )
+    await target_store.append_commit(
+        BankCommit(
+            bank_version=2,
+            parent_bank_version=1,
+            term=2,
+            commit_id="c2",
+            committed_by_node_id="sourcenode0000000000000000000000",
+        )
+    )
+    await target_store.set_bank_version_pointer(
+        BankVersionPointer(bank_version=2, commit_id="c2")
+    )
+    assert not await b_service._import_validation_matches(awaiting, base=1)
+    await b_storage.put(marker_key, "{")
+    assert not await b_service._import_validation_matches(awaiting, base=1)
 
 
 async def test_source_rejects_unconfirmed_activation_response(monkeypatch):
@@ -648,6 +1258,232 @@ async def test_corrupt_bootstrap_import_blocks_target_recovery(monkeypatch):
     assert signed_ev is not None and signed_ev.evidence.next_action == "resync"
 
 
+async def test_resync_rejects_mismatched_prefetched_payload_before_target_teardown() -> None:
+    """A validly signed wire reply is insufficient if it differs from e+1.
+
+    The resync preflight must verify the retained source envelope's payload
+    commitment before it turns the target unsafe or deletes its recoverable
+    state.  This simulates storage tampering of the source bootstrap blob while
+    its pair route still signs the transport response normally.
+    """
+
+    a_service, b_service, _a_config, _b_config, a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(74, 75)
+    )
+    corrupt = {"on": True}
+
+    class _CorruptFirstImport(AsgiPeerSender):
+        async def send(self, method, path, *, headers, body):
+            response = await super().send(method, path, headers=headers, body=body)
+            if corrupt["on"] and path.endswith("/bootstrap"):
+                return PeerResponse(response.status_code, response.headers, response.body + b"x")
+            return response
+
+    b_service._sender_factory = lambda _endpoint: _CorruptFirstImport(peers, "A")  # type: ignore[attr-defined]
+    with pytest.raises(MeshPairingServiceError):
+        await b_service.run_target_enrollment(pair_id)
+    assert (await b_service.store.get_session(pair_id)).state == "blocked_recovery"
+
+    corrupt["on"] = False
+    # Simulate an out-of-band rewrite after the source committed its signed
+    # envelope.  The source signs the route response, but that response must
+    # still be rejected because it is not the committed bootstrap bytes.
+    payload_key = a_service.store._blob_key(pair_id, "bootstrap_payload")
+    await a_storage.put(
+        payload_key,
+        base64.urlsafe_b64encode(b'{"not":"the-signed-bootstrap"}').decode("ascii"),
+    )
+    before = b_storage.snapshot()
+
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await b_service.resync(pair_id)
+
+    assert exc.value.code == "bootstrap_mismatch"
+    assert b_storage.snapshot() == before
+    assert (await b_service.store.get_session(pair_id)).state == "blocked_recovery"
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+
+async def test_resync_source_health_flip_before_bootstrap_keeps_target_unchanged() -> None:
+    """A status->bootstrap health race cannot tear down the target first."""
+
+    a_service, b_service, _a_config, _b_config, a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(75, 76)
+    )
+    corrupt = {"on": True}
+
+    class _CorruptFirstImport(AsgiPeerSender):
+        async def send(self, method, path, *, headers, body):
+            response = await super().send(method, path, headers=headers, body=body)
+            if corrupt["on"] and path.endswith("/bootstrap"):
+                return PeerResponse(response.status_code, response.headers, response.body + b"x")
+            return response
+
+    b_service._sender_factory = lambda _endpoint: _CorruptFirstImport(peers, "A")  # type: ignore[attr-defined]
+    with pytest.raises(MeshPairingServiceError):
+        await b_service.run_target_enrollment(pair_id)
+    assert (await b_service.store.get_session(pair_id)).state == "blocked_recovery"
+
+    corrupt["on"] = False
+    flipped = {"done": False}
+
+    class _FlipSourceUnsafeAfterStatus(AsgiPeerSender):
+        async def send(self, method, path, *, headers, body):
+            response = await super().send(method, path, headers=headers, body=body)
+            if not flipped["done"] and path.endswith("/status"):
+                flipped["done"] = True
+                await HivemindStateStore(storage=a_storage, space_id=SPACE).set_node_status(  # type: ignore[arg-type]
+                    NodeHealth(status=HiveNodeStatus.UNSAFE, reason="test_source_flip")
+                )
+            return response
+
+    b_service._sender_factory = lambda _endpoint: _FlipSourceUnsafeAfterStatus(peers, "A")  # type: ignore[attr-defined]
+    before = b_storage.snapshot()
+
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await b_service.resync(pair_id)
+
+    assert flipped["done"] is True
+    assert exc.value.code == "no_bootstrap"
+    assert b_storage.snapshot() == before
+    assert (await b_service.store.get_session(pair_id)).state == "blocked_recovery"
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+
+async def test_resync_post_marker_failure_cannot_overwrite_raced_active_target() -> None:
+    """A late resync failure re-reads the target receipt before blocking it.
+
+    The source can resume and deliver e+2 after the replacement marker is
+    durable but before the resync worker completes its readback.  That worker
+    must not subsequently replace a just-written ACTIVE session with stale
+    ``blocked_recovery`` bookkeeping.
+    """
+
+    a_service, b_service, _a_config, _b_config, _a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(76, 77)
+    )
+
+    class _BlackHole:
+        async def send(self, method, path, *, headers, body):
+            return PeerResponse(503, [], b"")
+
+    a_service._sender_factory = lambda _endpoint: _BlackHole()  # type: ignore[attr-defined]
+    initial = await b_service.run_target_enrollment(pair_id)
+    assert initial["state"] == MeshPairingState.AWAITING_ACKS.value
+    assert (await a_service.store.get_session(pair_id)).state == "blocked_recovery"
+    a_service._sender_factory = lambda _endpoint: AsgiPeerSender(peers, "B")  # type: ignore[attr-defined]
+
+    # Force the target through its evidence-gated resync path.
+    await b_storage.delete(b_service.store._import_validation_key(pair_id))
+    real_persist = b_service._persist_import_validation
+    marker_written = asyncio.Event()
+    release_failure = asyncio.Event()
+
+    async def persist_then_fail(*args, **kwargs):
+        await real_persist(*args, **kwargs)
+        marker_written.set()
+        await release_failure.wait()
+        raise RuntimeError("simulated post-marker readback failure")
+
+    b_service._persist_import_validation = persist_then_fail  # type: ignore[method-assign]
+    resync_task = asyncio.create_task(b_service.resync(pair_id))
+    await asyncio.wait_for(marker_written.wait(), timeout=ASYNC_RACE_TIMEOUT_SECONDS)
+
+    # The fresh marker permits the source's existing e+2 resume to complete the
+    # target activation concurrently with the stale resync worker.
+    resumed = await a_service.resume(pair_id)
+    assert resumed["state"] == "active"
+    release_failure.set()
+    result = await asyncio.wait_for(resync_task, timeout=ASYNC_RACE_TIMEOUT_SECONDS)
+    b_service._persist_import_validation = real_persist  # type: ignore[method-assign]
+
+    assert result["state"] == "active"
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    assert await b_service.store.get_reservation(SPACE) is None
+
+
+async def test_resync_and_stale_activation_delivery_linearize_at_target_tail() -> None:
+    """A stale e+2 cannot finalize after resync begins destructive recovery."""
+
+    a_service, b_service, _a_config, _b_config, _a_storage, b_storage, _peers, pair_id = (
+        await _drive_to_approved(151, 152)
+    )
+    # Leave e+2 applied but make the terminal receipt unavailable.  This is
+    # intentionally distinct from a HEALTHY-tail crash: a valid signed receipt
+    # must now win over a stale resync rather than tearing the target down.
+    real_persist_receipt = b_service._persist_target_activation_receipt
+    fail_receipt = {"on": True}
+
+    async def fail_first_receipt(session, *, base):
+        if fail_receipt["on"]:
+            fail_receipt["on"] = False
+            raise RuntimeError("simulated terminal receipt write failure")
+        return await real_persist_receipt(session, base=base)
+
+    b_service._persist_target_activation_receipt = fail_first_receipt  # type: ignore[method-assign]
+    await b_service.run_target_enrollment(pair_id)
+    b_service._persist_target_activation_receipt = real_persist_receipt  # type: ignore[method-assign]
+    assert (await a_service.store.get_session(pair_id)).state == "blocked_recovery"
+    assert (await b_service.store.get_session(pair_id)).state == "awaiting_acks"
+    assert await b_service.store.get_target_activation_receipt(pair_id) is None
+
+    real_matches = b_service._import_validation_matches
+    match_count = 0
+    finalizer_precheck = asyncio.Event()
+    release_finalizer = asyncio.Event()
+
+    async def pause_stale_finalizer(session, *, base):
+        nonlocal match_count
+        matched = await real_matches(session, base=base)
+        match_count += 1
+        if match_count == 2:
+            finalizer_precheck.set()
+            await release_finalizer.wait()
+        return matched
+
+    b_service._import_validation_matches = pause_stale_finalizer  # type: ignore[method-assign]
+    resume_task = asyncio.create_task(a_service.resume(pair_id))
+    await asyncio.wait_for(finalizer_precheck.wait(), timeout=ASYNC_RACE_TIMEOUT_SECONDS)
+
+    # The target begins an evidence-gated resync while the old delivery is
+    # paused after its pre-lock marker check.  The resync lock must prevent that
+    # stale delivery from releasing the reservation or writing ACTIVE over its
+    # replacement import state.
+    await b_storage.delete(b_service.store._import_validation_key(pair_id))
+    real_teardown = b_service._teardown_target_space
+    teardown_entered = asyncio.Event()
+    release_teardown = asyncio.Event()
+
+    async def pause_teardown(space_id):
+        teardown_entered.set()
+        await release_teardown.wait()
+        await real_teardown(space_id)
+
+    b_service._teardown_target_space = pause_teardown  # type: ignore[method-assign]
+    resync_task = asyncio.create_task(b_service.resync(pair_id))
+    # The stale finalizer already owns the same space-tail lock.  Releasing it
+    # first lets its second marker check observe the deletion and refuse, then
+    # the resync worker acquires the lock and performs the destructive reset.
+    # Waiting for teardown while that finalizer remains paused would manufacture
+    # a test-only lock inversion rather than exercise a protocol race.
+    release_finalizer.set()
+    await asyncio.wait_for(teardown_entered.wait(), timeout=ASYNC_RACE_TIMEOUT_SECONDS)
+    release_teardown.set()
+
+    await asyncio.wait_for(resume_task, timeout=ASYNC_RACE_TIMEOUT_SECONDS)
+    result = await asyncio.wait_for(resync_task, timeout=ASYNC_RACE_TIMEOUT_SECONDS)
+    b_service._import_validation_matches = real_matches  # type: ignore[method-assign]
+    b_service._teardown_target_space = real_teardown  # type: ignore[method-assign]
+
+    assert result["state"] == "active"
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    health = await HivemindStateStore(storage=b_storage, space_id=SPACE).get_node_status()  # type: ignore[arg-type]
+    assert health is not None and HiveNodeStatus(health.status) == HiveNodeStatus.HEALTHY
+    assert await b_service.store.get_reservation(SPACE) is None
+
+
 async def test_crash_window_A_source_crash_before_persisting_active_converges(monkeypatch):
     # Crash the SOURCE right AFTER it verifies the target's activation confirmation
     # but BEFORE it persists its own ACTIVE session. The target is fully active
@@ -672,6 +1508,141 @@ async def test_crash_window_A_source_crash_before_persisting_active_converges(mo
     assert resumed["state"] == "active"
     assert (await a_service.store.get_session(pair_id)).state == "active"
     assert (await b_service.store.get_session(pair_id)).state == "active"
+
+
+async def test_crash_window_A_marker_loss_uses_signed_terminal_receipt() -> None:
+    """Marker loss after e+2 can recover only through the signed terminal proof."""
+
+    a_service, b_service, _a_config, b_config, _a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(82, 83)
+    )
+    real_put = a_service.store.put_session
+
+    async def crash_on_source_active(session):
+        if session.role == "source" and session.state == "active":
+            raise RuntimeError("simulated crash before persisting source active")
+        return await real_put(session)
+
+    a_service.store.put_session = crash_on_source_active  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    assert initial["state"] == "active"
+    a_service.store.put_session = real_put  # type: ignore[method-assign]
+    assert (await a_service.store.get_session(pair_id)).state == "awaiting_acks"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+
+    await b_storage.delete(b_service.store._import_validation_key(pair_id))
+    resumed = await a_service.resume(pair_id)
+
+    assert resumed["state"] == "active"
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    assert await b_service.store.get_import_validation(pair_id) is None
+    receipt = await b_service.store.get_target_activation_receipt(pair_id)
+    assert receipt is not None
+    receipt.verify(b_config.public_key)
+
+
+async def test_terminal_receipt_rejects_post_e2_head_rewrite_after_marker_loss() -> None:
+    """A local valid-schema BANK_COMMIT cannot replace e+1 import authority.
+
+    The source has applied e+2 but crashed before its own ACTIVE receipt.  If
+    the target subsequently loses the import marker, a forged pointer/commit
+    chain must not be accepted merely because its parent and manifest are
+    locally coherent: no all-ACK authorization binds that new head to the
+    retained snapshot.
+    """
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(83, 84)
+    real_put = a_service.store.put_session
+
+    async def crash_on_source_active(session):
+        if session.role == "source" and session.state == "active":
+            raise RuntimeError("simulated crash before persisting source active")
+        return await real_put(session)
+
+    a_service.store.put_session = crash_on_source_active  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    a_service.store.put_session = real_put  # type: ignore[method-assign]
+    assert initial["state"] == MeshPairingState.ACTIVE.value
+    await b_storage.delete(b_service.store._import_validation_key(pair_id))
+
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await target_store.get_membership()
+    term = await target_store.get_term()
+    assert membership is not None and term is not None and membership.epoch == 3
+    source_member = next(
+        member for member in membership.members if member.node_id != b_service._config.fingerprint.split(":", 1)[1]
+    )
+    forged = BankCommit(
+        bank_version=2,
+        parent_bank_version=1,
+        term=term.term,
+        membership_epoch=membership.epoch,
+        commit_id="forged-valid-schema-head",
+        committed_by_node_id=source_member.node_id,
+        manifest=[],
+    )
+    await target_store.append_commit(forged)
+    await target_store.set_bank_version_pointer(
+        BankVersionPointer(bank_version=forged.bank_version, commit_id=forged.commit_id)
+    )
+
+    resumed = await a_service.resume(pair_id)
+
+    assert resumed["state"] == MeshPairingState.BLOCKED_RECOVERY.value
+    assert (await a_service.store.get_session(pair_id)).state == MeshPairingState.BLOCKED_RECOVERY.value
+    target_health = await target_store.get_node_status()
+    assert target_health is not None and target_health.status == HiveNodeStatus.UNSAFE.value
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+    pointer = await target_store.get_bank_version_pointer()
+    assert pointer is not None and pointer.commit_id == forged.commit_id
+
+
+async def test_both_target_terminal_authorities_recover_only_from_source_e2() -> None:
+    """Loss of marker+receipt fences a live target until its source confirms e+2."""
+
+    a_service, b_service, _a_config, b_config, _a_storage, b_storage, _peers, pair_id = (
+        await _drive_to_approved(82, 83)
+    )
+    real_put = a_service.store.put_session
+
+    async def crash_on_source_active(session):
+        if session.role == "source" and session.state == "active":
+            raise RuntimeError("simulated crash before persisting source active")
+        return await real_put(session)
+
+    a_service.store.put_session = crash_on_source_active  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    a_service.store.put_session = real_put  # type: ignore[method-assign]
+    assert initial["state"] == MeshPairingState.ACTIVE.value
+    assert (await a_service.store.get_session(pair_id)).state == "awaiting_acks"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+
+    # The target's active workflow record is mutable operational state.  Losing
+    # both durable authorities cannot leave it HEALTHY or self-repair locally.
+    await b_storage.delete(b_service.store._import_validation_key(pair_id))
+    await b_storage.delete(b_service.store._target_activation_receipt_key(pair_id))
+
+    recovered = await b_service.run_target_enrollment(pair_id)
+
+    assert recovered["ack_status"] == 200
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    health = await HivemindStateStore(storage=b_storage, space_id=SPACE).get_node_status()  # type: ignore[arg-type]
+    assert health is not None and HiveNodeStatus(health.status) == HiveNodeStatus.HEALTHY
+    assert await b_service.store.get_reservation(SPACE) is None
+    receipt = await b_service.store.get_target_activation_receipt(pair_id)
+    assert receipt is not None
+    receipt.verify(b_config.public_key)
 
 
 async def test_crash_window_B_target_crash_before_healthy_converges(monkeypatch):
@@ -706,6 +1677,1690 @@ async def test_crash_window_B_target_crash_before_healthy_converges(monkeypatch)
     b_health2 = await HivemindStateStore(storage=b_storage, space_id=SPACE).get_node_status()  # type: ignore[arg-type]
     assert HiveNodeStatus(b_health2.status) == HiveNodeStatus.HEALTHY
     assert await b_service.store.get_reservation(SPACE) is None  # released on convergence
+
+
+async def test_target_terminal_receipt_recovers_marker_loss_before_healthy() -> None:
+    """A signed e+2 receipt heals the crash tail after marker loss.
+
+    The receipt is deliberately persisted after exact e+2 proof but before
+    HEALTHY/session/release.  A failure at that boundary followed by marker
+    loss must remain resumable without treating the mutable target session as
+    activation authority.
+    """
+
+    a_service, b_service, _a_config, b_config, _a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(84, 85)
+    )
+    real_put = b_storage.put
+    fail = {"on": True}
+
+    async def fail_healthy_status(key, content, content_type="text/plain"):
+        if (
+            fail["on"]
+            and key == layout.node_status_key(SPACE)
+            and '"healthy"' in content
+        ):
+            raise OSError("simulated healthy-status write failure")
+        await real_put(key, content, content_type)
+
+    b_storage.put = fail_healthy_status  # type: ignore[method-assign]
+    result = await b_service.run_target_enrollment(pair_id)
+    assert result["state"] != "active"
+    target = await b_service.store.get_session(pair_id)
+    assert target is not None and target.state != MeshPairingState.ACTIVE.value
+    health = await HivemindStateStore(storage=b_storage, space_id=SPACE).get_node_status()  # type: ignore[arg-type]
+    assert health is not None and HiveNodeStatus(health.status) == HiveNodeStatus.UNSAFE
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+    assert (await a_service.store.get_session(pair_id)).state == "blocked_recovery"
+    receipt = await b_service.store.get_target_activation_receipt(pair_id)
+    assert receipt is not None
+    receipt.verify(b_config.public_key)
+
+    fail["on"] = False
+    b_storage.put = real_put  # type: ignore[method-assign]
+    # Simulate a restart after an independent marker-loss/corruption event.
+    # The signed terminal receipt, retained snapshot, and exact e+2 view are
+    # sufficient; neither a fresh marker nor a mutable ACTIVE session is.
+    await b_service.store.clear_import_validation_for_resync(pair_id)
+    a_service._clock_ms = lambda: NOW_MS + 1_000  # type: ignore[method-assign]
+    b_service._clock_ms = lambda: NOW_MS + 1_000  # type: ignore[method-assign]
+    resumed = await a_service.resume(pair_id)
+    assert resumed["state"] == "active"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    assert await b_service.store.get_reservation(SPACE) is None
+
+
+async def test_resync_replaces_rejected_terminal_receipt_after_marker_loss() -> None:
+    """A malformed receipt cannot permanently conflict with a fresh import."""
+
+    a_service, b_service, _a_config, _b_config, _a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(85, 86)
+    )
+
+    class _BlackHole:
+        async def send(self, method, path, *, headers, body):
+            return PeerResponse(503, [], b"")
+
+    # The source has e+2 but cannot deliver it, leaving the target at its
+    # imported e+1 marker.  A damaged terminal-receipt object plus marker loss
+    # must take the evidence-gated destructive resync route, which clears both
+    # rejected authorities immediately before the fresh signed import.
+    a_service._sender_factory = lambda _endpoint: _BlackHole()  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    assert initial["state"] == MeshPairingState.AWAITING_ACKS.value
+    await b_service.store.clear_import_validation_for_resync(pair_id)
+    await b_storage.put(
+        b_service.store._target_activation_receipt_key(pair_id), "{"
+    )
+    a_service._sender_factory = lambda _endpoint: AsgiPeerSender(peers, "B")  # type: ignore[method-assign]
+
+    repaired = await b_service.resync(pair_id)
+
+    assert repaired["state"] == MeshPairingState.ACTIVE.value
+    assert repaired["ack_status"] == 200
+    receipt = await b_service.store.get_target_activation_receipt(pair_id)
+    assert receipt is not None
+    assert await b_service.store.get_reservation(SPACE) is None
+
+
+async def test_source_terminal_receipt_holds_target_write_fence_until_ack() -> None:
+    """A target e+2 receipt is not the final all-ACK boundary.
+
+    If the target crashes/fails while releasing its final reservation, the
+    source is already durably ACTIVE but keeps its source activation fence.  No
+    ordinary target write may slip into that interval: an authenticated retry
+    of the source-signed terminal receipt is the only operation that releases
+    both sides' fences.
+    """
+
+    from live_mem.core.reservation_guard import (
+        PairingActivationError,
+        assert_space_not_reserved,
+        clear_reservation_checker,
+        register_reservation_checker,
+    )
+    from live_mem.mesh.pairing_store import MeshPairingStoreError
+
+    a_service, b_service, _a_config, _b_config, _a_storage, _b_storage, _peers, pair_id = (
+        await _drive_to_approved(85, 86)
+    )
+    real_release = b_service.store.release
+    fail_release = {"on": True}
+
+    async def fail_first_target_release(space_id, released_pair_id):
+        if (
+            fail_release["on"]
+            and space_id == SPACE
+            and released_pair_id == pair_id
+        ):
+            fail_release["on"] = False
+            raise OSError("simulated target reservation release failure")
+        await real_release(space_id, released_pair_id)
+
+    b_service.store.release = fail_first_target_release  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    b_service.store.release = real_release  # type: ignore[method-assign]
+    assert initial["state"] == "active"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+    # The source has durably reached ACTIVE, but its terminal source receipt
+    # remains fenced until the target can persist/release its matching tail.
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    with pytest.raises(PairingActivationError):
+        await a_service.assert_no_pairing_activation(SPACE)
+
+    # The target is e+2/HEALTHY but must remain write-fenced until it has
+    # read-back verified the source-signed receipt.  This is the regression
+    # boundary for the former source-crash -> post-e2 BANK_COMMIT gap.
+    register_reservation_checker(b_service.assert_space_not_reserved)
+    try:
+        with pytest.raises(MeshPairingStoreError) as exc:
+            await assert_space_not_reserved(SPACE)
+        assert exc.value.code == "space_reserved"
+    finally:
+        clear_reservation_checker()
+
+    # A source restart/retry does not replay e+2 as authority.  It replays its
+    # exact signed terminal receipt and the target then releases only its own
+    # matching reservation.
+    repaired = await a_service.resume(pair_id)
+
+    assert repaired["state"] == "active"
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    assert await b_service.store.get_reservation(SPACE) is None
+    await a_service.assert_no_pairing_activation(SPACE)
+
+    register_reservation_checker(b_service.store.assert_space_not_reserved)
+    try:
+        await assert_space_not_reserved(SPACE)
+    finally:
+        clear_reservation_checker()
+
+
+async def test_source_terminal_retry_reconciles_timestamp_variant_receipt() -> None:
+    """A target-confirmed receipt canonicalizes a restarted source retry.
+
+    ``confirmed_at_ms`` is observational.  When the source loses its local
+    receipt after the target has retained an otherwise identical copy, a later
+    retry must adopt the target-confirmed bytes rather than strand the final
+    all-ACK digest on two timestamp-only variants.
+    """
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(227, 228)
+    real_put_terminal = b_service.store.put_target_terminal_confirmation
+    fail = {"on": True}
+
+    async def fail_first_terminal_confirmation(signed):
+        if fail["on"]:
+            fail["on"] = False
+            raise OSError("simulated target terminal-confirmation failure")
+        await real_put_terminal(signed)
+
+    b_service.store.put_target_terminal_confirmation = fail_first_terminal_confirmation  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    b_service.store.put_target_terminal_confirmation = real_put_terminal  # type: ignore[method-assign]
+    assert initial["ack_status"] != 200
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+    retained_at_target = await b_service.store.get_source_activation_receipt(pair_id)
+    assert retained_at_target is not None
+    await a_storage.delete(a_service.store._source_activation_receipt_key(pair_id))
+    a_service._clock_ms = lambda: NOW_MS + 1  # type: ignore[method-assign]
+
+    # The first retry may create a new timestamp-only observation before B
+    # returns its retained terminal chain; it must remain safely pending.
+    first = await a_service.resume(pair_id)
+    assert first["state"] == "active"
+    restored_at_source = await a_service.store.get_source_activation_receipt(pair_id)
+    assert restored_at_source is not None
+
+    # Replaying the target-confirmed receipt now converges the terminal chain.
+    repaired = await a_service.resume(pair_id)
+    assert repaired["state"] == "active"
+    assert repaired.get("source_confirmation_pending") is not True
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    assert await b_service.store.get_reservation(SPACE) is None
+    source_after = await a_service.store.get_source_activation_receipt(pair_id)
+    target_after = await b_service.store.get_source_activation_receipt(pair_id)
+    source_terminal = await a_service.store.get_target_terminal_confirmation(pair_id)
+    target_terminal = await b_service.store.get_target_terminal_confirmation(pair_id)
+    assert source_after is not None and target_after is not None
+    assert source_terminal is not None and target_terminal is not None
+    assert source_after.canonical_bytes() == target_after.canonical_bytes()
+    assert source_terminal.canonical_bytes() == target_terminal.canonical_bytes()
+
+
+async def test_terminal_confirmation_payloads_require_exact_signed_bindings() -> None:
+    """Final-ACK replay helpers refuse incomplete or retargeted signed data.
+
+    This exercises the source and target's independent parsers directly after
+    a real all-ACK pairing.  A response body is an untrusted transport
+    projection: it may only hydrate the exact receipt/digest pair already
+    bound by the invitation, source activation event, and target signature.
+    """
+
+    import hashlib
+
+    from live_mem.mesh.pairing_state import (
+        SignedTargetTerminalConfirmationReceipt,
+    )
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(238, 239)
+    activated = await b_service.run_target_enrollment(pair_id)
+    assert activated["state"] == MeshPairingState.ACTIVE.value
+    source_session = await a_service.store.get_session(pair_id)
+    target_session = await b_service.store.get_session(pair_id)
+    target_receipt = await b_service.store.get_target_activation_receipt(pair_id)
+    source_receipt = await a_service.store.get_source_activation_receipt(pair_id)
+    terminal = await b_service.store.get_target_terminal_confirmation(pair_id)
+    event = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_event(source_session.activation_event_id)  # type: ignore[arg-type]
+    assert (
+        source_session is not None
+        and target_session is not None
+        and target_receipt is not None
+        and source_receipt is not None
+        and terminal is not None
+        and event is not None
+    )
+
+    confirmation = {
+        "target_activation_receipt": target_receipt.as_dict(),
+        "target_activation_receipt_digest": hashlib.sha256(
+            target_receipt.canonical_bytes()
+        ).hexdigest(),
+        "target_terminal_confirmation": terminal.as_dict(),
+    }
+    replay_event = a_service._event_with_source_activation_receipt(
+        event,
+        source_receipt,
+        "terminal-binding-replay",
+        terminal_confirmation=terminal,
+    )
+    assert await a_service._target_receipt_from_activation_confirmation(
+        source_session, confirmation, base=source_session.base_epoch
+    ) == target_receipt
+    assert await b_service._target_terminal_confirmation_for_event(
+        target_session,
+        source_receipt,
+        replay_event,
+        base=target_session.base_epoch,
+    ) == terminal
+    assert await a_service._persist_target_terminal_confirmation(
+        source_session, source_receipt, confirmation
+    )
+
+    # A missing or digest-mismatched target proof cannot be promoted into a
+    # durable terminal acknowledgement by either side.
+    assert await a_service._target_receipt_from_activation_confirmation(
+        source_session, {}, base=source_session.base_epoch
+    ) is None
+    bad_digest = dict(confirmation)
+    bad_digest["target_activation_receipt_digest"] = "0" * 64
+    assert await a_service._target_receipt_from_activation_confirmation(
+        source_session, bad_digest, base=source_session.base_epoch
+    ) is None
+    assert not await a_service._persist_target_terminal_confirmation(
+        source_session, source_receipt, {}
+    )
+    assert await b_service._target_terminal_confirmation_for_event(
+        target_session,
+        source_receipt,
+        replay_event,
+        base=target_session.base_epoch,
+    ) == terminal
+
+    # Even a freshly valid target signature is not portable to another pair.
+    # Its field binding is as important as signature verification.
+    wrong_pair_terminal = SignedTargetTerminalConfirmationReceipt.sign(
+        replace(terminal.receipt, pair_id="pair_" + "f" * 32),
+        b_config.private_key,
+    )
+    retargeted = dict(confirmation)
+    retargeted["target_terminal_confirmation"] = wrong_pair_terminal.as_dict()
+    retargeted_event = a_service._event_with_source_activation_receipt(
+        event,
+        source_receipt,
+        "retargeted-terminal-replay",
+        terminal_confirmation=wrong_pair_terminal,
+    )
+    assert await b_service._target_terminal_confirmation_for_event(
+        target_session,
+        source_receipt,
+        retargeted_event,
+        base=target_session.base_epoch,
+    ) is None
+    assert not await a_service._persist_target_terminal_confirmation(
+        source_session, source_receipt, retargeted
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["event_epoch", "event_pair", "missing_evidence", "node_digest"]
+)
+async def test_source_terminal_receipt_requires_exact_e2_binding(
+    mutation: str,
+) -> None:
+    """The source final-ACK signer rechecks every retained e+1/e+2 binding."""
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(240, 241)
+    activated = await b_service.run_target_enrollment(pair_id)
+    assert activated["state"] == MeshPairingState.ACTIVE.value
+    source_session = await a_service.store.get_session(pair_id)
+    assert source_session is not None
+    state = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    event = await state.get_event(source_session.activation_event_id)
+    membership = await state.get_membership()
+    assert event is not None and membership is not None
+    # The durable event keeps only the generic membership update.  The source
+    # attaches this pairing-local binding when it sends the final e+2 delivery.
+    from live_mem.mesh.membership_sync import candidate_view_digest
+
+    event = event.model_copy(
+        update={
+            "payload": {
+                **event.payload,
+                "pair_id": pair_id,
+                "candidate_view_digest": candidate_view_digest(membership),
+            }
+        }
+    )
+    assert await a_service._source_terminal_activation_state_matches(
+        source_session, event
+    )
+
+    if mutation == "event_epoch":
+        event = event.model_copy(
+            update={"membership_epoch": source_session.base_epoch + 3}
+        )
+    elif mutation == "event_pair":
+        event = event.model_copy(
+            update={
+                "payload": {
+                    **event.payload,
+                    "pair_id": "pair_" + "e" * 32,
+                }
+            }
+        )
+    elif mutation == "missing_evidence":
+        await a_storage.delete(
+            a_service.store._source_bootstrap_evidence_key(pair_id)
+        )
+    else:
+        node = await state.get_node_identity()
+        assert node is not None
+        await state.set_node_identity(
+            node.model_copy(update={"display_name": "unexpected-node"})
+        )
+
+    assert not await a_service._source_terminal_activation_state_matches(
+        source_session, event
+    )
+
+
+@pytest.mark.parametrize("damage", ["evidence", "incarnation"])
+async def test_source_terminal_marker_survives_lost_fence_provenance(damage: str) -> None:
+    """A #417 source tail never falls back to legacy after mutable-loss damage."""
+
+    from live_mem.core.reservation_guard import PairingActivationError
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(226, 227)
+    real_put_terminal = b_service.store.put_target_terminal_confirmation
+    fail = {"on": True}
+
+    async def fail_terminal_confirmation(signed):
+        if fail["on"]:
+            fail["on"] = False
+            raise OSError("simulated target terminal-confirmation crash")
+        await real_put_terminal(signed)
+
+    b_service.store.put_target_terminal_confirmation = fail_terminal_confirmation  # type: ignore[method-assign]
+    result = await b_service.run_target_enrollment(pair_id)
+    b_service.store.put_target_terminal_confirmation = real_put_terminal  # type: ignore[method-assign]
+    assert result["ack_status"] != 200
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+
+    # The primary binding and member incarnation are both mutable storage
+    # projections.  The separately keyed source-tail marker must still fence
+    # ordinary source mutations while the target has not signed final all-ACK.
+    await a_storage.delete(a_service.store._activation_fence_key(SPACE))
+    if damage == "evidence":
+        await a_storage.delete(a_service.store._source_bootstrap_evidence_key(pair_id))
+    else:
+        source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+        membership = await source_store.get_membership()
+        assert membership is not None
+        target_id = b_service._config.fingerprint.split(":", 1)[1]
+        await source_store.set_membership(
+            membership.model_copy(
+                update={
+                    "members": [
+                        member.model_copy(update={"incarnation": None})
+                        if member.node_id == target_id
+                        else member
+                        for member in membership.members
+                    ]
+                }
+            )
+        )
+
+    restarted = MeshPairingService(
+        a_service._config,
+        a_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=a_service._sender_factory,
+    )
+    with pytest.raises(PairingActivationError):
+        await restarted.assert_no_pairing_activation(SPACE)
+
+
+@pytest.mark.parametrize("damage", ["downgrade", "delete"])
+async def test_source_protocol_floor_rejects_lost_or_downgraded_tail_index(
+    damage: str,
+) -> None:
+    """A #417 source cannot fall back to legacy after losing tail records.
+
+    The re-armed source index is signed, while a separate immutable protocol
+    floor records that this source has entered #417.  Removing the primary
+    evidence/marker/fence and then either downgrading that index to a valid v1
+    legacy record or deleting it must still keep ordinary e+3 mutations fenced.
+    """
+
+    from live_mem.core.reservation_guard import (
+        PairingActivationError,
+        clear_pairing_activation_checker,
+        register_pairing_activation_checker,
+    )
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(229, 230)
+    real_put_terminal = b_service.store.put_target_terminal_confirmation
+    fail = {"on": True}
+
+    async def fail_terminal_confirmation(signed):
+        if fail["on"]:
+            fail["on"] = False
+            raise OSError("simulated target terminal-confirmation crash")
+        await real_put_terminal(signed)
+
+    b_service.store.put_target_terminal_confirmation = fail_terminal_confirmation  # type: ignore[method-assign]
+    result = await b_service.run_target_enrollment(pair_id)
+    b_service.store.put_target_terminal_confirmation = real_put_terminal  # type: ignore[method-assign]
+    assert result["ack_status"] != 200
+
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await source_store.get_membership()
+    assert membership is not None
+    source_node_id = next(
+        member.node_id
+        for member in membership.members
+        if member.node_id != b_service._config.fingerprint.split(":", 1)[1]
+    )
+    await a_storage.delete(a_service.store._source_bootstrap_evidence_key(pair_id))
+    await a_storage.delete(a_service.store._source_activation_marker_key(SPACE))
+    await a_storage.delete(a_service.store._activation_fence_key(SPACE))
+
+    if damage == "downgrade":
+        await a_storage.put(
+            a_service.store._activation_migration_key(SPACE),
+            canonical_dumps(
+                {
+                    "pair_id": pair_id,
+                    "protocol_version": 1,
+                    "space_id": SPACE,
+                    "updated_at_ms": NOW_MS + 1,
+                }
+            ).decode("utf-8"),
+        )
+    else:
+        await a_storage.delete(a_service.store._activation_migration_key(SPACE))
+
+    restarted = MeshPairingService(
+        a_service._config,
+        a_storage,
+        clock_ms=lambda: NOW_MS + 2,
+        sender_factory=a_service._sender_factory,
+    )
+    register_pairing_activation_checker(restarted.assert_no_pairing_activation)
+    try:
+        with pytest.raises(PairingActivationError):
+            await restarted._membership(SPACE).update_member_scopes(
+                source_node_id, ["read"]
+            )
+    finally:
+        clear_pairing_activation_checker()
+    held = await source_store.get_membership()
+    assert held is not None and held.epoch == membership.epoch
+
+
+async def test_historical_source_marker_cannot_mask_a_new_unconfirmed_tail() -> None:
+    """A valid marker from an evicted peer is not current tail authority.
+
+    The per-space marker is intentionally signed, but signatures alone do not
+    make an old snapshot current.  Replaying P0's completed marker while P1 is
+    in its e+2 final-confirmation tail must not let the ordinary-write guard
+    discard P1 merely because P0's historical session remains ACTIVE.
+    """
+
+    from live_mem.core.reservation_guard import PairingActivationError
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        peers,
+        first_pair,
+    ) = await _drive_to_approved(230, 231)
+    stale_marker = await a_service.store.get_source_activation_marker(SPACE)
+    assert stale_marker is not None
+    assert (await b_service.run_target_enrollment(first_pair))["ack_status"] == 200
+    await a_service.force_evict_member(first_pair, operator="operator", reason="dead")
+
+    c_config = _config(
+        MESH_PRIVATE_KEY_PREFIX
+        + base64.urlsafe_b64encode(bytes([232]) * 32).decode().rstrip("="),
+        "https://c.mesh.test",
+    )
+    c_storage = FakeStorage()
+    await _seed_blank_target(c_storage)
+    c_service = MeshPairingService(
+        c_config,
+        c_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=lambda _endpoint: AsgiPeerSender(peers, "A"),
+    )
+    peers["C"] = MeshNamespaceRouter(
+        _fallback(),
+        config=c_config,
+        process_lock=FakeProcessLock(),
+        storage_factory=lambda: c_storage,
+        replay_ledger=FakeReplayLedger(),
+        clock_ms=lambda: NOW_MS,
+        pairing_service=c_service,
+    )
+    a_service._sender_factory = lambda endpoint: AsgiPeerSender(
+        peers, "C" if urlsplit(endpoint).hostname == "c.mesh.test" else "B"
+    )  # type: ignore[method-assign]
+
+    invitation = await a_service.create_invitation(SPACE, requested_scopes=("read",))
+    second_pair = invitation["pair_id"]
+    await c_service.accept_invitation(
+        invitation["invitation_bytes"],
+        SPACE,
+        secret=invitation["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read",), quiesced=True,
+    )
+    await a_service.approve(second_pair)
+
+    real_put_terminal = c_service.store.put_target_terminal_confirmation
+    failed = {"once": True}
+
+    async def fail_terminal_confirmation(signed):
+        if failed["once"]:
+            failed["once"] = False
+            raise OSError("simulated target terminal-confirmation crash")
+        await real_put_terminal(signed)
+
+    c_service.store.put_target_terminal_confirmation = fail_terminal_confirmation  # type: ignore[method-assign]
+    result = await c_service.run_target_enrollment(second_pair)
+    c_service.store.put_target_terminal_confirmation = real_put_terminal  # type: ignore[method-assign]
+    assert result["ack_status"] != 200
+    assert (await a_service.store.get_session(second_pair)).state == "active"
+
+    # Replace M1 with the still-valid but historical M0, then remove P1's two
+    # mutable discovery paths.  Current membership is the monotonic authority
+    # that rejects M0 instead of releasing it as a completed historical tail.
+    await a_storage.put(
+        a_service.store._source_activation_marker_key(SPACE),
+        stale_marker.canonical_bytes().decode("utf-8"),
+    )
+    await a_storage.delete(a_service.store._activation_fence_key(SPACE))
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await source_store.get_membership()
+    assert membership is not None
+    target_id = c_config.fingerprint.split(":", 1)[1]
+    await source_store.set_membership(
+        membership.model_copy(
+            update={
+                "members": [
+                    member.model_copy(update={"incarnation": None})
+                    if member.node_id == target_id
+                    else member
+                    for member in membership.members
+                ]
+            }
+        )
+    )
+
+    restarted = MeshPairingService(
+        a_service._config,
+        a_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=a_service._sender_factory,
+    )
+    with pytest.raises(PairingActivationError):
+        await restarted.assert_no_pairing_activation(SPACE)
+
+
+async def test_lost_source_marker_cannot_unfence_current_signed_e2_tail() -> None:
+    """Primary signed evidence fences a tail when mutable discovery data is lost.
+
+    A delayed exact e+2 is still valid at the target.  Deleting the direct
+    per-space marker, the mutable activation fence, and the source-side member
+    incarnation must therefore not reclassify the source as legacy and permit
+    an e+3 membership mutation.
+    """
+
+    from live_mem.core.reservation_guard import (
+        PairingActivationError,
+        clear_pairing_activation_checker,
+        register_pairing_activation_checker,
+    )
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        _b_storage,
+        peers,
+        pair_id,
+    ) = await _drive_to_approved(235, 236)
+
+    class _DelayActivation(AsgiPeerSender):
+        async def send(self, method, path, *, headers, body):
+            if path.endswith("/events"):
+                # Keep the signed e+2 on the wire for a later target retry,
+                # while making the source durably enter blocked recovery.
+                return PeerResponse(503, [], b"")
+            return await super().send(method, path, headers=headers, body=body)
+
+    a_service._sender_factory = lambda _endpoint: _DelayActivation(  # type: ignore[method-assign]
+        peers, "B"
+    )
+    result = await b_service.run_target_enrollment(pair_id)
+    assert result["state"] != MeshPairingState.ACTIVE.value
+    source_session = await a_service.store.get_session(pair_id)
+    assert source_session is not None
+    assert source_session.state == MeshPairingState.BLOCKED_RECOVERY.value
+    assert await a_service.store.get_source_bootstrap_evidence(pair_id) is not None
+
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await source_store.get_membership()
+    assert membership is not None and membership.epoch == source_session.base_epoch + 2
+    target_node_id = b_config.fingerprint.split(":", 1)[1]
+    source_node_id = next(
+        member.node_id for member in membership.members if member.node_id != target_node_id
+    )
+    await a_storage.delete(a_service.store._source_activation_marker_key(SPACE))
+    await a_storage.delete(a_service.store._activation_fence_key(SPACE))
+    await source_store.set_membership(
+        membership.model_copy(
+            update={
+                "members": [
+                    member.model_copy(update={"incarnation": None})
+                    if member.node_id == target_node_id
+                    else member
+                    for member in membership.members
+                ]
+            }
+        )
+    )
+
+    restarted = MeshPairingService(
+        a_service._config,
+        a_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=a_service._sender_factory,
+    )
+    register_pairing_activation_checker(restarted.assert_no_pairing_activation)
+    try:
+        with pytest.raises(PairingActivationError):
+            await restarted._membership(SPACE).update_member_scopes(
+                source_node_id, ["read"]
+            )
+    finally:
+        clear_pairing_activation_checker()
+    held = await source_store.get_membership()
+    assert held is not None and held.epoch == membership.epoch
+
+
+async def test_target_acceptance_intent_fences_lost_terminal_triplet() -> None:
+    """A current target tail cannot be reclassified as receipt-less legacy data."""
+
+    from live_mem.mesh.pairing_store import MeshPairingStoreError
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(228, 229)
+    real_put_terminal = b_service.store.put_target_terminal_confirmation
+    fail = {"on": True}
+
+    async def fail_terminal_confirmation(signed):
+        if fail["on"]:
+            fail["on"] = False
+            raise OSError("simulated target terminal-confirmation crash")
+        await real_put_terminal(signed)
+
+    b_service.store.put_target_terminal_confirmation = fail_terminal_confirmation  # type: ignore[method-assign]
+    result = await b_service.run_target_enrollment(pair_id)
+    b_service.store.put_target_terminal_confirmation = real_put_terminal  # type: ignore[method-assign]
+    assert result["ack_status"] != 200
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+
+    # Simulate independent object loss and a process restart.  The immutable
+    # acceptance intent remains the #417 provenance discriminator.
+    await b_storage.delete(b_service.store._reservation_key(SPACE))
+    await b_storage.delete(b_service.store._target_activation_receipt_key(pair_id))
+    await b_storage.delete(b_service.store._source_activation_receipt_key(pair_id))
+    await b_storage.delete(
+        b_service.store._target_terminal_confirmation_key(pair_id)
+    )
+    restarted = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=b_service._sender_factory,
+    )
+
+    with pytest.raises(MeshPairingStoreError) as exc:
+        await restarted.assert_space_not_reserved(SPACE)
+    assert exc.value.code == "space_reserved"
+
+
+@pytest.mark.parametrize(
+    "lost_direct_record", ["none", "fence", "current_tail", "floor"]
+)
+async def test_target_fence_fails_closed_when_raw_reservation_is_lost_before_terminal(
+    lost_direct_record: str,
+) -> None:
+    """A held #417 target tail never falls back to a raw-reservation miss.
+
+    The direct target fence is written before the raw reservation.  Losing the
+    raw reservation alone must therefore remain write-blocking; losing either
+    half of the signed per-space index at the same time must also fail closed
+    while its sibling still proves this is a current #417 target.
+    """
+
+    from live_mem.mesh.pairing_store import MeshPairingStoreError
+
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(240, 241)
+
+    held_fence = await b_service.store.get_target_pairing_fence(SPACE)
+    floor = await b_service.store.get_target_pairing_protocol_floor(SPACE)
+    assert held_fence is not None and held_fence.authority.pair_id == pair_id
+    assert held_fence.authority.phase == "held"
+    assert floor is not None
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+    # Simulate a restart after independent object loss, before target terminal
+    # confirmation.  `assert_space_not_reserved` reads the raw reservation
+    # first, so the direct fence/floor must independently preserve the block.
+    await b_storage.delete(b_service.store._reservation_key(SPACE))
+    if lost_direct_record == "fence":
+        await b_storage.delete(b_service.store._target_pairing_fence_key(SPACE))
+    elif lost_direct_record == "current_tail":
+        await b_storage.delete(
+            b_service.store._target_pairing_current_tail_key(SPACE)
+        )
+    elif lost_direct_record == "floor":
+        await b_storage.delete(
+            b_service.store._target_pairing_protocol_floor_key(SPACE)
+        )
+
+    restarted = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=lambda: NOW_MS + 1,
+        sender_factory=b_service._sender_factory,
+    )
+    with pytest.raises(MeshPairingStoreError) as exc:
+        await restarted.assert_space_not_reserved(SPACE)
+    assert exc.value.code == "space_reserved"
+
+
+@pytest.mark.parametrize("replayed_record", ["fence", "current_tail"])
+async def test_target_current_tail_rejects_historical_released_record_replay(
+    replayed_record: str,
+) -> None:
+    """A prior released target pair cannot mask a later held tail.
+
+    The permanent protocol floor tells the guard this instance has entered
+    #417, while the current-tail index names the latest pairing generation.
+    Replaying only one old signed direct record must therefore remain fenced
+    after the raw operational reservation is independently lost.
+    """
+
+    from live_mem.mesh.pairing_store import MeshPairingStoreError
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        first_pair,
+    ) = await _drive_to_approved(244, 245)
+    # Build P0's released tail through the real post-T1 recovery path.  Once
+    # source membership has admitted a PENDING target, an ordinary cancel is
+    # intentionally refused; source eviction emits the signed disposition that
+    # authorizes target abandonment.
+    b_service._sender_factory = lambda _e: _AckDropSender(_peers, "A")  # type: ignore[attr-defined]
+    await b_service.run_target_enrollment(first_pair)
+    await a_service.evict(first_pair, operator="op", reason="release P0")
+    await b_service.abandon(first_pair)
+    historical_fence = await b_service.store.get_target_pairing_fence(SPACE)
+    historical_current = await b_service.store.get_target_pairing_current_tail(SPACE)
+    assert historical_fence is not None and historical_fence.authority.phase == "released"
+    assert historical_current == historical_fence
+
+    second = await a_service.create_invitation(SPACE, requested_scopes=("read",))
+    second_pair = second["pair_id"]
+    await b_service.accept_invitation(
+        second["invitation_bytes"],
+        SPACE,
+        secret=second["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read",), quiesced=True,
+    )
+    current = await b_service.store.get_target_pairing_current_tail(SPACE)
+    held = await b_service.store.get_target_pairing_fence(SPACE)
+    assert current is not None and held is not None
+    assert current == held and held.authority.pair_id == second_pair
+    assert held.authority.phase == "held"
+    await b_storage.delete(b_service.store._reservation_key(SPACE))
+
+    if replayed_record == "fence":
+        await b_storage.put(
+            b_service.store._target_pairing_fence_key(SPACE),
+            historical_fence.canonical_bytes().decode("utf-8"),
+        )
+    else:
+        await b_storage.put(
+            b_service.store._target_pairing_current_tail_key(SPACE),
+            historical_current.canonical_bytes().decode("utf-8"),
+        )
+
+    restarted = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=lambda: NOW_MS + 1,
+        sender_factory=b_service._sender_factory,
+    )
+    with pytest.raises(MeshPairingStoreError) as exc:
+        await restarted.assert_space_not_reserved(SPACE)
+    assert exc.value.code == "space_reserved"
+
+
+@pytest.mark.parametrize("replayed_record", ["fence", "current_tail"])
+async def test_target_current_tail_rejects_same_pair_terminal_replay_after_rearm(
+    replayed_record: str,
+) -> None:
+    """A terminal proof for the same pair cannot undo a recovery-held fence."""
+
+    from live_mem.mesh.pairing_store import MeshPairingStoreError
+
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(246, 247)
+    assert (await b_service.run_target_enrollment(pair_id))["state"] == "active"
+    terminal_fence = await b_service.store.get_target_pairing_fence(SPACE)
+    terminal_current = await b_service.store.get_target_pairing_current_tail(SPACE)
+    assert terminal_fence is not None and terminal_fence.authority.phase == "terminal_confirmed"
+    assert terminal_current == terminal_fence
+    session = await b_service.store.get_session(pair_id)
+    assert session is not None
+    for key in (
+        b_service.store._target_activation_receipt_key(pair_id),
+        b_service.store._source_activation_receipt_key(pair_id),
+        b_service.store._target_terminal_confirmation_key(pair_id),
+    ):
+        await b_storage.delete(key)
+    assert await b_service._fence_active_target_terminal_chain_loss(
+        session, base=session.base_epoch
+    )
+    held = await b_service.store.get_target_pairing_fence(SPACE)
+    current = await b_service.store.get_target_pairing_current_tail(SPACE)
+    assert held is not None and held.authority.phase == "held"
+    assert current == held
+    await b_storage.delete(b_service.store._reservation_key(SPACE))
+    if replayed_record == "fence":
+        await b_storage.put(
+            b_service.store._target_pairing_fence_key(SPACE),
+            terminal_fence.canonical_bytes().decode("utf-8"),
+        )
+    else:
+        await b_storage.put(
+            b_service.store._target_pairing_current_tail_key(SPACE),
+            terminal_current.canonical_bytes().decode("utf-8"),
+        )
+    restarted = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=lambda: NOW_MS + 1,
+        sender_factory=b_service._sender_factory,
+    )
+    with pytest.raises(MeshPairingStoreError) as exc:
+        await restarted.assert_space_not_reserved(SPACE)
+    assert exc.value.code == "space_reserved"
+
+
+@pytest.mark.parametrize("loss_path", ["terminal_chain", "activation_authority"])
+async def test_target_recovery_rearm_keeps_direct_fence_after_raw_reservation_loss(
+    loss_path: str,
+) -> None:
+    """Recovery must re-arm the signed fence before reserving the raw target.
+
+    A raw reservation is a cache-like operational guard, not durable
+    ordinary-write authority.  Both terminal-chain and activation-authority
+    recovery paths therefore have to replace a prior terminal fence with an
+    exact same-pair ``held`` fence.  Deleting the raw record after that recovery
+    must still refuse an ordinary write after restart.
+    """
+
+    from live_mem.mesh.pairing_store import MeshPairingStoreError
+
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(246, 247)
+    assert (await b_service.run_target_enrollment(pair_id))["state"] == (
+        MeshPairingState.ACTIVE.value
+    )
+    session = await b_service.store.get_session(pair_id)
+    assert session is not None and session.state == MeshPairingState.ACTIVE.value
+    assert await b_service.store.get_reservation(SPACE) is None
+
+    # Lose every terminal receipt.  The authority-loss branch additionally
+    # loses the retained e+1 validation marker, whereas a post-all-ACK terminal
+    # chain loss retains it but may no longer use it as completion authority.
+    for key in (
+        b_service.store._target_activation_receipt_key(pair_id),
+        b_service.store._source_activation_receipt_key(pair_id),
+        b_service.store._target_terminal_confirmation_key(pair_id),
+    ):
+        await b_storage.delete(key)
+    if loss_path == "terminal_chain":
+        rearmed = await b_service._fence_active_target_terminal_chain_loss(
+            session, base=session.base_epoch
+        )
+    else:
+        await b_storage.delete(b_service.store._import_validation_key(pair_id))
+        rearmed = await b_service._fence_target_activation_authority_loss(
+            session, base=session.base_epoch
+        )
+
+    assert rearmed is True
+    held = await b_service.store.get_target_pairing_fence(SPACE)
+    assert held is not None
+    assert held.authority.pair_id == pair_id
+    assert held.authority.phase == "held"
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+
+    # Re-open the service after independent raw-record loss so no in-process
+    # reservation cache can hide a missing direct target fence.
+    await b_storage.delete(b_service.store._reservation_key(SPACE))
+    restarted = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=lambda: NOW_MS + 1,
+        sender_factory=b_service._sender_factory,
+    )
+    with pytest.raises(MeshPairingStoreError) as exc:
+        await restarted.assert_space_not_reserved(SPACE)
+    assert exc.value.code == "space_reserved"
+
+
+@pytest.mark.parametrize("loss_path", ["terminal_chain", "activation_authority"])
+async def test_target_recovery_persists_held_fence_before_unsafe_status_or_raw_reserve(
+    loss_path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recovery crash point after arming already refuses ordinary writes.
+
+    ``NodeHealth(UNSAFE)`` is operational state and the raw reservation can be
+    lost independently.  Pausing that health write models a crash exactly
+    between durable recovery steps: at that point the signed direct fence must
+    already be ``held``, while the raw reservation has not yet been recreated.
+    """
+
+    from live_mem.mesh.pairing_store import MeshPairingStoreError
+
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(248, 249)
+    assert (await b_service.run_target_enrollment(pair_id))["state"] == (
+        MeshPairingState.ACTIVE.value
+    )
+    session = await b_service.store.get_session(pair_id)
+    assert session is not None and session.state == MeshPairingState.ACTIVE.value
+
+    for key in (
+        b_service.store._target_activation_receipt_key(pair_id),
+        b_service.store._source_activation_receipt_key(pair_id),
+        b_service.store._target_terminal_confirmation_key(pair_id),
+    ):
+        await b_storage.delete(key)
+    if loss_path == "activation_authority":
+        await b_storage.delete(b_service.store._import_validation_key(pair_id))
+
+    real_set_node_status = HivemindStateStore.set_node_status
+    observed_held_before_unsafe = False
+
+    async def crash_after_fence_before_unsafe(store, health):
+        nonlocal observed_held_before_unsafe
+        if store.space_id == SPACE and health.status == HiveNodeStatus.UNSAFE:
+            with pytest.raises(MeshPairingStoreError) as exc:
+                await b_service.assert_space_not_reserved(SPACE)
+            assert exc.value.code == "space_reserved"
+            observed_held_before_unsafe = True
+            raise OSError("simulated crash after target fence re-arm")
+        return await real_set_node_status(store, health)
+
+    monkeypatch.setattr(
+        HivemindStateStore, "set_node_status", crash_after_fence_before_unsafe
+    )
+    if loss_path == "terminal_chain":
+        rearmed = await b_service._fence_active_target_terminal_chain_loss(
+            session, base=session.base_epoch
+        )
+    else:
+        rearmed = await b_service._fence_target_activation_authority_loss(
+            session, base=session.base_epoch
+        )
+
+    # The injected I/O failure is deliberately caught by the recovery helper.
+    # Its durable precondition, not a later health/raw-reservation write, is
+    # what keeps the target ordinary-write fenced across that crash.
+    assert rearmed is False
+    assert observed_held_before_unsafe is True
+    held = await b_service.store.get_target_pairing_fence(SPACE)
+    assert held is not None
+    assert held.authority.pair_id == pair_id
+    assert held.authority.phase == "held"
+    assert await b_service.store.get_reservation(SPACE) is None
+    health = await HivemindStateStore(
+        storage=b_storage, space_id=SPACE
+    ).get_node_status()  # type: ignore[arg-type]
+    assert health is not None and health.status == HiveNodeStatus.HEALTHY.value
+    with pytest.raises(MeshPairingStoreError) as exc:
+        await b_service.assert_space_not_reserved(SPACE)
+    assert exc.value.code == "space_reserved"
+
+
+async def test_target_fence_guard_avoids_session_inventory_above_history_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Completed and unrelated target writes remain O(1) above 256 history rows."""
+
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        _a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(242, 243)
+    completed = await b_service.run_target_enrollment(pair_id)
+    assert completed["state"] == MeshPairingState.ACTIVE.value
+    target_session = await b_service.store.get_session(pair_id)
+    terminal_fence = await b_service.store.get_target_pairing_fence(SPACE)
+    assert target_session is not None
+    assert terminal_fence is not None
+    assert terminal_fence.authority.phase == "terminal_confirmed"
+    assert await b_service.store.get_reservation(SPACE) is None
+
+    # Make the former global inventory path unrepresentable: 257 historic
+    # target records exceed MAX_PAIRING_SESSIONS before the current terminal
+    # record is considered.  They must be irrelevant to either direct guard.
+    for index in range(1, 258):
+        historical_id = f"pair_{index:032x}"
+        if historical_id == pair_id:
+            continue
+        await b_service.store.put_session(
+            replace(
+                target_session,
+                pair_id=historical_id,
+                state=MeshPairingState.CANCELLED.value,
+                updated_at_ms=NOW_MS + index,
+            )
+        )
+
+    async def history_scan_forbidden(*_args, **_kwargs):
+        raise AssertionError("ordinary target writes must not call list_sessions")
+
+    real_list_objects = b_storage.list_objects
+
+    async def session_inventory_forbidden(prefix: str, max_keys: int = 0):
+        if prefix == f"{b_service.store._prefix}sessions/":
+            raise AssertionError("ordinary target writes must not list session objects")
+        return await real_list_objects(prefix, max_keys)
+
+    monkeypatch.setattr(b_service.store, "list_sessions", history_scan_forbidden)
+    monkeypatch.setattr(b_storage, "list_objects", session_inventory_forbidden)
+
+    # A completed #417 target verifies only its signed per-space terminal
+    # authority.  A legacy/unrelated space has neither record and likewise
+    # must not inherit a global target-session ceiling.
+    await b_service.assert_space_not_reserved(SPACE)
+    await b_service.assert_space_not_reserved("unrelated")
+
+
+async def test_completed_target_fence_guard_does_not_reparse_bootstrap_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal target guard consumes its signed fence, not retained bootstrap."""
+
+    (
+        _a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        _a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(244, 245)
+    completed = await b_service.run_target_enrollment(pair_id)
+    assert completed["state"] == MeshPairingState.ACTIVE.value
+    terminal_fence = await b_service.store.get_target_pairing_fence(SPACE)
+    assert terminal_fence is not None
+    assert terminal_fence.authority.pair_id == pair_id
+    assert terminal_fence.authority.phase == "terminal_confirmed"
+
+    async def retained_bootstrap_reparse_forbidden(*_args, **_kwargs):
+        raise AssertionError(
+            "ordinary completed-target guard must not reparse retained bootstrap"
+        )
+
+    # The historical guard reached `_retained_import_authority` through
+    # `_target_finalized_activation_matches`, which parses and hashes the
+    # retained bootstrap payload.  The direct signed fence makes that expensive
+    # replay path unnecessary for each ordinary write.
+    monkeypatch.setattr(
+        b_service,
+        "_retained_import_authority",
+        retained_bootstrap_reparse_forbidden,
+    )
+    await b_service.assert_space_not_reserved(SPACE)
+
+
+async def test_terminal_replay_restores_lost_target_triplet_after_normal_commit() -> None:
+    """A completed target repairs its exact terminal chain after later work.
+
+    The e+1 pointer is intentionally allowed to advance after all-ACK.  If the
+    target then loses its reservation and terminal copies, it must re-fence and
+    accept only the source's replay carrying the original source receipt and
+    this target's old detached terminal confirmation — not infer success from a
+    mutable ACTIVE session or the newer BANK_COMMIT head.
+    """
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        b_storage,
+        peers,
+        pair_id,
+    ) = await _drive_to_approved(233, 234)
+    assert (await b_service.run_target_enrollment(pair_id))["ack_status"] == 200
+
+    target_before = await b_service.store.get_target_activation_receipt(pair_id)
+    source_before = await b_service.store.get_source_activation_receipt(pair_id)
+    terminal_before = await b_service.store.get_target_terminal_confirmation(pair_id)
+    assert target_before is not None
+    assert source_before is not None
+    assert terminal_before is not None
+
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    source_node = await source_store.get_node_identity()
+    assert source_node is not None
+    for store in (source_store, target_store):
+        membership = await store.get_membership()
+        term = await store.get_term()
+        assert membership is not None and term is not None
+        commit = BankCommit(
+            bank_version=2,
+            parent_bank_version=1,
+            term=term.term,
+            membership_epoch=membership.epoch,
+            commit_id="post-terminal-c2",
+            committed_by_node_id=source_node.node_id,
+            manifest=[],
+        )
+        await store.append_commit(commit)
+        await store.set_bank_version_pointer(
+            BankVersionPointer(bank_version=2, commit_id=commit.commit_id)
+        )
+
+    # Simulate a restart after independent loss of every mutable target-tail
+    # object.  The #417 import marker and immutable acceptance intent remain;
+    # they fence ordinary writes while the source proves the completed chain.
+    await b_storage.delete(b_service.store._reservation_key(SPACE))
+    await b_storage.delete(b_service.store._target_activation_receipt_key(pair_id))
+    await b_storage.delete(b_service.store._source_activation_receipt_key(pair_id))
+    await b_storage.delete(b_service.store._target_terminal_confirmation_key(pair_id))
+    restarted = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=b_service._sender_factory,
+    )
+    peers["B"] = MeshNamespaceRouter(
+        _fallback(),
+        config=b_config,
+        process_lock=FakeProcessLock(),
+        storage_factory=lambda: b_storage,
+        replay_ledger=FakeReplayLedger(),
+        clock_ms=lambda: NOW_MS,
+        pairing_service=restarted,
+    )
+
+    repaired = await restarted.run_target_enrollment(pair_id)
+
+    assert repaired["ack_status"] == 200
+    health = await target_store.get_node_status()
+    assert health is not None and health.status == HiveNodeStatus.HEALTHY.value
+    assert await restarted.store.get_reservation(SPACE) is None
+    target_after = await restarted.store.get_target_activation_receipt(pair_id)
+    source_after = await restarted.store.get_source_activation_receipt(pair_id)
+    terminal_after = await restarted.store.get_target_terminal_confirmation(pair_id)
+    assert target_after is not None and target_after.canonical_bytes() == target_before.canonical_bytes()
+    assert source_after is not None and source_after.canonical_bytes() == source_before.canonical_bytes()
+    assert terminal_after is not None and terminal_after.canonical_bytes() == terminal_before.canonical_bytes()
+
+
+async def test_bare_reconfirmation_hydrates_target_receipt_before_terminal_replay() -> None:
+    """Crossed source/target receipt loss cannot make retry order a deadlock.
+
+    Once all-ACK is complete, a normal v2 BANK_COMMIT may advance the head.  If
+    A loses its source receipt while B loses only its detached target receipt,
+    A's first retry is deliberately a bare e+2 request.  B must rehydrate its
+    target receipt from its already-retained source+terminal chain *before*
+    fencing that bare retry, so A can consume the returned exact terminal chain.
+    """
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(234, 235)
+    assert (await b_service.run_target_enrollment(pair_id))["ack_status"] == 200
+
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    source_node = await source_store.get_node_identity()
+    assert source_node is not None
+    for store in (source_store, target_store):
+        membership = await store.get_membership()
+        term = await store.get_term()
+        assert membership is not None and term is not None
+        commit = BankCommit(
+            bank_version=2,
+            parent_bank_version=1,
+            term=term.term,
+            membership_epoch=membership.epoch,
+            commit_id="cross-loss-post-terminal-c2",
+            committed_by_node_id=source_node.node_id,
+            manifest=[],
+        )
+        await store.append_commit(commit)
+        await store.set_bank_version_pointer(
+            BankVersionPointer(bank_version=2, commit_id=commit.commit_id)
+        )
+
+    # Keep B's source receipt and target-signed terminal confirmation, but
+    # remove exactly the detached artifacts that force the bare-first retry.
+    await a_storage.delete(a_service.store._source_activation_receipt_key(pair_id))
+    await b_storage.delete(b_service.store._target_activation_receipt_key(pair_id))
+    assert await b_service.store.get_source_activation_receipt(pair_id) is not None
+    assert await b_service.store.get_target_terminal_confirmation(pair_id) is not None
+
+    repaired = await a_service.resume(pair_id)
+
+    assert repaired["state"] == MeshPairingState.ACTIVE.value
+    assert repaired.get("source_confirmation_pending") is not True
+    assert await a_service.store.get_activation_fence(SPACE) is None
+    assert await b_service.store.get_reservation(SPACE) is None
+    assert await b_service.store.get_target_activation_receipt(pair_id) is not None
+    assert await a_service.store.get_source_activation_receipt(pair_id) is not None
+    assert await a_service.store.get_target_terminal_confirmation(pair_id) is not None
+    health = await target_store.get_node_status()
+    assert health is not None and health.status == HiveNodeStatus.HEALTHY.value
+
+
+async def test_source_reconfirmation_restores_full_terminal_chain_after_normal_commit() -> None:
+    """A source that lost both terminal copies restores only B's exact chain."""
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(236, 237)
+    assert (await b_service.run_target_enrollment(pair_id))["ack_status"] == 200
+
+    source_before = await a_service.store.get_source_activation_receipt(pair_id)
+    terminal_before = await a_service.store.get_target_terminal_confirmation(pair_id)
+    assert source_before is not None and terminal_before is not None
+    _source_store, target_store = await _advance_completed_pair_head(
+        a_storage, b_storage, commit_id="source-terminal-loss-c2"
+    )
+
+    # A normal BANK_COMMIT must not make the target's retained signed terminal
+    # chain unusable.  The source has no local completion copy to replay, so its
+    # first request is deliberately bare and can only accept B's exact response.
+    await a_storage.delete(a_service.store._source_activation_receipt_key(pair_id))
+    await a_storage.delete(
+        a_service.store._target_terminal_confirmation_key(pair_id)
+    )
+
+    repaired = await a_service.resume(pair_id)
+
+    assert repaired["state"] == MeshPairingState.ACTIVE.value
+    assert repaired.get("source_confirmation_pending") is not True
+    source_after = await a_service.store.get_source_activation_receipt(pair_id)
+    terminal_after = await a_service.store.get_target_terminal_confirmation(pair_id)
+    assert source_after is not None and terminal_after is not None
+    assert source_after.canonical_bytes() == source_before.canonical_bytes()
+    assert terminal_after.canonical_bytes() == terminal_before.canonical_bytes()
+    assert await a_service.store.get_activation_fence(SPACE) is None
+    pointer = await target_store.get_bank_version_pointer()
+    assert pointer is not None and pointer.commit_id == "source-terminal-loss-c2"
+
+
+async def test_source_reconfirmation_rejects_conflicting_target_terminal_chain_after_normal_commit() -> None:
+    """A re-signed but incompatible target terminal record cannot heal A's loss."""
+
+    from live_mem.core.reservation_guard import PairingActivationError
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(237, 238)
+    assert (await b_service.run_target_enrollment(pair_id))["ack_status"] == 200
+
+    terminal = await b_service.store.get_target_terminal_confirmation(pair_id)
+    assert terminal is not None
+    _source_store, target_store = await _advance_completed_pair_head(
+        a_storage, b_storage, commit_id="conflicting-terminal-c2"
+    )
+
+    # This remains a well-formed target-signed record, but it binds a different
+    # source receipt digest.  Raw object replacement models a conflicting
+    # persisted record without relying on malformed JSON to exercise rejection.
+    conflicting = SignedTargetTerminalConfirmationReceipt.sign(
+        replace(
+            terminal.receipt,
+            source_activation_receipt_digest="0" * 64,
+        ),
+        b_config.private_key,
+    )
+    conflicting_bytes = conflicting.canonical_bytes().decode("utf-8")
+    await b_storage.put(
+        b_service.store._target_terminal_confirmation_key(pair_id),
+        conflicting_bytes,
+    )
+    await a_storage.delete(a_service.store._source_activation_receipt_key(pair_id))
+    await a_storage.delete(
+        a_service.store._target_terminal_confirmation_key(pair_id)
+    )
+
+    repaired = await a_service.resume(pair_id)
+
+    assert repaired["state"] == MeshPairingState.ACTIVE.value
+    assert repaired["source_confirmation_pending"] is True
+    assert await a_service.store.get_target_terminal_confirmation(pair_id) is None
+    assert await a_service.store.get_activation_fence(SPACE) == pair_id
+    assert (
+        await b_storage.get(b_service.store._target_terminal_confirmation_key(pair_id))
+        == conflicting_bytes
+    )
+    with pytest.raises(PairingActivationError):
+        await a_service.assert_no_pairing_activation(SPACE)
+    pointer = await target_store.get_bank_version_pointer()
+    assert pointer is not None and pointer.commit_id == "conflicting-terminal-c2"
+
+
+async def test_active_target_retry_repairs_local_tail_while_source_is_offline() -> None:
+    """A restart repairs its local tail but reports source confirmation pending."""
+
+    a_service, b_service, _a_config, b_config, _a_storage, b_storage, _peers, pair_id = (
+        await _drive_to_approved(87, 88)
+    )
+    real_release = b_service.store.release
+    fail_release = {"on": True}
+
+    async def fail_first_target_release(space_id, released_pair_id):
+        if (
+            fail_release["on"]
+            and space_id == SPACE
+            and released_pair_id == pair_id
+        ):
+            fail_release["on"] = False
+            raise OSError("simulated target reservation release failure")
+        await real_release(space_id, released_pair_id)
+
+    b_service.store.release = fail_first_target_release  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    b_service.store.release = real_release  # type: ignore[method-assign]
+    assert initial["state"] == "active"
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+
+    class _Offline:
+        async def send(self, method, path, *, headers, body):
+            raise AssertionError("an ACTIVE local-tail retry must not call the source")
+
+    # Re-open the service against the same durable storage to prove this is a
+    # restart-safe local convergence tail, not an in-process retry artifact.
+    restarted = MeshPairingService(
+        b_config,
+        b_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=lambda _endpoint: _Offline(),
+    )
+    repaired = await restarted.run_target_enrollment(pair_id)
+
+    assert repaired == {
+        "pair_id": pair_id,
+        "state": "active",
+        "ack_status": 202,
+        "source_confirmation_pending": True,
+    }
+    # The target cannot locally release its ordinary-write fence while the
+    # source is offline: only the source-signed terminal receipt can do that.
+    assert await restarted.store.get_reservation(SPACE) == pair_id
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+
+
+async def test_resync_refuses_tampered_active_session_without_local_e2_authority() -> None:
+    """An ACTIVE workflow record alone cannot bless an e+1 target as healthy."""
+
+    a_service, b_service, _a_config, _b_config, _a_storage, b_storage, _peers, pair_id = (
+        await _drive_to_approved(86, 87)
+    )
+    claimed = await b_service.store.get_session(pair_id)
+    assert claimed is not None and claimed.state == "claimed"
+    signed_env = await b_service._fetch_and_verify_approval(claimed)
+    transferring = claimed.transition(
+        MeshPairingState.APPROVED, now_ms=NOW_MS
+    ).transition(
+        MeshPairingState.TRANSFERRING,
+        now_ms=NOW_MS,
+        bootstrap_manifest_digest=signed_env.envelope.manifest_digest,
+        bootstrap_bank_version=signed_env.envelope.bank_version,
+    )
+    await b_service.store.put_session(transferring)
+    awaiting = await b_service._import_and_await(transferring, signed_env)
+    # Simulate a valid-schema persistence rewrite: the imported target is only
+    # e+1/PENDING, but workflow state falsely claims a completed e+2 receipt.
+    await b_service.store.put_session(
+        awaiting.transition(MeshPairingState.ACTIVE, now_ms=NOW_MS)
+    )
+    before = b_storage.snapshot()
+
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await b_service.resync(pair_id)
+
+    assert exc.value.code == "not_resyncable"
+    assert b_storage.snapshot() == before
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    health = await target_store.get_node_status()
+    membership = await target_store.get_membership()
+    assert health is not None and HiveNodeStatus(health.status) == HiveNodeStatus.UNSAFE
+    assert membership is not None and membership.epoch == 2
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+    assert (await a_service.store.get_session(pair_id)).state == "transferring"
+
+
+async def test_active_source_ack_retry_redelivers_before_success() -> None:
+    """A rewritten source ACTIVE record cannot suppress the target all-ACK proof."""
+
+    a_service, b_service, _a_config, _b_config, _a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(191, 192)
+    )
+
+    class _BlackHole:
+        async def send(self, method, path, *, headers, body):
+            return PeerResponse(503, [], b"")
+
+    a_service._sender_factory = lambda _endpoint: _BlackHole()  # type: ignore[attr-defined]
+    initial = await b_service.run_target_enrollment(pair_id)
+    assert initial["ack_status"] != 200
+    assert (await a_service.store.get_session(pair_id)).state == "blocked_recovery"
+    assert (await b_service.store.get_session(pair_id)).state == "awaiting_acks"
+
+    a_service._sender_factory = lambda _endpoint: AsgiPeerSender(peers, "B")  # type: ignore[attr-defined]
+    source = await a_service.store.get_session(pair_id)
+    assert source is not None
+    # Valid-schema storage damage changes only operational workflow state; the
+    # source membership is already e+2 while the target remains e+1/PENDING.
+    await a_service.store.put_session(
+        source.with_fields(now_ms=source.updated_at_ms + 1, state="active")
+    )
+
+    retried = await b_service.run_target_enrollment(pair_id)
+
+    assert retried["ack_status"] == 200
+    assert (await a_service.store.get_session(pair_id)).state == "active"
+    assert (await b_service.store.get_session(pair_id)).state == "active"
+    health = await HivemindStateStore(storage=b_storage, space_id=SPACE).get_node_status()  # type: ignore[arg-type]
+    assert health is not None and HiveNodeStatus(health.status) == HiveNodeStatus.HEALTHY
+    assert await b_service.store.get_reservation(SPACE) is None
+
+
+async def test_missing_import_marker_blocks_replayed_active_receipt_tail() -> None:
+    """A rewritten target ACTIVE receipt cannot bypass retained import authority."""
+
+    a_service, b_service, _a_config, _b_config, a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(193, 194)
+    )
+
+    class _BlackHole:
+        async def send(self, method, path, *, headers, body):
+            return PeerResponse(503, [], b"")
+
+    a_service._sender_factory = lambda _endpoint: _BlackHole()  # type: ignore[method-assign]
+    initial = await b_service.run_target_enrollment(pair_id)
+    assert initial["state"] == MeshPairingState.AWAITING_ACKS.value
+    assert (await a_service.store.get_session(pair_id)).state == "blocked_recovery"
+    target = await b_service.store.get_session(pair_id)
+    assert target is not None and target.state == MeshPairingState.AWAITING_ACKS.value
+
+    # Simulate coherent-looking but unauthoritative storage damage: target
+    # membership matches the source e+2 view and its workflow record claims
+    # ACTIVE, but the independently retained import marker is gone.
+    source_membership = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_membership()  # type: ignore[arg-type]
+    assert source_membership is not None and source_membership.epoch == target.base_epoch + 2
+    await b_service.store.clear_import_validation_for_resync(pair_id)
+    await b_service.store.put_session(
+        target.transition(MeshPairingState.ACTIVE, now_ms=NOW_MS)
+    )
+    target_store = HivemindStateStore(storage=b_storage, space_id=SPACE)  # type: ignore[arg-type]
+    await target_store.set_membership(source_membership)
+
+    a_service._sender_factory = lambda _endpoint: AsgiPeerSender(peers, "B")  # type: ignore[method-assign]
+    resumed = await a_service.resume(pair_id)
+
+    assert resumed["state"] != MeshPairingState.ACTIVE.value
+    assert (await a_service.store.get_session(pair_id)).state == "blocked_recovery"
+    assert (await b_service.store.get_session(pair_id)).state == MeshPairingState.ACTIVE.value
+    health = await target_store.get_node_status()
+    assert health is not None and HiveNodeStatus(health.status) == HiveNodeStatus.UNSAFE
+    assert await b_service.store.get_reservation(SPACE) == pair_id
+    assert await b_service.store.get_import_validation(pair_id) is None
 
 
 async def test_corrupt_import_resync_reaches_active_without_eviction(monkeypatch):
@@ -854,7 +3509,7 @@ async def test_admin_control_plane_completes_enrollment_two_instances(monkeypatc
 
     status, acc = await _admin_post(
         b_admin, "accept",
-        {"invitation": inv["invitation"], "target_space_id": SPACE, "secret": inv["secret"], "source_endpoint": A_URL, "scopes": ["read", "commit"]},
+        {"invitation": inv["invitation"], "target_space_id": SPACE, "secret": inv["secret"], "source_endpoint": A_URL, "scopes": ["read", "commit"], "quiesced": True},
         host=b"b.mesh.test",
     )
     assert status == 200 and acc["state"] == "claimed"
@@ -879,7 +3534,7 @@ async def test_approve_export_failure_blocks_not_cancellable_and_evicts(monkeypa
     a_service, b_service, a_config, b_config, a_storage, b_storage, peers, _ = await _build_admin_instances(101, 102)
     invite = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
     pair_id = invite["pair_id"]
-    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"))
+    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True)
 
     async def boom(*a, **k):
         raise RuntimeError("simulated bootstrap export failure")
@@ -925,7 +3580,7 @@ async def test_hard_crash_during_export_leaves_recoverable_approved_admitted(mon
     a_service, b_service, a_config, b_config, a_storage, b_storage, peers, _ = await _build_admin_instances(103, 104)
     invite = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
     pair_id = invite["pair_id"]
-    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"))
+    await b_service.accept_invitation(invite["invitation_bytes"], SPACE, secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True)
 
     class _HardCrash(BaseException):
         pass
@@ -955,6 +3610,191 @@ async def test_hard_crash_during_export_leaves_recoverable_approved_admitted(mon
     assert not any(m.node_id == tgt and m.status in ("pending", "active") for m in a_mem2.members)
 
 
+async def test_evict_retries_approved_after_pending_removal_crash(monkeypatch):
+    """A source crash after e+1 removal must not strand an APPROVED tail.
+
+    The pre-removal intent is the only authority allowed to turn the adjacent
+    EVICTED membership into the target-facing terminal disposition.  This
+    specifically covers a hard crash during an export, where the source
+    session has not reached ``blocked_recovery`` yet.
+    """
+
+    a_service, b_service, *_rest = await _build_admin_instances(181, 182)
+    invite = await a_service.create_invitation(SPACE, requested_scopes=("read",))
+    pair_id = invite["pair_id"]
+    await b_service.accept_invitation(
+        invite["invitation_bytes"],
+        SPACE,
+        secret=invite["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read",), quiesced=True,
+    )
+
+    class _HardCrash(BaseException):
+        pass
+
+    async def crash_during_export(*_args, **_kwargs):
+        raise _HardCrash("crash during bootstrap export")
+
+    monkeypatch.setattr(a_service, "_export_and_store_bootstrap", crash_during_export)
+    with pytest.raises(_HardCrash):
+        await a_service.approve(pair_id)
+
+    source = await a_service.store.get_session(pair_id)
+    assert source is not None and source.state == MeshPairingState.APPROVED.value
+
+    real_persist = a_service._persist_source_terminal_disposition
+
+    async def crash_after_pending_removal(*_args, **_kwargs):
+        raise _HardCrash("crash after pending removal")
+
+    monkeypatch.setattr(
+        a_service,
+        "_persist_source_terminal_disposition",
+        crash_after_pending_removal,
+    )
+    with pytest.raises(_HardCrash):
+        await a_service.evict(pair_id, operator="op", reason="retry seam")
+
+    assert await a_service.store.get_source_pending_eviction_intent(pair_id)
+    assert await a_service.store.get_source_terminal_disposition(pair_id) is None
+
+    monkeypatch.setattr(
+        a_service, "_persist_source_terminal_disposition", real_persist
+    )
+    out = await a_service.evict(pair_id, operator="op", reason="retry")
+    assert out["state"] == MeshPairingState.CANCELLED.value
+    assert await a_service.store.get_source_terminal_disposition(pair_id)
+
+    abandoned = await b_service.abandon(pair_id)
+    assert abandoned["state"] == MeshPairingState.CANCELLED.value
+    assert await b_service.store.get_reservation(SPACE) is None
+
+
+async def test_hard_crash_after_source_marker_allows_only_owner_evict(monkeypatch):
+    """The marker-before-TRANSFERRING crash prefix cannot strand e+1.
+
+    The signed per-space marker is intentionally written before the bootstrap
+    is advertised.  A power loss immediately after that write leaves the
+    source session APPROVED while its target is already PENDING at e+1.  The
+    marker must fence unrelated epoch changes, but the owning give-up path must
+    still be able to remove exactly that candidate.
+    """
+
+    from live_mem.core.reservation_guard import PairingActivationError
+
+    a_service, b_service, a_config, b_config, a_storage, b_storage, peers, _ = (
+        await _build_admin_instances(105, 106)
+    )
+    invite = await a_service.create_invitation(
+        SPACE, requested_scopes=("read", "commit")
+    )
+    pair_id = invite["pair_id"]
+    await b_service.accept_invitation(
+        invite["invitation_bytes"],
+        SPACE,
+        secret=invite["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read", "commit"), quiesced=True,
+    )
+
+    class _HardCrash(BaseException):
+        pass
+
+    real_put_marker = a_service.store.put_source_activation_marker
+
+    async def crash_after_marker(marker):
+        await real_put_marker(marker)
+        raise _HardCrash("crash after durable source activation marker")
+
+    monkeypatch.setattr(
+        a_service.store, "put_source_activation_marker", crash_after_marker
+    )
+    with pytest.raises(_HardCrash):
+        await a_service.approve(pair_id)
+
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None and session.state == MeshPairingState.APPROVED.value
+    marker = await a_service.store.get_source_activation_marker(SPACE)
+    assert marker is not None and marker.evidence.pair_id == pair_id
+    target_node_id = b_config.fingerprint.split(":", 1)[1]
+    membership = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_membership()
+    assert membership is not None and membership.epoch == session.base_epoch + 1
+    assert any(
+        member.node_id == target_node_id and member.status == "pending"
+        for member in membership.members
+    )
+
+    # An ordinary mutation does not own the tail and remains fenced.
+    with pytest.raises(PairingActivationError):
+        await a_service.assert_no_pairing_activation(SPACE)
+
+    # The paired operator eviction passes the exact pair id through the
+    # lifecycle checker, removes only the PENDING candidate, and clears the
+    # marker.  This is the sole permitted recovery for the crash prefix.
+    out = await a_service.evict(pair_id, operator="op", reason="hard crash")
+    assert out["state"] == MeshPairingState.CANCELLED.value
+    assert await a_service.store.get_source_activation_marker(SPACE) is None
+    membership = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_membership()
+    assert membership is not None
+    assert not any(
+        member.node_id == target_node_id
+        and member.status in ("pending", "active")
+        for member in membership.members
+    )
+
+
+async def test_evict_retry_finishes_cancelled_marker_release_after_hard_crash(monkeypatch):
+    """A crash after CANCELLED retains only a bounded, idempotent cleanup tail."""
+
+    a_service, b_service, a_config, b_config, a_storage, b_storage, peers, pair_id = (
+        await _drive_to_approved(107, 108)
+    )
+
+    class _HardCrash(BaseException):
+        pass
+
+    real_release_marker = a_service.store.release_source_activation_marker
+
+    async def crash_before_marker_release(space_id: str, owner_pair_id: str) -> None:
+        assert space_id == SPACE and owner_pair_id == pair_id
+        raise _HardCrash("crash after durable cancelled session")
+
+    monkeypatch.setattr(
+        a_service.store,
+        "release_source_activation_marker",
+        crash_before_marker_release,
+    )
+    with pytest.raises(_HardCrash):
+        await a_service.evict(pair_id, operator="op", reason="simulate power loss")
+
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None and session.state == MeshPairingState.CANCELLED.value
+    marker = await a_service.store.get_source_activation_marker(SPACE)
+    assert marker is not None and marker.evidence.pair_id == pair_id
+    target_node_id = b_config.fingerprint.split(":", 1)[1]
+    membership = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_membership()
+    assert membership is not None
+    evicted = next(
+        member for member in membership.members if member.node_id == target_node_id
+    )
+    assert evicted.status == "evicted" and evicted.incarnation == pair_id
+
+    monkeypatch.setattr(
+        a_service.store, "release_source_activation_marker", real_release_marker
+    )
+    out = await a_service.evict(pair_id, operator="op", reason="finish cleanup")
+    assert out["state"] == MeshPairingState.CANCELLED.value
+    assert await a_service.store.get_source_activation_marker(SPACE) is None
+    await a_service.assert_no_pairing_activation(SPACE)
+
+
 async def test_evict_gives_up_stuck_transferring_source(monkeypatch):
     # A source waiting at 'transferring' for a permanently-unresponsive target must
     # be givable-up through the control plane: cancel refuses (post-mutation) but
@@ -979,6 +3819,45 @@ async def test_evict_gives_up_stuck_transferring_source(monkeypatch):
     assert await a_service.store.get_evidence(pair_id) is not None  # auditable abandonment
 
 
+async def test_evict_refuses_pending_candidate_with_rewritten_incarnation() -> None:
+    """A retained source pairing cannot give up a different pending candidate."""
+
+    a_service, b_service, _a_config, b_config, a_storage, _b_storage, _peers, pair_id = (
+        await _drive_to_approved(109, 110)
+    )
+    source_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await source_store.get_membership()
+    assert membership is not None
+    target_node_id = b_config.fingerprint.split(":", 1)[1]
+    other_pair = "pair_ffffffffffffffffffffffffffffffff"
+    await source_store.set_membership(
+        membership.model_copy(
+            update={
+                "members": [
+                    member.model_copy(update={"incarnation": other_pair})
+                    if member.node_id == target_node_id
+                    else member
+                    for member in membership.members
+                ]
+            }
+        )
+    )
+    restarted = MeshPairingService(
+        a_service._config,
+        a_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=a_service._sender_factory,
+    )
+
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await restarted.evict(pair_id, operator="op", reason="incarnation mismatch")
+    assert exc.value.code == "stale_pairing"
+    held = await source_store.get_membership()
+    assert held is not None and held.epoch == membership.epoch
+    pending = next(member for member in held.members if member.node_id == target_node_id)
+    assert pending.status == "pending" and pending.incarnation == other_pair
+
+
 async def test_accept_refuses_space_mismatch(monkeypatch):
     # The reserved space MUST equal the enrolled space; a mismatch is refused
     # before any reservation is taken.
@@ -989,7 +3868,7 @@ async def test_accept_refuses_space_mismatch(monkeypatch):
     with pytest.raises(MeshPairingServiceError) as e:
         await b_service.accept_invitation(
             invite["invitation_bytes"], "othermeshspace",
-            secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"),
+            secret=invite["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True,
         )
     assert e.value.code == "space_mismatch"
     assert await b_service.store.get_reservation("othermeshspace") is None  # nothing reserved
@@ -1153,8 +4032,8 @@ async def test_concurrent_approvals_admit_exactly_one(monkeypatch):
 
     inv1 = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
     inv2 = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
-    await b_service.accept_invitation(inv1["invitation_bytes"], SPACE, secret=inv1["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"))
-    await c_service.accept_invitation(inv2["invitation_bytes"], SPACE, secret=inv2["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"))
+    await b_service.accept_invitation(inv1["invitation_bytes"], SPACE, secret=inv1["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True)
+    await c_service.accept_invitation(inv2["invitation_bytes"], SPACE, secret=inv2["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True)
 
     # FORCE interleaving: park the FIRST approval AFTER its epoch check (it persists
     # the 'approved' session, past the check, before admit) so the second approval
@@ -1220,13 +4099,13 @@ async def test_second_pairing_refused_while_first_candidate_pending(monkeypatch)
         peers[key] = MeshNamespaceRouter(_fallback(), config=cfg, process_lock=FakeProcessLock(), storage_factory=lambda st=st: st, replay_ledger=FakeReplayLedger(), clock_ms=clock, pairing_service={"A": a_service, "B": b_service, "C": c_service}[key])
 
     inv1 = await a_service.create_invitation(SPACE, requested_scopes=("read",))
-    await b_service.accept_invitation(inv1["invitation_bytes"], SPACE, secret=inv1["secret"], source_endpoint=A_URL, requested_scopes=("read",))
+    await b_service.accept_invitation(inv1["invitation_bytes"], SPACE, secret=inv1["secret"], source_endpoint=A_URL, requested_scopes=("read",), quiesced=True)
     await a_service.approve(inv1["pair_id"])  # pairing 1 admits its target PENDING
 
     # A SECOND invitation minted AFTER the first admitted has a fresh base_epoch, so
     # it passes the epoch check — the PENDING-candidate gate must still refuse it.
     inv2 = await a_service.create_invitation(SPACE, requested_scopes=("read",))
-    await c_service.accept_invitation(inv2["invitation_bytes"], SPACE, secret=inv2["secret"], source_endpoint=A_URL, requested_scopes=("read",))
+    await c_service.accept_invitation(inv2["invitation_bytes"], SPACE, secret=inv2["secret"], source_endpoint=A_URL, requested_scopes=("read",), quiesced=True)
     with pytest.raises(MeshPairingServiceError) as exc:
         await a_service.approve(inv2["pair_id"])
     assert exc.value.code == "pairing_in_flight"
@@ -1254,35 +4133,204 @@ async def test_approve_vs_concurrent_rescope_fails_closed(monkeypatch):
     a_service, b_service, a_config, b_config, a_storage, b_storage, peers, _ = await _build_admin_instances(151, 152)
     inv = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
     pair_id = inv["pair_id"]
-    await b_service.accept_invitation(inv["invitation_bytes"], SPACE, secret=inv["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"))
+    await b_service.accept_invitation(inv["invitation_bytes"], SPACE, secret=inv["secret"], source_endpoint=A_URL, requested_scopes=("read", "commit"), quiesced=True)
 
-    # Park approve at put_session('approved') — after its early epoch read, BEFORE it
-    # acquires the membership lock — so the rescope can advance the epoch.
-    gate = asyncio.Event()
-    park_reached = asyncio.Event()
-    real_put = a_service.store.put_session
-
-    async def gated_put(session):
-        if session.role == "source" and session.state == "approved" and not park_reached.is_set():
-            park_reached.set()
-            await gate.wait()
-        return await real_put(session)
-
-    a_service.store.put_session = gated_put  # type: ignore[method-assign]
-    task = asyncio.ensure_future(a_service.approve(pair_id))
-    await park_reached.wait()
-    # Concurrent rescope advances the source epoch base(1) -> 2.
-    await a_service._membership(SPACE).update_member_scopes("sourcenode0000000000000000000000", ["read"])
-    gate.set()
+    # Queue a real rescope before approve on the shared membership lock. Approve
+    # may complete its early read while both wait, but the rescope wins the lock
+    # and advances base(1) -> 2 before approve's under-lock deep proof.
+    membership = a_service._membership(SPACE)
+    lock = membership.space_lock()
+    await lock.acquire()
+    rescope = asyncio.create_task(
+        membership.update_member_scopes(
+            "sourcenode0000000000000000000000", ["read"]
+        )
+    )
+    await asyncio.sleep(0)
+    task = asyncio.create_task(a_service.approve(pair_id))
+    await asyncio.sleep(0)
+    lock.release()
+    await rescope
     with pytest.raises(MeshPairingServiceError) as e:
         await task
     assert e.value.code == "epoch_changed"
-    a_service.store.put_session = real_put  # type: ignore[method-assign]
 
-    # No admission happened at the wrong epoch: only the rescope's bump.
+    # No approval/session mutation happened at the wrong epoch: only the
+    # rescope's bump, and the claim remains retryable evidence.
     a_mem = await HivemindStateStore(storage=a_storage, space_id=SPACE).get_membership()  # type: ignore[arg-type]
     assert a_mem.epoch == 2
     assert not any(m.status == "pending" for m in a_mem.members)
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None and session.state == "claimed"
+    assert await a_service.store.get_blob(pair_id, "approval") is None
+
+
+async def test_approval_capacity_boundary_covers_max_width_timestamps(monkeypatch):
+    """The e+1 proof is an upper bound even across isoformat's exact-second case."""
+
+    from dataclasses import replace
+
+    from live_mem.mesh.bootstrap_snapshot import serialize_snapshot
+    from live_mem.mesh.pairing_service import (
+        MeshPairingServiceError,
+        _legacy_membership_key,
+        _node_id_from_fingerprint,
+    )
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        _pair_id,
+    ) = await _build_admin_instances(153, 154)
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read", "commit")
+    )
+    pair_id = invitation["pair_id"]
+    await b_service.accept_invitation(
+        invitation["invitation_bytes"],
+        SPACE,
+        secret=invitation["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read", "commit"), quiesced=True,
+    )
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None and session.state == "claimed"
+    store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    node = await store.get_node_identity()
+    term = await store.get_term()
+    assert node is not None and term is not None
+    candidate = Member(
+        node_id=_node_id_from_fingerprint(session.target_fingerprint),
+        public_key=_legacy_membership_key(session.target_public_key),
+        scopes=list(session.granted_scopes),
+        incarnation=pair_id,
+    )
+    current = await a_service._deep_source_bootstrap_preflight(SPACE)
+    projected = a_service._bootstrap().project_membership_admission_snapshot(
+        current,
+        space_id=SPACE,
+        candidate=candidate,
+        source_node=node,
+        term=term,
+    )
+    capacity = len(serialize_snapshot(projected))
+    assert projected.manifest.created_at.endswith(".000000+00:00")
+    assert ".000000+00:00" in projected.files["_hivemind/members.json"]
+    assert any(".000000+00-00" in path for path in projected.files)
+
+    # One byte below the conservative exact e+1 bound refuses before approval
+    # evidence or shared membership changes, leaving CLAIMED retryable.
+    a_service._config = replace(
+        a_service._config, bootstrap_max_bytes=capacity - 1
+    )
+    membership_before = await store.get_membership()
+    with pytest.raises(MeshPairingServiceError) as exc:
+        await a_service.approve(pair_id)
+    assert exc.value.code == "bootstrap_limit_exceeded"
+    assert await a_service.store.get_blob(pair_id, "approval") is None
+    assert (await a_service.store.get_session(pair_id)).state == "claimed"
+    assert await store.get_membership() == membership_before
+
+    # At the projected bound the real timestamps are never wider, so admission
+    # and the subsequent exact export succeed without a post-e+1 limit failure.
+    a_service._config = replace(a_service._config, bootstrap_max_bytes=capacity)
+    result = await a_service.approve(pair_id)
+    assert result["state"] == "transferring"
+    payload = await a_service.store.get_blob(pair_id, "bootstrap_payload")
+    assert payload is not None and len(payload) <= capacity
+
+
+async def test_approval_capacity_retry_reuses_orphaned_deterministic_event() -> None:
+    """An event-first crash retry must not reserve capacity for a duplicate."""
+
+    import uuid
+    from dataclasses import replace
+
+    from live_mem.core.hivemind import EventEnvelope, EventType
+    from live_mem.mesh.pairing_service import (
+        _legacy_membership_key,
+        _node_id_from_fingerprint,
+    )
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        _pair_id,
+    ) = await _build_admin_instances(155, 156)
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read", "commit")
+    )
+    pair_id = invitation["pair_id"]
+    await b_service.accept_invitation(
+        invitation["invitation_bytes"],
+        SPACE,
+        secret=invitation["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read", "commit"), quiesced=True,
+    )
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None
+    store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await store.get_membership()
+    node = await store.get_node_identity()
+    term = await store.get_term()
+    assert membership is not None and node is not None and term is not None
+    candidate = Member(
+        node_id=_node_id_from_fingerprint(session.target_fingerprint),
+        public_key=_legacy_membership_key(session.target_public_key),
+        scopes=list(session.granted_scopes),
+        incarnation=pair_id,
+    )
+    new_epoch = membership.epoch + 1
+    event_id = uuid.uuid5(
+        uuid.NAMESPACE_OID,
+        f"{SPACE}:{EventType.MEMBERSHIP_UPDATED.value}:"
+        f"{candidate.node_id}:{new_epoch}",
+    ).hex
+    await store.append_event(
+        EventEnvelope(
+            event_id=event_id,
+            type=EventType.MEMBERSHIP_UPDATED,
+            origin_node_id=node.node_id,
+            term=term.term,
+            membership_epoch=new_epoch,
+            created_at="2026-08-19T12:00:00.123456+00:00",
+            payload={
+                "node_id": candidate.node_id,
+                "epoch": new_epoch,
+                "status": "pending",
+            },
+        )
+    )
+
+    current = await a_service._deep_source_bootstrap_preflight(SPACE)
+    projected = a_service._bootstrap().project_membership_admission_snapshot(
+        current,
+        space_id=SPACE,
+        candidate=candidate,
+        source_node=node,
+        term=term,
+    )
+    suffix = f"_{event_id}.json"
+    assert len([path for path in projected.files if path.endswith(suffix)]) == 1
+    assert len(projected.files) == len(current.files)
+
+    a_service._config = replace(
+        a_service._config,
+        bootstrap_max_objects=len(current.files),
+    )
+    result = await a_service.approve(pair_id)
+    assert result["state"] == "transferring"
 
 
 async def test_bootstrap_export_strips_member_incarnation(monkeypatch):
@@ -1331,13 +4379,37 @@ async def test_force_evict_stale_pairing_refuses_after_re_enrollment(monkeypatch
 
     await a_service.force_evict_member(pair_id1, operator="op", reason="dead")  # P1 evicts B; session stays active
 
-    # B re-enrolls with the SAME identity: reset its space to blank, then pair anew.
-    await b_service._teardown_target_space(SPACE)
+    # B re-enrolls with the SAME identity only after its forced-eviction
+    # decommission has replaced the entire dead target instance, including all
+    # local pairing metadata.  Teardown of the shared target *space* alone is
+    # deliberately insufficient: it must not erase a signed terminal tail from
+    # a potentially live source member.  Model the documented dead-node rebuild
+    # with a clean local store/router, rather than selectively deleting fence
+    # keys (which would teach an unsafe production recovery shortcut).
+    rebuilt_storage = FakeStorage()
+    await _seed_blank_target(rebuilt_storage)
+    rebuilt_service = MeshPairingService(
+        b_config,
+        rebuilt_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=lambda _e: AsgiPeerSender(peers, "A"),
+    )
+    peers["B"] = MeshNamespaceRouter(
+        _fallback(),
+        config=b_config,
+        process_lock=FakeProcessLock(),
+        storage_factory=lambda: rebuilt_storage,
+        replay_ledger=FakeReplayLedger(),
+        clock_ms=lambda: NOW_MS,
+        pairing_service=rebuilt_service,
+    )
+    b_service = rebuilt_service
+    b_storage = rebuilt_storage
     invite2 = await a_service.create_invitation(SPACE, requested_scopes=("read", "commit"))
     pair_id2 = invite2["pair_id"]
     await b_service.accept_invitation(
         invite2["invitation_bytes"], SPACE, secret=invite2["secret"], source_endpoint=A_URL,
-        requested_scopes=("read", "commit"),
+        requested_scopes=("read", "commit"), quiesced=True,
     )
     await a_service.approve(pair_id2)
     assert (await b_service.run_target_enrollment(pair_id2))["state"] == "active"
@@ -1365,7 +4437,7 @@ async def test_awaiting_acks_crash_dead_target_force_evict(monkeypatch):
     async def boom(*a, **k):
         raise RuntimeError("crash after promote, before persisting active/blocked")
 
-    monkeypatch.setattr(a_service, "_deliver_activation", boom)
+    monkeypatch.setattr(a_service, "_complete_source_activation_tail", boom)
     result = await b_service.run_target_enrollment(pair_id)
     assert result["state"] != "active"
     a_sess = await a_service.store.get_session(pair_id)
@@ -1374,7 +4446,7 @@ async def test_awaiting_acks_crash_dead_target_force_evict(monkeypatch):
     a_mem = await HivemindStateStore(storage=a_storage, space_id=SPACE).get_membership()  # type: ignore[arg-type]
     assert a_mem.epoch == 3 and any(m.node_id == tgt and m.status == "active" for m in a_mem.members)
 
-    monkeypatch.undo()  # restore _deliver_activation
+    monkeypatch.undo()  # restore terminal activation delivery
 
     class _Dead:
         async def send(self, method, path, *, headers, body):
@@ -1394,6 +4466,74 @@ async def test_awaiting_acks_crash_dead_target_force_evict(monkeypatch):
     a_mem2 = await HivemindStateStore(storage=a_storage, space_id=SPACE).get_membership()  # type: ignore[arg-type]
     assert a_mem2.epoch == 4  # epoch-advancing member eviction
     assert not any(m.node_id == tgt and m.status in ("pending", "active") for m in a_mem2.members)
+
+
+async def test_force_evict_retry_finishes_cancelled_marker_release(monkeypatch):
+    """The same force-evict retry finishes its durable post-eviction tail."""
+
+    a_service, b_service, _a_config, b_config, a_storage, _b_storage, peers, pair_id = (
+        await _drive_to_approved(127, 128)
+    )
+
+    class _ActivationResponseDrop(AsgiPeerSender):
+        async def send(self, method, path, *, headers, body):
+            response = await super().send(method, path, headers=headers, body=body)
+            if path.endswith("/events"):
+                return PeerResponse(503, [], b"")
+            return response
+
+    a_service._sender_factory = lambda _endpoint: _ActivationResponseDrop(  # type: ignore[method-assign]
+        peers, "B"
+    )
+    await b_service.run_target_enrollment(pair_id)
+    assert (await a_service.store.get_session(pair_id)).state == "blocked_recovery"
+
+    class _HardCrash(BaseException):
+        pass
+
+    real_release_marker = a_service.store.release_source_activation_marker
+
+    async def crash_before_marker_release(space_id: str, owner_pair_id: str) -> None:
+        assert space_id == SPACE and owner_pair_id == pair_id
+        raise _HardCrash("crash after force-eviction cancelled write")
+
+    monkeypatch.setattr(
+        a_service.store,
+        "release_source_activation_marker",
+        crash_before_marker_release,
+    )
+    with pytest.raises(_HardCrash):
+        await a_service.force_evict_member(pair_id, operator="op", reason="dead")
+
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None and session.state == MeshPairingState.CANCELLED.value
+    marker = await a_service.store.get_source_activation_marker(SPACE)
+    assert marker is not None and marker.evidence.pair_id == pair_id
+    target_id = b_config.fingerprint.split(":", 1)[1]
+    membership = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_membership()
+    assert membership is not None
+    assert any(
+        member.node_id == target_id
+        and member.status == "evicted"
+        and member.incarnation == pair_id
+        for member in membership.members
+    )
+
+    monkeypatch.setattr(
+        a_service.store, "release_source_activation_marker", real_release_marker
+    )
+    restarted = MeshPairingService(
+        a_service._config,
+        a_storage,
+        clock_ms=lambda: NOW_MS,
+        sender_factory=a_service._sender_factory,
+    )
+    out = await restarted.force_evict_member(pair_id, operator="op", reason="retry")
+    assert out["state"] == MeshPairingState.CANCELLED.value
+    assert await restarted.store.get_source_activation_marker(SPACE) is None
+    await restarted.assert_no_pairing_activation(SPACE)
 
 
 async def test_source_evict_then_target_abandon_releases_reservation(monkeypatch):
@@ -1423,6 +4563,40 @@ async def test_source_evict_then_target_abandon_releases_reservation(monkeypatch
     assert out["state"] == "cancelled"
     assert await b_service.store.get_reservation(SPACE) is None  # target released its own
     await b_service._bootstrap()._assert_blank_target(SPACE)  # torn back to blank (reusable)
+
+
+async def test_abandon_with_lost_raw_reservation_tears_down_before_fence_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost raw reservation cannot turn an imported target into a bare cancel.
+
+    The signed #417 direct fence and immutable acceptance intent still bind the
+    target.  After the source's signed eviction, abandon must use that proof to
+    reset the imported target to blank before it releases the fence; a later
+    ``cancel`` retry must not open ordinary writes over retained import data.
+    """
+
+    a_service, b_service, _a_config, _b_config, _a_storage, _b_storage, peers, pair_id = (
+        await _drive_to_approved(113, 114)
+    )
+    b_service._sender_factory = lambda _e: _AckDropSender(peers, "A")  # type: ignore[attr-defined]
+    await b_service.run_target_enrollment(pair_id)
+    await a_service.evict(pair_id, operator="op", reason="give up")
+
+    # Model a durable reservation-object loss after the target already imported
+    # e+1 and marked itself UNSAFE. The target #417 authority remains intact.
+    await b_service.store.release(SPACE, pair_id)
+    assert await b_service.store.get_reservation(SPACE) is None
+    fence = await b_service.store.get_target_pairing_fence(SPACE)
+    assert fence is not None and fence.authority.phase == "held"
+
+    out = await b_service.abandon(pair_id)
+    assert out["state"] == "cancelled"
+    await b_service._bootstrap()._assert_blank_target(SPACE)
+    released = await b_service.store.get_target_pairing_fence(SPACE)
+    assert released is not None and released.authority.phase == "released"
+    await b_service.cancel(pair_id)  # exact terminal retry is now harmless
+    await b_service.assert_space_not_reserved(SPACE)
 
 
 async def test_abandon_skips_teardown_when_space_no_longer_owned(monkeypatch):
@@ -1595,7 +4769,8 @@ async def test_activation_fence_blocks_rescope_between_promotion_and_delivery(mo
 
     register_pairing_activation_checker(a_service.assert_no_pairing_activation)
     try:
-        a_service._sender_factory = lambda _e: _RescopeAtActivation(peers, "B")  # type: ignore[attr-defined]
+        sender = _RescopeAtActivation(peers, "B")
+        a_service._sender_factory = lambda _e: sender  # type: ignore[attr-defined]
         result = await b_service.run_target_enrollment(pair_id)
     finally:
         clear_pairing_activation_checker()
@@ -1660,7 +4835,8 @@ async def test_activation_fence_blocks_external_admit_between_promotion_and_deli
 
     register_pairing_activation_checker(a_service.assert_no_pairing_activation)
     try:
-        a_service._sender_factory = lambda _e: _AdmitAtActivation(peers, "B")  # type: ignore[attr-defined]
+        sender = _AdmitAtActivation(peers, "B")
+        a_service._sender_factory = lambda _e: sender  # type: ignore[attr-defined]
         result = await b_service.run_target_enrollment(pair_id)
     finally:
         clear_pairing_activation_checker()
@@ -1714,7 +4890,8 @@ async def test_activation_fence_blocks_external_evict_between_promotion_and_deli
 
     register_pairing_activation_checker(a_service.assert_no_pairing_activation)
     try:
-        a_service._sender_factory = lambda _e: _EvictAtActivation(peers, "B")  # type: ignore[attr-defined]
+        sender = _EvictAtActivation(peers, "B")
+        a_service._sender_factory = lambda _e: sender  # type: ignore[attr-defined]
         result = await b_service.run_target_enrollment(pair_id)
     finally:
         clear_pairing_activation_checker()
@@ -1805,7 +4982,7 @@ async def test_resume_refuses_when_epoch_reached_e2_without_our_promotion(monkey
 
     with pytest.raises(MeshPairingServiceError) as exc:
         await a_service.resume(pair_id)
-    assert exc.value.code == "unrecoverable_epoch"
+    assert exc.value.code == "source_unavailable"
     # Failed closed BEFORE re-driving: the source never promoted the target (still
     # PENDING at e+2) and no e+2 activation was delivered — so no split is possible.
     still = await HivemindStateStore(storage=a_storage, space_id=SPACE).get_membership()  # type: ignore[arg-type]
@@ -1814,9 +4991,12 @@ async def test_resume_refuses_when_epoch_reached_e2_without_our_promotion(monkey
 
 
 async def test_assert_no_pairing_activation_filters_role_space_and_state(monkeypatch):
-    """The real checker fences ONLY a SOURCE session for the SAME space in a
-    mid-activation state (awaiting_acks / blocked_recovery) — not other states,
-    not other spaces, not TARGET-role sessions."""
+    """The checker resolves source pairing authority from member incarnations.
+
+    A PENDING incarnation is fenced even while its durable session is still
+    transferring; ACTIVE incarnations are fenced for awaiting/blocked recovery.
+    Other spaces and target-only local state remain unaffected.
+    """
 
     from dataclasses import replace
 
@@ -1825,8 +5005,10 @@ async def test_assert_no_pairing_activation_filters_role_space_and_state(monkeyp
 
     a_service, b_service, a_config, b_config, a_storage, b_storage, peers, pair_id = await _drive_to_approved(163, 164)
 
-    # SOURCE session is 'transferring' (not mid-activation) -> no fence, any space.
-    await a_service.assert_no_pairing_activation(SPACE)
+    # The admitted PENDING member is already shared mutation, so it fences even
+    # while the local session is still transferring.
+    with pytest.raises(PairingActivationError):
+        await a_service.assert_no_pairing_activation(SPACE)
     await a_service.assert_no_pairing_activation("otherspace")
 
     # Advance the SOURCE session to awaiting_acks -> fences its own space only.
@@ -1846,3 +5028,445 @@ async def test_assert_no_pairing_activation_filters_role_space_and_state(monkeyp
         replace(tgt_session, state=MeshPairingState.BLOCKED_RECOVERY.value)
     )
     await b_service.assert_no_pairing_activation(SPACE)  # target-role -> no fence
+
+
+@pytest.mark.parametrize(
+    ("terminal_state", "a_seed", "b_seed"),
+    [("active", 165, 166), ("cancelled", 167, 168)],
+)
+async def test_terminal_activation_fence_tail_requires_signed_target_confirmation(
+    monkeypatch, terminal_state, a_seed, b_seed
+):
+    """A mutable terminal session never clears the final source fence alone."""
+
+    from live_mem.mesh.pairing_state import MeshPairingState
+
+    (
+        a_service,
+        _b_service,
+        a_config,
+        b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(a_seed, b_seed)
+    state_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await state_store.get_membership()
+    session = await a_service.store.get_session(pair_id)
+    assert membership is not None and session is not None
+    target_id = b_config.fingerprint.split(":", 1)[1]
+
+    await a_service.store.put_activation_fence(SPACE, pair_id, now_ms=NOW_MS)
+    if terminal_state == "active":
+        members = [
+            member.model_copy(update={"status": "active"})
+            if member.node_id == target_id
+            else member
+            for member in membership.members
+        ]
+        terminal = session.transition(
+            MeshPairingState.AWAITING_ACKS,
+            now_ms=NOW_MS + 1,
+            activation_event_id="a" * 32,
+        ).transition(MeshPairingState.ACTIVE, now_ms=NOW_MS + 2)
+    else:
+        members = [
+            member for member in membership.members if member.node_id != target_id
+        ]
+        terminal = session.transition(
+            MeshPairingState.BLOCKED_RECOVERY, now_ms=NOW_MS + 1
+        ).transition(MeshPairingState.CANCELLED, now_ms=NOW_MS + 2)
+    await state_store.set_membership(
+        MembershipView(epoch=membership.epoch + 1, members=members)
+    )
+    await a_service.store.put_session(terminal)
+
+    restarted = MeshPairingService(
+        a_config,
+        a_storage,
+        clock_ms=lambda: NOW_MS + 3,
+        sender_factory=lambda _endpoint: None,
+    )
+    assert await restarted.store.get_activation_fence(SPACE) == pair_id
+    if terminal_state == "active":
+        # #417's source ACTIVE tail is still mid-protocol without the target's
+        # detached readback receipt.  A raw fence phase rewrite/deletion must
+        # not turn this synthetic crash prefix into write authority.
+        from live_mem.core.reservation_guard import PairingActivationError
+
+        with pytest.raises(PairingActivationError):
+            await restarted.assert_no_pairing_activation(SPACE)
+        assert await restarted.store.get_activation_fence(SPACE) == pair_id
+    else:
+        await restarted.assert_no_pairing_activation(SPACE)
+        assert await restarted.store.get_activation_fence(SPACE) is None
+        # The converged cancellation tail stays idempotently clear.
+        await restarted.assert_no_pairing_activation(SPACE)
+
+
+async def test_activation_migration_sentinel_avoids_terminal_history_ceiling(
+    monkeypatch,
+):
+    """An upgrade with 257+ terminal records seeds clear without a scan."""
+
+    from dataclasses import replace
+
+    (
+        a_service,
+        b_service,
+        _a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        _pair_id,
+    ) = await _build_admin_instances(169, 170)
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read", "commit")
+    )
+    pair_id = invitation["pair_id"]
+    template = await a_service.store.get_session(pair_id)
+    assert template is not None
+    index = 1
+    added = 0
+    while added < 257:
+        historical_id = f"pair_{index:032x}"
+        index += 1
+        if historical_id == pair_id:
+            continue
+        await a_service.store.put_session(
+            replace(
+                template,
+                pair_id=historical_id,
+                state="cancelled",
+                updated_at_ms=NOW_MS + index,
+            )
+        )
+        added += 1
+    assert await a_service.store.get_activation_migration(SPACE) is None
+
+    async def history_scan_forbidden(*_args, **_kwargs):
+        raise AssertionError("migrated activation authority must be targeted")
+
+    a_service.store.list_sessions = history_scan_forbidden  # type: ignore[method-assign]
+    await b_service.accept_invitation(
+        invitation["invitation_bytes"],
+        SPACE,
+        secret=invitation["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read", "commit"), quiesced=True,
+    )
+    approved = await a_service.approve(pair_id)
+    assert approved["state"] == "transferring"
+    # The legacy inventory remains clear without a history scan, then the new
+    # source flow deliberately re-arms the same targeted per-space owner before
+    # Transition 1 so marker/fence/incarnation loss cannot hide this tail.
+    assert await a_service.store.get_activation_migration(SPACE) == pair_id
+    membership = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_membership()  # type: ignore[arg-type]
+    assert membership is not None
+    assert len([m for m in membership.members if m.status == "pending"]) == 1
+
+
+async def test_pre_mesh_multi_active_roster_ignores_terminal_history(monkeypatch):
+    """Incarnation-less legacy members cannot encode a hidden P10 activation."""
+
+    from dataclasses import replace
+
+    (
+        a_service,
+        _b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        _pair_id,
+    ) = await _build_admin_instances(171, 172)
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read", "commit")
+    )
+    pair_id = invitation["pair_id"]
+    template = await a_service.store.get_session(pair_id)
+    assert template is not None
+    index = 1
+    added = 0
+    while added < 256:
+        historical_id = f"pair_{index:032x}"
+        index += 1
+        if historical_id == pair_id:
+            continue
+        await a_service.store.put_session(
+            replace(
+                template,
+                pair_id=historical_id,
+                state="cancelled",
+                updated_at_ms=NOW_MS + index,
+            )
+        )
+        added += 1
+    assert await a_service.store.get_activation_migration(SPACE) is None
+    store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await store.get_membership()
+    assert membership is not None
+    await store.set_membership(
+        MembershipView(
+            epoch=membership.epoch,
+            members=[
+                *membership.members,
+                Member(
+                    node_id="legacyactive000000000000000000000",
+                    public_key=_legacy(b_config.public_key),
+                ),
+            ],
+        )
+    )
+
+    async def history_scan_forbidden(*_args, **_kwargs):
+        raise AssertionError("append-only history is not activation authority")
+
+    a_service.store.list_sessions = history_scan_forbidden  # type: ignore[method-assign]
+    await a_service.assert_no_pairing_activation(SPACE)
+    assert await a_service.store.get_activation_migration(SPACE) == ""
+
+
+async def test_legacy_mutating_session_is_indexed_and_never_omitted(monkeypatch):
+    from dataclasses import replace
+
+    from live_mem.core.reservation_guard import PairingActivationError
+
+    (
+        a_service,
+        _b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        _pair_id,
+    ) = await _build_admin_instances(173, 174)
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read",)
+    )
+    pair_id = invitation["pair_id"]
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None
+    await a_service.store.put_session(
+        replace(session, state="awaiting_acks", updated_at_ms=NOW_MS + 1)
+    )
+    state_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await state_store.get_membership()
+    assert membership is not None
+    await state_store.set_membership(
+        MembershipView(
+            epoch=membership.epoch + 1,
+            members=[
+                *membership.members,
+                Member(
+                    node_id=b_config.fingerprint.split(":", 1)[1],
+                    public_key=_legacy(b_config.public_key),
+                    incarnation=pair_id,
+                ),
+            ],
+        )
+    )
+
+    with pytest.raises(PairingActivationError):
+        await a_service.assert_no_pairing_activation(SPACE)
+    assert await a_service.store.get_activation_migration(SPACE) == pair_id
+
+    await a_service.store.put_session(
+        replace(session, state="active", updated_at_ms=NOW_MS + 2)
+    )
+    await a_service.assert_no_pairing_activation(SPACE)
+    assert await a_service.store.get_activation_migration(SPACE) == ""
+
+
+async def test_legacy_approved_pending_owner_remains_evictable() -> None:
+    """Crash-after-admit APPROVED evidence is a valid PENDING owner."""
+
+    from dataclasses import replace
+
+    (
+        a_service,
+        _b_service,
+        _a_config,
+        b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        _pair_id,
+    ) = await _build_admin_instances(179, 180)
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read",)
+    )
+    pair_id = invitation["pair_id"]
+    session = await a_service.store.get_session(pair_id)
+    assert session is not None
+    await a_service.store.put_session(
+        replace(session, state="approved", updated_at_ms=NOW_MS + 1)
+    )
+    state_store = HivemindStateStore(storage=a_storage, space_id=SPACE)  # type: ignore[arg-type]
+    membership = await state_store.get_membership()
+    assert membership is not None
+    await state_store.set_membership(
+        MembershipView(
+            epoch=membership.epoch + 1,
+            members=[
+                *membership.members,
+                Member(
+                    node_id=b_config.fingerprint.split(":", 1)[1],
+                    public_key=_legacy(b_config.public_key),
+                    status="pending",
+                    incarnation=pair_id,
+                ),
+            ],
+        )
+    )
+
+    await a_service.assert_no_pairing_activation(
+        SPACE, ignore_pair_id=pair_id
+    )
+    assert await a_service.store.get_activation_migration(SPACE) == pair_id
+    # Crash after persisting the owner sentinel but before removing PENDING:
+    # the exact retry must remain authorized and evictable.
+    await a_service.assert_no_pairing_activation(
+        SPACE, ignore_pair_id=pair_id
+    )
+
+
+async def test_legacy_activation_event_resolves_target_reservation_not_history():
+    """A payload without pair_id still works above the historical session cap."""
+
+    from dataclasses import replace
+
+    (
+        a_service,
+        b_service,
+        a_config,
+        _b_config,
+        _a_storage,
+        _b_storage,
+        _peers,
+        _pair_id,
+    ) = await _build_admin_instances(175, 176)
+    invitation = await a_service.create_invitation(
+        SPACE, requested_scopes=("read", "commit")
+    )
+    pair_id = invitation["pair_id"]
+    await b_service.accept_invitation(
+        invitation["invitation_bytes"],
+        SPACE,
+        secret=invitation["secret"],
+        source_endpoint=A_URL,
+        requested_scopes=("read", "commit"), quiesced=True,
+    )
+    target_session = await b_service.store.get_session(pair_id)
+    assert target_session is not None and target_session.state == "claimed"
+    target_session = replace(
+        target_session, state="transferring", updated_at_ms=NOW_MS + 1
+    )
+    await b_service.store.put_session(target_session)
+    index = 1
+    added = 0
+    while added < 256:
+        historical_id = f"pair_{index:032x}"
+        index += 1
+        if historical_id == pair_id:
+            continue
+        await b_service.store.put_session(
+            replace(
+                target_session,
+                pair_id=historical_id,
+                state="cancelled",
+                updated_at_ms=NOW_MS + index,
+            )
+        )
+        added += 1
+
+    async def history_scan_forbidden(*_args, **_kwargs):
+        raise AssertionError("legacy activation resolution must be targeted")
+
+    b_service.store.list_sessions = history_scan_forbidden  # type: ignore[method-assign]
+    resolved = await b_service._find_target_session(
+        SPACE, a_config.fingerprint, pair_id=""
+    )
+    assert resolved is not None and resolved.pair_id == pair_id
+
+
+async def test_finalized_legacy_activation_reconfirms_without_session_scan():
+    """Post-release HEALTHY authority can confirm a pre-pair_id activation."""
+
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from live_mem.mesh.membership_sync import candidate_view_digest
+
+    (
+        a_service,
+        b_service,
+        a_config,
+        _b_config,
+        a_storage,
+        _b_storage,
+        _peers,
+        pair_id,
+    ) = await _drive_to_approved(177, 178)
+    activated = await b_service.run_target_enrollment(pair_id)
+    assert activated["state"] == "active"
+    assert await b_service.store.get_reservation(SPACE) is None
+    source_session = await a_service.store.get_session(pair_id)
+    target_session = await b_service.store.get_session(pair_id)
+    assert source_session is not None and target_session is not None
+    event = await HivemindStateStore(
+        storage=a_storage, space_id=SPACE
+    ).get_event(source_session.activation_event_id)  # type: ignore[arg-type]
+    assert event is not None and "pair_id" not in event.payload
+    target_membership = await HivemindStateStore(
+        storage=_b_storage, space_id=SPACE
+    ).get_membership()  # type: ignore[arg-type]
+    assert target_membership is not None
+    legacy_event = event.model_copy(
+        update={
+            "payload": {
+                **event.payload,
+                "candidate_view_digest": candidate_view_digest(
+                    target_membership
+                ),
+            }
+        }
+    )
+
+    index = 1
+    added = 0
+    while added < 256:
+        historical_id = f"pair_{index:032x}"
+        index += 1
+        if historical_id == pair_id:
+            continue
+        await b_service.store.put_session(
+            replace(
+                target_session,
+                pair_id=historical_id,
+                state="cancelled",
+                updated_at_ms=NOW_MS + index,
+            )
+        )
+        added += 1
+
+    confirmation = await b_service.try_activation_reconfirmation(
+        SimpleNamespace(
+            space_id=SPACE,
+            source_fingerprint=a_config.fingerprint,
+            source_public_key=a_config.public_key,
+            nonce="nonce_" + "a" * 32,
+        ),
+        legacy_event,
+    )
+    assert confirmation is not None
+    assert json.loads(confirmation.body) == {
+        "epoch": legacy_event.membership_epoch,
+        "state": "active",
+    }

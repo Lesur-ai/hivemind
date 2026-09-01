@@ -413,6 +413,80 @@ class TestGcConstraints:
         assert "failure_reason" in result
 
 
+class TestCompactionDiagnostics:
+    def test_compact_result_uses_utf8_bytes_and_never_fabricates_null_post_size(
+        self, oper
+    ):
+        result = _extract_fn(oper, "function paintCompact(")
+        success = _extract_fn(oper, "function compactSuccessMarkup(")
+        assert "UTF-8 bytes" in success
+        assert "total_size_after === null" in success
+        assert "numOr(data.total_size_after)" not in success
+        # The non-success branch follows the same null-is-unknown rule.
+        assert "total_size_after === null" in result
+
+    def test_compact_partial_and_error_preserve_typed_safe_diagnostics(self, oper):
+        result = _extract_fn(oper, "function paintCompact(")
+        assert "status === 'partial' && data.recovery_required === true" in result
+        for field in (
+            "failure_reason",
+            "failed_phase",
+            "rollback_outcome",
+            "preimage_id",
+            "failures",
+            "remediation",
+            "source_sha256",
+            "result_sha256",
+        ):
+            assert field in result
+        assert "const message = data && data.message ? serverMessage(data.message) : '';" in result
+        assert "No automatic retry or restore was performed." in result
+
+    def test_compact_target_diagnostic_is_closed_and_content_free(self, oper):
+        detail = _extract_fn(oper, "function safeCompactionTargetDetail(")
+        rows = _extract_fn(oper, "function safeCompactionFailureRows(")
+        paint = _extract_fn(oper, "function paintCompact(")
+        for field in (
+            "operation_index",
+            "target_resolution",
+            "target_match_count",
+            "target_heading_sha256",
+        ):
+            assert field in detail
+        assert "failure.heading" not in detail
+        assert "failure.reason" not in detail
+        assert "safeCompactionTargetDetail(f)" in rows
+        assert "safeCompactionFailureRows(failures)" in paint
+        assert "Target resolution" in paint
+
+    def test_automatic_job_inspector_shows_safe_compaction_diagnostics(self, consol):
+        detail = _extract_fn(consol, "function safeCompactionTargetDetail(")
+        render = _extract_fn(consol, "function renderSafeCompactionFailures(")
+        job = _extract_fn(consol, "function renderJob(")
+        assert "failure.heading" not in detail
+        assert "failure.reason" not in detail
+        assert "compaction_failures" in render
+        assert "renderSafeCompactionFailures(job.result)" in job
+        assert "bank_consolidation_status" in consol
+
+    def test_verified_apply_evidence_survives_the_mandatory_rescan(self, oper):
+        run = _extract_fn(oper, "function runCompact(")
+        paint = _extract_fn(oper, "function paintCompact(")
+        success = _extract_fn(oper, "function compactSuccessMarkup(")
+        assert "state.compactApplyEvidence = data" in run
+        assert "runCompact(true, sid, true)" in run
+        assert "compactApplyEvidenceMarkup(state.compactApplyEvidence)" in run
+        assert "evidence + stateError({ title: 'Compact failed' })" in run
+        assert "applyEvidence + compactSuccessMarkup(data)" in paint
+        assert "Verified compaction apply evidence" in oper
+        assert "Result SHA-256" in success
+
+    def test_target_change_invalidates_every_maintenance_lane(self, oper):
+        picker = _extract_fn(oper, "function paintMaintPicker(")
+        assert "state.compactApplyEvidence = null" in picker
+        assert "Object.keys(_maintReq).forEach" in picker
+
+
 # ─────────────────────────── dry-run defaults (§4.8 M3/M4) ───────────────────────────
 
 
@@ -559,7 +633,7 @@ class TestRoundThreeFixes:
     def test_compact_repair_apply_re_dry_runs_captured_target(self, oper):
         # §5.8.2 (line ~1425): apply → after-action re-dry-run for the captured
         # target, and the result stays bound to the visible target.
-        assert "runCompact(true, sid)" in _extract_fn(oper, "function runCompact(")
+        assert "runCompact(true, sid, true)" in _extract_fn(oper, "function runCompact(")
         assert "runRepair(true, sid)" in _extract_fn(oper, "function runRepair(")
 
     def test_stale_scan_drops_out_of_order_responses(self, consol):

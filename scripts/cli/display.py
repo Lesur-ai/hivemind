@@ -181,7 +181,7 @@ def show_about_result(result: dict):
 
         table = Table(show_header=True, title="MCP Tools", title_style="bold")
         table.add_column("Cat.", style="bold", width=8)
-        table.add_column("Outil", style="cyan bold", width=20)
+        table.add_column("Tool", style="cyan bold", width=20)
         table.add_column("Description", style="dim", max_width=55)
 
         for cat, cat_tools in categories.items():
@@ -541,8 +541,166 @@ def show_consolidation_result(result: dict):
     )
 
 
+def _utf8_bytes_or_unasserted(value: object) -> str:
+    """Render a byte metric without inventing a value for a null diagnostic."""
+
+    if type(value) is int and value >= 0:
+        return f"{value} UTF-8 bytes"
+    return "unknown / not asserted"
+
+
+def _safe_compaction_target_resolution_text(failure: object) -> str | None:
+    """Render only the closed, content-free target-resolution tuple."""
+
+    if not isinstance(failure, dict):
+        return None
+    operation_index = failure.get("operation_index")
+    target_resolution = failure.get("target_resolution")
+    target_match_count = failure.get("target_match_count")
+    target_heading_sha256 = failure.get("target_heading_sha256")
+    if (
+        failure.get("error") != "ambiguous_or_missing_compaction_target"
+        or type(operation_index) is not int
+        or operation_index < 0
+        or type(target_resolution) is not str
+        or target_resolution not in {"missing", "ambiguous"}
+        or type(target_match_count) is not int
+        or target_match_count < 0
+        or type(target_heading_sha256) is not str
+        or len(target_heading_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in target_heading_sha256)
+        or (target_resolution == "missing" and target_match_count != 0)
+        or (target_resolution == "ambiguous" and target_match_count < 2)
+    ):
+        return None
+    return (
+        f"operation_index={operation_index}; target_resolution={target_resolution}; "
+        f"target_match_count={target_match_count}; "
+        f"target_heading_sha256={target_heading_sha256}"
+    )
+
+
+def _safe_compaction_failure_lines(failures: object) -> list[str]:
+    """Format server-projected compaction failures without inspecting extras."""
+
+    if not isinstance(failures, list):
+        return []
+    lines: list[str] = []
+    for failure in failures:
+        if not isinstance(failure, dict):
+            continue
+        filename = escape_markup(str(failure.get("filename", "")))
+        error = escape_markup(str(failure.get("error", "unknown")))
+        target_resolution = _safe_compaction_target_resolution_text(failure)
+        suffix = (
+            "; " + escape_markup(target_resolution)
+            if target_resolution is not None
+            else ""
+        )
+        lines.append(f"  - {filename or '<space>'}: {error}{suffix}")
+    return lines
+
+
+def show_bank_compact_failure(result: dict):
+    """Display a typed compact refusal or unresolved recovery as non-success."""
+
+    status = escape_markup(str(result.get("status", "error")))
+    recovery_required = result.get("recovery_required") is True
+    failure_reason = escape_markup(str(result.get("failure_reason", "unknown")))
+    message = escape_markup(str(result.get("message", "")))
+    remediation = escape_markup(str(result.get("remediation", "<missing>")))
+    preimage_id = result.get("preimage_id")
+    failures = result.get("failures")
+    if not isinstance(failures, list):
+        failures = []
+
+    failure_lines = _safe_compaction_failure_lines(failures)
+    failure_text = "\n".join(failure_lines) if failure_lines else "  []"
+
+    lines = [
+        f"[bold]status:[/bold] {status}",
+        f"[bold]failure_reason:[/bold] {failure_reason}",
+        "[bold]total_size_after:[/bold] "
+        f"{_utf8_bytes_or_unasserted(result.get('total_size_after'))}",
+    ]
+    if "failed_phase" in result:
+        lines.append(
+            "[bold]failed_phase:[/bold] "
+            f"{escape_markup(str(result.get('failed_phase')))}"
+        )
+    if "rollback_outcome" in result:
+        lines.append(
+            "[bold]rollback_outcome:[/bold] "
+            f"{escape_markup(str(result.get('rollback_outcome')))}"
+        )
+    if "files_applied_before_failure" in result:
+        lines.append(
+            "[bold]files_applied_before_failure:[/bold] "
+            f"{json.dumps(result.get('files_applied_before_failure'), ensure_ascii=False)}"
+        )
+    if "apply_may_have_mutated" in result:
+        lines.append(
+            "[bold]apply_may_have_mutated:[/bold] "
+            f"{json.dumps(result.get('apply_may_have_mutated'), ensure_ascii=False)}"
+        )
+    if recovery_required:
+        lines.append("[bold]recovery_required:[/bold] true")
+    if preimage_id is not None:
+        lines.append(
+            f"[bold]preimage_id:[/bold] {escape_markup(str(preimage_id))}"
+        )
+    file_reports = result.get("files")
+    hash_lines = []
+    if isinstance(file_reports, list):
+        for file_report in file_reports:
+            if not isinstance(file_report, dict):
+                continue
+            source_sha256 = file_report.get("source_sha256")
+            result_sha256 = file_report.get("result_sha256")
+            if source_sha256 is None and result_sha256 is None:
+                continue
+            filename = escape_markup(str(file_report.get("filename", "<space>")))
+            source_text = (
+                escape_markup(str(source_sha256))
+                if source_sha256 is not None
+                else "—"
+            )
+            result_text = (
+                escape_markup(str(result_sha256))
+                if result_sha256 is not None
+                else "—"
+            )
+            hash_lines.append(
+                f"  - {filename}: source_sha256={source_text}; result_sha256={result_text}"
+            )
+    if hash_lines:
+        lines.extend(["[bold]file hashes:[/bold]", *hash_lines])
+    lines.extend(
+        [
+            "[bold]failures:[/bold]",
+            failure_text,
+            f"[bold]remediation:[/bold] {remediation}",
+        ]
+    )
+    if message:
+        lines.append(f"[yellow]{message}[/yellow]")
+    lines.append("[bold]No automatic retry or restore was performed.[/bold]")
+
+    console.print(
+        Panel.fit(
+            "\n".join(lines),
+            title=(
+                "Compaction — Recovery Required (not successful)"
+                if recovery_required
+                else "Compaction — Failed"
+            ),
+            border_style="yellow" if recovery_required else "red",
+        )
+    )
+
+
 def show_bank_compact_result(result: dict):
-    """Displays the bank_compact result."""
+    """Displays a successful bank_compact result with persisted UTF-8 bytes."""
     dry_run = result.get("dry_run", True)
     mode_label = (
         "[yellow]DRY-RUN (no modifications)[/yellow]"
@@ -555,9 +713,18 @@ def show_bank_compact_result(result: dict):
     size_before = result.get("total_size_before", 0)
     size_after = result.get("total_size_after", 0)
     reduction = ""
-    if not dry_run and size_before > 0 and size_after < size_before:
+    if (
+        not dry_run
+        and type(size_before) is int
+        and type(size_after) is int
+        and size_before > 0
+        and size_after < size_before
+    ):
         pct = round((1 - size_after / size_before) * 100)
-        reduction = f"\n[bold]Reduction  :[/bold] [green]-{pct}%[/green] ({size_before} → {size_after} bytes)"
+        reduction = (
+            "\n[bold]Reduction  :[/bold] "
+            f"[green]-{pct}%[/green] ({size_before} → {size_after} UTF-8 bytes)"
+        )
 
     console.print(
         Panel.fit(
@@ -565,7 +732,10 @@ def show_bank_compact_result(result: dict):
             f"[bold]Mode       :[/bold] {mode_label}\n"
             f"[bold]Files      :[/bold] {result.get('files_total', 0)} total\n"
             f"[bold]Oversized  :[/bold] {files_over}\n"
-            f"[bold]Bank size  :[/bold] {size_before} bytes" + reduction,
+            "[bold]Bank size  :[/bold] "
+            f"{_utf8_bytes_or_unasserted(size_before)}\n"
+            "[bold]After      :[/bold] "
+            f"{_utf8_bytes_or_unasserted(size_after)}" + reduction,
             title="📦 Bank Compact",
             border_style=border,
         )
@@ -576,8 +746,10 @@ def show_bank_compact_result(result: dict):
     if files:
         table = Table(title="Details per file", show_header=True)
         table.add_column("File", style="cyan bold")
-        table.add_column("Size", justify="right")
-        table.add_column("Limit", justify="right")
+        table.add_column("Size (UTF-8 bytes)", justify="right")
+        table.add_column("Limit (UTF-8 bytes)", justify="right")
+        table.add_column("Source SHA-256", style="dim")
+        table.add_column("Result SHA-256", style="dim")
         table.add_column("Ratio", justify="right")
         table.add_column("Status")
 
@@ -598,18 +770,28 @@ def show_bank_compact_result(result: dict):
             # Statut
             if not over:
                 status = "✅ OK"
-            elif f.get("compacted_size"):
+            elif type(f.get("compacted_size")) is int:
                 pct = f.get("reduction_pct", 0)
-                status = f"📦 -{pct}% ({f['compacted_size']} bytes)"
+                status = f"📦 -{pct}% ({f['compacted_size']} UTF-8 bytes)"
             elif f.get("error"):
-                status = f"[red]❌ {f['error']}[/red]"
+                status = f"[red]❌ {escape_markup(str(f['error']))}[/red]"
             else:
                 status = "⚠️ needs compaction" if dry_run else "⚠️ oversized"
 
             table.add_row(
-                f.get("filename", "?"),
+                escape_markup(str(f.get("filename", "?"))),
                 f"{size}",
                 f"{max_size}",
+                (
+                    escape_markup(str(f["source_sha256"]))
+                    if f.get("source_sha256") is not None
+                    else "—"
+                ),
+                (
+                    escape_markup(str(f["result_sha256"]))
+                    if f.get("result_sha256") is not None
+                    else "—"
+                ),
                 ratio_str,
                 status,
             )
@@ -655,6 +837,14 @@ def show_consolidation_job(result: dict):
             )
     if result.get("error"):
         lines.append(f"[bold]Error      :[/bold] [red]{result['error']}[/red]")
+    job_result = result.get("result")
+    compaction_failure_lines = _safe_compaction_failure_lines(
+        job_result.get("compaction_failures")
+        if isinstance(job_result, dict)
+        else None
+    )
+    if compaction_failure_lines:
+        lines.extend(["[bold]Compaction failures:[/bold]", *compaction_failure_lines])
 
     console.print(
         Panel.fit(
@@ -876,7 +1066,7 @@ def show_bulk_update_result(result: dict):
     if updated == 0:
         show_warning(result.get("message", "No tokens modified."))
         if filters:
-            console.print(f"[dim]Filtres : {filters}[/dim]")
+            console.print(f"[dim]Filters: {filters}[/dim]")
         return
 
     show_success(f"{updated} token(s) updated")

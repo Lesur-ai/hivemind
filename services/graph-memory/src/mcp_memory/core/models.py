@@ -62,19 +62,19 @@ class ExtractedEntity(BaseModel):
     dynamiques des ontologies (presales, cloud, etc.) sans être limité à l'Enum
     EntityType. L'Enum est conservée pour la compatibilité avec le code existant.
     """
-    name: str = Field(..., description="Nom de l'entité")
-    type: str = Field(default="Other", description="Type d'entité (string libre, supporte les types d'ontologie)")
-    description: Optional[str] = Field(None, description="Description contextuelle")
-    aliases: List[str] = Field(default_factory=list, description="Noms alternatifs")
+    name: str = Field(..., description="Entity name")
+    type: str = Field(default="Other", description="Free-form entity type supporting ontology-defined types")
+    description: Optional[str] = Field(None, description="Contextual description")
+    aliases: List[str] = Field(default_factory=list, description="Alternative names")
 
 
 class ExtractedRelation(BaseModel):
     """Relation extraite par le LLM."""
-    from_entity: str = Field(..., description="Nom de l'entité source")
-    to_entity: str = Field(..., description="Nom de l'entité cible")
-    type: str = Field(default="RELATED_TO", description="Type de relation (string libre, supporte les types d'ontologie)")
-    description: Optional[str] = Field(None, description="Description de la relation")
-    weight: float = Field(default=1.0, ge=0.0, le=1.0, description="Force de la relation")
+    from_entity: str = Field(..., description="Source entity name")
+    to_entity: str = Field(..., description="Target entity name")
+    type: str = Field(default="RELATED_TO", description="Free-form relation type supporting ontology-defined types")
+    description: Optional[str] = Field(None, description="Relation description")
+    weight: float = Field(default=1.0, ge=0.0, le=1.0, description="Relation strength")
     
     class Config:
         use_enum_values = True
@@ -84,8 +84,8 @@ class ExtractionResult(BaseModel):
     """Résultat complet d'une extraction LLM."""
     entities: List[ExtractedEntity] = Field(default_factory=list)
     relations: List[ExtractedRelation] = Field(default_factory=list)
-    summary: Optional[str] = Field(None, description="Résumé du document")
-    key_topics: List[str] = Field(default_factory=list, description="Sujets principaux")
+    summary: Optional[str] = Field(None, description="Document summary")
+    key_topics: List[str] = Field(default_factory=list, description="Main topics")
 
 
 # =============================================================================
@@ -103,11 +103,11 @@ class DocumentMetadata(BaseModel):
 
 class Document(BaseModel):
     """Représentation d'un document dans le système."""
-    id: str = Field(..., description="Identifiant unique (UUID)")
-    memory_id: str = Field(..., description="ID de la mémoire propriétaire")
-    uri: str = Field(..., description="URI S3 du document")
+    id: str = Field(..., description="Unique identifier (UUID)")
+    memory_id: str = Field(..., description="Owning memory identifier")
+    uri: str = Field(..., description="Document S3 URI")
     filename: str
-    hash: str = Field(..., description="SHA256 du contenu")
+    hash: str = Field(..., description="Content SHA256")
     ingested_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: DocumentMetadata
     entity_count: int = Field(default=0)
@@ -120,13 +120,13 @@ class Document(BaseModel):
 
 class Memory(BaseModel):
     """Représentation d'une mémoire (namespace)."""
-    id: str = Field(..., description="Identifiant unique de la mémoire")
-    name: str = Field(..., description="Nom lisible")
+    id: str = Field(..., description="Unique memory identifier")
+    name: str = Field(..., description="Human-readable name")
     description: Optional[str] = None
-    ontology: str = Field(default="default", description="Nom de l'ontologie utilisée pour l'extraction")
-    ontology_uri: Optional[str] = Field(None, description="URI S3 de l'ontologie copiée")
+    ontology: str = Field(default="default", description="Ontology used for extraction")
+    ontology_uri: Optional[str] = Field(None, description="S3 URI of the copied ontology")
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    owner_token: Optional[str] = Field(None, description="Token propriétaire")
+    owner_token: Optional[str] = Field(None, description="Owner token")
 
 
 class MemoryStats(BaseModel):
@@ -152,8 +152,8 @@ class SearchResult(BaseModel):
     entities: List[Dict[str, Any]] = Field(default_factory=list)
     documents: List[Dict[str, Any]] = Field(default_factory=list)
     relations: List[Dict[str, Any]] = Field(default_factory=list)
-    context: Optional[str] = Field(None, description="Contexte synthétisé")
-    used_fallback: bool = Field(default=False, description="RAG vectoriel utilisé")
+    context: Optional[str] = Field(None, description="Synthesized context")
+    used_fallback: bool = Field(default=False, description="Whether vector RAG was used")
 
 
 class GraphContext(BaseModel):
@@ -178,23 +178,23 @@ class Chunk(BaseModel):
     Chaque chunk respecte les frontières naturelles du texte :
     sections, articles, paragraphes, phrases.
     """
-    text: str = Field(..., description="Contenu textuel du chunk")
-    index: int = Field(..., description="Position du chunk dans le document (0-based)")
-    total_chunks: int = Field(default=0, description="Nombre total de chunks du document")
+    text: str = Field(..., description="Chunk text content")
+    index: int = Field(..., description="Chunk position in the document (zero-based)")
+    total_chunks: int = Field(default=0, description="Total number of document chunks")
     
     # Métadonnées de provenance
-    doc_id: Optional[str] = Field(None, description="ID du document source")
-    memory_id: Optional[str] = Field(None, description="ID de la mémoire")
-    filename: Optional[str] = Field(None, description="Nom du fichier source")
+    doc_id: Optional[str] = Field(None, description="Source document ID")
+    memory_id: Optional[str] = Field(None, description="Memory identifier")
+    filename: Optional[str] = Field(None, description="Source filename")
     
     # Métadonnées sémantiques (détectées par le chunker)
-    section_title: Optional[str] = Field(None, description="Titre de la section englobante")
-    article_number: Optional[str] = Field(None, description="Numéro d'article (ex: '23.2')")
-    heading_hierarchy: List[str] = Field(default_factory=list, description="Hiérarchie de titres (ex: ['Titre III', 'Article 23'])")
+    section_title: Optional[str] = Field(None, description="Containing section title")
+    article_number: Optional[str] = Field(None, description="Article number (for example, '23.2')")
+    heading_hierarchy: List[str] = Field(default_factory=list, description="Heading hierarchy")
     
     # Statistiques
-    char_count: int = Field(default=0, description="Nombre de caractères")
-    token_estimate: int = Field(default=0, description="Estimation du nombre de tokens")
+    char_count: int = Field(default=0, description="Character count")
+    token_estimate: int = Field(default=0, description="Estimated token count")
 
 
 class ChunkResult(BaseModel):
@@ -204,7 +204,7 @@ class ChunkResult(BaseModel):
     Contient le chunk retrouvé + son score de similarité.
     """
     chunk: Chunk
-    score: float = Field(..., ge=0.0, le=1.0, description="Score de similarité cosinus")
+    score: float = Field(..., ge=0.0, le=1.0, description="Cosine-similarity score")
     
     # Contexte pour le prompt LLM
     @property
@@ -228,20 +228,20 @@ class ChunkResult(BaseModel):
 
 class TokenInfo(BaseModel):
     """Information sur un token client."""
-    token_hash: str = Field(..., description="Hash du token (pas le token lui-même)")
+    token_hash: str = Field(..., description="Token hash, not the token itself")
     client_name: str
-    email: Optional[str] = Field(None, description="Adresse email du propriétaire du token")
+    email: Optional[str] = Field(None, description="Token owner's email address")
     created_at: datetime
     expires_at: Optional[datetime] = None
     permissions: List[str] = Field(default_factory=list)
     is_active: bool = True
-    memory_ids: List[str] = Field(default_factory=list, description="Mémoires autorisées (vide = toutes)")
+    memory_ids: List[str] = Field(default_factory=list, description="Allowed memories; empty means all")
 
 
 class TokenCreateRequest(BaseModel):
     """Requête de création de token."""
     client_name: str
-    email: Optional[str] = Field(None, description="Adresse email du propriétaire")
+    email: Optional[str] = Field(None, description="Owner's email address")
     permissions: List[str] = Field(default_factory=lambda: ["read", "write"])
     memory_ids: List[str] = Field(default_factory=list)
     expires_in_days: Optional[int] = None

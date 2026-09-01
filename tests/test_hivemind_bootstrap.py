@@ -662,11 +662,36 @@ async def test_export_refused_from_unhealthy_source(
     from live_mem.core.hivemind import NodeHealth
 
     await _seed_source(storage)
-    src_store = HivemindStateStore(storage=storage, space_id=SOURCE)  # type: ignore[arg-type]
+    src_store = HivemindStateStore(
+        storage=storage, space_id=SOURCE  # type: ignore[arg-type]
+    )
     await src_store.set_node_status(NodeHealth(status=bad_status, reason="dégradé"))
     service = BootstrapService(storage)  # type: ignore[arg-type]
     with pytest.raises(BootstrapError):
         await service.export_snapshot(SOURCE)
+
+
+async def test_preparation_validation_error_names_required_unsafe_marker(
+    storage: FakeStorage,
+) -> None:
+    from live_mem.core.hivemind import NodeHealth
+
+    await _seed_source(storage)
+    src_store = HivemindStateStore(storage=storage, space_id=SOURCE)  # type: ignore[arg-type]
+    await src_store.set_node_status(
+        NodeHealth(status=HiveNodeStatus.UNSAFE, reason="wrong-preparation-reason")
+    )
+
+    with pytest.raises(BootstrapError) as exc:
+        await BootstrapService(storage).validate_source_preparation(  # type: ignore[arg-type]
+            SOURCE,
+            initializing_reason="source_initialization",
+        )
+
+    message = str(exc.value)
+    assert message.startswith("source preparation validation refused:")
+    assert "exact initializing UNSAFE marker" in message
+    assert "bootstrap only from a HEALTHY source" not in message
 
 
 async def test_export_refused_when_source_state_corrupt(

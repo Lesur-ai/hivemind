@@ -592,10 +592,10 @@ class GraphMemoryClient:
 
         except asyncio.TimeoutError:
             raise TimeoutError(
-                f"Timeout après {self._timeout}s pour '{tool_name}' sur Graph Memory"
+                f"Timed out after {self._timeout}s calling '{tool_name}' on Graph Memory"
             )
         except Exception as e:
-            raise ConnectionError(f"Erreur MCP '{tool_name}' sur Graph Memory : {e}")
+            raise ConnectionError(f"Graph Memory MCP error for '{tool_name}': {e}")
 
     async def call_tools_batch(self, calls: list[tuple[str, dict]]) -> list[dict]:
         """
@@ -639,14 +639,14 @@ class GraphMemoryClient:
                             results.append(
                                 {
                                     "status": "error",
-                                    "message": f"Timeout {self._timeout}s pour '{tool_name}'",
+                                    "message": f"Timed out after {self._timeout}s running '{tool_name}'",
                                 }
                             )
                         except Exception as e:
                             results.append(
                                 {
                                     "status": "error",
-                                    "message": f"Erreur '{tool_name}': {e}",
+                                    "message": f"'{tool_name}' error: {e}",
                                 }
                             )
 
@@ -656,7 +656,7 @@ class GraphMemoryClient:
                 results.append(
                     {
                         "status": "error",
-                        "message": f"Connexion Graph Memory échouée : {e}",
+                        "message": f"Graph Memory connection failed: {e}",
                     }
                 )
 
@@ -665,7 +665,7 @@ class GraphMemoryClient:
     # Context manager pour compatibilité (délègue à call_tool par appel)
     async def __aenter__(self):
         logger.info(
-            "GraphMemoryClient connecté (mode appels auto-contenus) : %s",
+            "GraphMemoryClient connected (self-contained call mode): %s",
             self._base_url,
         )
         return self
@@ -818,7 +818,7 @@ class GraphBridgeService:
         if meta_data is None:
             return None, None, {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         block = meta_data.get("graph_memory")
@@ -851,9 +851,8 @@ class GraphBridgeService:
                     "status": "error",
                     "connected": False,
                     "message": (
-                        "Binding embedded incohérent : l'URL persistée ne "
-                        "correspond pas au runtime long embarqué — refus "
-                        "fail-closed."
+                        "Inconsistent embedded binding: the persisted URL does "
+                        "not match the embedded long runtime — refusing fail-closed."
                     ),
                     "long_authority": _LONG_AUTHORITY_MARKER,
                 }
@@ -865,7 +864,7 @@ class GraphBridgeService:
                     "status": "error",
                     "connected": False,
                     "reachable": False,
-                    "message": "Secret du runtime long embarqué indisponible.",
+                "message": "Embedded long-runtime secret is unavailable.",
                     "long_authority": _LONG_AUTHORITY_MARKER,
                 }
             guard = self._guard_url(block.get("url", ""))
@@ -879,8 +878,8 @@ class GraphBridgeService:
             return None, None, {
                 "status": "error",
                 "message": (
-                    f"Espace '{space_id}' non connecté à Graph Memory. "
-                    f"Utilisez graph_connect d'abord."
+                    f"Space '{space_id}' is not connected to Graph Memory. "
+                    "Use graph_connect first."
                 ),
             }
 
@@ -906,7 +905,7 @@ class GraphBridgeService:
             return None, None, {
                 "status": "error",
                 "connected": False,
-                "message": "Runtime long embarqué non configuré (URL/token).",
+                "message": "Embedded long runtime is not configured (URL/token).",
                 "long_authority": _LONG_AUTHORITY_MARKER,
             }
 
@@ -925,7 +924,7 @@ class GraphBridgeService:
                 "status": "error",
                 "connected": False,
                 "message": (
-                    "Token interne long indisponible ou inactif : "
+                    "Internal long token is unavailable or inactive: "
                     f"{reg.get('message', '')}"
                 ),
                 "long_authority": _LONG_AUTHORITY_MARKER,
@@ -966,7 +965,7 @@ class GraphBridgeService:
                     "status": "error",
                     "connected": False,
                     "reachable": False,
-                    "message": "Runtime long embarqué indisponible (health).",
+                    "message": "Embedded long runtime is unavailable (health check).",
                     "long_authority": _LONG_AUTHORITY_MARKER,
                 }
 
@@ -1006,7 +1005,7 @@ class GraphBridgeService:
                             "status": "error",
                             "connected": False,
                             "message": (
-                                "Création de la mémoire embarquée échouée : "
+                                "Embedded memory creation failed: "
                                 f"{create.get('message', '')}"
                             ),
                             "long_authority": _LONG_AUTHORITY_MARKER,
@@ -1016,14 +1015,14 @@ class GraphBridgeService:
                 "status": "error",
                 "connected": False,
                 "reachable": False,
-                "message": f"Connexion impossible au runtime long embarqué : {e}",
+                "message": f"Could not connect to the embedded long runtime: {e}",
                 "long_authority": _LONG_AUTHORITY_MARKER,
             }
         except Exception as e:
             return None, None, {
                 "status": "error",
                 "connected": False,
-                "message": f"Erreur d'auto-bind embarqué : {e}",
+                "message": f"Embedded auto-bind error: {e}",
                 "long_authority": _LONG_AUTHORITY_MARKER,
             }
 
@@ -1078,8 +1077,8 @@ class GraphBridgeService:
             return {
                 "status": "error",
                 "message": (
-                    f"Token réservé interdit ('{EMBEDDED_TOKEN_SENTINEL}') — "
-                    "valeur sentinelle du runtime long embarqué."
+                    f"Reserved token is forbidden ('{EMBEDDED_TOKEN_SENTINEL}') — "
+                    "it is the embedded long-runtime sentinel value."
                 ),
             }
 
@@ -1090,7 +1089,7 @@ class GraphBridgeService:
         if meta_data is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Garde SSRF sur l'URL fournie AVANT toute construction de client.
@@ -1109,8 +1108,8 @@ class GraphBridgeService:
                 return {
                     "status": "error",
                     "message": (
-                        f"Graph Memory non disponible : "
-                        f"{health.get('message', 'erreur inconnue') if isinstance(health, dict) else 'réponse invalide'}"
+                        "Graph Memory is unavailable: "
+                        f"{health.get('message', 'unknown error') if isinstance(health, dict) else 'invalid response'}"
                     ),
                 }
 
@@ -1132,8 +1131,7 @@ class GraphBridgeService:
                         "memory_id": memory_id,
                         "name": f"Live Memory — {space_id}",
                         "description": (
-                            f"Memory Bank synchronisée depuis live-memory "
-                            f"space '{space_id}'"
+                            f"Memory Bank synchronized from live-memory space '{space_id}'"
                         ),
                         "ontology": ontology,
                     },
@@ -1143,14 +1141,13 @@ class GraphBridgeService:
                     return {
                         "status": "error",
                         "message": (
-                            f"Impossible de créer la mémoire '{memory_id}' "
-                            f"dans Graph Memory : "
+                            f"Could not create memory '{memory_id}' in Graph Memory: "
                             f"{create_result.get('message', '')}"
                         ),
                     }
                 memory_created = True
                 logger.info(
-                    "Mémoire '%s' créée dans Graph Memory (ontologie: %s)",
+                    "Memory '%s' created in Graph Memory (ontology: %s)",
                     memory_id,
                     ontology,
                 )
@@ -1158,12 +1155,12 @@ class GraphBridgeService:
         except ConnectionError as e:
             return {
                 "status": "error",
-                "message": f"Connexion impossible à Graph Memory : {e}",
+                "message": f"Could not connect to Graph Memory: {e}",
             }
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Erreur lors du test de connexion : {e}",
+                "message": f"Connection test failed: {e}",
             }
 
         # Sauvegarder la config dans _meta.json — binding EXPLICITE (P7-3) :
@@ -1181,7 +1178,7 @@ class GraphBridgeService:
         await storage.put_json(f"{space_id}/_meta.json", meta_data)
 
         logger.info(
-            "Space '%s' connecté à Graph Memory '%s' (%s)",
+            "Space '%s' connected to Graph Memory '%s' (%s)",
             space_id,
             memory_id,
             url,
@@ -1307,7 +1304,7 @@ class GraphBridgeService:
         if meta_data is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # P7-3 : la résolution de la config (embedded/explicit + auto-bind) est
@@ -1349,7 +1346,7 @@ class GraphBridgeService:
             return {
                 "status": "ok",
                 "space_id": space_id,
-                "message": "Aucun fichier bank à pousser",
+                "message": "No bank files to push",
                 "pushed": 0,
                 "pushed_files": [],
                 "skipped_volatile": skipped_volatile,
@@ -1404,7 +1401,7 @@ class GraphBridgeService:
                         mirror_ids_by_filename.setdefault(fname, []).append(doc_id)
 
             logger.info(
-                "Push '%s' → '%s' : %d fichiers bank, %d docs existants",
+                "Push '%s' → '%s': %d bank files, %d existing documents",
                 space_id,
                 memory_id,
                 len(bank_files),
@@ -1430,9 +1427,9 @@ class GraphBridgeService:
                     resolved_ids = mirror_ids_by_filename.get(filename, [])
                     if not resolved_ids:
                         logger.warning(
-                            "Document '%s' présent dans GM sans copie mirror "
-                            "identifiable (id + source_path nul) — delete-"
-                            "avant-réingestion SAUTÉ (fail-closed)",
+                            "Document '%s' is present in GM without an "
+                            "identifiable mirror copy (null id + source_path) — "
+                            "skipping delete before re-ingestion (fail-closed)",
                             filename,
                         )
                     for doc_id in resolved_ids:
@@ -1494,9 +1491,9 @@ class GraphBridgeService:
                 resolved_ids = mirror_ids_by_filename.get(orphan, [])
                 if not resolved_ids:
                     logger.warning(
-                        "Orphelin bank-mirror '%s' sans copie mirror "
-                        "identifiable (id + source_path nul) — nettoyage "
-                        "SAUTÉ (fail-closed), conservé au ledger",
+                        "bank-mirror orphan '%s' has no identifiable mirror "
+                        "copy (null id + source_path) — skipping cleanup "
+                        "(fail-closed); retaining it in the ledger",
                         orphan,
                     )
                     unresolved_orphans.add(orphan)
@@ -1535,14 +1532,14 @@ class GraphBridgeService:
                             }
                         )
                         logger.error(
-                            "Échec %s '%s' : %s",
+                            "%s failed for '%s': %s",
                             action,
                             filename,
                             result.get("message", ""),
                         )
                     else:
                         logger.warning(
-                            "Échec %s '%s' : %s",
+                            "%s failed for '%s': %s",
                             action,
                             filename,
                             result.get("message", ""),
@@ -1551,22 +1548,22 @@ class GraphBridgeService:
                     if action == "ingest":
                         pushed += 1
                         pushed_files.append(filename)
-                        logger.info("Ingéré '%s'", filename)
+                        logger.info("Ingested '%s'", filename)
                     elif action == "delete":
                         deleted_before_reingest += 1
                     elif action == "clean":
                         cleaned += 1
-                        logger.info("Nettoyé orphelin '%s'", filename)
+                        logger.info("Cleaned orphan '%s'", filename)
 
         except ConnectionError as e:
             return {
                 "status": "error",
-                "message": f"Connexion impossible à Graph Memory : {e}",
+                "message": f"Could not connect to Graph Memory: {e}",
             }
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Erreur lors du push : {e}",
+                "message": f"Push failed: {e}",
             }
 
         duration = round(time.monotonic() - t0, 1)
@@ -1644,7 +1641,7 @@ class GraphBridgeService:
             result["error_details"] = error_details
 
         logger.info(
-            "Push terminé '%s' → '%s' : %d poussés, %d nettoyés, %d erreurs (%.1fs)",
+            "Push completed '%s' → '%s': %d pushed, %d cleaned, %d errors (%.1fs)",
             space_id,
             memory_id,
             pushed,
@@ -1684,7 +1681,7 @@ class GraphBridgeService:
         if meta_data is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         gm_config = meta_data.get("graph_memory")
@@ -1700,8 +1697,8 @@ class GraphBridgeService:
                     "bound": False,
                     "embedded": True,
                     "message": (
-                        "Runtime long embarqué configuré ; liaison automatique "
-                        "au premier long_push (aucun graph_connect requis)."
+                        "The embedded long runtime is configured; it will bind "
+                        "automatically on the first long_push (graph_connect is not required)."
                     ),
                     "long_authority": _LONG_AUTHORITY_MARKER,
                 }
@@ -1709,7 +1706,7 @@ class GraphBridgeService:
                 "status": "ok",
                 "space_id": space_id,
                 "connected": False,
-                "message": "Aucune connexion Graph Memory configurée",
+                "message": "No Graph Memory connection is configured",
                 "long_authority": _LONG_AUTHORITY_MARKER,
             }
 
@@ -1861,7 +1858,7 @@ class GraphBridgeService:
         if meta_data is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         if use_embedded:
@@ -1874,7 +1871,7 @@ class GraphBridgeService:
         if "graph_memory" not in meta_data or meta_data["graph_memory"] is None:
             return {
                 "status": "ok",
-                "message": (f"Espace '{space_id}' n'est pas connecté à Graph Memory"),
+                "message": (f"Space '{space_id}' is not connected to Graph Memory"),
             }
 
         old_config = meta_data["graph_memory"]
@@ -1882,7 +1879,7 @@ class GraphBridgeService:
         await storage.put_json(f"{space_id}/_meta.json", meta_data)
 
         logger.info(
-            "Space '%s' déconnecté de Graph Memory '%s'",
+            "Space '%s' disconnected from Graph Memory '%s'",
             space_id,
             old_config.get("memory_id", ""),
         )
@@ -1927,7 +1924,7 @@ class GraphBridgeService:
             return {
                 "status": "error",
                 "space_id": space_id,
-                "message": "Provisioning du runtime long embarqué incomplet.",
+                "message": "Embedded long-runtime provisioning is incomplete.",
                 "previous_binding_preserved": previous_config is not None,
                 "long_authority": _LONG_AUTHORITY_MARKER,
             }
@@ -1938,7 +1935,7 @@ class GraphBridgeService:
             return {
                 "status": "not_found",
                 "space_id": space_id,
-                "message": f"Espace '{space_id}' introuvable après provisioning",
+                "message": f"Space '{space_id}' not found after provisioning",
             }
 
         # The remote checks above can be slow.  Refuse to overwrite a binding
@@ -1950,8 +1947,8 @@ class GraphBridgeService:
                 "status": "error",
                 "space_id": space_id,
                 "message": (
-                    "La configuration long a changé pendant le provisioning ; "
-                    "bascule locale refusée, relancez après vérification."
+                    "The long configuration changed during provisioning; the local "
+                    "switch was refused. Verify the configuration and retry."
                 ),
                 "long_authority": _LONG_AUTHORITY_MARKER,
             }
@@ -1972,7 +1969,7 @@ class GraphBridgeService:
             previous_view = {"binding": "invalid"}
 
         logger.info(
-            "Space '%s' basculé vers le runtime long embarqué '%s'",
+            "Space '%s' switched to embedded long runtime '%s'",
             space_id,
             config.memory_id,
         )
@@ -1989,9 +1986,8 @@ class GraphBridgeService:
             },
             "previous_graph_memory": previous_view,
             "note": (
-                "L'ancienne configuration locale a été remplacée ; aucune "
-                "donnée Graph Memory distante n'a été supprimée et aucun "
-                "document n'a été ingéré."
+                "The previous local configuration was replaced; no remote Graph "
+                "Memory data was deleted and no document was ingested."
             ),
             "long_authority": _LONG_AUTHORITY_MARKER,
         }
@@ -2028,12 +2024,12 @@ class GraphBridgeService:
         except ConnectionError as e:
             return {
                 "status": "error",
-                "message": f"Connexion impossible à Graph Memory : {e}",
+                "message": f"Could not connect to Graph Memory: {e}",
             }
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Erreur ontology_list : {e}",
+                "message": f"ontology_list error: {e}",
             }
 
     async def query(self, space_id: str, query: str, limit: int = 10) -> dict:
@@ -2063,12 +2059,12 @@ class GraphBridgeService:
         except ConnectionError as e:
             return {
                 "status": "error",
-                "message": f"Connexion impossible à Graph Memory : {e}",
+                "message": f"Could not connect to Graph Memory: {e}",
             }
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Erreur memory_query : {e}",
+                "message": f"memory_query error: {e}",
             }
 
     async def search(self, space_id: str, query: str, limit: int = 10) -> dict:
@@ -2097,12 +2093,12 @@ class GraphBridgeService:
         except ConnectionError as e:
             return {
                 "status": "error",
-                "message": f"Connexion impossible à Graph Memory : {e}",
+                "message": f"Could not connect to Graph Memory: {e}",
             }
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Erreur memory_search : {e}",
+                "message": f"memory_search error: {e}",
             }
 
     async def ingest(
@@ -2132,7 +2128,7 @@ class GraphBridgeService:
         if (content is None) == (content_base64 is None):
             return {
                 "status": "error",
-                "message": "Fournir exactement un de content ou content_base64",
+                "message": "Provide exactly one of content or content_base64",
             }
 
         config, err = await self._load_gm_config(space_id)
@@ -2166,12 +2162,12 @@ class GraphBridgeService:
         except ConnectionError as e:
             return {
                 "status": "error",
-                "message": f"Connexion impossible à Graph Memory : {e}",
+                "message": f"Could not connect to Graph Memory: {e}",
             }
         except Exception as e:
             return {
                 "status": "error",
-                "message": f"Erreur memory_ingest : {e}",
+                "message": f"memory_ingest error: {e}",
             }
 
     async def reindex(self, space_id: str) -> dict:
@@ -2338,12 +2334,12 @@ class GraphBridgeService:
             except ConnectionError as e:
                 return {
                     "status": "error",
-                    "message": f"Connexion impossible à Graph Memory : {e}",
+                    "message": f"Could not connect to Graph Memory: {e}",
                 }
             except Exception as e:
                 return {
                     "status": "error",
-                    "message": f"Erreur document_list : {e}",
+                    "message": f"document_list error: {e}",
                 }
 
             # Map remote keyée par source_path (jamais par le nom de fichier

@@ -1005,7 +1005,7 @@ async def test_divergent_commit_same_bank_version_conflicts() -> None:
     await model.apply_commit("nodeA", bank_version=0, commit_id="c0")
 
     store = cluster.nodes["nodeA"].store
-    with pytest.raises(RuntimeError, match="Conflit de commit"):
+    with pytest.raises(RuntimeError, match="Commit conflict"):
         await store.append_commit(
             BankCommit(
                 bank_version=0,

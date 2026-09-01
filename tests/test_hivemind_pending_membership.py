@@ -274,9 +274,10 @@ async def test_evict_member_incarnation_compare_and_evict(storage) -> None:
     assert any(m.node_id == "nodeB" and m.status == MemberStatus.EVICTED.value for m in v3.members)
     assert v3.epoch == 7
 
-    # A member WITHOUT an incarnation (legacy / pre-P10-3) has no newer incarnation
-    # to protect, so an expected_incarnation does NOT strand it — the operator's
-    # explicit assertion governs and the force-eviction proceeds.
+    # A caller that supplies an expected incarnation requires an exact atomic
+    # match.  ``None`` is not a legacy escape hatch: pairing bootstrap exports
+    # intentionally strip source-local tags on peers, so accepting it would let
+    # a stale retained pairing evict a re-enrolled node after a restore.
     keys_c = generate_peer_keypair()
     await store.set_membership(
         MembershipView(
@@ -287,9 +288,42 @@ async def test_evict_member_incarnation_compare_and_evict(storage) -> None:
             ],
         )
     )
-    await svc.evict_member("nodeC", operator="op", confirm=True, expected_incarnation="pairZ")
+    with pytest.raises(MembershipIncarnationError):
+        await svc.evict_member(
+            "nodeC", operator="op", confirm=True, expected_incarnation="pairZ"
+        )
     v4 = await store.get_membership()
-    assert any(m.node_id == "nodeC" and m.status == MemberStatus.EVICTED.value for m in v4.members)
+    assert any(m.node_id == "nodeC" and m.status == MemberStatus.ACTIVE.value for m in v4.members)
+
+
+async def test_remove_pending_candidate_requires_exact_expected_incarnation(storage) -> None:
+    """Pairing give-up cannot remove a different PENDING incarnation."""
+
+    from live_mem.core.hivemind import MembershipIncarnationError
+
+    store, _ = await _seed_source(storage)
+    svc = MembershipService(store)
+    keys_b = generate_peer_keypair()
+    await svc.admit_pending_candidate(
+        Member(
+            node_id="nodeB",
+            public_key=keys_b.public_key,
+            incarnation="pair_current",
+        )
+    )
+
+    with pytest.raises(MembershipIncarnationError):
+        await svc.remove_pending_candidate(
+            "nodeB",
+            operator="op",
+            confirm=True,
+            expected_incarnation="pair_stale",
+        )
+    view = await store.get_membership()
+    assert view is not None
+    member = next(item for item in view.members if item.node_id == "nodeB")
+    assert member.status == MemberStatus.PENDING.value
+    assert member.incarnation == "pair_current"
 
 
 async def test_admit_and_promote_expected_epoch_compare(storage) -> None:

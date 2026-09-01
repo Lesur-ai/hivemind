@@ -1,46 +1,46 @@
 # =============================================================================
-# Ontologie Cloud Infrastructure
+# Cloud Infrastructure Ontology
 # =============================================================================
-# Spécialisée pour l'extraction d'informations depuis des documents
-# liés à l'infrastructure cloud, datacenters, certifications, services cloud,
-# fiches produits et documentation technique Cloud Temple.
+# Specialized for extracting information from documents related to cloud
+# infrastructure, data centers, certifications, cloud services, product sheets,
+# and Cloud Temple technical documentation.
 
 name: cloud
 version: "1.2"
 description: |
-  Ontologie spécialisée pour les documents d'infrastructure cloud.
-  Optimisée pour extraire les services cloud, architectures, certifications,
-  zones de disponibilité, configurations, indicateurs de performance,
-  tarification et classes de stockage.
-  Couvre les fiches produits (PRODUCT) et la documentation technique (DOCS).
+  Specialized ontology for cloud infrastructure documents.
+  Optimized to extract cloud services, architectures, certifications,
+  availability zones, configurations, performance indicators,
+  pricing, and storage classes.
+  Covers product sheets (PRODUCT) and technical documentation (DOCS).
 
-# Instructions spécifiques pour le LLM
+# LLM-specific instructions
 context: |
-  Tu es un expert en infrastructure cloud et datacenter.
-  Tu dois identifier avec précision :
-  - Les services cloud (IaaS, PaaS, SaaS) et leurs caractéristiques
-  - Les certifications de sécurité (SecNumCloud, ISO 27001, HDS, etc.)
-  - Les zones de disponibilité et régions
-  - Les configurations techniques (CPU, RAM, stockage)
-  - Les indicateurs de performance et SLA
-  - Les technologies utilisées (hyperviseurs, orchestrateurs, etc.)
-  - Les aspects de sécurité et conformité
-  - Les classes de stockage et leurs niveaux de performance
-  - Les solutions de sauvegarde et réplication
-  - Les modèles de tarification et unités de consommation
-  - Les modèles d'IA et services associés (LLMaaS, GPU)
+  You are an expert in cloud infrastructure and data centers.
+  You must accurately identify:
+  - Cloud services (IaaS, PaaS, SaaS) and their characteristics
+  - Security certifications (SecNumCloud, ISO 27001, HDS, etc.)
+  - Availability zones and regions
+  - Technical configurations (CPU, RAM, storage)
+  - Performance indicators and SLAs
+  - Technologies in use (hypervisors, orchestrators, etc.)
+  - Security and compliance aspects
+  - Storage classes and their performance levels
+  - Backup and replication solutions
+  - Pricing models and consumption units
+  - AI models and associated services (LLMaaS, GPU)
   
-  IMPORTANT: Sois précis sur les spécifications techniques et les certifications.
-  Pour les fiches produits, extrais systématiquement la tarification, les SLA
-  et les compatibilités entre services.
+  IMPORTANT: Be precise about technical specifications and certifications.
+  For product sheets, always extract pricing, SLAs, and compatibility
+  between services.
 
 # =============================================================================
-# Types d'entités spécifiques au domaine Cloud
+# Cloud-specific entity types
 # =============================================================================
 entity_types:
-  # Services Cloud
+  # Cloud services
   - name: CloudService
-    description: Service cloud (IaaS, PaaS, SaaS)
+    description: Cloud service (IaaS, PaaS, SaaS)
     priority: high
     examples:
       - "Infrastructure IaaS SecNumCloud"
@@ -48,13 +48,13 @@ entity_types:
       - "Object Storage S3"
       - "Database as a Service"
       - "LLMaaS (Large Language Model as a Service)"
-      - "Bastion (accès sécurisé)"
+      - "Bastion (secure access)"
 
   - name: ServiceTier
-    description: Niveau de service, offre, gamme
+    description: Service level, offering, tier
     examples:
-      - "Offre Standard"
-      - "Offre Premium"
+      - "Standard Offering"
+      - "Premium Offering"
       - "Compute Standard"
       - "Storage Performance"
       - "ECO v3"
@@ -63,15 +63,15 @@ entity_types:
 
   # Infrastructure
   - name: Datacenter
-    description: Centre de données, site d'hébergement
+    description: Data center, hosting site
     examples:
       - "DC Paris (PAR7S)"
       - "DC Lyon (TH3S)"
-      - "Site de Nanterre"
+      - "Nanterre Site"
       - "Datacenter AZ07"
 
   - name: AvailabilityZone
-    description: Zone de disponibilité
+    description: Availability zone
     examples:
       - "AZ-FR1"
       - "Zone A"
@@ -80,15 +80,15 @@ entity_types:
       - "AZ07"
 
   - name: Region
-    description: Région géographique cloud
+    description: Cloud geographic region
     examples:
       - "France (FR1)"
-      - "Europe de l'Ouest"
-      - "Region Paris"
+      - "Western Europe"
+      - "Paris Region"
 
   # Technologies
   - name: Technology
-    description: Technologie, produit technique, composant logiciel
+    description: Technology, technical product, software component
     priority: high
     examples:
       - "VMware vSphere 8"
@@ -100,7 +100,7 @@ entity_types:
       - "Terraform"
 
   - name: Hypervisor
-    description: Hyperviseur, plateforme de virtualisation
+    description: Hypervisor, virtualization platform
     examples:
       - "VMware ESXi 8.0"
       - "KVM/QEMU"
@@ -108,7 +108,7 @@ entity_types:
       - "Microsoft Hyper-V"
 
   - name: Orchestrator
-    description: Orchestrateur de conteneurs/services
+    description: Container or service orchestrator
     examples:
       - "Kubernetes"
       - "OpenShift 4.14"
@@ -116,7 +116,7 @@ entity_types:
       - "Rancher"
 
   - name: NetworkComponent
-    description: Composant réseau
+    description: Network component
     examples:
       - "Load Balancer F5"
       - "Firewall Fortinet"
@@ -125,21 +125,21 @@ entity_types:
       - "Juniper networking"
       - "VPLS"
 
-  # Spécifications
+  # Specifications
   - name: ComputeSpec
-    description: Spécification de calcul (CPU, RAM, lame serveur)
+    description: Compute specification (CPU, RAM, server blade)
     examples:
       - "8 vCPU"
-      - "32 Go RAM"
+      - "32 GB RAM"
       - "Intel Xeon Gold 6354"
       - "Cisco UCS B200 M5"
       - "NVIDIA L40S"
       - "NVIDIA H100"
 
   - name: StorageSpec
-    description: Spécification de stockage (capacité, technologie)
+    description: Storage specification (capacity, technology)
     examples:
-      - "1 To SSD NVMe"
+      - "1 TB NVMe SSD"
       - "Block Storage"
       - "Object Storage"
       - "IOPS 10000"
@@ -147,26 +147,26 @@ entity_types:
       - "Distributed RAID 6"
 
   - name: StorageClass
-    description: Classe de performance stockage (niveau IOPS/To)
+    description: Storage performance class (IOPS/TB level)
     examples:
-      - "ECO 500 IOPS/To"
-      - "Standard 1500 IOPS/To"
-      - "Premium 3000 IOPS/To"
-      - "Enterprise 7500 IOPS/To"
-      - "Ultra 15000 IOPS/To"
+      - "ECO 500 IOPS/TB"
+      - "Standard 1500 IOPS/TB"
+      - "Premium 3000 IOPS/TB"
+      - "Enterprise 7500 IOPS/TB"
+      - "Ultra 15000 IOPS/TB"
       - "Mass Storage"
 
   - name: NetworkSpec
-    description: Spécification réseau
+    description: Network specification
     examples:
-      - "Bande passante 10 Gbps"
-      - "Latence < 5ms"
-      - "IP publique"
-      - "VLAN dédié"
+      - "10 Gbps bandwidth"
+      - "Latency < 5 ms"
+      - "Public IP"
+      - "Dedicated VLAN"
 
-  # Certifications et Sécurité
+  # Certifications and security
   - name: Certification
-    description: Certification cloud/sécurité
+    description: Cloud or security certification
     priority: high
     examples:
       - "SecNumCloud 3.2"
@@ -178,19 +178,19 @@ entity_types:
       - "Common Criteria EAL4+"
 
   - name: SecurityFeature
-    description: Fonctionnalité de sécurité
+    description: Security feature
     examples:
-      - "Chiffrement AES-256"
-      - "MFA obligatoire"
+      - "AES-256 encryption"
+      - "Mandatory MFA"
       - "HSM (Hardware Security Module)"
       - "Thales Luna S790"
       - "KMS / BYOK"
-      - "Chiffrement XTS-AES 256"
+      - "XTS-AES 256 encryption"
 
   - name: ComplianceFramework
-    description: Cadre de conformité réglementaire
+    description: Regulatory compliance framework
     examples:
-      - "RGPD"
+      - "GDPR"
       - "DORA"
       - "NIS2"
       - "ANSSI PAMS"
@@ -199,47 +199,47 @@ entity_types:
 
   # Performance et SLA
   - name: SLA
-    description: Engagement de niveau de service
+    description: Service-level commitment
     priority: high
     examples:
-      - "Disponibilité 99.99%"
-      - "GTI 15 minutes"
-      - "GTR 4 heures"
-      - "RPO 1 heure"
-      - "RTO 4 heures"
+      - "99.99% availability"
+      - "Guaranteed intervention time: 15 minutes"
+      - "Guaranteed restoration time: 4 hours"
+      - "RPO 1 hour"
+      - "RTO 4 hours"
 
   - name: SLALevel
-    description: Niveau de priorité, d'impact ou de criticité dans la matrice de support
+    description: Priority, impact, or criticality level in the support matrix
     examples:
-      - "Priorité P1 (GTI 30min, perf 95%)"
-      - "Priorité P2 (GTI 2h, perf 90%)"
-      - "Priorité P3 (GTI 4h, perf 90%)"
-      - "Impact I1 (Services interrompus)"
-      - "Impact I2 (Services dégradés)"
-      - "Criticité C1 (Dégradation rapide)"
-      - "Matrice Priorité SLA"
+      - "Priority P1 (intervention time 30 min, performance 95%)"
+      - "Priority P2 (intervention time 2 h, performance 90%)"
+      - "Priority P3 (intervention time 4 h, performance 90%)"
+      - "Impact I1 (Service interruption)"
+      - "Impact I2 (Service degradation)"
+      - "Criticality C1 (Rapid degradation)"
+      - "SLA Priority Matrix"
 
   - name: PerformanceMetric
-    description: Métrique de performance
+    description: Performance metric
     examples:
-      - "Latence P99 < 10ms"
+      - "P99 latency < 10 ms"
       - "Throughput 1 Gbps"
       - "IOPS 50000"
-      - "50 équipements par appliance"
+      - "50 devices per appliance"
 
-  # Tarification
+  # Pricing
   - name: PricingModel
-    description: Modèle de tarification, unité de consommation, prix
+    description: Pricing model, consumption unit, price
     examples:
-      - "Facturation à l'heure"
-      - "Unité de consommation: vCPU/mois"
-      - "Pack 3 Bastion: 1290€/mois"
-      - "Stockage 0,06€/Go/mois"
-      - "Engagement annuel -15%"
+      - "Hourly billing"
+      - "Consumption unit: vCPU/month"
+      - "Bastion 3-pack: €1,290/month"
+      - "Storage €0.06/GB/month"
+      - "Annual commitment -15%"
 
-  # Sauvegarde et réplication
+  # Backup and replication
   - name: BackupSolution
-    description: Solution de sauvegarde ou de réplication
+    description: Backup or replication solution
     examples:
       - "IBM Spectrum Protect Plus"
       - "VMware Replication"
@@ -247,9 +247,9 @@ entity_types:
       - "Metro Mirror"
       - "Veeam Backup"
 
-  # IA et Machine Learning
+  # AI and machine learning
   - name: AIModel
-    description: Modèle d'intelligence artificielle
+    description: Artificial intelligence model
     examples:
       - "Mistral Large 2"
       - "Llama 3.1 70B"
@@ -257,9 +257,9 @@ entity_types:
       - "bge-m3 (embedding)"
       - "Qwen 2.5 Coder"
 
-  # Organisations
+  # Organizations
   - name: CloudProvider
-    description: Fournisseur de services cloud
+    description: Cloud service provider
     examples:
       - "Cloud Temple"
       - "AWS"
@@ -267,28 +267,28 @@ entity_types:
       - "OVHcloud"
 
   - name: Organization
-    description: Organisation cliente, partenaire ou régulatrice
+    description: Customer, partner, or regulator organization
     examples:
       - "ANSSI"
       - "CNIL"
-      - "Ministère de la Santé"
+      - "Ministry of Health"
       - "Cisco"
       - "IBM"
       - "VMware"
 
   - name: Role
-    description: Rôle IAM, profil de permission ou fonction dans la console
+    description: IAM role, permission profile, or console function
     examples:
-      - "Mainteneur"
-      - "Ecrivain"
-      - "Lecteur"
-      - "Ecrivain et Lecteur"
-      - "Administrateur"
-      - "Opérateur"
+      - "Maintainer"
+      - "Writer"
+      - "Reader"
+      - "Writer and Reader"
+      - "Administrator"
+      - "Operator"
 
-  # API et Interfaces
+  # APIs and interfaces
   - name: API
-    description: Interface de programmation ou console de gestion
+    description: Programming interface or management console
     examples:
       - "API REST v2"
       - "Console Shiva"
@@ -297,120 +297,120 @@ entity_types:
       - "API S3 compatible"
 
 # =============================================================================
-# Types de relations spécifiques au domaine Cloud
+# Cloud-specific relationship types
 # =============================================================================
 relation_types:
   - name: PROVIDES
-    description: Un fournisseur propose un service
+    description: A provider offers a service
     examples:
       - "Cloud Temple → PROVIDES → IaaS SecNumCloud"
 
   - name: LOCATED_IN
-    description: Situé dans une zone/région
+    description: Located in an availability zone or region
     examples:
       - "Service → LOCATED_IN → DC Paris"
-      - "Données → LOCATED_IN → France"
+      - "Data → LOCATED_IN → France"
 
   - name: USES_TECHNOLOGY
-    description: Utilise une technologie
+    description: Uses a technology
     examples:
       - "IaaS → USES_TECHNOLOGY → VMware vSphere"
 
   - name: CERTIFIED_FOR
-    description: Certifié pour une norme
+    description: Certified for a standard
     examples:
       - "Cloud Temple → CERTIFIED_FOR → SecNumCloud"
-      - "Service HDS → CERTIFIED_FOR → Hébergement Données Santé"
+      - "HDS Service → CERTIFIED_FOR → Health Data Hosting"
 
   - name: HAS_SLA
-    description: Possède un engagement de niveau de service
+    description: Has a service-level commitment
     examples:
-      - "IaaS Standard → HAS_SLA → Disponibilité 99.95%"
+      - "Standard IaaS → HAS_SLA → 99.95% availability"
 
   - name: REQUIRES
-    description: Nécessite un composant/prérequis
+    description: Requires a component or prerequisite
     examples:
       - "Kubernetes → REQUIRES → Load Balancer"
 
   - name: INCLUDES
-    description: Inclut un composant ou une fonctionnalité
+    description: Includes a component or feature
     examples:
-      - "Offre Premium → INCLUDES → Backup automatique"
+      - "Premium Offering → INCLUDES → Automatic Backup"
 
   - name: CONNECTS_TO
-    description: Connexion réseau
+    description: Network connection
     examples:
-      - "VPC Client → CONNECTS_TO → Internet Gateway"
+      - "Client VPC → CONNECTS_TO → Internet Gateway"
 
   - name: REPLICATED_TO
-    description: Réplication vers une autre zone
+    description: Replicated to another availability zone
     examples:
-      - "Stockage → REPLICATED_TO → AZ-FR2"
+      - "Storage → REPLICATED_TO → AZ-FR2"
 
   - name: COMPLIANT_WITH
-    description: Conforme à un cadre réglementaire
+    description: Compliant with a regulatory framework
     examples:
-      - "Service → COMPLIANT_WITH → RGPD"
+      - "Service → COMPLIANT_WITH → GDPR"
 
   - name: HAS_SPEC
-    description: Possède une spécification technique
+    description: Has a technical specification
     examples:
-      - "VM Large → HAS_SPEC → 16 vCPU, 64 Go RAM"
+      - "Large VM → HAS_SPEC → 16 vCPU, 64 GB RAM"
 
   - name: MANAGED_BY
-    description: Géré par un composant/outil/console
+    description: Managed by a component, tool, or console
     examples:
       - "Cluster → MANAGED_BY → Console Shiva"
 
   - name: BACKUP_TO
-    description: Sauvegardé vers
+    description: Backed up to
     examples:
-      - "Données → BACKUP_TO → Object Storage"
+      - "Data → BACKUP_TO → Object Storage"
 
   - name: INTEGRATED_WITH
-    description: Intégré avec un service ou outil
+    description: Integrated with a service or tool
     examples:
       - "Kubernetes → INTEGRATED_WITH → Prometheus"
 
-  # === Nouvelles relations v1.1 ===
+  # === New v1.1 relations ===
 
   - name: COMPATIBLE_WITH
-    description: Compatible avec un outil, format ou service
+    description: Compatible with a tool, format, or service
     examples:
       - "Object Storage → COMPATIBLE_WITH → API S3"
       - "IaaS VMware → COMPATIBLE_WITH → Terraform"
       - "Managed K8s → COMPATIBLE_WITH → Helm"
 
   - name: SUPPORTS
-    description: Supporte un protocole, format ou fonctionnalité
+    description: Supports a protocol, format, or feature
     examples:
       - "Bastion → SUPPORTS → RDP, SSH"
       - "Block Storage → SUPPORTS → Fiber Channel 32G"
       - "Console Shiva → SUPPORTS → API REST"
 
   - name: PART_OF
-    description: Fait partie de (hiérarchie de composition)
+    description: Part of a composition hierarchy
     examples:
-      - "AZ PAR7S → PART_OF → Region FR1"
+      - "AZ PAR7S → PART_OF → FR1 Region"
       - "Block Storage → PART_OF → IaaS VMware"
       - "StorageClass Premium → PART_OF → Block Storage"
 
   - name: DEPENDS_ON
-    description: Dépend d'un autre service ou composant
+    description: Depends on another service or component
     examples:
       - "Managed Kubernetes → DEPENDS_ON → Block Storage"
       - "Bastion recording → DEPENDS_ON → Object Storage"
       - "VM encryption → DEPENDS_ON → HSM"
 
   - name: HAS_PRICING
-    description: Possède un modèle de tarification
+    description: Has a pricing model
     examples:
-      - "IaaS VMware → HAS_PRICING → Facturation vCPU/heure"
-      - "Object Storage → HAS_PRICING → 0.06€/Go/mois"
-      - "Bastion → HAS_PRICING → Pack 3: 1290€/mois"
+      - "VMware IaaS → HAS_PRICING → vCPU/hour billing"
+      - "Object Storage → HAS_PRICING → €0.06/GB/month"
+      - "Bastion → HAS_PRICING → 3-pack: €1,290/month"
 
 # =============================================================================
-# Règles d'extraction spécifiques
+# Extraction rules
 # =============================================================================
 extraction_rules:
   max_entities: 60
@@ -427,95 +427,95 @@ extraction_rules:
     - PricingModel
 
   special_instructions: |
-    # --- RÈGLES D'EXTRACTION MÉTIER ---
-    - Identifie TOUTES les certifications mentionnées avec leur version si disponible
-    - Extrais les SLA avec leurs valeurs exactes (%, heures, minutes)
-    - Identifie les technologies et leurs versions
-    - Note les spécifications techniques (CPU, RAM, stockage, réseau)
-    - Identifie les zones de disponibilité et régions
-    - Distingue les services IaaS, PaaS, SaaS
-    - Extrais les classes de stockage avec leurs niveaux d'IOPS
-    - Identifie les solutions de sauvegarde et réplication (IBM SPP, VMware Replication, etc.)
-    - Pour les fiches produits : extrais la tarification (prix, unités, packs)
-    - Pour les fiches produits : identifie les compatibilités et dépendances entre services
-    - Pour les modèles IA (LLMaaS) : extrais le nom du modèle, sa taille, ses capacités
+    # --- BUSINESS EXTRACTION RULES ---
+    - Identify ALL mentioned certifications with their version when available.
+    - Extract SLAs with their exact values (%, hours, minutes).
+    - Identify technologies and their versions.
+    - Record technical specifications (CPU, RAM, storage, network).
+    - Identify availability zones and regions.
+    - Distinguish IaaS, PaaS, and SaaS services.
+    - Extract storage classes with their IOPS levels.
+    - Identify backup and replication solutions (IBM SPP, VMware Replication, etc.).
+    - For product sheets: extract pricing (prices, units, packages).
+    - For product sheets: identify service compatibility and dependencies.
+    - For AI models (LLMaaS): extract the model name, size, and capabilities.
 
-    # --- MAPPINGS OBLIGATOIRES (types qui N'EXISTENT PAS dans cette ontologie) ---
+    # --- REQUIRED MAPPINGS (types that DO NOT EXIST in this ontology) ---
 
-    - ⚠️ Les niveaux de priorité d'incidents (P1-P5), niveaux d'impact (I1-I3) et niveaux de criticité (C1-C3)
-      sont des **SLALevel**. La matrice de priorité est aussi un SLALevel.
-      Intègre le GTI et l'objectif de performance dans le nom
-      (ex: "Priorité P1 (GTI 30min, perf 95%)" et non "Priority_P1" seul).
+    - ⚠️ Incident priority levels (P1-P5), impact levels (I1-I3), and criticality levels (C1-C3)
+      are **SLALevel**. The priority matrix is also an SLALevel.
+      Include the intervention time and performance objective in the name
+      (for example, "Priority P1 (intervention time 30 min, performance 95%)", not just "Priority_P1").
 
-    - ⚠️ Les endpoints d'API (/v1/chat/completions, /v1/models, /v1/completions) sont des **API**.
-      Ne crée JAMAIS de type "Endpoint" — utilise API.
+    - ⚠️ API endpoints (/v1/chat/completions, /v1/models, /v1/completions) are **API**.
+      NEVER create an "Endpoint" type — use API.
 
-    - ⚠️ Les licences firewall (FTG2, FTG4, FTG8, vDOM) sont des **PricingModel**.
-      Inclus le SKU dans le nom (ex: "Licence FortiGate VM02V (csp:fr1:licence:fw:ftg2)").
-      Ne crée JAMAIS de type "Licence" ou "License" — utilise PricingModel.
+    - ⚠️ Firewall licenses (FTG2, FTG4, FTG8, vDOM) are **PricingModel**.
+      Include the SKU in the name (for example, "FortiGate VM02V License (csp:fr1:licence:fw:ftg2)").
+      NEVER create a "Licence" or "License" type — use PricingModel.
 
-    - ⚠️ Les configurations HA (cluster Active-Passive, failover) sont des **Technology**.
-      (ex: "HA Cluster FortiGate Active-Passive").
-      Ne crée JAMAIS de type "HACluster" ou "HAMode".
+    - ⚠️ HA configurations (Active-Passive cluster, failover) are **Technology**.
+      (for example, "FortiGate Active-Passive HA Cluster").
+      NEVER create an "HACluster" or "HAMode" type.
 
-    - ⚠️ Les capacités réseau (VLAN tagging, trunking, port mirroring, SRV-IO)
-      sont des **NetworkComponent**.
-      Ne crée JAMAIS de type "Feature" ou "NetworkFeature".
+    - ⚠️ Network capabilities (VLAN tagging, trunking, port mirroring, SRV-IO)
+      are **NetworkComponent**.
+      NEVER create a "Feature" or "NetworkFeature" type.
 
-    - ⚠️ Les offres d'hébergement physique (mutualisé, dédié, hands & eyes)
-      sont des **CloudService**.
-      Ne crée JAMAIS de type "Hosting" ou "PhysicalHosting".
+    - ⚠️ Physical hosting offerings (shared, dedicated, hands & eyes)
+      are **CloudService**.
+      NEVER create a "Hosting" or "PhysicalHosting" type.
 
-    - ⚠️ Les rôles de permission (Mainteneur, Ecrivain, Lecteur, Administrateur, Opérateur)
-      sont des **Role**.
-      Ne crée JAMAIS de type "Permission" ou "IAMRole".
+    - ⚠️ Permission roles (Maintainer, Writer, Reader, Administrator, Operator)
+      are **Role**.
+      NEVER create a "Permission" or "IAMRole" type.
 
-    - ⚠️ Les contraintes architecturales (obligation de 2 AZ, prérequis techniques)
-      sont des **SLA** ou intégrées dans la description du CloudService associé.
-      Ne crée JAMAIS de type "Requirement" — utilise SLA ou REQUIRES relation.
+    - ⚠️ Architectural constraints (requirement for 2 AZs, technical prerequisites)
+      are **SLA** or included in the description of the associated CloudService.
+      NEVER create a "Requirement" type — use an SLA or a REQUIRES relation.
 
-    - ⚠️ Les durées, préavis, délais et engagements contractuels (préavis 3 mois, délai 21 jours,
-      engagement 36 mois) doivent être INTÉGRÉS dans le nom du SLA ou PricingModel associé.
-      Ne crée JAMAIS de type "Duration", "Engagement", "Delay", "Period" ou "Timeframe".
+    - ⚠️ Durations, notice periods, delays, and contractual commitments (3-month notice period, 21-day delay,
+      36-month commitment) MUST be INCLUDED in the name of the associated SLA or PricingModel.
+      NEVER create a "Duration", "Engagement", "Delay", "Period", or "Timeframe" type.
 
-    - ⚠️ Les langues de support (français, anglais) doivent être intégrées dans le SLA correspondant
-      (ex: "Support français 24/7" et non "Language_French" séparé).
-      Ne crée JAMAIS de type "Language".
+    - ⚠️ Support languages (French, English) MUST be included in the corresponding SLA
+      (for example, "French support 24/7", not a separate "Language_French").
+      NEVER create a "Language" type.
 
-    - ⚠️ Les processus opérationnels (création de ticket, notification, gestion incidents)
-      doivent être intégrés comme description du CloudService ou du SLA.
-      Ne crée JAMAIS de type "Process", "Workflow" ou "Procedure".
+    - ⚠️ Operational processes (ticket creation, notification, incident management)
+      MUST be included as a description of the CloudService or SLA.
+      NEVER create a "Process", "Workflow", or "Procedure" type.
 
-    - ⚠️ Les certificats et attestations (certificat de suppression, rapport d'audit)
-      sont des **SecurityFeature** ou des **Certification**.
+    - ⚠️ Certificates and attestations (deletion certificate, audit report)
+      are **SecurityFeature** or **Certification**.
 
-    # --- EXCLUSIONS (NE PAS extraire comme entités) ---
+    # --- EXCLUSIONS (DO NOT extract as entities) ---
     
-    - ⚠️ NE PAS extraire :
-      * Les flags CLI, variables d'environnement ou options de commande
+    - ⚠️ DO NOT extract:
+      * CLI flags, environment variables, or command options
         ("--overwrite", "--remove", "AWS_REQUEST_CHECKSUM_CALCULATION")
-      * Les chemins de fichiers ou noms d'exemple ("./mon-site", "demo-app", "poc-helmfile")
-      * Les codes d'erreur isolés ("XAmzContentSHA256Mismatch")
-      * Les formats de données seuls ("JSON", "YAML", "XML")
-      * Les paramètres d'API seuls ("Parameter model", "Parameter messages")
-      * Les titres de sections ou guides ("Guide de démarrage rapide", "Tutoriel HA")
-      * Les mots isolés sans contexte ("Compute", "Storage", "Network", "Electricity", "Cooling")
-      * Les identifiants numériques isolés ("Group ID 16", "Priority 100", "Priority 200")
-      → Ces éléments doivent être IGNORÉS ou intégrés comme attributs d'autres entités.
+      * File paths or sample names ("./my-site", "demo-app", "poc-helmfile")
+      * Isolated error codes ("XAmzContentSHA256Mismatch")
+      * Standalone data formats ("JSON", "YAML", "XML")
+      * Standalone API parameters ("Parameter model", "Parameter messages")
+      * Section titles or guides ("Quick Start Guide", "HA Tutorial")
+      * Isolated words without context ("Compute", "Storage", "Network", "Electricity", "Cooling")
+      * Isolated numeric identifiers ("Group ID 16", "Priority 100", "Priority 200")
+      → These elements MUST be IGNORED or included as attributes of other entities.
 
-    # --- QUALITÉ ---
-    - Chaque entité doit avoir un NOM descriptif et auto-suffisant.
-      Mauvais: "P1", "I2", "FTG4". Bon: "Priorité P1 (GTI 30min)", "Impact I2 (Services dégradés)", "Licence FortiGate VM04V".
+    # --- QUALITY ---
+    - Each entity MUST have a descriptive, self-contained NAME.
+      Bad: "P1", "I2", "FTG4". Good: "Priority P1 (intervention time 30 min)", "Impact I2 (Service degradation)", "FortiGate VM04V License".
 
 # =============================================================================
-# Exemples d'extraction
+# Extraction examples
 # =============================================================================
 examples:
   - input: |
-      Cloud Temple propose une infrastructure IaaS qualifiée SecNumCloud 3.2
-      hébergée dans ses datacenters français (Paris et Lyon).
-      L'offre Compute Standard inclut VMware vSphere 8 avec un SLA de 99.95%.
-      Le stockage Block Storage offre 50000 IOPS avec réplication synchrone.
+      Cloud Temple offers SecNumCloud 3.2-qualified IaaS infrastructure
+      hosted in its French data centers (Paris and Lyon).
+      The Compute Standard offering includes VMware vSphere 8 with a 99.95% SLA.
+      Block Storage provides 50,000 IOPS with synchronous replication.
     expected_entities:
       - {name: "Cloud Temple", type: "CloudProvider"}
       - {name: "IaaS SecNumCloud", type: "CloudService"}
@@ -524,41 +524,41 @@ examples:
       - {name: "DC Lyon", type: "Datacenter"}
       - {name: "Compute Standard", type: "ServiceTier"}
       - {name: "VMware vSphere 8", type: "Technology"}
-      - {name: "Disponibilité 99.95%", type: "SLA"}
+      - {name: "99.95% availability", type: "SLA"}
       - {name: "Block Storage", type: "CloudService"}
       - {name: "50000 IOPS", type: "PerformanceMetric"}
     expected_relations:
       - {from: "Cloud Temple", to: "IaaS SecNumCloud", type: "PROVIDES"}
       - {from: "Cloud Temple", to: "SecNumCloud 3.2", type: "CERTIFIED_FOR"}
       - {from: "Compute Standard", to: "VMware vSphere 8", type: "USES_TECHNOLOGY"}
-      - {from: "Compute Standard", to: "Disponibilité 99.95%", type: "HAS_SLA"}
+      - {from: "Compute Standard", to: "99.95% availability", type: "HAS_SLA"}
 
   - input: |
-      Le service Bastion Cloud Temple permet un accès sécurisé via RDP et SSH
-      aux infrastructures hébergées. Disponible en pack de 3 appliances
-      à 1290€/mois. Le stockage Block Storage propose 5 classes de performance :
-      ECO (500 IOPS/To), Standard (1500), Premium (3000), Enterprise (7500)
-      et Ultra (15000 IOPS/To). La sauvegarde est assurée par IBM Spectrum
-      Protect Plus avec un RPO de 24 heures. Le service est compatible Terraform.
+      The Cloud Temple Bastion service provides secure RDP and SSH access
+      to hosted infrastructure. It is available as a pack of three appliances
+      for €1,290/month. Block Storage provides five performance classes:
+      ECO (500 IOPS/TB), Standard (1,500), Premium (3,000), Enterprise (7,500),
+      and Ultra (15,000 IOPS/TB). Backup is provided by IBM Spectrum
+      Protect Plus with a 24-hour RPO. The service is compatible with Terraform.
     expected_entities:
       - {name: "Bastion", type: "CloudService"}
       - {name: "Cloud Temple", type: "CloudProvider"}
-      - {name: "Pack 3 Bastion: 1290€/mois", type: "PricingModel"}
+      - {name: "Bastion 3-pack: €1,290/month", type: "PricingModel"}
       - {name: "Block Storage", type: "CloudService"}
-      - {name: "ECO 500 IOPS/To", type: "StorageClass"}
-      - {name: "Standard 1500 IOPS/To", type: "StorageClass"}
-      - {name: "Premium 3000 IOPS/To", type: "StorageClass"}
-      - {name: "Enterprise 7500 IOPS/To", type: "StorageClass"}
-      - {name: "Ultra 15000 IOPS/To", type: "StorageClass"}
+      - {name: "ECO 500 IOPS/TB", type: "StorageClass"}
+      - {name: "Standard 1500 IOPS/TB", type: "StorageClass"}
+      - {name: "Premium 3000 IOPS/TB", type: "StorageClass"}
+      - {name: "Enterprise 7500 IOPS/TB", type: "StorageClass"}
+      - {name: "Ultra 15000 IOPS/TB", type: "StorageClass"}
       - {name: "IBM Spectrum Protect Plus", type: "BackupSolution"}
-      - {name: "RPO 24 heures", type: "SLA"}
+      - {name: "RPO 24 hours", type: "SLA"}
       - {name: "Terraform", type: "Technology"}
     expected_relations:
       - {from: "Cloud Temple", to: "Bastion", type: "PROVIDES"}
-      - {from: "Bastion", to: "Pack 3 Bastion: 1290€/mois", type: "HAS_PRICING"}
+      - {from: "Bastion", to: "Bastion 3-pack: €1,290/month", type: "HAS_PRICING"}
       - {from: "Bastion", to: "RDP", type: "SUPPORTS"}
       - {from: "Bastion", to: "SSH", type: "SUPPORTS"}
-      - {from: "ECO 500 IOPS/To", to: "Block Storage", type: "PART_OF"}
+      - {from: "ECO 500 IOPS/TB", to: "Block Storage", type: "PART_OF"}
       - {from: "Block Storage", to: "IBM Spectrum Protect Plus", type: "BACKUP_TO"}
-      - {from: "IBM Spectrum Protect Plus", to: "RPO 24 heures", type: "HAS_SLA"}
+      - {from: "IBM Spectrum Protect Plus", to: "RPO 24 hours", type: "HAS_SLA"}
       - {from: "Bastion", to: "Terraform", type: "COMPATIBLE_WITH"}

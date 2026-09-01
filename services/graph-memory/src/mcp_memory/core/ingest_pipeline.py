@@ -235,7 +235,7 @@ async def delete_document_everywhere(
             result["s3_deleted"] = deleted
             # delete_document() renvoie False sur ClientError → considérer comme erreur
             if not deleted:
-                result["errors"].append(f"s3: suppression non confirmée pour {uri}")
+                result["errors"].append(f"s3: deletion not confirmed for {uri}")
         except Exception as e:
             result["errors"].append(f"s3: {e}")
             print(f"⚠️ [delete_everywhere] S3: {e}", file=sys.stderr)
@@ -367,11 +367,11 @@ async def run_ingest_pipeline(
         # Vérifier la mémoire + ontologie (nécessaire pour l'extraction)
         memory = await _graph().get_memory(memory_id)
         if not memory:
-            return {"status": "error", "message": f"Mémoire '{memory_id}' non trouvée"}
+            return {"status": "error", "message": f"Memory '{memory_id}' not found"}
         if not memory.ontology:
             return {
                 "status": "error",
-                "message": f"La mémoire '{memory_id}' n'a pas d'ontologie définie.",
+                "message": f"Memory '{memory_id}' has no ontology.",
             }
 
         # Remplacement : supprimer proprement l'ancien document d'abord.
@@ -380,7 +380,7 @@ async def run_ingest_pipeline(
         # orphelins de l'ancien doc en marquant le nouveau 'succeeded'.
         if replace_doc_id:
             _check_cancel("before_replace")
-            await _report("replace", 8, f"🔄 Remplacement : suppression de {replace_doc_id}")
+            await _report("replace", 8, f"🔄 Replacing: deleting {replace_doc_id}")
             del_res = await delete_document_everywhere(memory_id, replace_doc_id)
             if del_res.get("errors"):
                 # Si l'ancien nœud Neo4j a survécu, le marquer pour re-traitement
@@ -394,7 +394,7 @@ async def run_ingest_pipeline(
                         pass
                 return {
                     "status": "error",
-                    "message": f"Remplacement abandonné : suppression de l'ancien document incomplète {del_res['errors']}",
+                    "message": f"Replacement abandoned: deletion of the old document was incomplete: {del_res['errors']}",
                     "steps": _steps_log,
                 }
 
@@ -405,11 +405,11 @@ async def run_ingest_pipeline(
             memory_id=memory_id, filename=filename, content=content, metadata=metadata
         )
         s3_uploaded_uri = s3_result["uri"]
-        await _report("s3_upload", 12, "✅ Upload S3 terminé")
+        await _report("s3_upload", 12, "✅ S3 upload complete")
 
         # --- Extraction texte ---
         _check_cancel("before_text")
-        await _report("text_extract", 15, f"📄 Extraction texte ({file_ext})...")
+        await _report("text_extract", 15, f"📄 Extracting text ({file_ext})...")
         from ..server import _extract_text  # réutilise l'extracteur de formats existant
         text = _extract_text(content, filename)
         if not text:
@@ -419,9 +419,9 @@ async def run_ingest_pipeline(
                     await _storage().delete_document(memory_id, s3_uploaded_uri)
                 except Exception:
                     pass
-            return {"status": "warning", "message": "Document uploadé mais extraction texte impossible"}
+            return {"status": "warning", "message": "Document uploaded, but text extraction failed"}
 
-        await _report("text_extract", 15, f"📄 Texte extrait : {len(text)} caractères")
+        await _report("text_extract", 15, f"📄 Extracted {len(text)} characters")
         del content
         gc.collect()
 
@@ -431,7 +431,7 @@ async def run_ingest_pipeline(
         async def _extraction_progress(event: str, data: dict):
             if event == "extraction_start":
                 total = data.get("chunks_total", 1)
-                await _report("llm_extract", 15, f"🔍 Extraction LLM : {total} chunk(s)", chunks_total=total)
+                await _report("llm_extract", 15, f"🔍 LLM extraction: {total} chunk(s)", chunks_total=total)
             elif event == "extraction_chunk_done":
                 chunk = data.get("chunk", 0)
                 total = max(1, data.get("chunks_total", 1))
@@ -442,20 +442,20 @@ async def run_ingest_pipeline(
                     chunk=chunk, chunks_total=total,
                 )
 
-        await _report("llm_extract", 15, f"🔍 Démarrage extraction LLM (ontologie: {memory.ontology})...")
+        await _report("llm_extract", 15, f"🔍 Starting LLM extraction (ontology: {memory.ontology})...")
         extraction = await _extractor().extract_with_ontology_chunked(
             text, memory.ontology, progress_callback=_extraction_progress
         )
         await _report(
             "llm_extract", 60,
-            f"✅ Extraction : {len(extraction.entities)} entités, {len(extraction.relations)} relations",
+            f"✅ Extraction: {len(extraction.entities)} entities, {len(extraction.relations)} relations",
         )
 
         # --- Neo4j : document (running) + entités/relations ---
         # À partir d'ici on n'interrompt plus en plein milieu : on laisse finir
         # puis on rollback si annulation (delete_document_everywhere).
         _check_cancel("before_graph")
-        await _report("graph_write", 65, "📊 Stockage dans le graphe Neo4j...")
+        await _report("graph_write", 65, "📊 Storing data in the Neo4j graph...")
         doc_id = str(uuid.uuid4())
         await _graph().add_document(
             memory_id=memory_id,
@@ -475,7 +475,7 @@ async def run_ingest_pipeline(
         graph_result = await _graph().add_entities_and_relations(
             memory_id=memory_id, doc_id=doc_id, extraction=extraction
         )
-        await _report("graph_write", 70, "✅ Graphe Neo4j mis à jour")
+        await _report("graph_write", 70, "✅ Neo4j graph updated")
         # Annulation après écriture graphe : on supprime proprement le document
         # qu'on vient de créer (rollback dans le except IngestCancelled).
         _check_cancel("after_graph")
@@ -484,11 +484,11 @@ async def run_ingest_pipeline(
         chunks_stored = 0
         EMBED_BATCH_SIZE = 5
         try:
-            await _report("chunking", 72, "🧩 Chunking sémantique...")
+            await _report("chunking", 72, "🧩 Semantic chunking...")
             import asyncio
             loop = asyncio.get_event_loop()
             chunks = await loop.run_in_executor(None, _chunker().chunk_document, text, filename)
-            await _report("chunking", 75, f"🧩 {len(chunks)} chunks créés")
+            await _report("chunking", 75, f"🧩 Created {len(chunks)} chunks")
 
             if chunks:
                 for chunk in chunks:
@@ -516,7 +516,7 @@ async def run_ingest_pipeline(
                     batch_results.append(batch_result)
 
                 embedding_result = _merge_embedding_results(batch_results)
-                await _report("vector_store", 96, f"📦 Stockage Qdrant ({len(embedding_result.vectors)} vecteurs)...")
+                await _report("vector_store", 96, f"📦 Storing {len(embedding_result.vectors)} vectors in Qdrant...")
                 vector_store = _vector_store()
                 # Dès que le store est invoqué, sa livraison peut être partielle.
                 # Avant ce point, le rollback ne doit pas créer à lui seul un
@@ -526,12 +526,12 @@ async def run_ingest_pipeline(
                     memory_id=memory_id, doc_id=doc_id, filename=filename,
                     chunks=chunks, embedding_result=embedding_result,
                 )
-                await _report("vector_store", 98, f"✅ RAG : {chunks_stored} chunks vectorisés")
+                await _report("vector_store", 98, f"✅ RAG: vectorized {chunks_stored} chunks")
         except IngestCancelled:
             raise  # laisser remonter pour le rollback (ne pas masquer en RuntimeError)
         except Exception as e:
-            print(f"❌ [Ingest] Erreur RAG vectoriel: {e}", file=sys.stderr)
-            raise RuntimeError(f"Échec vectorisation Qdrant (couplage strict): {e}")
+            print(f"❌ [Ingest] Vector RAG error: {e}", file=sys.stderr)
+            raise RuntimeError(f"Qdrant vectorization failed (strict coupling): {e}")
 
         # Dernière frontière avant de marquer le document comme succeeded
         _check_cancel("before_finalize")
@@ -547,7 +547,7 @@ async def run_ingest_pipeline(
         relation_types = Counter(r.type for r in extraction.relations)
         entity_types = Counter(e.type for e in extraction.entities)
         _elapsed = round(_time.monotonic() - _t0, 1)
-        await _report("done", 100, f"🏁 Ingestion terminée en {_elapsed}s")
+        await _report("done", 100, f"🏁 Ingestion completed in {_elapsed}s")
 
         return {
             "status": "ok",
@@ -579,7 +579,7 @@ async def run_ingest_pipeline(
             s3_uploaded_uri,
             delete_vectors=vector_write_attempted,
         )
-        out = {"status": "cancelled", "message": f"Annulé ({c})", "steps": _steps_log}
+        out = {"status": "cancelled", "message": f"Cancelled ({c})", "steps": _steps_log}
         if cleanup.get("errors"):
             out["cleanup"] = cleanup
         return out
@@ -590,11 +590,11 @@ async def run_ingest_pipeline(
             s3_uploaded_uri,
             delete_vectors=vector_write_attempted,
         )
-        print(f"❌ [Ingest] Erreur: {e}", file=sys.stderr)
+        print(f"❌ [Ingest] Error: {e}", file=sys.stderr)
         out = {"status": "error", "message": str(e), "steps": _steps_log}
         if cleanup.get("errors"):
             out["cleanup"] = cleanup
-            out["message"] += f" | rollback incomplet: {cleanup['errors']}"
+            out["message"] += f" | incomplete rollback: {cleanup['errors']}"
         return out
 
 
@@ -634,6 +634,6 @@ async def _rollback(
             # Seul l'objet S3 a été uploadé → le retirer
             await _storage().delete_document(memory_id, s3_uri)
     except Exception as e:  # pragma: no cover - défensif
-        print(f"⚠️ [Ingest] Rollback partiel: {e}", file=sys.stderr)
+        print(f"⚠️ [Ingest] Partial rollback: {e}", file=sys.stderr)
         result.setdefault("errors", []).append(str(e))
     return result

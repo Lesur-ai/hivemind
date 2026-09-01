@@ -98,8 +98,10 @@ def register(mcp: FastMCP) -> int:
             # P3-7 ROUTE-FIRST-THEN-DELEGATE: resolve the per-space WriteSink
             # BEFORE any durable write. The single durable mutation is the live
             # note PUT, which lives INSIDE LiveService.write_note (it builds the
-            # filename and calls get_storage() directly — the held sink is inert,
-            # and live.py is NOT edited here per wrap-don't-rewrite). So:
+            # filename and calls get_storage() directly; the held sink is inert).
+            # LiveService independently re-proves DIRECT_LOCAL at that final
+            # mutation boundary so a retained engine cannot cross #413 source
+            # preparation. At this initial tool gate:
             #   - DIRECT_LOCAL (non-Hivemind) -> delegate to the short engine's
             #     write_note: byte-for-byte identical legacy PUT via get_storage.
             #   - STAGED (Hivemind-healthy) -> raise StagedWriteNotImplemented
@@ -109,12 +111,10 @@ def register(mcp: FastMCP) -> int:
             #   - REFUSE (unsafe/resync) / corrupt -> resolve_sink raises
             #     (RegistryRefused / CorruptedStateError) before any write,
             #     and the except below renders it via safe_error.
-            # SINGLE resolution: build the engine (which resolves the route
-            # once) and gate on the ENGINE's own resolved sink — never a second,
-            # independent resolve_sink whose verdict could differ from the one
-            # the engine carries (that gap let an observed STAGED still fall
-            # through to the inert legacy write). REFUSE/corrupt raise inside
-            # short_engine() before it returns.
+            # Build the engine with exactly one registry sink resolution and gate
+            # on THAT sink — never resolve a second competing sink here. The
+            # separate LiveService check is a last-mutation fence, not a sink
+            # whose verdict can fall through to the legacy write.
             registry = get_engine_registry()
             engine = await registry.short_engine(space_id)
             if not isinstance(engine.write_sink, DirectLocalWriteSink):

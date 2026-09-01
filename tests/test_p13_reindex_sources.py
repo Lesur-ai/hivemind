@@ -1443,7 +1443,7 @@ async def test_best_effort_index_deferred_failures_are_consumed_and_redacted(
     stderr = capsys.readouterr().err
     assert graph._doc_constraints_ready is True
     assert any("CREATE INDEX document_memory_id_id" in query for query in session.consumed_queries)
-    assert "Index (memory_id, id) non créé" in stderr
+    assert "Index (memory_id, id) was not created" in stderr
     assert "planted deferred lookup backend detail" not in stderr
 
 
@@ -1465,7 +1465,7 @@ async def test_best_effort_lookup_timeout_preserves_the_critical_schema_budget(
         await graph.ensure_document_lookup_index()
         await graph.initialize_document_schema()
 
-    assert "Index (memory_id, id) non créé" in capsys.readouterr().err
+    assert "Index (memory_id, id) was not created" in capsys.readouterr().err
     assert graph.document_schema_status() == {"status": "ok", "ready": True}
 
 
@@ -1484,7 +1484,7 @@ async def test_fulltext_readiness_never_publishes_after_deferred_failure(
     stderr = capsys.readouterr().err
     assert graph._fulltext_index_ready is False
     assert getattr(session.calls[0][0], "timeout", None) == 30
-    assert "Impossible de créer l'index fulltext" in stderr
+    assert "Could not create the full-text index" in stderr
     assert "planted deferred fulltext backend detail" not in stderr
 
 

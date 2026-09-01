@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -21,8 +22,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..config import get_settings
-from .consolidator import get_consolidator
+from .consolidator import (
+    _sanitize_compaction_failure_payloads,
+    _sanitize_normal_operation_failure_payloads,
+    get_consolidator,
+)
 from .locks import get_lock_manager
+from .reservation_guard import assert_space_not_reserved
 
 logger = logging.getLogger("live_mem.consolidation_queue")
 
@@ -38,6 +44,33 @@ NO_AUTO_POLLING_CONTRACT = {
         "only if an explicit status check is needed."
     ),
 }
+_COMPACTION_PREIMAGE_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/"
+    r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[0-9a-f]{32}$"
+)
+
+
+def _sanitize_failure_diagnostics_in_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep the job-status relay from widening mutation diagnostics."""
+
+    safe_result = dict(result)
+    if "compaction_failures" in safe_result:
+        safe_failures = _sanitize_compaction_failure_payloads(
+            safe_result.get("compaction_failures")
+        )
+        if safe_failures:
+            safe_result["compaction_failures"] = safe_failures
+        else:
+            safe_result.pop("compaction_failures", None)
+    if "operation_failures" in safe_result:
+        safe_operation_failures = _sanitize_normal_operation_failure_payloads(
+            safe_result.get("operation_failures")
+        )
+        if safe_operation_failures:
+            safe_result["operation_failures"] = safe_operation_failures
+        else:
+            safe_result.pop("operation_failures", None)
+    return safe_result
 
 
 def _now() -> str:
@@ -66,6 +99,10 @@ class ConsolidationQueueService:
 
     def __init__(self, max_history: int = 100):
         self._state_lock = asyncio.Lock()
+        # Serializes queue admission with Project Mesh source preparation.
+        # The lock is per-space so maintenance on one space never stalls the
+        # independent queue lane of another space.
+        self._admission_locks: dict[str, asyncio.Lock] = {}
         self._queues: dict[str, deque[str]] = defaultdict(deque)
         self._active_jobs: dict[str, str] = {}
         self._workers: dict[str, asyncio.Task] = {}
@@ -80,40 +117,57 @@ class ConsolidationQueueService:
         A manage/admin `agent=""` job is kept distinct because it can process
         all agents and should not silently collapse narrower semantics.
         """
-        async with self._state_lock:
-            if agent:
-                existing_id = self._find_pending_job(space_id, agent)
-                if existing_id:
-                    return self._job_payload(self._jobs[existing_id])
+        # Project Mesh source preparation takes the same per-space admission
+        # lock while it persists its durable intent and protocol state. Keeping
+        # the reservation check inside this lock closes the check-before-intent
+        # race: an enqueue either lands first and is observed by preparation, or
+        # waits and then sees PREPARING and fails closed.
+        async with self.space_admission_lock(space_id):
+            await assert_space_not_reserved(space_id)
+            async with self._state_lock:
+                if agent:
+                    existing_id = self._find_pending_job(space_id, agent)
+                    if existing_id:
+                        return self._job_payload(self._jobs[existing_id])
 
-            job_id = f"consol_{uuid.uuid4().hex}"
-            job = ConsolidationJob(
-                job_id=job_id,
-                space_id=space_id,
-                agent=agent,
-                requested_by=requested_by,
-                progress={
-                    "phase": "queued",
-                    "batch_size": get_settings().consolidation_batch_size,
-                    "notes_total": None,
-                    "notes_done": 0,
-                    "batches_total": None,
-                    "batches_done": 0,
-                    "current_batch": 0,
-                },
-            )
-            self._jobs[job_id] = job
+                job_id = f"consol_{uuid.uuid4().hex}"
+                job = ConsolidationJob(
+                    job_id=job_id,
+                    space_id=space_id,
+                    agent=agent,
+                    requested_by=requested_by,
+                    progress={
+                        "phase": "queued",
+                        "batch_size": get_settings().consolidation_batch_size,
+                        "notes_total": None,
+                        "notes_done": 0,
+                        "batches_total": None,
+                        "batches_done": 0,
+                        "current_batch": 0,
+                    },
+                )
+                self._jobs[job_id] = job
 
-            if space_id not in self._active_jobs:
-                job.status = "running"
-                job.started_at = _now()
-                self._active_jobs[space_id] = job_id
-            else:
-                self._queues[space_id].append(job_id)
+                if space_id not in self._active_jobs:
+                    job.status = "running"
+                    job.started_at = _now()
+                    self._active_jobs[space_id] = job_id
+                else:
+                    self._queues[space_id].append(job_id)
 
-            self._trim_history_locked()
-            self._ensure_worker_locked(space_id)
-            return self._job_payload(job)
+                self._trim_history_locked()
+                self._ensure_worker_locked(space_id)
+                return self._job_payload(job)
+
+    def space_admission_lock(self, space_id: str) -> asyncio.Lock:
+        """Return the queue/preparation admission lock for one space.
+
+        Callers may hold it across a quiesced transition only after confirming
+        the lane is idle. Queue workers do not take this lock: an already-running
+        worker is detected by the lane summary and must finish before preparation.
+        """
+
+        return self._admission_locks.setdefault(space_id, asyncio.Lock())
 
     async def get_job(self, job_id: str) -> dict:
         async with self._state_lock:
@@ -121,7 +175,7 @@ class ConsolidationQueueService:
             if not job:
                 return {
                     "status": "not_found",
-                    "message": f"Consolidation job '{job_id}' introuvable",
+                    "message": f"Consolidation job '{job_id}' not found",
                 }
             return self._job_payload(job)
 
@@ -158,6 +212,21 @@ class ConsolidationQueueService:
                 "service_config": {
                     "batch_size": get_settings().consolidation_batch_size,
                 },
+            }
+
+    async def get_space_readiness_summary(self, space_id: str) -> dict:
+        """Return the O(1), fixed-shape lane head used by Mesh readiness.
+
+        Readiness needs only whether admission is busy and a stable running id;
+        materializing queued job ids/payloads or historical jobs would make a
+        state-token read proportional to attacker-controlled queue history.
+        """
+
+        async with self._state_lock:
+            active_id = self._active_jobs.get(space_id)
+            return {
+                "running_job_id": active_id or "",
+                "queued_count": len(self._queues.get(space_id, ())),
             }
 
     def _find_pending_job(self, space_id: str, agent: str) -> str | None:
@@ -197,6 +266,8 @@ class ConsolidationQueueService:
                         enforce_cooldown=False,
                         progress_callback=progress_callback,
                     )
+                if type(result) is dict:
+                    result = _sanitize_failure_diagnostics_in_result(result)
                 async with self._state_lock:
                     job.result = result
                     job.progress.update(
@@ -230,6 +301,77 @@ class ConsolidationQueueService:
                     if job.status == "failed":
                         job.error = result.get("message", "Consolidation failed")
                     self._finish_active_locked(space_id, job.job_id)
+            except asyncio.CancelledError as cancelled:
+                # A consolidator can raise CancelledError as a job-level
+                # outcome. That must finish this job and let the lane advance;
+                # otherwise queued siblings are orphaned behind a dead worker.
+                # In contrast, cancellation delivered to this worker task is
+                # lifecycle control flow and must still propagate after cleanup.
+                worker_task = asyncio.current_task()
+                worker_is_cancelling = (
+                    worker_task is not None and worker_task.cancelling() > 0
+                )
+
+                # A queued job must never stay "running" after a compaction
+                # rollback may have been interrupted. The compactor attaches
+                # only safe filename/error diagnostics to this exception.
+                raw_failures = getattr(cancelled, "compaction_rollback_failures", ())
+                if type(raw_failures) in {tuple, list}:
+                    rollback_failures = [
+                        failure
+                        for failure in raw_failures
+                        if type(failure) is dict
+                        and type(failure.get("filename")) is str
+                        and type(failure.get("error")) is str
+                        and failure["error"].startswith("compaction_rollback_")
+                    ]
+                    compaction_failures = _sanitize_compaction_failure_payloads(
+                        rollback_failures
+                    )
+                else:
+                    compaction_failures = []
+                raw_preimage_id = getattr(cancelled, "compaction_preimage_id", None)
+                preimage_id = (
+                    raw_preimage_id
+                    if type(raw_preimage_id) is str
+                    and _COMPACTION_PREIMAGE_ID_RE.fullmatch(raw_preimage_id)
+                    else None
+                )
+                generic_message = (
+                    "Consolidation was cancelled; bank recovery may be "
+                    "incomplete. Check the server logs before retrying."
+                )
+                async with self._state_lock:
+                    job.status = "failed"
+                    job.error = generic_message
+                    job.result = {
+                        "status": "partial",
+                        "message": generic_message,
+                        "failure_reason": "consolidation_cancelled",
+                    }
+                    if compaction_failures:
+                        job.result["compaction_failures"] = compaction_failures
+                        job.result["recovery_required"] = True
+                    if preimage_id is not None:
+                        job.result["preimage_id"] = preimage_id
+                    job.progress.update({"phase": "failed"})
+                    job.finished_at = _now()
+                    self._finish_active_locked(space_id, job.job_id)
+                    if (
+                        worker_is_cancelling
+                        and worker_task is not None
+                        and self._workers.get(space_id) is worker_task
+                    ):
+                        # A worker-task cancellation must retain the caller's
+                        # signal, but it must not strand jobs which were
+                        # already accepted in this lane.  Replace the worker
+                        # before re-raising so the existing FIFO continues.
+                        self._workers.pop(space_id, None)
+                        if self._queues.get(space_id):
+                            self._ensure_worker_locked(space_id)
+                if worker_is_cancelling:
+                    raise
+                continue
             except Exception:
                 logger.exception("Consolidation job failed — job=%s", job.job_id)
                 # P12-1 (revue Codex PR #256) : ne JAMAIS persister str(e)
@@ -239,9 +381,8 @@ class ConsolidationQueueService:
                 # générique + raison stable ; le détail reste dans les
                 # journaux serveur (logger.exception ci-dessus).
                 generic_message = (
-                    "La consolidation a échoué de manière inattendue avant "
-                    "de produire un résultat ; consultez les journaux "
-                    "serveur pour le détail."
+                    "Consolidation failed unexpectedly before producing a "
+                    "result; check the server logs for details."
                 )
                 async with self._state_lock:
                     job.status = "failed"

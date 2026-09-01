@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from live_mem.core import consolidator as consolidator_module
 from live_mem.core.consolidation_queue import (
     ConsolidationQueueService,
     QUEUE_GUARANTEE,
@@ -102,7 +104,15 @@ class FakeConsolidator:
         return self.consolidate_result
 
     async def compact_bank(self, space_id, dry_run=True) -> dict:
-        self.compact_calls.append({"space_id": space_id, "dry_run": dry_run})
+        self.compact_calls.append(
+            {
+                "space_id": space_id,
+                "dry_run": dry_run,
+                "direct_local_sink": consolidator_module._bound_direct_local_compaction_sink(
+                    space_id
+                ),
+            }
+        )
         return self.compact_result
 
 
@@ -186,6 +196,74 @@ async def test_mid_engine_consolidate_default_enforce_cooldown_true() -> None:
 
     assert fake.consolidate_calls[0]["enforce_cooldown"] is True
     assert fake.consolidate_calls[0]["agent"] == ""
+
+
+@pytest.mark.asyncio
+async def test_mid_engine_consolidate_never_binds_a_stale_manual_authority() -> None:
+    """Only manual compact_bank may consume the one-route capability.
+
+    A registry-built engine can be retained while a space moves to STAGED or
+    REFUSE.  ``consolidate`` must leave the old DirectLocal proof unbound so
+    the real service re-resolves the lifecycle route at execution time.
+    """
+
+    class ContextRecordingConsolidator:
+        def __init__(self) -> None:
+            self.bound_sink: DirectLocalWriteSink | None = None
+
+        async def consolidate(self, space_id, **_kwargs) -> dict:
+            self.bound_sink = consolidator_module._bound_direct_local_compaction_sink(
+                space_id
+            )
+            return {"status": "ok"}
+
+    storage = WriteSinkFakeStorage()
+    sink = DirectLocalWriteSink(storage)
+    fake = ContextRecordingConsolidator()
+    engine = MidEngine(
+        consolidator=fake,
+        queue=FakeQueue(),
+        write_sink=sink,
+        direct_local_compaction_authority=(
+            consolidator_module._issue_direct_local_compaction_authority(
+                "space-a", sink
+            )
+        ),
+    )
+
+    result = await engine.consolidate("space-a", enforce_cooldown=False)
+
+    assert result == {"status": "ok"}
+    assert fake.bound_sink is None
+
+
+@pytest.mark.asyncio
+async def test_manual_compaction_authority_cannot_escape_to_a_child_task() -> None:
+    """A child task must not retain a tool route proof after the tool exits."""
+
+    storage = WriteSinkFakeStorage()
+    sink = DirectLocalWriteSink(storage)
+    authority = consolidator_module._issue_direct_local_compaction_authority(
+        "space-a", sink
+    )
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+
+    async def child() -> DirectLocalWriteSink | None:
+        child_started.set()
+        await release_child.wait()
+        return consolidator_module._bound_direct_local_compaction_sink("space-a")
+
+    with consolidator_module._direct_local_compaction_authority(authority):
+        task = asyncio.create_task(child())
+        await child_started.wait()
+        assert (
+            consolidator_module._bound_direct_local_compaction_sink("space-a")
+            is sink
+        )
+
+    release_child.set()
+    assert await task is None
 
 
 @pytest.mark.asyncio
@@ -286,7 +364,9 @@ async def test_mid_engine_compact_bank_delegates() -> None:
     result = await engine.compact_bank("space-a", dry_run=True)
 
     assert result is fake.compact_result
-    assert fake.compact_calls == [{"space_id": "space-a", "dry_run": True}]
+    assert fake.compact_calls == [
+        {"space_id": "space-a", "dry_run": True, "direct_local_sink": None}
+    ]
 
 
 @pytest.mark.asyncio
@@ -297,6 +377,71 @@ async def test_mid_engine_compact_bank_default_dry_run_true() -> None:
     await engine.compact_bank("space-a")
 
     assert fake.compact_calls[0]["dry_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_mid_engine_compact_bank_forwards_its_resolved_sink_on_apply() -> None:
+    fake = FakeConsolidator()
+    storage = WriteSinkFakeStorage()
+    sink = DirectLocalWriteSink(storage)
+    engine = MidEngine(
+        consolidator=fake,
+        queue=FakeQueue(),
+        write_sink=sink,
+        direct_local_compaction_authority=(
+            consolidator_module._issue_direct_local_compaction_authority(
+                "space-a", sink
+            )
+        ),
+    )
+
+    with engine._tool_compaction_authority("space-a"):
+        result = await engine.compact_bank("space-a", dry_run=False)
+
+    assert result is fake.compact_result
+    assert fake.compact_calls == [
+        {"space_id": "space-a", "dry_run": False, "direct_local_sink": sink}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mid_engine_compact_bank_does_not_reuse_a_retained_authority() -> None:
+    """A public call on a retained engine must make the service re-resolve."""
+
+    fake = FakeConsolidator()
+    sink = DirectLocalWriteSink(WriteSinkFakeStorage())
+    engine = MidEngine(
+        consolidator=fake,
+        queue=FakeQueue(),
+        write_sink=sink,
+        direct_local_compaction_authority=(
+            consolidator_module._issue_direct_local_compaction_authority(
+                "space-a", sink
+            )
+        ),
+    )
+
+    result = await engine.compact_bank("space-a", dry_run=False)
+
+    assert result is fake.compact_result
+    assert fake.compact_calls == [
+        {"space_id": "space-a", "dry_run": False, "direct_local_sink": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mid_engine_bare_direct_sink_is_not_route_authority() -> None:
+    """Only EngineRegistry may grant the context proof consumed by apply."""
+
+    fake = FakeConsolidator()
+    sink = DirectLocalWriteSink(WriteSinkFakeStorage())
+    engine = MidEngine(consolidator=fake, queue=FakeQueue(), write_sink=sink)
+
+    await engine.compact_bank("space-a", dry_run=False)
+
+    assert fake.compact_calls == [
+        {"space_id": "space-a", "dry_run": False, "direct_local_sink": None}
+    ]
 
 
 # =============================================================================
@@ -438,8 +583,9 @@ async def test_mid_engine_queue_semantics_unchanged() -> None:
 def test_mid_engine_documents_writesink_mutation_call_sites() -> None:
     """Executable enumeration: MidEngine documents the FULL eventual WriteSink
     mutation set (consolidator + bank-tool branches), anchored on SEMANTIC
-    descriptions so #8/#9 inherit the authoritative list. Line numbers are
-    hints; we assert membership semantically, not on raw integers."""
+    descriptions so #8/#9 inherit the authoritative list. The normal
+    consolidation source anchors are checked separately below; this test keeps
+    the primary inventory assertions semantic."""
     sites = WRITE_SINK_MUTATION_CALL_SITES
     assert len(sites) >= 10
 
@@ -453,25 +599,60 @@ def test_mid_engine_documents_writesink_mutation_call_sites() -> None:
 
     # ---- CONSOLIDATOR branch coverage (semantic, not line-pinned) -----------
     consolidator_sites = [s for s in sites if s["branch"] == "consolidator"]
-    descs = " | ".join(s["description"].lower() for s in consolidator_sites)
-    keys = " | ".join(s["key_pattern"] for s in consolidator_sites)
     methods = {s["method"] for s in consolidator_sites}
 
-    # bank/* PUT (create/replace/merge) in _write_results
-    assert "{space_id}/bank/{filename}" in keys
-    # _synthesis.md PUT
-    assert any("_synthesis.md" in s["key_pattern"] for s in consolidator_sites)
-    # _meta.json put_json (both _write_results AND consolidate epilogue)
+    normal_apply = "ConsolidatorService._apply_prepared_normal_batch"
+    consolidate = "ConsolidatorService.consolidate"
+
+    # ``_write_results`` remains callable for compatibility, but only delegates
+    # validation/application and must never be presented as a durable sink.
+    assert callable(getattr(ConsolidatorService, "_write_results"))
+    assert "ConsolidatorService._write_results" not in methods
+
+    # The single prepared-batch bank PUT covers all create/edit/rewrite candidates.
+    prepared_bank_puts = [
+        s
+        for s in consolidator_sites
+        if s["method"] == normal_apply
+        and s["op"] == "put"
+        and s["key_pattern"] == "{space_id}/bank/{filename}"
+    ]
+    assert len(prepared_bank_puts) == 1
+    assert "create, edit, or rewrite" in prepared_bank_puts[0]["description"].lower()
+    # _synthesis.md PUT is part of that same prepared batch.
+    synthesis_puts = [
+        s for s in consolidator_sites if s["key_pattern"].endswith("_synthesis.md")
+    ]
+    assert {(s["method"], s["op"]) for s in synthesis_puts} == {(normal_apply, "put")}
+    # _meta.json has the direct/private application path and the run-level path.
     meta_json = [s for s in consolidator_sites if s["key_pattern"].endswith("_meta.json")]
-    assert {s["method"] for s in meta_json} == {
-        "ConsolidatorService._write_results",
-        "ConsolidatorService.consolidate",
+    assert {(s["method"], s["op"]) for s in meta_json} == {
+        (normal_apply, "put_json"),
+        (consolidate, "put_json"),
     }
-    assert all(s["op"] == "put_json" for s in meta_json)
-    # unicode-dup delete + notes delete_many (notes deleted LAST for atomicity)
-    assert "unicode" in descs
-    assert any(s["op"] == "delete_many" for s in consolidator_sites)
-    assert "atomicity" in descs
+    assert any("private direct-application" in s["description"].lower() for s in meta_json)
+    assert any("run-level" in s["description"].lower() for s in meta_json)
+    # Unicode cleanup is a prepared-batch mutation after bank write readback.
+    unicode_deletes = [
+        s
+        for s in consolidator_sites
+        if s["op"] == "delete" and "unicode" in s["description"].lower()
+    ]
+    assert {s["method"] for s in unicode_deletes} == {normal_apply}
+    assert "readback" in unicode_deletes[0]["description"].lower()
+    # Direct callers retain their compatible finalization; normal consolidate()
+    # defers its one delete_many until after the run-level metadata readback.
+    note_deletes = [
+        s
+        for s in consolidator_sites
+        if s["op"] == "delete_many" and "consumed notes" in s["key_pattern"]
+    ]
+    assert {s["method"] for s in note_deletes} == {normal_apply, consolidate}
+    direct_note_delete = next(s for s in note_deletes if s["method"] == normal_apply)
+    deferred_note_delete = next(s for s in note_deletes if s["method"] == consolidate)
+    assert "defer_note_finalization" in direct_note_delete["description"]
+    assert "deferred" in deferred_note_delete["description"].lower()
+    assert "metadata write/readback" in deferred_note_delete["description"].lower()
     # compact_bank bank PUT
     assert "ConsolidatorService.compact_bank" in methods
 
@@ -494,3 +675,44 @@ def test_mid_engine_documents_writesink_mutation_call_sites() -> None:
     ).lower()
     assert "graph_push" not in all_text
     assert "long_" not in all_text
+
+
+def test_mid_engine_normal_writesink_line_hints_resolve_to_live_mutations() -> None:
+    """Pin the normal-consolidation source anchors to their real storage calls.
+
+    These seven inventory entries are used as precise handoff pointers for the
+    normal batch's durable-write ordering.  A source delta must therefore
+    update the corresponding ``line_hint`` rather than silently leaving the
+    inventory stale.
+    """
+    source_lines = Path(consolidator_module.__file__).read_text(
+        encoding="utf-8"
+    ).splitlines()
+    normal_apply = "ConsolidatorService._apply_prepared_normal_batch"
+    consolidate = "ConsolidatorService.consolidate"
+    expected_calls = {
+        (normal_apply, "delete", "{space_id}/bank/<unicode-dup>"):
+            "await storage.delete(raw_key)",
+        (normal_apply, "put", "{space_id}/bank/{filename}"):
+            'await storage.put(f"{space_id}/bank/{write.filename}", write.content)',
+        (normal_apply, "put", "{space_id}/_synthesis.md"):
+            'await storage.put(f"{space_id}/_synthesis.md", synthesis_md)',
+        (normal_apply, "put_json", "{space_id}/_meta.json"):
+            'await storage.put_json(f"{space_id}/_meta.json", meta)',
+        (normal_apply, "delete_many", "{space_id}/live/* (consumed notes)"):
+            "notes_deleted = await storage.delete_many(notes_keys)",
+        (consolidate, "put_json", "{space_id}/_meta.json"):
+            'await storage.put_json(f"{space_id}/_meta.json", meta)',
+        (consolidate, "delete_many", "{space_id}/live/* (consumed notes)"):
+            "notes_deleted = await storage.delete_many(pending_note_keys)",
+    }
+    sites_by_identity = {
+        (site["method"], site["op"], site["key_pattern"]): site
+        for site in WRITE_SINK_MUTATION_CALL_SITES
+        if site["branch"] == "consolidator"
+    }
+
+    assert expected_calls.keys() <= sites_by_identity.keys()
+    for identity, expected_call in expected_calls.items():
+        line_hint = sites_by_identity[identity]["line_hint"]
+        assert source_lines[line_hint - 1].strip() == expected_call

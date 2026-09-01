@@ -635,12 +635,13 @@ testing this repository locally does not imply that authorization, and route
 availability alone is not certification evidence. Checking out or exporting
 this revision creates no new `certified` manifest or paid call.
 
-## v1.4.0 release preparation boundary
+## v1.4.1 release preparation boundary
 
-The runtime identity is now `1.4.0` for the separately assembled private RC
+The runtime identity is now `1.4.1` for the separately assembled private RC
 candidate. That identity does not create a Git tag, public image, deployment,
 GitHub Release, or provider call. The immutable private candidate suffix stays
-only in `rc-v1.4.0-rc1`; it is not part of the runtime or package version.
+only in `rc-v1.4.1-rcN`, where `N >= 1`; it is not part of the runtime or
+package version.
 
 A later release-cut decision must start from one exact final source SHA and
 recheck all of the following:
@@ -650,7 +651,7 @@ recheck all of the following:
    on that SHA;
 2. Cloud Temple has a passing minimal manifest with
    `profile_status=live-verified` on that same SHA; Gemini is deliberately not
-   a v1.4.0 live-verification or release prerequisite and remains `compatible`;
+   a v1.4.1 live-verification or release prerequisite and remains `compatible`;
 3. the Cloud Temple live manifest retains exact request inventory, zero retry,
    price-schedule, cost ceiling, redaction, model identity, and dimension
    validity, while deterministic CI remains green for complete Hivemind;
@@ -661,7 +662,7 @@ recheck all of the following:
 
 Cloud Temple live verification, a private-image dispatch, and the digest-pinned
 smoke each require their own explicit human GO on the frozen final SHA. Gemini
-is deliberately not a v1.4.0 live-verification or release prerequisite; its
+is deliberately not a v1.4.1 live-verification or release prerequisite; its
 profile remains `compatible` and a later qualification needs a new source SHA
 and its own authorization. Reusing or replacing an existing tag is never an
 execution step.

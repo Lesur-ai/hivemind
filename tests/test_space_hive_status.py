@@ -264,13 +264,37 @@ async def test_non_hivemind_info_local_only_and_golden(patched_storage, stub_con
     assert complement == expected
 
 
+async def test_space_info_normalizes_missing_informational_size(
+    patched_storage,
+    stub_consolidation_queue,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _seed_meta(patched_storage)
+    original_list_objects = patched_storage.list_objects
+
+    async def list_without_bank_size(prefix: str, max_keys: int = 0) -> list[dict]:
+        objects = await original_list_objects(prefix, max_keys=max_keys)
+        for obj in objects:
+            if obj["Key"] == f"{SPACE}/bank/activeContext.md":
+                obj.pop("Size")
+        return objects
+
+    monkeypatch.setattr(patched_storage, "list_objects", list_without_bank_size)
+
+    result = await space_module.SpaceService().get_info(SPACE)
+
+    assert result["status"] == "ok"
+    assert result["bank"]["files_count"] == 1
+    assert result["bank"]["total_size"] == 0
+
+
 async def test_not_found_early_return_shape_unchanged(patched_storage):
-    # Verrou de la décision « champ uniquement sur le chemin succès » : le
-    # not_found garde EXACTEMENT sa forme 2-clés, sans hive_status_label.
+    # Lock the decision that the field exists only on the success path:
+    # not_found keeps its exact two-key shape without hive_status_label.
     resp = await space_module.SpaceService().get_summary("does-not-exist")
     assert resp == {
         "status": "not_found",
-        "message": "Espace 'does-not-exist' introuvable",
+        "message": "Space 'does-not-exist' not found",
     }
     assert "hive_status_label" not in resp
 

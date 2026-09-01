@@ -9,6 +9,8 @@ substitution cannot pass the delete precondition.
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -26,6 +28,29 @@ from live_mem.core.locks import get_lock_manager
 from live_mem.core.write_sink import DirectLocalWriteSink, StagedWriteNotImplemented
 from tests.test_engine_registry import _seed_healthy_hive
 from tests.test_write_sink import WriteSinkFakeStorage
+
+
+@pytest.fixture(autouse=True)
+def _route_pipeline_doubles_to_their_injected_storage(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Keep isolated consolidator tests explicit about their DirectLocal route.
+
+    The real service now resolves a route before its first input/provider
+    effect (#394).  Most tests in this module deliberately construct partial
+    consolidators and patch only ``consolidator.get_storage``; this tiny dynamic
+    registry maps that already-injected fake to a DirectLocal proof. Route
+    tests call ``_bind_runtime`` later in their body and intentionally replace
+    this default with the real injected EngineRegistry.
+    """
+
+    from live_mem.core import engines
+
+    class DirectRegistry:
+        async def resolve_sink(self, _space_id: str) -> DirectLocalWriteSink:
+            return DirectLocalWriteSink(consolidator_module.get_storage())
+
+    monkeypatch.setattr(engines, "get_engine_registry", lambda: DirectRegistry())
 
 
 class GCStorage(WriteSinkFakeStorage):
@@ -47,11 +72,14 @@ class GCStorage(WriteSinkFakeStorage):
             prefixes.add(f"{prefix}{first}/")
         return sorted(prefixes)
 
-    async def list_and_get(self, prefix: str) -> list[dict[str, str]]:
+    async def list_and_get(
+        self, prefix: str, exclude_keep: bool = True
+    ) -> list[dict[str, str]]:
         return [
             {"key": key, "content": self.objects[key]}
             for key in sorted(self.objects)
             if key.startswith(prefix)
+            and (not exclude_keep or not key.endswith(".keep"))
         ]
 
     async def delete(self, key: str) -> None:
@@ -93,6 +121,31 @@ def _seed_space(storage: GCStorage, space_id: str, *note_keys: str) -> None:
     storage.objects[f"{space_id}/_rules.md"] = "# Rules"
     for key in note_keys:
         storage.objects[key] = f"note:{key}"
+
+
+def _normal_success_output(
+    filename: str = "facts.md",
+    *,
+    synthesis: str = "Integrated safely.",
+) -> dict[str, Any]:
+    """Return the smallest strict normal-consolidation success plan.
+
+    An empty ``file_edits`` list is now intentionally rejected: a successful
+    fixture must exercise the same non-empty, fully specified output contract
+    as a production normal batch.
+    """
+
+    return {
+        "file_edits": [
+            {
+                "filename": filename,
+                "action": "create",
+                "content": "# Facts\n\nIntegrated fact.\n",
+                "reason": "The note requires a durable fact.",
+            }
+        ],
+        "synthesis": synthesis,
+    }
 
 
 async def _seed_route(storage: GCStorage, space_id: str, route: str) -> None:
@@ -202,6 +255,32 @@ def test_eligible_set_token_is_stable_scoped_and_opaque() -> None:
     assert token.startswith("gc-set-v1:")
     assert len(token) == len("gc-set-v1:") + 64
     assert all(key not in token for key in keys)
+
+
+async def test_gc_scan_normalizes_missing_informational_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "local-missing-size"
+    old_key = _old_key(sid, "missing-size")
+    _seed_space(storage, sid, old_key)
+    _bind_runtime(monkeypatch, storage)
+    original_list_objects = storage.list_objects
+
+    async def list_without_note_size(prefix: str, max_keys: int = 0) -> list[dict]:
+        objects = await original_list_objects(prefix, max_keys=max_keys)
+        for obj in objects:
+            if obj["Key"] == old_key:
+                obj.pop("Size")
+        return objects
+
+    monkeypatch.setattr(storage, "list_objects", list_without_note_size)
+
+    result = await gc_module.GCService().scan_old_notes(sid, 7)
+
+    assert result["spaces"][sid]["old_notes"] == 1
+    assert result["spaces"][sid]["old_notes_size"] == 0
+    assert result["total_old_size"] == 0
 
 
 async def test_empty_consolidation_keeps_the_full_count_contract(
@@ -505,6 +584,40 @@ class _RecordingConsolidator:
         }
 
 
+class _CompactionRefusalConsolidator(_RecordingConsolidator):
+    """A safe prepare refusal as seen by the GC integration seam."""
+
+    async def consolidate(self, space_id: str, **kwargs: Any) -> dict:
+        self.calls.append({"space_id": space_id, **kwargs})
+        return {
+            "status": "error",
+            "reason": "consolidation_failed",
+            "failure_reason": "compaction_prepare_failed",
+            "notes_processed": 0,
+            "notes_deleted": 0,
+            "notes_delete_failed": 0,
+            "notes_remaining": len(kwargs.get("note_keys", [])),
+            "bank_files_created": 0,
+            "bank_files_updated": 0,
+            "compaction_failures": [
+                {
+                    "filename": "facts.md",
+                    "error": "ambiguous_or_missing_compaction_target",
+                    "operation_index": 1,
+                    "target_resolution": "missing",
+                    "target_match_count": 0,
+                    "target_heading_sha256": hashlib.sha256(
+                        b"## GC_COMPLETION_HEADING_SECRET"
+                    ).hexdigest(),
+                    "heading": "## GC_COMPLETION_HEADING_SECRET",
+                    "reason": "GC_COMPLETION_REASON_SECRET",
+                }
+            ],
+            "remediation": "Correct facts.md with bank_write, then retry.",
+            "message": "No durable write occurred.",
+        }
+
+
 async def test_gc_consolidation_passes_an_exact_allowlist_excluding_fresh_notes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -537,6 +650,44 @@ async def test_gc_consolidation_passes_an_exact_allowlist_excluding_fresh_notes(
     assert "notes_deleted" not in detail
     assert "notes_delete_failed" not in detail
     assert "notes_remaining" not in detail
+
+
+async def test_gc_surfaces_safe_compaction_prepare_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unattended GC result must retain actionable safe refusal details."""
+
+    storage = GCStorage()
+    sid = "local-compaction-refusal"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    _bind_runtime(monkeypatch, storage)
+    refusal = _CompactionRefusalConsolidator()
+    monkeypatch.setattr(consolidator_module, "get_consolidator", lambda: refusal)
+
+    result = await gc_module.GCService().consolidate_old_notes(sid, 7)
+
+    assert result["status"] == "partial"
+    assert result["consolidated"] == 0
+    detail = result["consolidation_details"][sid]["alice"]
+    assert detail["reason"] == "consolidation_failed"
+    assert detail["failure_reason"] == "compaction_prepare_failed"
+    assert detail["compaction_failures"] == [
+        {
+            "filename": "facts.md",
+            "error": "ambiguous_or_missing_compaction_target",
+            "operation_index": 1,
+            "target_resolution": "missing",
+            "target_match_count": 0,
+            "target_heading_sha256": hashlib.sha256(
+                b"## GC_COMPLETION_HEADING_SECRET"
+            ).hexdigest(),
+        }
+    ]
+    assert "GC_COMPLETION_HEADING_SECRET" not in json.dumps(detail)
+    assert "GC_COMPLETION_REASON_SECRET" not in json.dumps(detail)
+    assert detail["remediation"] == "Correct facts.md with bank_write, then retry."
+    assert old in storage.objects
 
 
 async def test_gc_disables_per_space_cooldown_for_every_agent(
@@ -583,7 +734,11 @@ async def test_gc_keeps_underscore_agent_identity_intact(
     assert result["status"] == "ok"
     assert [call["agent"] for call in recorder.calls] == ["foo_bar"]
     notice_key = next(key for key in recorder.calls[0]["note_keys"] if key != old)
-    assert 'agent: "foo_bar"' in storage.objects[notice_key]
+    notice = storage.objects[notice_key]
+    assert 'agent: "foo_bar"' in notice
+    assert "GARBAGE COLLECTOR — Forced consolidation" in notice
+    assert "The Garbage Collector detected 1 orphaned notes" in notice
+    assert "Consolidation forcée" not in notice
 
 
 async def test_gc_rechecks_route_before_each_agent_notice(
@@ -1007,7 +1162,7 @@ async def test_consolidator_write_results_reports_partial_live_note_cleanup(
 
     result = await service._write_results(
         space_id=sid,
-        llm_output={"file_edits": [], "synthesis": "Integrated safely."},
+        llm_output=_normal_success_output(),
         bank_files=[],
         notes_keys=[first, second],
         notes_count=2,
@@ -1054,8 +1209,8 @@ async def test_consolidator_keeps_all_sources_when_a_bank_edit_is_invalid(
         skip_meta=True,
     )
 
-    assert result["status"] == "partial"
-    assert result["reason"] == "partial_consolidation"
+    assert result["status"] == "error"
+    assert result["reason"] == "invalid_consolidation_batch"
     assert result["operations_failed"] == 1
     assert result["notes_processed"] == 0
     assert result["notes_deleted"] == 0
@@ -1090,7 +1245,7 @@ async def test_consolidator_does_not_read_storage_after_live_note_delete(
 
     result = await service._write_results(
         space_id=sid,
-        llm_output={"file_edits": [], "synthesis": "Integrated safely."},
+        llm_output=_normal_success_output(),
         bank_files=[],
         notes_keys=[old],
         notes_count=1,
@@ -1122,17 +1277,18 @@ async def test_consolidator_bank_count_failure_happens_before_live_note_delete(
     monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
     service = object.__new__(ConsolidatorService)
 
-    with pytest.raises(RuntimeError, match="bank count failure"):
-        await service._write_results(
-            space_id=sid,
-            llm_output={"file_edits": [], "synthesis": "Integrated safely."},
-            bank_files=[],
-            notes_keys=[old],
-            notes_count=1,
-            usage={},
-            skip_meta=True,
-        )
+    result = await service._write_results(
+        space_id=sid,
+        llm_output=_normal_success_output(),
+        bank_files=[],
+        notes_keys=[old],
+        notes_count=1,
+        usage={},
+        skip_meta=True,
+    )
 
+    assert result["status"] == "partial"
+    assert result["operations_failed"] == 1
     assert old in storage.objects
 
 
@@ -1168,18 +1324,15 @@ async def test_consolidator_pipeline_never_reports_ok_after_an_incomplete_batch(
     service._build_prompt = lambda **_kwargs: []
     service._call_llm = AsyncMock(
         side_effect=[
-            {"status": "ok", "data": {}, "usage": {}},
+            {
+                "status": "ok",
+                "data": _normal_success_output(),
+                "usage": {},
+            },
             {"status": "error", "message": "injected second-batch failure"},
         ]
     )
-    service._write_results = AsyncMock(
-        return_value={
-            "status": "ok",
-            "notes_processed": 1,
-            "notes_deleted": 1,
-            "notes_delete_failed": 0,
-        }
-    )
+    service._write_results = AsyncMock(side_effect=_deferred_batch_write_result)
 
     result = await service.consolidate(sid, enforce_cooldown=False)
 
@@ -1188,29 +1341,32 @@ async def test_consolidator_pipeline_never_reports_ok_after_an_incomplete_batch(
     assert result["batches_total"] == 2
     assert result["batches_completed"] == 1
     assert result["notes_processed"] == 1
+    # A failed later batch still finalizes the verified first batch.  Its
+    # source is safe to remove only after the subset metadata readback.
+    assert result["notes_deleted"] == 1
     assert result["notes_remaining"] == 1
+    assert first not in storage.objects
+    assert second in storage.objects
+    metadata = await storage.get_json(f"{sid}/_meta.json")
+    assert metadata["consolidation_count"] == 1
+    assert metadata["total_notes_processed"] == 1
 
 
-async def test_consolidator_preserves_first_batch_counts_when_refresh_fails(
+async def test_consolidator_finalizes_verified_first_batch_when_refresh_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from live_mem.core import consolidator as consolidator_module
 
-    class RefreshFailsAfterDeleteStorage(GCStorage):
-        delete_completed = False
-
-        async def delete_many(self, keys: list[str]) -> int:
-            deleted = await super().delete_many(keys)
-            self.delete_completed = True
-            return deleted
-
-        async def list_and_get(self, prefix: str) -> list[dict[str, str]]:
-            if self.delete_completed and prefix.endswith("/bank/"):
+    class RefreshFailsBeforeRunFinalizationStorage(GCStorage):
+        async def list_and_get(
+            self, prefix: str, exclude_keep: bool = True
+        ) -> list[dict[str, str]]:
+            if prefix.endswith("/bank/"):
                 raise RuntimeError("injected next-batch refresh failure")
-            return await super().list_and_get(prefix)
+            return await super().list_and_get(prefix, exclude_keep=exclude_keep)
 
-    storage = RefreshFailsAfterDeleteStorage()
-    sid = "consolidator-refresh-after-first-delete"
+    storage = RefreshFailsBeforeRunFinalizationStorage()
+    sid = "consolidator-refresh-before-finalization"
     first = _old_key(sid, "first")
     second = _old_key(sid, "second")
     _seed_space(storage, sid, first, second)
@@ -1235,7 +1391,11 @@ async def test_consolidator_preserves_first_batch_counts_when_refresh_fails(
     service._compact_bank_if_needed = AsyncMock(return_value={"compacted": False})
     service._build_prompt = lambda **_kwargs: []
     service._call_llm = AsyncMock(
-        return_value={"status": "ok", "data": {}, "usage": {}}
+        return_value={
+            "status": "ok",
+            "data": _normal_success_output(),
+            "usage": {},
+        }
     )
 
     result = await service.consolidate(sid, enforce_cooldown=False)
@@ -1248,28 +1408,24 @@ async def test_consolidator_preserves_first_batch_counts_when_refresh_fails(
     assert result["notes_remaining"] == 1
     assert first not in storage.objects
     assert second in storage.objects
+    metadata = await storage.get_json(f"{sid}/_meta.json")
+    assert metadata["consolidation_count"] == 1
+    assert metadata["total_notes_processed"] == 1
 
 
-async def test_consolidator_preserves_delete_counts_when_metadata_update_fails(
+async def test_consolidator_keeps_sources_when_metadata_update_fails_before_delete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from live_mem.core import consolidator as consolidator_module
 
-    class MetaFailsAfterDeleteStorage(GCStorage):
-        delete_completed = False
-
-        async def delete_many(self, keys: list[str]) -> int:
-            deleted = await super().delete_many(keys)
-            self.delete_completed = True
-            return deleted
-
+    class MetaFailsBeforeDeleteStorage(GCStorage):
         async def put_json(self, key: str, data: dict) -> None:
-            if self.delete_completed and key.endswith("/_meta.json"):
-                raise RuntimeError("injected post-delete metadata failure")
+            if key.endswith("/_meta.json"):
+                raise RuntimeError("injected pre-delete metadata failure")
             await super().put_json(key, data)
 
-    storage = MetaFailsAfterDeleteStorage()
-    sid = "consolidator-metadata-after-delete"
+    storage = MetaFailsBeforeDeleteStorage()
+    sid = "consolidator-metadata-before-delete"
     old = _old_key(sid, "old")
     _seed_space(storage, sid, old)
     monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
@@ -1290,7 +1446,11 @@ async def test_consolidator_preserves_delete_counts_when_metadata_update_fails(
     service._compact_bank_if_needed = AsyncMock(return_value={"compacted": False})
     service._build_prompt = lambda **_kwargs: []
     service._call_llm = AsyncMock(
-        return_value={"status": "ok", "data": {}, "usage": {}}
+        return_value={
+            "status": "ok",
+            "data": _normal_success_output(),
+            "usage": {},
+        }
     )
 
     result = await service.consolidate(sid, enforce_cooldown=False)
@@ -1299,10 +1459,9 @@ async def test_consolidator_preserves_delete_counts_when_metadata_update_fails(
     assert result["reason"] == "partial_consolidation"
     assert result["metadata_update_failed"] is True
     assert result["notes_processed"] == 1
-    assert result["notes_deleted"] == 1
-    assert result["notes_remaining"] == 0
-    assert "Aucune note source ne reste" in result["message"]
-    assert old not in storage.objects
+    assert result["notes_deleted"] == 0
+    assert result["notes_remaining"] == 1
+    assert old in storage.objects
 
 
 async def test_consolidator_pipeline_counts_live_notes_left_after_partial_delete(
@@ -1336,17 +1495,13 @@ async def test_consolidator_pipeline_counts_live_notes_left_after_partial_delete
     service._compact_bank_if_needed = AsyncMock(return_value={"compacted": False})
     service._build_prompt = lambda **_kwargs: []
     service._call_llm = AsyncMock(
-        return_value={"status": "ok", "data": {}, "usage": {}}
-    )
-    service._write_results = AsyncMock(
         return_value={
-            "status": "partial",
-            "reason": "partial_delete",
-            "notes_processed": 2,
-            "notes_deleted": 1,
-            "notes_delete_failed": 1,
+            "status": "ok",
+            "data": _normal_success_output(),
+            "usage": {},
         }
     )
+    storage.fail_delete.add(second)
 
     result = await service.consolidate(sid, enforce_cooldown=False)
 
@@ -1392,16 +1547,13 @@ async def test_only_exact_gc_selection_treats_max_notes_truncation_as_partial(
     service._compact_bank_if_needed = AsyncMock(return_value={"compacted": False})
     service._build_prompt = lambda **_kwargs: []
     service._call_llm = AsyncMock(
-        return_value={"status": "ok", "data": {}, "usage": {}}
-    )
-    service._write_results = AsyncMock(
         return_value={
             "status": "ok",
-            "notes_processed": 1,
-            "notes_deleted": 1,
-            "notes_delete_failed": 0,
+            "data": _normal_success_output(),
+            "usage": {},
         }
     )
+    service._write_results = AsyncMock(side_effect=_deferred_batch_write_result)
 
     result = await service.consolidate(
         sid,
@@ -1418,6 +1570,32 @@ async def test_only_exact_gc_selection_treats_max_notes_truncation_as_partial(
 # ─────────────────────────────────────────────────────────────
 # P12-1 — Honest structured consolidation outcomes
 # ─────────────────────────────────────────────────────────────
+
+
+async def _deferred_batch_write_result(*_args, **kwargs) -> dict:
+    """Faithful ``consolidate()`` writer double for run-level finalization.
+
+    Normal batches persist and verify bank/synthesis independently, then defer
+    metadata and one consolidated ``delete_many`` to the run-level finalizer.
+    If a later batch fails, that finalizer still handles the verified prefix.
+    Tests stubbing the writer must return the private proof token that the
+    orchestrator checks before it can finalize sources.
+    """
+
+    notes_keys = kwargs["notes_keys"]
+    notes_count = kwargs["notes_count"]
+    return {
+        "status": "ok",
+        "notes_processed": notes_count,
+        "notes_deleted": 0,
+        "notes_delete_failed": 0,
+        "bank_files_created": 0,
+        "bank_files_updated": 0,
+        "bank_files_total": 0,
+        "operations_applied": 0,
+        "operations_failed": 0,
+        "_deferred_note_keys": tuple(notes_keys),
+    }
 
 
 def _pipeline_service(
@@ -1448,16 +1626,13 @@ def _pipeline_service(
     service._compact_bank_if_needed = AsyncMock(return_value={"compacted": False})
     service._build_prompt = lambda **_kwargs: []
     service._call_llm = AsyncMock(
-        return_value={"status": "ok", "data": {}, "usage": {}}
-    )
-    service._write_results = AsyncMock(
         return_value={
             "status": "ok",
-            "notes_processed": 1,
-            "notes_deleted": 1,
-            "notes_delete_failed": 0,
+            "data": _normal_success_output(),
+            "usage": {},
         }
     )
+    service._write_results = AsyncMock(side_effect=_deferred_batch_write_result)
     return service
 
 
@@ -1526,10 +1701,9 @@ async def test_unrepairable_completion_is_terminal_and_classified_by_batch_posit
 
     P13-1C deleted the automatic corrective prompt turn (ADR-0027 §Retry: a
     malformed response is never replayed, and "the adapter never does so
-    silently"), so an unrepairable completion is terminal for its batch after
-    the network-free ``_repair_json`` rescue.  The sibling tests above inject at
-    the ``_call_llm`` seam, which sits ABOVE the malformed path and therefore
-    cannot see either property this pins:
+    silently"), so an unusable direct completion is terminal for its batch.
+    The sibling tests above inject at the ``_call_llm`` seam, which sits ABOVE
+    the malformed path and therefore cannot see either property this pins:
 
     - exactly ONE paid application request per batch — the whole point of
       removing the turn was that a batch could otherwise reach four upstream
@@ -1564,9 +1738,9 @@ async def test_unrepairable_completion_is_terminal_and_classified_by_batch_posit
             finish_reason="stop",
         )
 
-    usable = _reply(_json.dumps({"file_edits": [], "synthesis": "s"}))
-    # Prose, not truncated JSON: `_repair_json` rescues an unterminated string,
-    # and a rescued batch would prove nothing about the terminal path.
+    usable = _reply(_json.dumps(_normal_success_output(synthesis="s")))
+    # Prose, not truncated JSON: the strict direct parser rejects it without
+    # extracting or repairing a fragment.
     unusable = _reply("Je ne peux pas produire ce document.")
     replies = [unusable] if failing_batch == 1 else [usable, unusable]
     budgets: list[int] = []
@@ -1588,8 +1762,13 @@ async def test_unrepairable_completion_is_terminal_and_classified_by_batch_posit
     assert len(budgets) == failing_batch
     # The failed batch never wrote; only the batches before it did.
     assert service._write_results.await_count == failing_batch - 1
-    # Sources of the failed batch stay durable (never-drop).
+    # Sources of the failed batch stay durable (never-drop), while a verified
+    # earlier prefix is finalized even when the later completion is terminal.
     assert second in storage.objects
+    if failing_batch == 1:
+        assert first in storage.objects
+    else:
+        assert first not in storage.objects
 
 
 async def test_consolidator_first_batch_llm_exception_is_error_with_no_writes(
@@ -1680,6 +1859,50 @@ async def test_consolidator_write_results_error_status_stays_partial(
     assert result["failure_reason"] == "batch_write_failed"
 
 
+async def test_consolidator_ok_writer_without_deferred_proof_never_finalizes_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run finalizer accepts only the writer's exact deferred-key proof.
+
+    A writer reporting ``status=ok`` without that private proof has not proven
+    that its source note remains durable until the one run-level metadata
+    readback.  The orchestrator must therefore stop as a failed first batch,
+    without changing metadata or deleting the source.
+    """
+
+    storage = GCStorage()
+    sid = "p12-first-batch-missing-deferred-proof"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    before = storage.snapshot()
+    delete_many = AsyncMock(wraps=storage.delete_many)
+    put_json = AsyncMock(wraps=storage.put_json)
+    monkeypatch.setattr(storage, "delete_many", delete_many)
+    monkeypatch.setattr(storage, "put_json", put_json)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+
+    async def _ok_without_deferred_proof(*args, **kwargs) -> dict:
+        result = await _deferred_batch_write_result(*args, **kwargs)
+        result.pop("_deferred_note_keys")
+        return result
+
+    service._write_results = AsyncMock(side_effect=_ok_without_deferred_proof)
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "batch_finalization_failed"
+    assert result["failed_batch"] == 1
+    assert result["batches_completed"] == 0
+    assert result["notes_deleted"] == 0
+    assert result["notes_remaining"] == 1
+    delete_many.assert_not_awaited()
+    put_json.assert_not_awaited()
+    assert old in storage.objects
+    assert storage.objects[f"{sid}/_meta.json"] == "{}"
+    assert storage.snapshot() == before
+
+
 async def test_consolidator_later_batch_failure_reports_exact_failed_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1693,7 +1916,11 @@ async def test_consolidator_later_batch_failure_reports_exact_failed_batch(
     )
     service._call_llm = AsyncMock(
         side_effect=[
-            {"status": "ok", "data": {}, "usage": {}},
+            {
+                "status": "ok",
+                "data": _normal_success_output(),
+                "usage": {},
+            },
             {"status": "error", "message": "injected second-batch failure"},
         ]
     )
@@ -1709,6 +1936,10 @@ async def test_consolidator_later_batch_failure_reports_exact_failed_batch(
     # Applied metrics from the completed first batch are preserved.
     assert result["batches_completed"] == 1
     assert result["notes_processed"] == 1
+    assert result["notes_deleted"] == 1
+    assert result["notes_remaining"] == 1
+    assert first not in storage.objects
+    assert second in storage.objects
     assert phases.last_phase == "failed"
 
 
@@ -1723,14 +1954,24 @@ async def test_consolidator_note_delete_partial_has_no_fabricated_failed_batch(
     service = _pipeline_service(
         storage, monkeypatch, [(first, "first"), (second, "second")]
     )
-    service._write_results = AsyncMock(
-        return_value={
-            "status": "partial",
-            "reason": "partial_delete",
-            "notes_processed": 1,
-            "notes_deleted": 0,
-            "notes_delete_failed": 1,
-        }
+    # The only deletion is the run-level finalizer.  Let the real writer
+    # retain both batches first, then fail one selected source in that single
+    # delete_many call.
+    storage.fail_delete.add(second)
+    service._write_results = ConsolidatorService._write_results.__get__(service)
+    service._call_llm = AsyncMock(
+        side_effect=[
+            {
+                "status": "ok",
+                "data": _normal_success_output("first.md"),
+                "usage": {},
+            },
+            {
+                "status": "ok",
+                "data": _normal_success_output("second.md"),
+                "usage": {},
+            },
+        ]
     )
 
     result = await service.consolidate(sid, enforce_cooldown=False)
@@ -1738,6 +1979,11 @@ async def test_consolidator_note_delete_partial_has_no_fabricated_failed_batch(
     assert result["status"] == "partial"
     assert "failed_batch" not in result
     assert result["failure_reason"] == "note_delete_failed"
+    assert result["batches_completed"] == 2
+    assert result["notes_deleted"] == 1
+    assert result["notes_delete_failed"] == 1
+    assert first not in storage.objects
+    assert second in storage.objects
 
 
 async def test_consolidator_exact_selection_truncation_has_no_failed_batch(
@@ -1813,18 +2059,211 @@ async def test_consolidator_compaction_write_disqualifies_error_status(
     assert result["failure_reason"] == "batch_llm_failed"
 
 
+async def test_consolidator_real_prepare_refusal_preserves_every_write_and_recovers_after_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A deterministic invalid bank blocks safely, not permanently.
+
+    This exercises the real strict planner admission rather than injecting an
+    abstract error.  Correcting the source in the fixture makes the next run
+    consume the pending live note, proving there is no durable lock or failure
+    marker behind the deliberate fail-closed refusal.
+    """
+
+    storage = GCStorage()
+    sid = "p12-compaction-prepare-failure"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    storage.objects[f"{sid}/_synthesis.md"] = "previous synthesis"
+    bank_key = f"{sid}/bank/facts.md"
+    invalid_source = "## No level-one heading\n\n" + "x" * 360
+    storage.objects[bank_key] = invalid_source
+    before = storage.snapshot()
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._bank_file_max_size = 100
+    service._max_tokens = 1_000
+    service._compact_threshold = 0.6
+    service._compact_bank_if_needed = (
+        ConsolidatorService._compact_bank_if_needed.__get__(
+            service, ConsolidatorService
+        )
+    )
+    service._collect_inputs.return_value["bank_files"] = [
+        {"key": bank_key, "content": invalid_source}
+    ]
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "error"
+    assert result["failure_reason"] == "compaction_prepare_failed"
+    assert result["compaction_failures"] == [
+        {"filename": "facts.md", "error": "invalid_compaction_source_structure"}
+    ]
+    assert "bank_write" in result["remediation"]
+    service._call_llm.assert_not_awaited()
+    service._write_results.assert_not_awaited()
+    assert storage.objects == before
+    warnings = [record.getMessage() for record in caplog.records]
+    assert any(
+        "COMPACT prepare rejected" in message
+        and "facts.md" in message
+        and "invalid_compaction_source_structure" in message
+        for message in warnings
+    )
+    assert any(
+        "Bank auto-compaction safely aborted" in message
+        and "facts.md" in message
+        and "invalid_compaction_source_structure" in message
+        for message in warnings
+    )
+
+    # A bank_write-style correction preserves the hard-limit admission: the
+    # repaired source is still oversized, so the strict planner must re-enter
+    # and apply a new safe candidate before ordinary consolidation resumes.
+    repaired_source = "# Facts\n\n## Detail\n" + "valid retained fact\n" * 20
+    compacted_source = "# Facts\n\n## Detail\ncondensed facts\n"
+    planner = AsyncMock(
+        return_value=(
+            compacted_source,
+            {
+                "status": "ok",
+                "action": "edit",
+                "operation_reasons": ("Remove repetition after repair.",),
+            },
+        )
+    )
+    storage.objects[bank_key] = repaired_source
+    service._collect_inputs.return_value["bank_files"] = [
+        {"key": bank_key, "content": repaired_source}
+    ]
+    service._plan_single_file_compaction = planner
+    service._write_results = ConsolidatorService._write_results.__get__(
+        service, ConsolidatorService
+    )
+    # The recovered snapshot retains ``facts.md`` after compaction, so the
+    # normal success fixture must create an unoccupied target.
+    service._call_llm.return_value["data"] = _normal_success_output("recovered.md")
+
+    recovered = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert recovered["status"] == "ok"
+    assert recovered["notes_processed"] == 1
+    assert recovered["notes_deleted"] == 1
+    assert old not in storage.objects
+    planner.assert_awaited_once_with("facts.md", repaired_source, 100, "")
+    assert storage.objects[bank_key] == compacted_source
+
+
+async def test_consolidator_preserves_route_refusal_reason_and_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence-in-depth route refusal is not misreported as a document error."""
+
+    storage = GCStorage()
+    sid = "p12-compaction-route-refusal"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._compact_bank_if_needed = AsyncMock(
+        return_value={
+            "compacted": False,
+            "status": "error",
+            "failure_reason": "direct_local_route_required",
+            "failures": [
+                {"filename": "", "error": "direct_local_route_required"}
+            ],
+        }
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "error"
+    assert result["failure_reason"] == "direct_local_route_required"
+    assert result["compaction_failures"] == [
+        {"filename": "", "error": "direct_local_route_required"}
+    ]
+    assert "DirectLocal compaction route is unavailable" in result["remediation"]
+    service._call_llm.assert_not_awaited()
+    service._write_results.assert_not_awaited()
+    assert old in storage.objects
+
+
+async def test_consolidator_relays_only_the_closed_target_failure_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A queued status result cannot inherit raw planner fields by accident."""
+
+    storage = GCStorage()
+    sid = "p12-compaction-target-diagnostic"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    marker = "RAW_COMPLETION_HEADING_SECRET_4f27"
+    marker_reason = "RAW_COMPLETION_REASON_SECRET_9a31"
+    target_heading = "## requested target"
+    service._compact_bank_if_needed = AsyncMock(
+        return_value={
+            "compacted": False,
+            "status": "error",
+            "failure_reason": "compaction_prepare_failed",
+            "failures": [
+                {
+                    "filename": "facts.md",
+                    "error": "ambiguous_or_missing_compaction_target",
+                    "operation_index": 2,
+                    "target_resolution": "missing",
+                    "target_match_count": 0,
+                    "target_heading_sha256": hashlib.sha256(
+                        target_heading.encode("utf-8")
+                    ).hexdigest(),
+                    "heading": marker,
+                    "reason": marker_reason,
+                    "prompt": marker,
+                    "completion": marker,
+                }
+            ],
+        }
+    )
+    caplog.set_level(logging.WARNING, logger="live_mem.consolidator")
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "error"
+    assert result["compaction_failures"] == [
+        {
+            "filename": "facts.md",
+            "error": "ambiguous_or_missing_compaction_target",
+            "operation_index": 2,
+            "target_resolution": "missing",
+            "target_match_count": 0,
+            "target_heading_sha256": hashlib.sha256(
+                target_heading.encode("utf-8")
+            ).hexdigest(),
+        }
+    ]
+    serialized = json.dumps(result) + caplog.text
+    assert marker not in serialized
+    assert marker_reason not in serialized
+    service._call_llm.assert_not_awaited()
+    service._write_results.assert_not_awaited()
+    assert old in storage.objects
+
+
 async def test_consolidator_compaction_exception_is_partial_bank_compact_failed(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     storage = GCStorage()
     sid = "p12-compaction-crash"
     old = _old_key(sid, "old")
     _seed_space(storage, sid, old)
     service = _pipeline_service(storage, monkeypatch, [(old, "old")])
-    service._compact_bank_if_needed = AsyncMock(
-        side_effect=RuntimeError("injected compaction crash")
-    )
+    marker = "secret-source-or-completion-2ac7f9"
+    service._compact_bank_if_needed = AsyncMock(side_effect=RuntimeError(marker))
     phases = _PhaseRecorder()
+    caplog.set_level(logging.ERROR)
 
     result = await service.consolidate(
         sid, enforce_cooldown=False, progress_callback=phases
@@ -1833,12 +2272,94 @@ async def test_consolidator_compaction_exception_is_partial_bank_compact_failed(
     # Compaction writes may have started: durable state is ambiguous.
     assert result["status"] == "partial"
     assert result["failure_reason"] == "bank_compact_failed"
+    assert result["failed_phase"] == "unknown"
+    assert result["rollback_outcome"] == "unknown"
     assert "failed_batch" not in result
     assert result["notes_processed"] == 0
     assert service._call_llm.await_count == 0
     assert service._write_results.await_count == 0
     assert old in storage.objects
     assert phases.last_phase == "failed"
+    assert marker not in str(result)
+    assert marker not in caplog.text
+
+
+async def test_consolidator_compaction_apply_partial_stops_before_notes_or_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = GCStorage()
+    sid = "p12-compaction-apply-partial"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    before = storage.snapshot()
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._compact_bank_if_needed = AsyncMock(
+        return_value={
+            "compacted": False,
+            "status": "partial",
+            "failure_reason": "compaction_apply_recovery_unverified",
+            "files_applied_before_failure": 1,
+            "apply_may_have_mutated": True,
+            "recovery_required": True,
+            "preimage_id": "p12-compaction-apply-partial/2026-08-16T06-00-00-" + "a" * 32,
+            "failures": [
+                {"filename": "b.md", "error": "compaction_apply_failed"}
+            ],
+        }
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "compaction_apply_recovery_unverified"
+    assert result["failed_phase"] == "apply"
+    assert result["rollback_outcome"] == "unverified"
+    assert result["recovery_required"] is True
+    assert result["preimage_id"].endswith("-" + "a" * 32)
+    assert result["compaction_failures"] == [
+        {"filename": "b.md", "error": "compaction_apply_failed"}
+    ]
+    service._call_llm.assert_not_awaited()
+    service._write_results.assert_not_awaited()
+    assert storage.snapshot() == before
+
+
+async def test_consolidator_reverted_compaction_stops_before_notes_or_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verified rollback is safe, but does not permit ordinary consolidation."""
+
+    storage = GCStorage()
+    sid = "p12-compaction-apply-reverted"
+    old = _old_key(sid, "old")
+    _seed_space(storage, sid, old)
+    before = storage.snapshot()
+    service = _pipeline_service(storage, monkeypatch, [(old, "old")])
+    service._compact_bank_if_needed = AsyncMock(
+        return_value={
+            "compacted": False,
+            "status": "error",
+            "failure_reason": "compaction_apply_reverted",
+            "preimage_id": "p12-compaction-apply-reverted/2026-08-16T06-00-00-" + "b" * 32,
+            "failures": [
+                {"filename": "b.md", "error": "compaction_apply_failed"}
+            ],
+        }
+    )
+
+    result = await service.consolidate(sid, enforce_cooldown=False)
+
+    assert result["status"] == "error"
+    assert result["failure_reason"] == "compaction_apply_reverted"
+    assert result["preimage_id"].endswith("-" + "b" * 32)
+    assert result["compaction_failures"] == [
+        {"filename": "b.md", "error": "compaction_apply_failed"}
+    ]
+    assert "verified restored" in result["message"]
+    assert "verified preimage" in result["remediation"]
+    service._call_llm.assert_not_awaited()
+    service._write_results.assert_not_awaited()
+    assert storage.snapshot() == before
 
 
 async def test_consolidator_full_success_keeps_ok_and_terminal_done_phase(
@@ -1903,7 +2424,7 @@ class _BudgetCaptureChat:
                 "max_tokens": output_budget,
             }
         )
-        return _chat_result('{"file_edits": [], "synthesis": "ok"}')
+        return _chat_result(json.dumps(_normal_success_output(synthesis="ok")))
 
 
 def _budget_service(max_tokens: int, context_window: int) -> tuple:
@@ -2046,15 +2567,14 @@ def _assert_call_fits_window(call: dict, context_window: int) -> None:
 # replacement contract: exactly ONE application request, whatever the response.
 
 
-async def test_call_llm_invalid_json_is_terminal_after_local_repair() -> None:
-    # Large non-JSON garbage that the network-free repair path cannot fix.
-    # The old behavior sent a second corrective turn; the contract is now a
-    # single request and a normalized failure the caller can act on.
+async def test_call_llm_invalid_json_is_terminal_without_local_repair() -> None:
+    # Large non-JSON garbage is terminal.  Normal mutating consolidation no
+    # longer salvages a prefix locally or sends a corrective turn.
     garbage = "this is definitely not json " * 500  # ~14000 chars ≈ 3500 tokens
     service, completions = _sequence_service(
         max_tokens=1024,
         context_window=4096,
-        contents=[garbage, '{"file_edits": [], "synthesis": "ok"}'],
+        contents=[garbage, json.dumps(_normal_success_output(synthesis="ok"))],
     )
 
     result = await service._call_llm(
@@ -2067,7 +2587,7 @@ async def test_call_llm_invalid_json_is_terminal_after_local_repair() -> None:
     _assert_call_fits_window(completions.calls[0], 4096)
     # Safe metadata only — never a fragment of the completion.
     assert "raw_preview" not in result
-    assert result["raw_len"] == len(garbage)
+    assert result["reason"] == "invalid_normal_consolidation_json"
 
 
 async def test_call_llm_missing_fields_is_terminal_without_a_second_turn() -> None:
@@ -2077,7 +2597,7 @@ async def test_call_llm_missing_fields_is_terminal_without_a_second_turn() -> No
     service, completions = _sequence_service(
         max_tokens=1024,
         context_window=4096,
-        contents=[padded, '{"file_edits": [], "synthesis": "ok"}'],
+        contents=[padded, json.dumps(_normal_success_output(synthesis="ok"))],
     )
 
     result = await service._call_llm(
@@ -2085,40 +2605,21 @@ async def test_call_llm_missing_fields_is_terminal_without_a_second_turn() -> No
     )
 
     assert result["status"] == "error"
-    assert result["message"] == "LLM response missing file_edits or synthesis"
+    assert result["message"] == "LLM returned an invalid consolidation plan"
+    assert result["reason"] == "invalid_normal_schema"
     assert len(completions.calls) == 1
     _assert_call_fits_window(completions.calls[0], 4096)
 
 
-async def test_call_llm_still_consults_the_network_free_repair(
+async def test_call_llm_never_consults_the_network_free_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-vacuity for the two tests above.
-
-    Removing the corrective TURN must not remove the network-free repair — that
-    is the rescue path that costs nothing, and deleting it would be an easy way
-    to "satisfy" the single-request contract while making consolidation
-    strictly worse. The guard is isolated to what it names: the repair helper is
-    spied at the module seam, and its recovered document is what the caller
-    receives, from a SINGLE request.
-    """
-    recovered = {
-        "file_edits": [
-            {
-                "filename": "facts.md",
-                "action": "edit",
-                "operations": [
-                    {"op": "append", "heading": "## Facts", "content": "kept"}
-                ],
-            }
-        ],
-        "synthesis": "recovered locally",
-    }
+    """A repair helper must be unreachable from a mutating normal response."""
     seen: list[str] = []
 
     def _spy_repair(json_str, exc):
         seen.append(json_str)
-        return recovered
+        raise AssertionError("_repair_json must be unreachable")
 
     monkeypatch.setattr(consolidator_module, "_repair_json", _spy_repair)
     service, completions = _sequence_service(
@@ -2127,9 +2628,9 @@ async def test_call_llm_still_consults_the_network_free_repair(
 
     result = await service._call_llm([{"role": "user", "content": "x" * 400}])
 
-    assert seen, "the malformed-response path no longer consults _repair_json"
-    assert result["status"] == "ok"
-    assert result["data"] == recovered
+    assert seen == []
+    assert result["status"] == "error"
+    assert result["reason"] == "invalid_normal_consolidation_json"
     assert len(completions.calls) == 1
 
 
@@ -2139,7 +2640,7 @@ async def test_call_llm_exhausted_window_never_calls_the_provider() -> None:
     service, completions = _sequence_service(
         max_tokens=1024,
         context_window=4096,
-        contents=['{"file_edits": [], "synthesis": "ok"}'],
+        contents=[json.dumps(_normal_success_output(synthesis="ok"))],
     )
 
     result = await service._call_llm(
@@ -2186,7 +2687,7 @@ async def test_consolidator_rejected_bank_edit_is_batch_write_failure_not_delete
         sid, enforce_cooldown=False, progress_callback=phases
     )
 
-    assert result["status"] == "partial"
+    assert result["status"] == "error"
     assert result["failure_reason"] == "batch_write_failed"
     assert result["failed_batch"] == 1
     assert result["operations_failed"] == 1
@@ -2216,7 +2717,7 @@ async def test_consolidator_true_delete_only_partial_keeps_note_delete_reason(
     service._call_llm = AsyncMock(
         return_value={
             "status": "ok",
-            "data": {"file_edits": [], "synthesis": "Integrated fine."},
+            "data": _normal_success_output(synthesis="Integrated fine."),
             "usage": {},
         }
     )
