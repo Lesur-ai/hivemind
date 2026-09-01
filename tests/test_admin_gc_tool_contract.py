@@ -73,7 +73,7 @@ async def test_gc_negative_age_is_rejected_before_service_call() -> None:
     assert result == {
         "status": "error",
         "reason": "invalid_max_age_days",
-        "message": "max_age_days doit être supérieur ou égal à 0.",
+        "message": "max_age_days must be greater than or equal to 0.",
     }
     get_gc_service.assert_not_called()
 

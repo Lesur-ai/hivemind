@@ -210,7 +210,7 @@ class StorageService:
             
             uri = f"s3://{self._bucket}/{key}"
             
-            print(f"📤 [S3] Document uploadé: {uri}", file=sys.stderr)
+            print(f"📤 [S3] Document uploaded: {uri}", file=sys.stderr)
             
             return {
                 "uri": uri,
@@ -221,7 +221,7 @@ class StorageService:
             }
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur upload: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [S3] Upload error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
     
     @_redact_proxy_errors
@@ -240,18 +240,18 @@ class StorageService:
         
         # Vérification que le document appartient à la mémoire
         if not key.startswith(f"{memory_id}/"):
-            raise PermissionError(f"Document n'appartient pas à la mémoire {memory_id}")
+            raise PermissionError(f"Document does not belong to memory {memory_id}")
         
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=key)
             content = response['Body'].read()
             
-            print(f"📥 [S3] Document téléchargé: {key} ({len(content)} bytes)", file=sys.stderr)
+            print(f"📥 [S3] Document downloaded: {key} ({len(content)} bytes)", file=sys.stderr)
             return content
             
         except ClientError as e:
             if e.response['Error']['Code'] == 'NoSuchKey':
-                raise FileNotFoundError(f"Document non trouvé: {key}")
+                raise FileNotFoundError(f"Document not found: {key}")
             raise
     
     @_redact_proxy_errors
@@ -270,15 +270,15 @@ class StorageService:
         
         # Vérification que le document appartient à la mémoire
         if not key.startswith(f"{memory_id}/"):
-            raise PermissionError(f"Document n'appartient pas à la mémoire {memory_id}")
+            raise PermissionError(f"Document does not belong to memory {memory_id}")
         
         try:
             self._client.delete_object(Bucket=self._bucket, Key=key)
-            print(f"🗑️ [S3] Document supprimé: {key}", file=sys.stderr)
+            print(f"🗑️ [S3] Document deleted: {key}", file=sys.stderr)
             return True
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur suppression: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [S3] Deletion error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return False
     
     @_redact_proxy_errors
@@ -352,7 +352,7 @@ class StorageService:
             return objects
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur listing: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [S3] Listing error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return []
     
     @_redact_proxy_errors
@@ -406,7 +406,7 @@ class StorageService:
                         "key": key,
                         "status": "missing",
                         "size_bytes": 0,
-                        "error": f"Document non trouvé sur S3"
+                        "error": "Document not found in S3"
                     })
                     missing += 1
                 else:
@@ -418,7 +418,7 @@ class StorageService:
                         # P12-3 R1 : chemin d'erreur RÉCUPÉRÉ (jamais re-levé),
                         # donc hors de portée du décorateur — redaction locale.
                         "error": redact_proxy_secrets(
-                            f"Erreur S3 [{error_code}]: "
+                            f"S3 error [{error_code}]: "
                             f"{e.response.get('Error', {}).get('Message', str(e))}"
                         )
                     })
@@ -490,7 +490,7 @@ class StorageService:
             return objects
             
         except ClientError as e:
-            print(f"❌ [S3] Erreur listing complet: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            print(f"❌ [S3] Full listing error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return []
 
     @_redact_proxy_errors
@@ -689,10 +689,10 @@ class StorageService:
             try:
                 self._client.delete_object(Bucket=self._bucket, Key=obj['key'])
                 deleted_count += 1
-                print(f"🗑️ [S3] Supprimé: {obj['key']}", file=sys.stderr)
+                print(f"🗑️ [S3] Deleted: {obj['key']}", file=sys.stderr)
             except ClientError as e:
                 error_count += 1
-                print(f"❌ [S3] Erreur suppression {obj['key']}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [S3] Error deleting {obj['key']}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
         
         return {
             "deleted_count": deleted_count,
@@ -719,10 +719,10 @@ class StorageService:
             try:
                 self._client.delete_object(Bucket=self._bucket, Key=key)
                 deleted_count += 1
-                print(f"🗑️ [S3] Supprimé: {key}", file=sys.stderr)
+                print(f"🗑️ [S3] Deleted: {key}", file=sys.stderr)
             except ClientError as e:
                 error_count += 1
-                print(f"❌ [S3] Erreur suppression {key}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [S3] Error deleting {key}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
         
         return {
             "deleted_count": deleted_count,
@@ -760,14 +760,14 @@ class StorageService:
                     "status": "ok",
                     "bucket": self._bucket,
                     "endpoint": self._endpoint_url,
-                    "message": "Connexion S3 réussie (PUT/GET/DELETE validés)"
+                    "message": "S3 connection succeeded (PUT/GET/DELETE validated)"
                 }
             else:
                 return {
                     "status": "warning",
                     "bucket": self._bucket,
                     "endpoint": self._endpoint_url,
-                    "message": "Connexion OK mais contenu incohérent"
+                    "message": "Connection succeeded but content validation failed"
                 }
             
         except NoCredentialsError:
@@ -775,7 +775,7 @@ class StorageService:
                 "status": "error",
                 "bucket": self._bucket,
                 "endpoint": self._endpoint_url,
-                "message": "Credentials S3 invalides ou manquants"
+                "message": "S3 credentials are invalid or missing"
             }
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
@@ -788,7 +788,7 @@ class StorageService:
                 # par system_health — hors de portée du décorateur, redaction
                 # locale du message serveur avant retour.
                 "message": redact_proxy_secrets(
-                    f"Erreur S3 [{error_code}]: {error_msg}"
+                    f"S3 error [{error_code}]: {error_msg}"
                 )
             }
     
@@ -799,7 +799,7 @@ class StorageService:
             parts = key_or_uri[5:].split("/", 1)
             if len(parts) == 2:
                 return parts[1]
-            raise ValueError(f"URI S3 invalide: {key_or_uri}")
+            raise ValueError(f"Invalid S3 URI: {key_or_uri}")
         return key_or_uri
     
     @staticmethod

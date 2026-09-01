@@ -132,10 +132,13 @@ def test_issue_183_docker_proof_is_blocking_and_complete() -> None:
 
 
 def test_mutation_red_runtime_job_removed_from_build_dependencies() -> None:
-    workflow = _read(".github/workflows/build.yml").replace(
-        "needs: [test, test_python314_arm64, audit, embedded_secret_runtime, public_tree]",
-        "needs: [test, test_python314_arm64, audit, public_tree]",
+    original = _read(".github/workflows/build.yml")
+    workflow = original.replace(
+        "needs: [change_classifier, test, test_python314_arm64, audit, embedded_secret_runtime, "
+        "public_tree, coverage_floors]",
+        "needs: [change_classifier, test, test_python314_arm64, audit, public_tree, coverage_floors]",
     )
+    assert workflow != original, "mutation target string no longer matches build.yml"
     with pytest.raises(AssertionError):
         _assert_ci_gate(workflow)
 

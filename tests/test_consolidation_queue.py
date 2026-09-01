@@ -6,6 +6,8 @@ Tests for issue #20 — asynchronous in-memory consolidation queue.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,6 +19,7 @@ from live_mem.core.consolidation_queue import (
     QUEUE_GUARANTEE,
     reset_consolidation_queue_for_tests,
 )
+from live_mem.core.consolidator import ConsolidatorService
 from live_mem.tools.bank import register as register_bank_tools
 from tests.test_write_sink import WriteSinkFakeStorage
 
@@ -321,6 +324,64 @@ async def test_failed_job_status_exposes_error():
 
 
 @pytest.mark.asyncio
+async def test_failed_job_status_projects_normal_target_diagnostics() -> None:
+    secret = "NORMAL_QUEUE_SECRET_MUST_NOT_LEAK"
+    reason_secret = "normal_queue_secret_must_not_leak"
+
+    class FailingConsolidator:
+        async def consolidate(
+            self, space_id, agent="", enforce_cooldown=True, progress_callback=None
+        ):
+            return {
+                "status": "error",
+                "message": "Consolidation refused",
+                "operation_failures": [
+                    {
+                        "reason": "ambiguous_or_missing_normal_target",
+                        "file_index": 1,
+                        "operation_index": 0,
+                        "filename": "progress.md",
+                        "target_resolution": "missing",
+                        "target_match_count": 0,
+                        "target_heading_sha256": "b" * 64,
+                        "heading": secret,
+                        "completion": secret,
+                    },
+                    {"reason": "normal_persistence_failure", "secret": secret},
+                    {"reason": reason_secret},
+                ],
+            }
+
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=FailingConsolidator(),
+    ):
+        result = await queue.enqueue("project", "agent-a", "agent-a")
+        for _ in range(20):
+            status = await queue.get_job(result["job_id"])
+            if status["status"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+
+    assert status["result"]["operation_failures"] == [
+        {
+            "reason": "ambiguous_or_missing_normal_target",
+            "file_index": 1,
+            "operation_index": 0,
+            "filename": "progress.md",
+            "target_resolution": "missing",
+            "target_match_count": 0,
+            "target_heading_sha256": "b" * 64,
+        },
+        {"reason": "normal_persistence_failure"},
+    ]
+    assert secret not in repr(status)
+    assert reason_secret not in repr(status)
+
+
+@pytest.mark.asyncio
 async def test_bank_consolidate_rejects_read_token_before_enqueue():
     tok = current_token_info.set(_token("reader", ["read"]))
     try:
@@ -543,7 +604,7 @@ async def test_bank_consolidation_status_requires_space_read_access():
         current_token_info.reset(tok)
 
     assert result["status"] == "error"
-    assert "Accès refusé" in result["message"]
+    assert "Access denied" in result["message"]
 
 
 @pytest.mark.asyncio
@@ -623,6 +684,41 @@ async def _terminal_status(queue, job_id, expected):
 
 
 @pytest.mark.asyncio
+async def test_worker_rechecks_route_before_consolidator_input_collection() -> None:
+    """A queued job cannot inherit a stale enqueue-time DirectLocal verdict."""
+
+    service = object.__new__(ConsolidatorService)
+    # Keep this narrow worker test independent of the class-level fallback and
+    # explicitly pass the production provider-presence guard.
+    service._chat_profile = object()
+    service._collect_inputs = AsyncMock()
+    route_calls: list[str] = []
+
+    class RefusingRegistry:
+        async def resolve_sink(self, space_id: str):
+            route_calls.append(space_id)
+            raise RuntimeError("space transitioned away from DirectLocal")
+
+    queue = ConsolidationQueueService()
+    with (
+        patch(
+            "live_mem.core.consolidation_queue.get_consolidator",
+            return_value=service,
+        ),
+        patch(
+            "live_mem.core.engines.get_engine_registry",
+            return_value=RefusingRegistry(),
+        ),
+    ):
+        accepted = await queue.enqueue("space-a", "agent-a", "agent-a")
+        status = await _terminal_status(queue, accepted["job_id"], "failed")
+
+    assert route_calls == ["space-a"]
+    service._collect_inputs.assert_not_awaited()
+    assert status["result"]["failure_reason"] == "consolidation_crashed"
+
+
+@pytest.mark.asyncio
 async def test_partial_result_marks_job_failed_with_terminal_failed_phase():
     consolidator = _OutcomeConsolidator(
         result={
@@ -681,6 +777,55 @@ async def test_error_result_marks_job_failed_with_terminal_failed_phase():
 
 
 @pytest.mark.asyncio
+async def test_job_status_projects_the_closed_compaction_failure_tuple():
+    marker = "QUEUE_RAW_COMPLETION_SECRET_4f27"
+    requested_heading = "## queue requested heading"
+    consolidator = _OutcomeConsolidator(
+        result={
+            "status": "error",
+            "message": "Consolidation stopped safely.",
+            "failure_reason": "compaction_prepare_failed",
+            "compaction_failures": [
+                {
+                    "filename": "facts.md",
+                    "error": "ambiguous_or_missing_compaction_target",
+                    "operation_index": 0,
+                    "target_resolution": "missing",
+                    "target_match_count": 0,
+                    "target_heading_sha256": hashlib.sha256(
+                        requested_heading.encode("utf-8")
+                    ).hexdigest(),
+                    "heading": marker,
+                    "completion": marker,
+                }
+            ],
+        }
+    )
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("project", "agent-a", "agent-a")
+        status = await _terminal_status(queue, accepted["job_id"], "failed")
+
+    assert status["result"]["compaction_failures"] == [
+        {
+            "filename": "facts.md",
+            "error": "ambiguous_or_missing_compaction_target",
+            "operation_index": 0,
+            "target_resolution": "missing",
+            "target_match_count": 0,
+            "target_heading_sha256": hashlib.sha256(
+                requested_heading.encode("utf-8")
+            ).hexdigest(),
+        }
+    ]
+    assert marker not in json.dumps(status)
+
+
+@pytest.mark.asyncio
 async def test_ok_result_keeps_terminal_done_phase():
     consolidator = _OutcomeConsolidator(
         result={
@@ -731,4 +876,98 @@ async def test_worker_crash_marks_job_failed_with_terminal_failed_phase():
     assert "sk-SECRET" not in _json.dumps(status)
     assert "s3.internal" not in _json.dumps(status)
     assert status["result"]["failure_reason"] == "consolidation_crashed"
-    assert "journaux serveur" in status["error"]
+    assert "server logs" in status["error"]
+
+
+@pytest.mark.asyncio
+async def test_job_cancellation_marks_job_terminal_and_runs_queued_sibling():
+    cancelled = asyncio.CancelledError()
+    cancelled.compaction_rollback_failures = (
+        {
+            "filename": "facts.md",
+            "error": "compaction_rollback_ownership_unverified",
+        },
+    )
+    cancelled.compaction_preimage_id = (
+        "project/2026-08-16T06-00-00-" + "a" * 32
+    )
+
+    class CancelThenSucceedConsolidator:
+        def __init__(self):
+            self.calls = []
+            self.first_started = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def consolidate(
+            self, space_id, agent="", enforce_cooldown=True, progress_callback=None
+        ):
+            self.calls.append(agent)
+            if len(self.calls) == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+                raise cancelled
+            return {"status": "ok", "space_id": space_id, "notes_processed": 1}
+
+    consolidator = CancelThenSucceedConsolidator()
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        cancelled_job = await queue.enqueue("project", "agent-a", "agent-a")
+        await asyncio.wait_for(consolidator.first_started.wait(), timeout=1)
+        sibling = await queue.enqueue("project", "agent-b", "agent-b")
+        assert sibling["status"] == "queued"
+
+        consolidator.release_first.set()
+        status = await _terminal_status(queue, cancelled_job["job_id"], "failed")
+        sibling_status = await _terminal_status(queue, sibling["job_id"], "succeeded")
+
+    assert status["status"] == "failed"
+    assert status["progress"]["phase"] == "failed"
+    assert status["result"] == {
+        "status": "partial",
+        "message": (
+            "Consolidation was cancelled; bank recovery may be incomplete. "
+            "Check the server logs before retrying."
+        ),
+        "failure_reason": "consolidation_cancelled",
+        "compaction_failures": [
+            {
+                "filename": "facts.md",
+                "error": "compaction_rollback_ownership_unverified",
+            }
+        ],
+        "recovery_required": True,
+        "preimage_id": "project/2026-08-16T06-00-00-" + "a" * 32,
+    }
+    assert sibling_status["status"] == "succeeded"
+    assert consolidator.calls == ["agent-a", "agent-b"]
+
+
+@pytest.mark.asyncio
+async def test_worker_task_cancellation_propagates_and_drains_queued_sibling():
+    consolidator = FakeConsolidator()
+    queue = ConsolidationQueueService()
+
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("project", "agent-a", "agent-a")
+        await asyncio.wait_for(consolidator.started.wait(), timeout=1)
+        sibling = await queue.enqueue("project", "agent-b", "agent-b")
+        worker = queue._workers["project"]
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+        status = await queue.get_job(accepted["job_id"])
+        consolidator.release.set()
+        sibling_status = await _terminal_status(queue, sibling["job_id"], "succeeded")
+
+    assert status["status"] == "failed"
+    assert status["progress"]["phase"] == "failed"
+    assert status["result"]["failure_reason"] == "consolidation_cancelled"
+    assert sibling_status["status"] == "succeeded"
+    assert len(consolidator.calls) == 2

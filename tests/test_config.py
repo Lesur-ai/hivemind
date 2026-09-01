@@ -161,6 +161,28 @@ class TestConsolidationValidation:
             _make_settings(consolidation_batch_size=0)
 
 
+class TestCompactionValidation:
+    @pytest.mark.parametrize(
+        "threshold",
+        (0.0, -0.01, 1.01, float("nan"), float("inf"), -float("inf")),
+    )
+    def test_compact_threshold_must_be_a_finite_positive_ratio(self, threshold):
+        with pytest.raises(ValueError, match="COMPACT_THRESHOLD"):
+            _make_settings(compact_threshold=threshold)
+
+    @pytest.mark.parametrize("threshold", (0.000001, 1.0))
+    def test_compact_threshold_accepts_positive_closed_unit_interval(self, threshold):
+        assert _make_settings(compact_threshold=threshold).compact_threshold == threshold
+
+    @pytest.mark.parametrize("size", (0, -1))
+    def test_bank_file_limit_must_be_positive(self, size):
+        with pytest.raises(ValueError, match="BANK_FILE_MAX_SIZE"):
+            _make_settings(bank_file_max_size=size)
+
+    def test_bank_file_limit_accepts_one_utf8_byte(self):
+        assert _make_settings(bank_file_max_size=1).bank_file_max_size == 1
+
+
 class TestTemperatureValidation:
     def test_temperature_out_of_range(self):
         with pytest.raises(ValueError, match="LLMAAS_TEMPERATURE"):

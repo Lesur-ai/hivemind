@@ -1,7 +1,7 @@
 # 🖥️ CLI, shell et tests Hivemind
 
 > CLI scriptable, shell interactif et scripts de test opérationnels pour
-> Hivemind `1.4.0`.
+> Hivemind `1.4.1`.
 
 🇬🇧 [English version](README.md)
 
@@ -102,8 +102,8 @@ uv run python scripts/mcp_cli.py bank consolidation-queues                  # R�
 uv run python scripts/mcp_cli.py bank stale-spaces                          # 🚨 Spaces ≥5 notes / plus ancienne ≥5 jours
 uv run python scripts/mcp_cli.py bank stale-spaces --min-notes 10 --min-age-days 7 --consolidate  # Déclenche un bulk limité au caller
 uv run python scripts/mcp_cli.py bank stale-spaces --consolidate --all-agents  # Bulk global explicite (manage/admin)
-uv run python scripts/mcp_cli.py bank compact my-proj                       # Dry-run des fichiers surdimensionnés
-uv run python scripts/mcp_cli.py bank compact my-proj --apply               # Compaction via LLM (manage)
+uv run python scripts/mcp_cli.py bank compact my-proj                       # Dry-run ; tailles rapportées en octets UTF-8
+uv run python scripts/mcp_cli.py bank compact my-proj --apply               # Apply DirectLocal seulement (manage) ; routes partagées refusées
 uv run python scripts/mcp_cli.py bank repair my-proj                        # Dry-run (Unicode / préfixes parasites)
 uv run python scripts/mcp_cli.py bank repair my-proj --apply                # Applique les fixes (manage)
 uv run python scripts/mcp_cli.py bank write my-proj activeContext.md -f ./ctx.md   # Bypass LLM (manage)
@@ -292,4 +292,4 @@ scripts/
 
 ---
 
-*CLI Hivemind — 1.4.0*
+*CLI Hivemind — 1.4.1*

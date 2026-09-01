@@ -37,6 +37,8 @@ from .display import (
     show_bank_list,
     show_bank_content,
     show_consolidation_result,
+    show_bank_compact_result,
+    show_bank_compact_failure,
     show_graph_connected,
     show_graph_status,
     show_graph_push_result,
@@ -62,6 +64,7 @@ def _run_tool(
     on_success,
     json_flag=False,
     on_recovery_required=None,
+    on_failure=None,
 ):
     """Common helper: calls an MCP tool and displays the result."""
 
@@ -90,6 +93,12 @@ def _run_tool(
                 "queued",
             ):
                 on_success(result)
+            elif result.get("status") == "conflict":
+                # A consolidation lock is an expected, retryable contention
+                # outcome—not a failed/partial compaction or recovery event.
+                show_error(result.get("message", "Operation is currently busy"))
+            elif on_failure is not None:
+                on_failure(result)
             else:
                 show_error(
                     result.get("message", f"Error: {result.get('status', '?')}")
@@ -348,9 +357,9 @@ def space_update_cmd(ctx, space_id, description, owner, jflag):
     Use ``space update-rules`` to change rules separately.
 
     Examples:
-      space update mon-projet -d "Nouvelle description"
-      space update mon-projet -o "Nouveau Owner"
-      space update mon-projet -d "Desc" -o "Owner"
+      space update my-project -d "New description"
+      space update my-project -o "New owner"
+      space update my-project -d "Description" -o "Owner"
     """
     args = {"space_id": space_id}
     if description:
@@ -381,7 +390,7 @@ def space_update_rules_cmd(ctx, space_id, rules_file, jflag):
 
     \b
     Examples:
-      space update-rules mon-projet -f RULES/live-mem.standard.memory.bank.md
+      space update-rules my-project -f RULES/live-mem.standard.memory.bank.md
     """
     content = open(rules_file, "r", encoding="utf-8").read()
     if not content.strip():
@@ -775,8 +784,8 @@ def bank_write_cmd(ctx, space_id, filename, content_file, content, jflag):
 
     \b
     Examples:
-      bank write mon-projet activeContext.md -f ./context.md
-      bank write mon-projet progress.md -c "# Progress\\n- v1 OK"
+      bank write my-project activeContext.md -f ./context.md
+      bank write my-project progress.md -c "# Progress\\n- v1 OK"
     """
     if content_file:
         content = open(content_file, encoding="utf-8").read()
@@ -835,8 +844,8 @@ def bank_repair_cmd(ctx, space_id, apply, jflag):
 
     \b
     Examples:
-      bank repair mon-projet              # Scan only (dry-run)
-      bank repair mon-projet --apply      # Apply corrections
+      bank repair my-project              # Scan only (dry-run)
+      bank repair my-project --apply      # Apply corrections
     """
     from .display import show_bank_repair_result
 
@@ -861,14 +870,14 @@ def bank_compact_cmd(ctx, space_id, apply, jflag):
     """📦 Compact oversized bank files via LLM (manage).
 
     \b
-    Analyzes each file and compares its size to the configured limit
-    (activeContext.md: 8KB, progress.md: 20KB, others: 15KB).
-    Oversized files are summarized/cleaned by the LLM.
+    Uses one configured per-file UTF-8-byte limit. It is DirectLocal-only:
+    shared Project Mesh routes are refused before compaction writes.
+    Oversized or context-incompatible files can fail closed without changes.
 
     \b
     Examples:
-      bank compact mon-projet              # Scan only (dry-run)
-      bank compact mon-projet --apply      # Compaction effective
+      bank compact my-project              # Scan only (dry-run)
+      bank compact my-project --apply      # Perform compaction
     """
     if not apply:
         console.print("[dim]Dry-run mode — analysis without modifications.[/dim]")
@@ -876,8 +885,6 @@ def bank_compact_cmd(ctx, space_id, apply, jflag):
         console.print(
             "[dim]Compaction in progress... (may take several seconds per file)[/dim]"
         )
-    from .display import show_bank_compact_result
-
     _run_tool(
         ctx,
         "bank_compact",
@@ -887,6 +894,7 @@ def bank_compact_cmd(ctx, space_id, apply, jflag):
         },
         show_bank_compact_result,
         jflag,
+        on_failure=show_bank_compact_failure,
     )
 
 
@@ -1011,9 +1019,9 @@ def token_update_cmd(
     Examples:
       token update sha256:a8c5 --email user@example.com
       token update sha256:a8c5 -p read,write
-      token update sha256:a8c5 -s "mon-projet"                 # remplace
-      token update sha256:a8c5 -a "new-space"                  # ajoute (delta)
-      token update sha256:a8c5 -a "new-a,new-b" -r "old"       # mix delta
+      token update sha256:a8c5 -s "my-project"                 # replaces
+      token update sha256:a8c5 -a "new-space"                  # adds (delta)
+      token update sha256:a8c5 -a "new-a,new-b" -r "old"       # mixed delta
     """
     if (
         not permissions
@@ -1084,8 +1092,8 @@ def token_list_cmd(ctx, name_contains, has_space, no_revoked, jflag):
     Examples:
       token list
       token list --name-contains agent
-      token list --has-space mon-projet
-      token list --has-space mon-projet --no-revoked
+      token list --has-space my-project
+      token list --has-space my-project --no-revoked
     """
     args = {
         "name_contains": name_contains,
@@ -1370,9 +1378,9 @@ def backup_create_cmd(ctx, space_id, backup_all, description, jflag):
 
     \b
     Examples:
-      backup create mon-projet                # Single space
+      backup create my-project                 # Single space
       backup create --all                     # ALL spaces (admin)
-      backup create --all -d "avant migration"
+      backup create --all -d "before migration"
     """
     if backup_all:
         space_id = ""

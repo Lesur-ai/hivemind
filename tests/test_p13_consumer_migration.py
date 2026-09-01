@@ -402,7 +402,7 @@ class TestHealthContract:
         with core_inference_runtime(chat=False, embedding=False):
             block = await build_llmaas_health_block(authenticated=True)
         assert block["status"] == "warning"
-        assert block["message"] == "LLMaaS non configuré"
+        assert block["message"] == "LLMaaS is not configured"
         for role in ("chat", "embedding"):
             assert block[role]["configured"] is False
             assert block[role]["connectivity"] == "not_configured"
@@ -1051,8 +1051,9 @@ class TestStartupAndShutdownWiring:
             "release_reusable=window.release)"
         ], "the process window is not bound to the positive lifecycle contract"
         assert registered["on_startup"] == [
+            "window.guard(_migrate_target_pairing_admission_anchors)",
             "window.guard(_validate_inference_startup)"
-        ], "the inference startup check is not an owner-guarded on_startup hook"
+        ], "the process startup hooks are not owner-guarded"
         # SIBLINGS, not nested: the guard runs every on_shutdown entry through
         # `run_finalizers`, so a consolidator close that raises cannot skip the
         # transport release. Folding one into the other would forfeit that.

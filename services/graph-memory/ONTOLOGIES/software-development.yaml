@@ -1,188 +1,187 @@
 # =============================================================================
-# Ontologie Software Development
+# Software Development Ontology
 # =============================================================================
-# Spécialisée pour l'extraction de connaissances depuis du code source,
-# de la documentation technique et des spécifications de projets logiciels.
-# Conçue pour permettre à un agent IA de comprendre l'architecture,
-# les composants, les dépendances et les patterns d'un projet.
+# Specialized for extracting knowledge from source code, technical documentation,
+# and software-project specifications. Designed to help an AI agent understand a
+# project's architecture, components, dependencies, and patterns.
 #
-# Cas d'usage premier : auto-ingestion de graph-memory dans graph-memory.
+# Primary use case: self-ingestion of graph-memory into graph-memory.
 
 name: software-development
 version: "1.2"
 description: |
-  Ontologie spécialisée pour les projets de développement logiciel.
-  Optimisée pour extraire l'architecture, les composants, les modèles de données,
-  les APIs, les dépendances et les patterns de conception depuis :
-  - Du code source (Python, JavaScript, TypeScript, Go, Rust, etc.)
-  - De la documentation technique (README, specs, ADR)
-  - Des fichiers de configuration (Docker, CI/CD, env)
-  - Des fichiers de tests
-  
-  L'objectif n'est PAS de reproduire un AST (arbre syntaxique) mais de capturer
-  les concepts architecturaux de haut niveau exploitables par un agent IA.
+  Specialized ontology for software development projects.
+  Optimized to extract architecture, components, data models, APIs,
+  dependencies, and design patterns from:
+  - Source code (Python, JavaScript, TypeScript, Go, Rust, etc.)
+  - Technical documentation (README, specifications, ADRs)
+  - Configuration files (Docker, CI/CD, environment files)
+  - Test files
 
-# Instructions spécifiques pour le LLM
+  The goal is NOT to reproduce an AST (abstract syntax tree), but to capture
+  high-level architectural concepts that an AI agent can use.
+
+# LLM-specific instructions
 context: |
-  Tu es un architecte logiciel senior expert en reverse engineering de code.
-  Tu dois identifier avec précision :
-  - L'architecture en couches (layers) et la structure des packages/modules
-  - Les classes et services principaux avec leurs responsabilités
-  - Les modèles de données (Pydantic, dataclass, ORM, schemas)
-  - Les APIs exposées (REST, MCP tools, GraphQL, gRPC)
-  - Les dépendances externes (librairies, services tiers)
-  - Les patterns de conception utilisés (Singleton, Repository, Middleware, etc.)
-  - Les flux de données entre composants
-  - Les configurations et paramètres d'environnement
-  - Les protocoles et standards implémentés (MCP, OAuth, S3, etc.)
-  
-  IMPORTANT :
-  - Privilégie les concepts ARCHITECTURAUX plutôt que les détails d'implémentation.
-  - Un nom d'entité doit être auto-suffisant et descriptif.
-  - Ne crée PAS d'entité pour chaque variable locale ou constante triviale.
-  - Concentre-toi sur les composants qui ont une RESPONSABILITÉ claire dans le système.
-  - Pour le code source, identifie les CLASSES et FONCTIONS PUBLIQUES principales,
-    pas chaque méthode privée utilitaire.
+  You are a senior software architect and expert in code reverse engineering.
+  You must precisely identify:
+  - The layered architecture and package/module structure
+  - The main classes and services with their responsibilities
+  - Data models (Pydantic, dataclass, ORM, schemas)
+  - Exposed APIs (REST, MCP tools, GraphQL, gRPC)
+  - External dependencies (libraries and third-party services)
+  - Applied design patterns (Singleton, Repository, Middleware, etc.)
+  - Data flows between components
+  - Configuration and environment parameters
+  - Implemented protocols and standards (MCP, OAuth, S3, etc.)
+
+  IMPORTANT:
+  - Prioritize ARCHITECTURAL concepts over implementation details.
+  - An entity name must be self-contained and descriptive.
+  - Do NOT create an entity for every local variable or trivial constant.
+  - Focus on components that have a clear RESPONSIBILITY in the system.
+  - For source code, identify the main PUBLIC CLASSES and FUNCTIONS,
+    not every private utility method.
 
 # =============================================================================
-# Types d'entités spécifiques au développement logiciel
+# Software-development entity types
 # =============================================================================
 entity_types:
 
-  # ── Architecture & Structure ──────────────────────────────────────────────
+  # ── Architecture and Structure ────────────────────────────────────────────
 
   - name: Package
-    description: Package, module de haut niveau ou répertoire structurant du projet
+    description: High-level package, module, or structuring project directory
     priority: high
     examples:
-      - "mcp_memory (package principal)"
-      - "mcp_memory.core (couche métier)"
-      - "mcp_memory.auth (couche authentification)"
-      - "mcp_memory.tools (couche outils MCP)"
-      - "scripts.cli (CLI client)"
+      - "mcp_memory (main package)"
+      - "mcp_memory.core (business layer)"
+      - "mcp_memory.auth (authentication layer)"
+      - "mcp_memory.tools (MCP tools layer)"
+      - "scripts.cli (client CLI)"
 
   - name: Module
-    description: Fichier source individuel (.py, .js, .ts, .go, etc.)
+    description: Individual source file (.py, .js, .ts, .go, etc.)
     priority: high
     examples:
-      - "server.py (point d'entrée MCP)"
-      - "graph.py (service Neo4j)"
-      - "extractor.py (extraction LLM)"
-      - "ontology.py (gestion des ontologies)"
-      - "middleware.py (middlewares ASGI)"
+      - "server.py (MCP entry point)"
+      - "graph.py (Neo4j service)"
+      - "extractor.py (LLM extraction)"
+      - "ontology.py (ontology management)"
+      - "middleware.py (ASGI middleware)"
 
   - name: Layer
-    description: Couche architecturale logique du système
+    description: Logical architectural layer of the system
     examples:
-      - "Couche Transport (MCP/HTTP)"
-      - "Couche Métier (core services)"
-      - "Couche Authentification"
-      - "Couche Persistance (Neo4j, S3, Qdrant)"
-      - "Couche Présentation (UI web)"
+      - "Transport Layer (MCP/HTTP)"
+      - "Business Logic Layer (core services)"
+      - "Authentication Layer"
+      - "Persistence Layer (Neo4j, S3, Qdrant)"
+      - "Presentation Layer (web UI)"
 
-  # ── Composants & Classes ──────────────────────────────────────────────────
+  # ── Components and Classes ────────────────────────────────────────────────
 
   - name: Class
-    description: Classe, service ou composant principal du système
+    description: Main class, service, or component in the system
     priority: high
     examples:
-      - "GraphService (service de graphe Neo4j)"
-      - "ExtractorService (extraction d'entités par LLM)"
-      - "StorageService (stockage S3)"
-      - "VectorStoreService (store vectoriel Qdrant)"
-      - "TokenManager (gestion des tokens)"
-      - "OntologyManager (chargement des ontologies)"
-      - "AuthMiddleware (middleware d'authentification)"
+      - "GraphService (Neo4j graph service)"
+      - "ExtractorService (LLM entity extraction)"
+      - "StorageService (S3 storage)"
+      - "VectorStoreService (Qdrant vector store)"
+      - "TokenManager (token management)"
+      - "OntologyManager (ontology loading)"
+      - "AuthMiddleware (authentication middleware)"
 
   - name: Function
-    description: Fonction ou méthode publique importante ayant une responsabilité claire
+    description: Important public function or method with a clear responsibility
     examples:
-      - "extract_with_ontology() (extraction guidée par ontologie)"
-      - "build_prompt() (construction du prompt LLM)"
-      - "search() (recherche dans le graphe)"
-      - "ingest_document() (ingestion de document)"
-      - "validate_token() (validation d'un token)"
+      - "extract_with_ontology() (ontology-guided extraction)"
+      - "build_prompt() (LLM prompt construction)"
+      - "search() (graph search)"
+      - "ingest_document() (document ingestion)"
+      - "validate_token() (token validation)"
 
   - name: Middleware
-    description: Middleware ou intercepteur dans la chaîne de traitement
+    description: Middleware or interceptor in the processing chain
     examples:
-      - "AuthMiddleware (vérification Bearer token)"
-      - "LoggingMiddleware (journalisation des requêtes)"
-      - "StaticFilesMiddleware (fichiers statiques et API REST)"
+      - "AuthMiddleware (Bearer-token verification)"
+      - "LoggingMiddleware (request logging)"
+      - "StaticFilesMiddleware (static files and REST API)"
       - "CORSMiddleware"
 
-  # ── Modèles de données ────────────────────────────────────────────────────
+  # ── Data Models ───────────────────────────────────────────────────────────
 
   - name: DataModel
-    description: Modèle de données, schéma, dataclass ou structure typée
+    description: Data model, schema, dataclass, or typed structure
     priority: high
     examples:
-      - "ExtractedEntity (entité extraite par LLM)"
-      - "ExtractedRelation (relation extraite)"
-      - "Memory (mémoire/graphe de connaissances)"
-      - "Document (document ingéré)"
-      - "DocumentMetadata (métadonnées de document)"
-      - "SearchResult (résultat de recherche)"
-      - "Ontology (définition d'ontologie)"
-      - "TokenInfo (informations de token)"
-      - "Chunk (fragment de texte)"
+      - "ExtractedEntity (LLM-extracted entity)"
+      - "ExtractedRelation (extracted relation)"
+      - "Memory (knowledge memory/graph)"
+      - "Document (ingested document)"
+      - "DocumentMetadata (document metadata)"
+      - "SearchResult (search result)"
+      - "Ontology (ontology definition)"
+      - "TokenInfo (token information)"
+      - "Chunk (text fragment)"
 
   - name: Enum
-    description: Énumération ou ensemble de valeurs constantes
+    description: Enumeration or set of constant values
     examples:
-      - "EntityType (types d'entités du graphe)"
-      - "RelationType (types de relations)"
-      - "SearchMode (modes de recherche : graph, vector, hybrid)"
+      - "EntityType (graph entity types)"
+      - "RelationType (relation types)"
+      - "SearchMode (search modes: graph, vector, hybrid)"
       - "TokenPermission (read, write, admin)"
 
-  # ── APIs & Interfaces ─────────────────────────────────────────────────────
+  # ── APIs and Interfaces ───────────────────────────────────────────────────
 
   - name: MCPTool
-    description: Outil MCP exposé via le protocole Model Context Protocol
+    description: MCP tool exposed through the Model Context Protocol
     priority: high
     examples:
-      - "memory_create (création de mémoire)"
-      - "memory_ingest (ingestion de document)"
-      - "memory_search (recherche sémantique)"
-      - "question_answer (Q&A avec RAG)"
-      - "memory_graph (visualisation du graphe)"
-      - "admin_create_token (création de token)"
-      - "backup_create (sauvegarde)"
-      - "ontology_list (liste des ontologies)"
+      - "memory_create (memory creation)"
+      - "memory_ingest (document ingestion)"
+      - "memory_search (semantic search)"
+      - "question_answer (Q&A with RAG)"
+      - "memory_graph (graph visualization)"
+      - "admin_create_token (token creation)"
+      - "backup_create (backup creation)"
+      - "ontology_list (ontology listing)"
 
   - name: APIEndpoint
-    description: Endpoint REST/HTTP, route ou URL exposée
+    description: Exposed REST/HTTP endpoint, route, or URL
     examples:
-      - "GET /health (vérification santé)"
-      - "GET /api/memories (liste des mémoires)"
-      - "GET /api/graph/{id} (données du graphe)"
-      - "POST /api/ask (question-réponse)"
-      - "GET /graph (visualisation web)"
+      - "GET /health (health check)"
+      - "GET /api/memories (memory list)"
+      - "GET /api/graph/{id} (graph data)"
+      - "POST /api/ask (question and answer)"
+      - "GET /graph (web visualization)"
 
   - name: Protocol
-    description: Protocole de communication ou standard implémenté
+    description: Implemented communication protocol or standard
     examples:
       - "MCP (Model Context Protocol)"
-      - "Streamable HTTP (transport MCP)"
-      - "S3 (protocole de stockage objet)"
-      - "Cypher (langage de requête Neo4j)"
-      - "OpenAI API (interface LLM compatible)"
+      - "Streamable HTTP (MCP transport)"
+      - "S3 (object-storage protocol)"
+      - "Cypher (Neo4j query language)"
+      - "OpenAI API (compatible LLM interface)"
       - "Bearer Token Authentication"
 
-  # ── Infrastructure & Dépendances ──────────────────────────────────────────
+  # ── Infrastructure and Dependencies ───────────────────────────────────────
 
   - name: ExternalService
-    description: Service externe ou infrastructure dont dépend le système
+    description: External service or infrastructure on which the system depends
     priority: high
     examples:
-      - "Neo4j (base de données graphe)"
-      - "Qdrant (base vectorielle)"
-      - "S3 Dell ECS (stockage objet)"
-      - "LLMaaS Cloud Temple (service LLM)"
-      - "Uvicorn (serveur ASGI)"
+      - "Neo4j (graph database)"
+      - "Qdrant (vector database)"
+      - "Dell ECS S3 (object storage)"
+      - "Cloud Temple LLMaaS (LLM service)"
+      - "Uvicorn (ASGI server)"
 
   - name: Dependency
-    description: Librairie, framework ou package externe utilisé
+    description: External library, framework, or package in use
     examples:
       - "fastapi >= 0.100.0"
       - "mcp >= 1.8.0"
@@ -194,219 +193,219 @@ entity_types:
       - "PyYAML >= 6.0"
 
   - name: ConfigParameter
-    description: Paramètre de configuration, variable d'environnement ou setting
+    description: Configuration parameter, environment variable, or setting
     examples:
-      - "NEO4J_URI (connexion Neo4j)"
-      - "QDRANT_URL (URL du serveur Qdrant)"
-      - "S3_ENDPOINT (endpoint S3)"
-      - "LLMAAS_API_KEY (clé API LLM)"
-      - "ADMIN_TOKEN (token bootstrap admin)"
-      - "LOG_LEVEL (niveau de log)"
-      - "MCP_TRANSPORT (type de transport: streamable-http)"
+      - "NEO4J_URI (Neo4j connection)"
+      - "QDRANT_URL (Qdrant server URL)"
+      - "S3_ENDPOINT (S3 endpoint)"
+      - "LLMAAS_API_KEY (LLM API key)"
+      - "ADMIN_TOKEN (admin bootstrap token)"
+      - "LOG_LEVEL (log level)"
+      - "MCP_TRANSPORT (transport type: streamable-http)"
 
-  # ── Patterns & Qualité ────────────────────────────────────────────────────
+  # ── Patterns and Quality ──────────────────────────────────────────────────
 
   - name: DesignPattern
-    description: Pattern de conception, pattern architectural ou pratique d'ingénierie
+    description: Design pattern, architectural pattern, or engineering practice
     examples:
-      - "Singleton (instance unique de service)"
-      - "Repository Pattern (abstraction de persistance)"
-      - "Middleware Chain (chaîne de middlewares ASGI)"
-      - "Lazy Loading (initialisation paresseuse)"
-      - "Chunked Processing (traitement par morceaux)"
-      - "Cumulative Context (contexte cumulatif entre chunks)"
-      - "Graph-Guided RAG (recherche augmentée guidée par graphe)"
-      - "Anti-Hub Rules (prévention des nœuds hub)"
+      - "Singleton (single service instance)"
+      - "Repository Pattern (persistence abstraction)"
+      - "Middleware Chain (ASGI middleware chain)"
+      - "Lazy Loading (deferred initialization)"
+      - "Chunked Processing (processing in chunks)"
+      - "Cumulative Context (cumulative context between chunks)"
+      - "Graph-Guided RAG (graph-guided augmented retrieval)"
+      - "Anti-Hub Rules (hub-node prevention)"
 
   - name: Algorithm
-    description: Algorithme, stratégie de traitement ou pipeline de données
+    description: Algorithm, processing strategy, or data pipeline
     examples:
-      - "Pipeline d'ingestion (upload → chunking → extraction → vectorisation)"
-      - "Graph-Guided RAG (graphe → expansion → vector search → LLM)"
-      - "Chunked Extraction (découpage → extraction cumulative → merge)"
-      - "Token-based Auth (hash SHA256 → Neo4j → validation)"
-      - "Ontology-guided Prompt (build_prompt avec types et rules)"
+      - "Ingestion pipeline (upload → chunking → extraction → vectorization)"
+      - "Graph-Guided RAG (graph → expansion → vector search → LLM)"
+      - "Chunked Extraction (splitting → cumulative extraction → merge)"
+      - "Token-based Auth (SHA256 hash → Neo4j → validation)"
+      - "Ontology-guided Prompt (build_prompt with types and rules)"
 
   - name: TestCase
-    description: Test unitaire, test d'intégration ou scénario de test
+    description: Unit test, integration test, or test scenario
     examples:
-      - "test_memory_create (création de mémoire)"
-      - "test_token_validation (validation de token)"
-      - "test_extraction_with_ontology (extraction guidée)"
-      - "27/27 tests Streamable HTTP"
+      - "test_memory_create (memory creation)"
+      - "test_token_validation (token validation)"
+      - "test_extraction_with_ontology (guided extraction)"
+      - "27/27 Streamable HTTP tests"
 
-  # ── Infrastructure & Déploiement (v1.2) ───────────────────────────────────
+  # ── Infrastructure and Deployment (v1.2) ──────────────────────────────────
 
   - name: InfraComponent
-    description: Composant d'infrastructure de déploiement (conteneur, WAF, réseau, volume)
+    description: Deployment-infrastructure component (container, WAF, network, or volume)
     examples:
-      - "mcp-memory-service (conteneur Docker principal)"
-      - "Coraza WAF (reverse proxy + firewall applicatif)"
-      - "mcp-network (réseau Docker bridge isolé)"
-      - "neo4j_data (volume persistant Neo4j)"
-      - "Uvicorn (serveur ASGI embarqué)"
-      - "Caddy (serveur HTTP du WAF)"
+      - "mcp-memory-service (main Docker container)"
+      - "Coraza WAF (reverse proxy + application firewall)"
+      - "mcp-network (isolated Docker bridge network)"
+      - "neo4j_data (persistent Neo4j volume)"
+      - "Uvicorn (embedded ASGI server)"
+      - "Caddy (WAF HTTP server)"
 
   - name: SecurityBoundary
-    description: Périmètre de sécurité, zone de confiance ou règle de contrôle d'accès
+    description: Security perimeter, trust zone, or access-control rule
     examples:
-      - "WAF Perimeter (filtrage OWASP CRS avant le service)"
-      - "Internal Network (réseau Docker sans port exposé)"
-      - "Bearer Token Auth (authentification par token)"
-      - "Localhost Bypass (requêtes internes sans auth)"
-      - "Token Scoping (isolation par mémoire autorisée)"
+      - "WAF Perimeter (OWASP CRS filtering before the service)"
+      - "Internal Network (Docker network with no exposed port)"
+      - "Bearer Token Auth (token authentication)"
+      - "Localhost Bypass (internal requests without authentication)"
+      - "Token Scoping (isolation by authorized memory)"
       - "RBAC (read, write, admin permissions)"
 
   # ── Documentation ─────────────────────────────────────────────────────────
 
   - name: Documentation
-    description: Document technique, spécification, ADR ou guide
+    description: Technical document, specification, ADR, or guide
     examples:
-      - "README.md (documentation principale)"
-      - "SPECIFICATION.md (spécification technique)"
-      - "CHANGELOG.md (journal des changements)"
-      - "Memory Bank (documentation de contexte projet)"
-      - "activeContext.md (contexte actif)"
-      - "progress.md (suivi d'avancement)"
+      - "README.md (main documentation)"
+      - "SPECIFICATION.md (technical specification)"
+      - "CHANGELOG.md (change log)"
+      - "Memory Bank (project-context documentation)"
+      - "activeContext.md (active context)"
+      - "progress.md (progress tracking)"
 
   - name: Feature
-    description: Fonctionnalité métier, capacité ou user story du système
+    description: Business feature, capability, or system user story
     examples:
-      - "Ingestion multi-format (txt, md, html, docx, pdf, csv)"
-      - "Extraction d'entités guidée par ontologie"
-      - "Recherche hybride (graphe + vectorielle)"
-      - "Question-réponse avec RAG"
-      - "Visualisation de graphe interactive"
-      - "Backup/restore avec archives tar.gz"
-      - "Multi-tenant avec isolation par token"
+      - "Multi-format ingestion (txt, md, html, docx, pdf, csv)"
+      - "Ontology-guided entity extraction"
+      - "Hybrid search (graph + vector)"
+      - "Question answering with RAG"
+      - "Interactive graph visualization"
+      - "Backup/restore with tar.gz archives"
+      - "Multi-tenant isolation by token"
 
 # =============================================================================
-# Types de relations spécifiques au développement logiciel
+# Software-development relation types
 # =============================================================================
 relation_types:
 
-  # ── Structure & Composition ───────────────────────────────────────────────
+  # ── Structure and Composition ─────────────────────────────────────────────
 
   - name: CONTAINS
-    description: Contient (package→module, module→class, class→method)
+    description: Contains (package→module, module→class, class→method)
     examples:
       - "mcp_memory.core → CONTAINS → graph.py"
       - "server.py → CONTAINS → memory_create()"
       - "GraphService → CONTAINS → search()"
 
   - name: PART_OF
-    description: Fait partie de (hiérarchie inverse de CONTAINS)
+    description: Is part of (inverse hierarchy of CONTAINS)
     examples:
       - "graph.py → PART_OF → mcp_memory.core"
-      - "AuthMiddleware → PART_OF → Couche Authentification"
+      - "AuthMiddleware → PART_OF → Authentication Layer"
 
   - name: BELONGS_TO_LAYER
-    description: Appartient à une couche architecturale
+    description: Belongs to an architectural layer
     examples:
-      - "GraphService → BELONGS_TO_LAYER → Couche Persistance"
-      - "AuthMiddleware → BELONGS_TO_LAYER → Couche Authentification"
-      - "memory_search → BELONGS_TO_LAYER → Couche Transport"
+      - "GraphService → BELONGS_TO_LAYER → Persistence Layer"
+      - "AuthMiddleware → BELONGS_TO_LAYER → Authentication Layer"
+      - "memory_search → BELONGS_TO_LAYER → Transport Layer"
 
-  # ── Dépendances & Relations entre composants ──────────────────────────────
+  # ── Dependencies and Component Relations ──────────────────────────────────
 
   - name: DEPENDS_ON
-    description: Dépend d'un composant, service ou librairie
+    description: Depends on a component, service, or library
     examples:
       - "GraphService → DEPENDS_ON → Neo4j"
       - "VectorStoreService → DEPENDS_ON → Qdrant"
       - "ExtractorService → DEPENDS_ON → LLMaaS"
 
   - name: IMPORTS
-    description: Importe ou utilise un module/package
+    description: Imports or uses a module/package
     examples:
       - "server.py → IMPORTS → graph.py"
       - "extractor.py → IMPORTS → ontology.py"
 
   - name: USES
-    description: Utilise un service, composant ou pattern
+    description: Uses a service, component, or pattern
     examples:
       - "memory_ingest → USES → ExtractorService"
       - "memory_search → USES → VectorStoreService"
       - "ExtractorService → USES → OntologyManager"
 
   - name: CALLS
-    description: Appelle une fonction ou méthode
+    description: Calls a function or method
     examples:
       - "memory_ingest → CALLS → extract_with_ontology()"
       - "extract_with_ontology() → CALLS → build_prompt()"
       - "question_answer → CALLS → generate_answer()"
 
-  # ── Héritage & Implémentation ─────────────────────────────────────────────
+  # ── Inheritance and Implementation ────────────────────────────────────────
 
   - name: INHERITS_FROM
-    description: Hérite d'une classe parente
+    description: Inherits from a parent class
     examples:
       - "Settings → INHERITS_FROM → BaseSettings (Pydantic)"
       - "AuthMiddleware → INHERITS_FROM → ASGIMiddleware"
 
   - name: IMPLEMENTS
-    description: Implémente un pattern, protocole ou interface
+    description: Implements a pattern, protocol, or interface
     examples:
       - "GraphService → IMPLEMENTS → Singleton"
       - "AuthMiddleware → IMPLEMENTS → Bearer Token Authentication"
       - "server.py → IMPLEMENTS → MCP (Model Context Protocol)"
 
-  # ── Données & Types ───────────────────────────────────────────────────────
+  # ── Data and Types ────────────────────────────────────────────────────────
 
   - name: RETURNS
-    description: Retourne un type de données
+    description: Returns a data type
     examples:
       - "extract_with_ontology() → RETURNS → ExtractionResult"
       - "search() → RETURNS → SearchResult"
       - "validate_token() → RETURNS → TokenInfo"
 
   - name: ACCEPTS
-    description: Accepte en paramètre un type de données
+    description: Accepts a data type as a parameter
     examples:
       - "memory_ingest → ACCEPTS → Document"
       - "build_prompt() → ACCEPTS → Ontology"
 
   - name: PRODUCES
-    description: Produit ou génère des données
+    description: Produces or generates data
     examples:
       - "ExtractorService → PRODUCES → ExtractedEntity"
       - "ChunkerService → PRODUCES → Chunk"
       - "EmbedderService → PRODUCES → vector embedding"
 
   - name: STORES_IN
-    description: Persiste des données dans un système de stockage
+    description: Persists data in a storage system
     examples:
-      - "Document → STORES_IN → S3 Dell ECS"
+      - "Document → STORES_IN → Dell ECS S3"
       - "ExtractedEntity → STORES_IN → Neo4j"
       - "vector embedding → STORES_IN → Qdrant"
 
-  # ── API & Exposition ──────────────────────────────────────────────────────
+  # ── API and Exposure ──────────────────────────────────────────────────────
 
   - name: EXPOSES
-    description: Expose un outil, endpoint ou interface
+    description: Exposes a tool, endpoint, or interface
     examples:
       - "server.py → EXPOSES → memory_create"
       - "StaticFilesMiddleware → EXPOSES → GET /api/memories"
       - "server.py → EXPOSES → GET /health"
 
   - name: DELEGATES_TO
-    description: Délègue le traitement à un autre composant
+    description: Delegates processing to another component
     examples:
       - "memory_ingest → DELEGATES_TO → ExtractorService"
       - "memory_search → DELEGATES_TO → GraphService"
       - "AuthMiddleware → DELEGATES_TO → TokenManager"
 
-  # ── Actions & Mutations (v1.1) ────────────────────────────────────────────
+  # ── Actions and Mutations (v1.1) ──────────────────────────────────────────
 
   - name: UPDATES
-    description: Met à jour, modifie ou écrit dans un composant ou un état
+    description: Updates, modifies, or writes to a component or state
     examples:
       - "startup_event → UPDATES → APIConfig"
       - "vectorize_all → UPDATES → Qdrant collection"
       - "import_catalog → UPDATES → Product catalog"
 
   - name: READS
-    description: Lit des données depuis un composant ou un stockage
+    description: Reads data from a component or storage system
     examples:
       - "get_admin_config → READS → APIConfig"
       - "search_documents → READS → Qdrant collection"
@@ -415,51 +414,51 @@ relation_types:
   # ── Configuration ─────────────────────────────────────────────────────────
 
   - name: CONFIGURED_BY
-    description: Configuré par un paramètre ou variable d'environnement
+    description: Configured by a parameter or environment variable
     examples:
       - "Neo4j → CONFIGURED_BY → NEO4J_URI"
       - "Qdrant → CONFIGURED_BY → QDRANT_URL"
       - "LLMaaS → CONFIGURED_BY → LLMAAS_API_KEY"
 
-  # ── Qualité & Documentation ───────────────────────────────────────────────
+  # ── Quality and Documentation ─────────────────────────────────────────────
 
   - name: TESTED_BY
-    description: Testé par un test ou scénario de test
+    description: Tested by a test or test scenario
     examples:
       - "memory_create → TESTED_BY → test_memory_create"
       - "Streamable HTTP → TESTED_BY → 27/27 tests"
 
   - name: DOCUMENTED_IN
-    description: Documenté dans un fichier ou section
+    description: Documented in a file or section
     examples:
       - "Architecture → DOCUMENTED_IN → SPECIFICATION.md"
       - "API → DOCUMENTED_IN → README.md"
-      - "Progression → DOCUMENTED_IN → progress.md"
+      - "Progress → DOCUMENTED_IN → progress.md"
 
   - name: IMPLEMENTS_FEATURE
-    description: Implémente une fonctionnalité métier
+    description: Implements a business feature
     examples:
-      - "ExtractorService → IMPLEMENTS_FEATURE → Extraction d'entités guidée par ontologie"
-      - "GraphService + VectorStoreService → IMPLEMENTS_FEATURE → Recherche hybride"
+      - "ExtractorService → IMPLEMENTS_FEATURE → Ontology-guided entity extraction"
+      - "GraphService + VectorStoreService → IMPLEMENTS_FEATURE → Hybrid search"
 
-  # ── Infrastructure & Sécurité (v1.2) ──────────────────────────────────────
+  # ── Infrastructure and Security (v1.2) ────────────────────────────────────
 
   - name: PROTECTS
-    description: Protège un composant (périmètre de sécurité → composant protégé)
+    description: Protects a component (security perimeter → protected component)
     examples:
-      - "Coraza WAF (reverse proxy) → PROTECTS → mcp-memory-service (conteneur)"
+      - "Coraza WAF (reverse proxy) → PROTECTS → mcp-memory-service (container)"
       - "Bearer Token Auth → PROTECTS → MCP Tools"
-      - "Internal Network (réseau Docker) → PROTECTS → Neo4j (base de données)"
+      - "Internal Network (Docker network) → PROTECTS → Neo4j (database)"
 
   - name: ROUTES_TO
-    description: Achemine le trafic vers un composant (reverse proxy, load balancer)
+    description: Routes traffic to a component (reverse proxy or load balancer)
     examples:
       - "Coraza WAF → ROUTES_TO → mcp-memory-service (port 8002)"
       - "mcp-memory-service → ROUTES_TO → Neo4j (bolt://neo4j:7687)"
       - "mcp-memory-service → ROUTES_TO → Qdrant (http://qdrant:6333)"
 
 # =============================================================================
-# Règles d'extraction spécifiques
+# Specific extraction rules
 # =============================================================================
 extraction_rules:
   max_entities: 160
@@ -476,193 +475,192 @@ extraction_rules:
     - Feature
 
   special_instructions: |
-    # --- RÈGLES D'EXTRACTION POUR LE CODE SOURCE ---
+    # --- EXTRACTION RULES FOR SOURCE CODE ---
 
-    ## Granularité
-    - Extrais les CLASSES et SERVICES principaux, pas chaque méthode utilitaire privée.
-    - Pour les fonctions, ne garde que celles qui ont une responsabilité métier claire
-      (points d'entrée, API publiques, algorithmes importants).
-    - Un Module = un fichier source. Un Package = un répertoire avec __init__.py (Python)
-      ou package.json (Node.js).
+    ## Granularity
+    - Extract the main CLASSES and SERVICES, not every private utility method.
+    - For functions, retain only those with a clear business responsibility
+      (entry points, public APIs, important algorithms).
+    - A Module = one source file. A Package = a directory containing __init__.py (Python)
+      or package.json (Node.js).
 
-    ## Nommage CANONIQUE (CRITIQUE pour la fusion cross-documents)
-    
-    ⚠️ RÈGLE N°1 : Le nom d'une entité doit être IDENTIQUE quel que soit le fichier
-    dans lequel elle apparaît. C'est la clé de la déduplication dans le graphe.
-    
-    Format obligatoire par type :
-    - **Class** : "NomClasse (description courte)" — ex: "VectorizationService (service de vectorisation)"
-      Le nom de classe DOIT être le nom exact tel qu'il apparaît dans le code.
-      La description entre parenthèses doit être STABLE (ne pas varier selon le contexte).
-    - **Function** : "nom_fonction() (description)" — ex: "vectorize_all() (vectorisation complète)"
-    - **Module** : "nom_fichier.ext (description)" — ex: "main.py (point d'entrée FastAPI)"
-    - **Package** : "chemin.complet (description)" — ex: "app.routers (routeurs FastAPI)"
-    - **ExternalService** : "NomService (type)" — ex: "Qdrant (base vectorielle)"
-    - **ConfigParameter** : "NOM_VARIABLE (description)" — ex: "LLMAAS_API_KEY (clé API LLM)"
-    - **DataModel** : "NomModele (framework)" — ex: "Offer (SQLAlchemy model)"
-    - **Layer** : Nom stable — ex: "Business Logic Layer", "Persistence Layer"
-    
-    ⚠️ INTERDIT de varier la description entre fichiers !
-    Mauvais : "VectorizationService (class)" dans un fichier, "VectorizationService (service de gestion de la vectorisation)" dans un autre.
-    Bon : "VectorizationService (service de vectorisation)" partout.
+    ## CANONICAL naming (CRITICAL for cross-document merging)
 
-    ## Types stricts — NE PAS inventer de types
+    ⚠️ RULE NO. 1: An entity name must be IDENTICAL in every file
+    in which it appears. This is the key to graph deduplication.
 
-    - ⚠️ Les décorateurs, annotations et métadonnées sont des ATTRIBUTS de l'entité décorée,
-      pas des entités séparées. Ne crée JAMAIS de type "Decorator" ou "Annotation".
+    Required format by type:
+    - **Class**: "ClassName (short description)" — for example, "VectorizationService (vectorization service)"
+      The class name MUST be exactly the name appearing in the code.
+      The parenthetical description must be STABLE (do not vary it by context).
+    - **Function**: "function_name() (description)" — for example, "vectorize_all() (full vectorization)"
+    - **Module**: "file_name.ext (description)" — for example, "main.py (FastAPI entry point)"
+    - **Package**: "full.path (description)" — for example, "app.routers (FastAPI routers)"
+    - **ExternalService**: "ServiceName (type)" — for example, "Qdrant (vector database)"
+    - **ConfigParameter**: "VARIABLE_NAME (description)" — for example, "LLMAAS_API_KEY (LLM API key)"
+    - **DataModel**: "ModelName (framework)" — for example, "Offer (SQLAlchemy model)"
+    - **Layer**: Stable name — for example, "Business Logic Layer", "Persistence Layer"
 
-    - ⚠️ Les imports et dépendances internes (entre modules du même projet) sont des
-      relations IMPORTS, pas des entités Dependency. Les Dependency sont UNIQUEMENT
-      les packages EXTERNES (pip, npm, cargo, go mod).
+    ⚠️ DO NOT vary a description between files!
+    Bad: "VectorizationService (class)" in one file, "VectorizationService (vectorization management service)" in another.
+    Good: "VectorizationService (vectorization service)" everywhere.
 
-    - ⚠️ Les variables d'instance, attributs de classe et propriétés ne sont PAS des entités.
-      Elles sont des caractéristiques de la Class qui les contient.
+    ## Strict types — DO NOT invent types
 
-    - ⚠️ Les constantes, variables globales et magic numbers ne sont PAS des entités,
-      SAUF si elles représentent une ConfigParameter exposée à l'utilisateur.
+    - ⚠️ Decorators, annotations, and metadata are ATTRIBUTES of the decorated entity,
+      not separate entities. NEVER create the types "Decorator" or "Annotation".
 
-    - ⚠️ Les exceptions custom sont des **Class**, pas un type séparé.
+    - ⚠️ Imports and internal dependencies (between modules in the same project) are
+      IMPORTS relations, not Dependency entities. Dependency entities are ONLY
+      EXTERNAL packages (pip, npm, cargo, go mod).
 
-    - ⚠️ Les fichiers statiques (HTML, CSS, JS d'UI) sont des **Module**.
+    - ⚠️ Instance variables, class attributes, and properties are NOT entities.
+      They are characteristics of the Class that contains them.
 
-    - ⚠️ Les Dockerfile, docker-compose.yml, Makefile, CI/CD sont de la **Documentation**.
+    - ⚠️ Constants, global variables, and magic numbers are NOT entities,
+      EXCEPT when they represent a ConfigParameter exposed to the user.
 
-    - ⚠️ Les commentaires TODO, FIXME, HACK ne sont PAS des entités.
+    - ⚠️ Custom exceptions are **Class** entities, not a separate type.
 
-    # --- MAPPINGS OBLIGATOIRES DE RELATIONS (NE PAS inventer) ---
+    - ⚠️ Static files (HTML, CSS, UI JavaScript) are **Module** entities.
 
-    - ⚠️ "EXECUTES" N'EXISTE PAS → utilise **CALLS** (appel de fonction) ou **DELEGATES_TO** (délégation).
-    - ⚠️ "IMPLEMENTED_BY" N'EXISTE PAS → inverse la relation et utilise **IMPLEMENTS** (A IMPLEMENTS B).
-    - ⚠️ "USED_IN" N'EXISTE PAS → inverse la relation et utilise **USES** (A USES B).
-    - ⚠️ "USED_BY" N'EXISTE PAS → inverse la relation et utilise **USES** (A USES B).
-    - ⚠️ "BELONGS_TO_CLASS" N'EXISTE PAS → utilise **PART_OF** ou **CONTAINS**.
-    - ⚠️ "INSTANCE_OF" N'EXISTE PAS → utilise **INHERITS_FROM** ou **IMPLEMENTS**.
-    - ⚠️ "CREATES" N'EXISTE PAS → utilise **PRODUCES** (production de données).
-    - ⚠️ "PROVIDES" N'EXISTE PAS → utilise **EXPOSES** (exposition d'interface).
-    - ⚠️ "ENABLED_BY" N'EXISTE PAS → utilise **DEPENDS_ON** (dépendance).
-    - ⚠️ "RELATED_TO" N'EXISTE PAS — trop vague. Choisis une relation SPÉCIFIQUE
+    - ⚠️ Dockerfile, docker-compose.yml, Makefile, and CI/CD are **Documentation** entities.
+
+    - ⚠️ TODO, FIXME, and HACK comments are NOT entities.
+
+    # --- REQUIRED RELATION MAPPINGS (DO NOT invent relations) ---
+
+    - ⚠️ "EXECUTES" DOES NOT EXIST → use **CALLS** (function call) or **DELEGATES_TO** (delegation).
+    - ⚠️ "IMPLEMENTED_BY" DOES NOT EXIST → reverse the relation and use **IMPLEMENTS** (A IMPLEMENTS B).
+    - ⚠️ "USED_IN" DOES NOT EXIST → reverse the relation and use **USES** (A USES B).
+    - ⚠️ "USED_BY" DOES NOT EXIST → reverse the relation and use **USES** (A USES B).
+    - ⚠️ "BELONGS_TO_CLASS" DOES NOT EXIST → use **PART_OF** or **CONTAINS**.
+    - ⚠️ "INSTANCE_OF" DOES NOT EXIST → use **INHERITS_FROM** or **IMPLEMENTS**.
+    - ⚠️ "CREATES" DOES NOT EXIST → use **PRODUCES** (data production).
+    - ⚠️ "PROVIDES" DOES NOT EXIST → use **EXPOSES** (interface exposure).
+    - ⚠️ "ENABLED_BY" DOES NOT EXIST → use **DEPENDS_ON** (dependency).
+    - ⚠️ "RELATED_TO" DOES NOT EXIST — it is too vague. Choose a SPECIFIC relation
       (USES, DEPENDS_ON, CALLS, PART_OF, etc.).
-    - ⚠️ "DEFINES" N'EXISTE PAS → utilise **CONTAINS** (un module CONTAINS une classe).
+    - ⚠️ "DEFINES" DOES NOT EXIST → use **CONTAINS** (a module CONTAINS a class).
 
-    # --- MAPPINGS OBLIGATOIRES D'ENTITÉS ---
+    # --- REQUIRED ENTITY MAPPINGS ---
 
-    - ⚠️ Les états de job, variables d'état global (ex: "ImageScanJob", "analyze_state")
-      sont des **Class** ou des **DataModel**, PAS de type "Other" ou "JobState".
-      Ne crée JAMAIS de type "Other".
+    - ⚠️ Job states and global-state variables (for example, "ImageScanJob", "analyze_state")
+      are **Class** or **DataModel** entities, NOT "Other" or "JobState".
+      NEVER create the type "Other".
 
-    - ⚠️ Les instances singleton (ex: "tool_executor", "gemini_service") sont des **Class**,
-      pas un type "Instance" ou "Other".
+    - ⚠️ Singleton instances (for example, "tool_executor", "gemini_service") are **Class** entities,
+      not "Instance" or "Other" entities.
 
-    ## Relations — Connectivité minimum
-    
-    ⚠️ Chaque entité DOIT avoir AU MOINS 2 relations (hors MENTIONS du document).
-    Si une Function ou un APIEndpoint n'a qu'une seule relation, ajoute :
-    - BELONGS_TO_LAYER → vers la couche concernée
-    - USES → vers le service ou composant utilisé
-    - RETURNS → vers le modèle de données retourné
-    - CONFIGURED_BY → vers le paramètre de config s'il y en a un
-    
-    ## Relations — Priorités architecturales
-    - Privilégie les relations ARCHITECTURALES (DEPENDS_ON, USES, EXPOSES, DELEGATES_TO)
-      plutôt que les relations triviales (chaque IMPORTS).
-    - N'extrais les relations CALLS que pour les appels INTER-COMPOSANTS significatifs.
-    - CONTAINS est pour la hiérarchie structurelle (Package→Module→Class→Method).
-    - USES est pour l'utilisation fonctionnelle (Class→ExternalService).
-    - UPDATES est pour les mutations d'état (Function→DataModel ou →ExternalService).
-    - READS est pour les lectures de données (Function→DataModel ou →ExternalService).
+    ## Relations — Minimum connectivity
 
-    ## Pipeline et flux de données
-    - Identifie les PIPELINES de traitement et modélise-les comme Algorithm.
-    - Identifie les flux : PRODUIT → STOCKE → LIT → MET À JOUR.
+    ⚠️ Every entity MUST have AT LEAST 2 relations (excluding document MENTIONS).
+    If a Function or APIEndpoint has only one relation, add:
+    - BELONGS_TO_LAYER → the relevant layer
+    - USES → the service or component used
+    - RETURNS → the returned data model
+    - CONFIGURED_BY → the configuration parameter, when one exists
+
+    ## Relations — Architectural priorities
+    - Prioritize ARCHITECTURAL relations (DEPENDS_ON, USES, EXPOSES, DELEGATES_TO)
+      over trivial relations (every IMPORTS relation).
+    - Extract CALLS relations only for meaningful INTER-COMPONENT calls.
+    - CONTAINS is for structural hierarchy (Package→Module→Class→Method).
+    - USES is for functional use (Class→ExternalService).
+    - UPDATES is for state mutations (Function→DataModel or →ExternalService).
+    - READS is for data reads (Function→DataModel or →ExternalService).
+
+    ## Pipeline and data flows
+    - Identify processing PIPELINES and model them as Algorithm entities.
+    - Identify flows: PRODUCES → STORES_IN → READS → UPDATES.
 
     # --- ANTI-HUB (v1.1) ---
-    
-    - Si une Class a plus de 30 relations, c'est probablement un hub.
-      Dans ce cas, regroupe les relations similaires et ne garde que
-      les relations ARCHITECTURALES les plus significatives.
-    - Les classes de type "Service" ne doivent PAS être la cible de TOUTES
-      les relations du fichier. Préfère des relations vers les Function
-      spécifiques de ce service plutôt que vers la classe elle-même.
 
-    # --- EXCLUSIONS (NE PAS extraire comme entités) ---
+    - If a Class has more than 30 relations, it is probably a hub.
+      In that case, group similar relations and retain only the most significant
+      ARCHITECTURAL relations.
+    - "Service" classes must NOT be the target of ALL relations in a file.
+      Prefer relations to the service's specific Functions rather than the class itself.
 
-    - ⚠️ NE PAS extraire :
-      * Les variables locales, paramètres de fonction ou arguments CLI
-      * Les chemins de fichiers d'exemple ou données de test
-      * Les messages de log ou chaînes de caractères littérales
-      * Les numéros de version isolés (sauf pour les Dependency)
-      * Les noms de branches git
-      * Les commentaires de code ou docstrings
-      * Les méthodes dunder Python (__init__, __str__, __repr__)
-      * Les getters/setters triviaux
-    → IGNORER ou intégrer comme attributs d'autres entités.
+    # --- EXCLUSIONS (DO NOT extract as entities) ---
 
-    # --- QUALITÉ ---
-    - Chaque entité doit avoir un NOM descriptif, STABLE et auto-suffisant.
-    - Les relations doivent avoir un sens ARCHITECTURAL clair.
-    - Préfère MOINS d'entités bien nommées à BEAUCOUP d'entités génériques.
-    - ZÉRO entité de type "Other" — tout doit être classifiable.
+    - ⚠️ DO NOT extract:
+      * Local variables, function parameters, or CLI arguments
+      * Example file paths or test data
+      * Log messages or literal strings
+      * Isolated version numbers (except for Dependency entities)
+      * Git branch names
+      * Code comments or docstrings
+      * Python dunder methods (__init__, __str__, __repr__)
+      * Trivial getters/setters
+    → IGNORE them or include them as attributes of other entities.
+
+    # --- QUALITY ---
+    - Every entity must have a descriptive, STABLE, self-contained NAME.
+    - Relations must have a clear ARCHITECTURAL meaning.
+    - Prefer FEWER well-named entities over MANY generic entities.
+    - ZERO entities of type "Other" — everything must be classifiable.
 
 # =============================================================================
-# Exemples d'extraction
+# Extraction examples
 # =============================================================================
 examples:
   - input: |
-      # server.py - Point d'entrée MCP Memory Service
+      # server.py - MCP Memory Service entry point
       from mcp.server.fastmcp import FastMCP
       from .core.graph import GraphService
       from .core.extractor import ExtractorService
-      
+
       mcp = FastMCP("MCP Memory Service")
-      
+
       @mcp.tool()
       async def memory_create(memory_id: str, description: str = "") -> dict:
-          """Crée une nouvelle mémoire (graphe de connaissances isolé)."""
+          """Create a new memory (isolated knowledge graph)."""
           graph = await get_graph_service()
           return await graph.create_memory(memory_id, description)
-      
+
       @mcp.tool()
       async def memory_ingest(memory_id: str, source: str, content: str,
                               ontology: str = "general") -> dict:
-          """Ingère un document dans une mémoire."""
+          """Ingest a document into a memory."""
           graph = await get_graph_service()
           extractor = await get_extractor_service()
           storage = await get_storage_service()
-          # Upload S3, extraction LLM, stockage Neo4j, vectorisation Qdrant
+          # S3 upload, LLM extraction, Neo4j storage, Qdrant vectorization
     expected_entities:
-      - {name: "server.py (point d'entrée MCP)", type: "Module"}
-      - {name: "FastMCP (framework MCP)", type: "Dependency"}
-      - {name: "GraphService (service de graphe Neo4j)", type: "Class"}
-      - {name: "ExtractorService (extraction LLM)", type: "Class"}
-      - {name: "memory_create (création de mémoire)", type: "MCPTool"}
-      - {name: "memory_ingest (ingestion de document)", type: "MCPTool"}
-      - {name: "Pipeline d'ingestion (S3 → extraction → Neo4j → Qdrant)", type: "Algorithm"}
+      - {name: "server.py (MCP entry point)", type: "Module"}
+      - {name: "FastMCP (MCP framework)", type: "Dependency"}
+      - {name: "GraphService (Neo4j graph service)", type: "Class"}
+      - {name: "ExtractorService (LLM extraction)", type: "Class"}
+      - {name: "memory_create (memory creation)", type: "MCPTool"}
+      - {name: "memory_ingest (document ingestion)", type: "MCPTool"}
+      - {name: "Ingestion pipeline (S3 → extraction → Neo4j → Qdrant)", type: "Algorithm"}
     expected_relations:
-      - {from: "server.py (point d'entrée MCP)", to: "GraphService (service de graphe Neo4j)", type: "IMPORTS"}
-      - {from: "server.py (point d'entrée MCP)", to: "ExtractorService (extraction LLM)", type: "IMPORTS"}
-      - {from: "server.py (point d'entrée MCP)", to: "memory_create (création de mémoire)", type: "EXPOSES"}
-      - {from: "server.py (point d'entrée MCP)", to: "memory_ingest (ingestion de document)", type: "EXPOSES"}
-      - {from: "memory_create (création de mémoire)", to: "GraphService (service de graphe Neo4j)", type: "DELEGATES_TO"}
-      - {from: "memory_ingest (ingestion de document)", to: "ExtractorService (extraction LLM)", type: "DELEGATES_TO"}
-      - {from: "memory_ingest (ingestion de document)", to: "Pipeline d'ingestion (S3 → extraction → Neo4j → Qdrant)", type: "IMPLEMENTS"}
+      - {from: "server.py (MCP entry point)", to: "GraphService (Neo4j graph service)", type: "IMPORTS"}
+      - {from: "server.py (MCP entry point)", to: "ExtractorService (LLM extraction)", type: "IMPORTS"}
+      - {from: "server.py (MCP entry point)", to: "memory_create (memory creation)", type: "EXPOSES"}
+      - {from: "server.py (MCP entry point)", to: "memory_ingest (document ingestion)", type: "EXPOSES"}
+      - {from: "memory_create (memory creation)", to: "GraphService (Neo4j graph service)", type: "DELEGATES_TO"}
+      - {from: "memory_ingest (document ingestion)", to: "ExtractorService (LLM extraction)", type: "DELEGATES_TO"}
+      - {from: "memory_ingest (document ingestion)", to: "Ingestion pipeline (S3 → extraction → Neo4j → Qdrant)", type: "IMPLEMENTS"}
 
   - input: |
-      # extractor.py - Service d'extraction d'entités par LLM
+      # extractor.py - LLM entity-extraction service
       class ExtractorService:
-          """Extraction d'entités et relations via LLMaaS Cloud Temple."""
-          
+          """Extract entities and relations through Cloud Temple LLMaaS."""
+
           def __init__(self):
               self.client = AsyncOpenAI(api_key=settings.LLMAAS_API_KEY)
               self.model = "gpt-oss:120b"
-          
+
           async def extract_with_ontology(self, text: str, ontology_name: str,
                                           memory_id: str) -> ExtractionResult:
               ontology = manager.get_ontology(ontology_name)
               prompt = ontology.build_prompt(text)
               response = await self.client.chat.completions.create(...)
               return self._parse_extraction(response)
-          
-          async def extract_with_ontology_chunked(self, text: str, 
+
+          async def extract_with_ontology_chunked(self, text: str,
                                                    ontology_name: str) -> ExtractionResult:
               chunks = self._split_text_for_extraction(text)
               cumulative = ""
@@ -671,69 +669,69 @@ examples:
                   cumulative += result.summary
               return self._merge_extraction_results(all_results)
     expected_entities:
-      - {name: "extractor.py (extraction d'entités LLM)", type: "Module"}
-      - {name: "ExtractorService (extraction d'entités par LLM)", type: "Class"}
-      - {name: "extract_with_ontology() (extraction guidée par ontologie)", type: "Function"}
-      - {name: "extract_with_ontology_chunked() (extraction par morceaux)", type: "Function"}
-      - {name: "ExtractionResult (résultat d'extraction Pydantic)", type: "DataModel"}
-      - {name: "LLMaaS Cloud Temple gpt-oss:120b", type: "ExternalService"}
-      - {name: "Chunked Extraction (découpage → extraction cumulative → merge)", type: "Algorithm"}
-      - {name: "Cumulative Context (contexte cumulatif entre chunks)", type: "DesignPattern"}
+      - {name: "extractor.py (LLM entity extraction)", type: "Module"}
+      - {name: "ExtractorService (LLM entity extraction)", type: "Class"}
+      - {name: "extract_with_ontology() (ontology-guided extraction)", type: "Function"}
+      - {name: "extract_with_ontology_chunked() (chunked extraction)", type: "Function"}
+      - {name: "ExtractionResult (Pydantic extraction result)", type: "DataModel"}
+      - {name: "Cloud Temple LLMaaS gpt-oss:120b", type: "ExternalService"}
+      - {name: "Chunked Extraction (splitting → cumulative extraction → merge)", type: "Algorithm"}
+      - {name: "Cumulative Context (cumulative context between chunks)", type: "DesignPattern"}
       - {name: "openai >= 1.0.0", type: "Dependency"}
     expected_relations:
-      - {from: "extractor.py (extraction d'entités LLM)", to: "ExtractorService (extraction d'entités par LLM)", type: "CONTAINS"}
-      - {from: "ExtractorService (extraction d'entités par LLM)", to: "extract_with_ontology() (extraction guidée par ontologie)", type: "CONTAINS"}
-      - {from: "ExtractorService (extraction d'entités par LLM)", to: "LLMaaS Cloud Temple gpt-oss:120b", type: "DEPENDS_ON"}
-      - {from: "ExtractorService (extraction d'entités par LLM)", to: "OntologyManager (chargement des ontologies)", type: "USES"}
-      - {from: "extract_with_ontology() (extraction guidée par ontologie)", to: "ExtractionResult (résultat d'extraction Pydantic)", type: "RETURNS"}
-      - {from: "ExtractorService (extraction d'entités par LLM)", to: "Chunked Extraction (découpage → extraction cumulative → merge)", type: "IMPLEMENTS"}
-      - {from: "Chunked Extraction (découpage → extraction cumulative → merge)", to: "Cumulative Context (contexte cumulatif entre chunks)", type: "USES"}
-      - {from: "ExtractorService (extraction d'entités par LLM)", to: "LLMAAS_API_KEY", type: "CONFIGURED_BY"}
+      - {from: "extractor.py (LLM entity extraction)", to: "ExtractorService (LLM entity extraction)", type: "CONTAINS"}
+      - {from: "ExtractorService (LLM entity extraction)", to: "extract_with_ontology() (ontology-guided extraction)", type: "CONTAINS"}
+      - {from: "ExtractorService (LLM entity extraction)", to: "Cloud Temple LLMaaS gpt-oss:120b", type: "DEPENDS_ON"}
+      - {from: "ExtractorService (LLM entity extraction)", to: "OntologyManager (ontology loading)", type: "USES"}
+      - {from: "extract_with_ontology() (ontology-guided extraction)", to: "ExtractionResult (Pydantic extraction result)", type: "RETURNS"}
+      - {from: "ExtractorService (LLM entity extraction)", to: "Chunked Extraction (splitting → cumulative extraction → merge)", type: "IMPLEMENTS"}
+      - {from: "Chunked Extraction (splitting → cumulative extraction → merge)", to: "Cumulative Context (cumulative context between chunks)", type: "USES"}
+      - {from: "ExtractorService (LLM entity extraction)", to: "LLMAAS_API_KEY", type: "CONFIGURED_BY"}
 
   - input: |
-      # models.py - Modèles de données Pydantic
+      # models.py - Pydantic data models
       class SearchMode(str, Enum):
           GRAPH = "graph"
-          VECTOR = "vector"  
+          VECTOR = "vector"
           HYBRID = "hybrid"
-      
+
       class ExtractedEntity(BaseModel):
           name: str
           type: str
           properties: dict = {}
-      
+
       class ExtractedRelation(BaseModel):
           source: str
           target: str
           type: str
           properties: dict = {}
-      
+
       class ExtractionResult(BaseModel):
           entities: list[ExtractedEntity]
           relations: list[ExtractedRelation]
-      
+
       class Memory(BaseModel):
           id: str
           description: str
           created_at: datetime
-      
+
       class Document(BaseModel):
           id: str
           source: str
           content_type: str
           metadata: DocumentMetadata
     expected_entities:
-      - {name: "models.py (modèles de données)", type: "Module"}
+      - {name: "models.py (data models)", type: "Module"}
       - {name: "SearchMode (enum: graph, vector, hybrid)", type: "Enum"}
-      - {name: "ExtractedEntity (entité extraite par LLM)", type: "DataModel"}
-      - {name: "ExtractedRelation (relation extraite)", type: "DataModel"}
-      - {name: "ExtractionResult (résultat d'extraction)", type: "DataModel"}
-      - {name: "Memory (mémoire/graphe de connaissances)", type: "DataModel"}
-      - {name: "Document (document ingéré)", type: "DataModel"}
+      - {name: "ExtractedEntity (LLM-extracted entity)", type: "DataModel"}
+      - {name: "ExtractedRelation (extracted relation)", type: "DataModel"}
+      - {name: "ExtractionResult (extraction result)", type: "DataModel"}
+      - {name: "Memory (knowledge memory/graph)", type: "DataModel"}
+      - {name: "Document (ingested document)", type: "DataModel"}
       - {name: "pydantic >= 2.0.0", type: "Dependency"}
     expected_relations:
-      - {from: "models.py (modèles de données)", to: "SearchMode (enum: graph, vector, hybrid)", type: "DEFINES"}
-      - {from: "models.py (modèles de données)", to: "ExtractedEntity (entité extraite par LLM)", type: "DEFINES"}
-      - {from: "ExtractionResult (résultat d'extraction)", to: "ExtractedEntity (entité extraite par LLM)", type: "CONTAINS"}
-      - {from: "ExtractionResult (résultat d'extraction)", to: "ExtractedRelation (relation extraite)", type: "CONTAINS"}
-      - {from: "ExtractedEntity (entité extraite par LLM)", to: "pydantic >= 2.0.0", type: "INHERITS_FROM"}
+      - {from: "models.py (data models)", to: "SearchMode (enum: graph, vector, hybrid)", type: "DEFINES"}
+      - {from: "models.py (data models)", to: "ExtractedEntity (LLM-extracted entity)", type: "DEFINES"}
+      - {from: "ExtractionResult (extraction result)", to: "ExtractedEntity (LLM-extracted entity)", type: "CONTAINS"}
+      - {from: "ExtractionResult (extraction result)", to: "ExtractedRelation (extracted relation)", type: "CONTAINS"}
+      - {from: "ExtractedEntity (LLM-extracted entity)", to: "pydantic >= 2.0.0", type: "INHERITS_FROM"}

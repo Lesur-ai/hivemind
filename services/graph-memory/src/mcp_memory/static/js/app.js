@@ -29,12 +29,12 @@ async function attemptLogin() {
     const token = input.value.trim();
 
     if (!token) {
-        errorEl.textContent = '❌ Veuillez saisir un token.';
+        errorEl.textContent = '❌ Please enter a token.';
         return;
     }
 
     btn.disabled = true;
-    btn.textContent = 'Connexion…';
+    btn.textContent = 'Connecting…';
     errorEl.textContent = '';
 
     try {
@@ -44,18 +44,18 @@ async function attemptLogin() {
         });
 
         if (response.status === 401) {
-            errorEl.textContent = '❌ Token invalide ou expiré.';
+            errorEl.textContent = '❌ Invalid or expired token.';
             return;
         }
 
         if (!response.ok) {
-            errorEl.textContent = `❌ Erreur serveur (${response.status}).`;
+            errorEl.textContent = `❌ Server error (${response.status}).`;
             return;
         }
 
         const result = await response.json();
         if (result.status !== 'ok') {
-            errorEl.textContent = `❌ ${result.message || 'Erreur inconnue.'}`;
+            errorEl.textContent = `❌ ${result.message || 'Unknown error.'}`;
             return;
         }
 
@@ -68,11 +68,11 @@ async function attemptLogin() {
         populateMemories(result);
 
     } catch (e) {
-        errorEl.textContent = `❌ Impossible de contacter le serveur.`;
+        errorEl.textContent = `❌ Unable to contact the server.`;
         console.error('Login error:', e);
     } finally {
         btn.disabled = false;
-        btn.textContent = 'Se connecter';
+        btn.textContent = 'Sign in';
     }
 }
 
@@ -83,7 +83,7 @@ function logout() {
     appState.currentData = null;
     appState.currentMemory = null;
     appState.network = null;
-    document.getElementById('memorySelect').innerHTML = '<option value="">-- Mémoire --</option>';
+    document.getElementById('memorySelect').innerHTML = '<option value="">-- Memory --</option>';
     document.getElementById('askBtn').disabled = true;
     document.getElementById('loadBtn').disabled = true;
     showLoginScreen();
@@ -104,12 +104,12 @@ async function checkExistingToken() {
             hideLoginScreen();
             populateMemories(result);
         } else {
-            showLoginScreen('Token invalide.');
+            showLoginScreen('Invalid token.');
         }
     } catch (e) {
         // Si c'est un 401, showLoginScreen est déjà appelé par authFetch
         if (e.message !== 'Unauthorized') {
-            showLoginScreen('Impossible de contacter le serveur.');
+            showLoginScreen('Unable to contact the server.');
         }
     }
 }
@@ -118,7 +118,7 @@ async function checkExistingToken() {
 function populateMemories(result) {
     const select = document.getElementById('memorySelect');
     // Vider (garder l'option par défaut)
-    select.innerHTML = '<option value="">-- Mémoire --</option>';
+    select.innerHTML = '<option value="">-- Memory --</option>';
     if (result.memories) {
         result.memories.forEach(m => {
             const opt = document.createElement('option');
@@ -132,7 +132,7 @@ function populateMemories(result) {
 // ═══════════════ SETUP LOGIN ═══════════════
 
 function setupLogin() {
-    // Bouton Se connecter
+    // Sign-in button
     document.getElementById('loginBtn').addEventListener('click', attemptLogin);
 
     // Entrée dans le champ token → submit
@@ -179,8 +179,8 @@ async function loadSelectedGraph() {
 
     } catch (e) {
         if (e.message !== 'Unauthorized') {
-            console.error('Erreur:', e);
-            alert('Erreur: ' + e.message);
+            console.error('Error:', e);
+            alert('Error: ' + e.message);
         }
     } finally {
         loading.classList.add('hidden');

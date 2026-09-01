@@ -73,14 +73,33 @@ function graphStatus(includeGraph) {
     };
 }
 
-async function routeConsole(page, { createToken = false } = {}) {
-    const state = { calls: [] };
+async function routeConsole(page, { createToken = false, meshSource = null } = {}) {
+    const state = { calls: [], meshCalls: [] };
     await page.addInitScript(() => { window.__visualQaXss = 0; });
     await page.route('**/*', async route => {
         const url = new URL(route.request().url());
         const p = url.pathname;
         if (p === '/health') return json(route, { version: 'visual-qa' });
         if (p === '/api/spaces') return json(route, { status: 'ok', spaces: [{ space_id: 'demo' }] });
+        if (p === '/api/admin/mesh/availability') {
+            state.meshCalls.push({ method: route.request().method(), path: p });
+            if (!meshSource) return route.fulfill({ status: 404, body: '' });
+            return json(route, { status: 'ok' });
+        }
+        if (p === '/api/admin/mesh/status') {
+            state.meshCalls.push({ method: route.request().method(), path: p });
+            if (!meshSource) return route.fulfill({ status: 404, body: '' });
+            return json(route, {
+                status: 'ok', instance_id: 'visual-qa', display_name: 'Visual QA',
+                public_url: 'https://mesh.invalid', fingerprint: 'visual-qa-fingerprint',
+                pairings: [], source_readiness: [meshSource], eligible_spaces: [],
+            });
+        }
+        if (p === '/api/admin/mesh/source-readiness/demo') {
+            state.meshCalls.push({ method: route.request().method(), path: p });
+            if (!meshSource) return route.fulfill({ status: 404, body: '' });
+            return json(route, { status: 'ok', source: meshSource });
+        }
         if (p === '/api/tool') {
             const body = JSON.parse(route.request().postData() || '{}');
             state.calls.push(body);
@@ -175,6 +194,31 @@ test('space detail is a clean Markdown reader with lazy graph exploration and si
     await expect(page.locator('#modalConfirmBtn')).toBeDisabled();
     await page.locator('#destructiveConfirmInput').fill('demo');
     await expect(page.locator('#modalConfirmBtn')).toBeEnabled();
+});
+
+test('space detail offers preparation only from targeted Mesh readiness and delegates without mutating', async ({ page }) => {
+    const meshSource = {
+        space_id: 'demo', state: 'local_only_can_prepare', source_ready: false,
+        source_initializable: true, can_create_invitation: false, resumable: false,
+        reason_code: 'local_only_can_prepare',
+        message: 'This local space can be prepared for Project Mesh.',
+        state_token: 'a'.repeat(64),
+    };
+    const state = await routeConsole(page, { meshSource });
+    await page.goto(`${ORIGIN}/admin.html#/spaces/demo`);
+
+    const entry = page.locator('[data-mesh-source-action="prepare"]');
+    await expect(entry).toHaveText('Prepare for Project Mesh');
+    await expect(page.locator('#sdMeshReadiness')).toContainText(meshSource.message);
+    await expect.poll(() => state.meshCalls.filter(
+        call => call.path === '/api/admin/mesh/source-readiness/demo',
+    ).length).toBe(1);
+    expect(state.meshCalls.some(call => call.method === 'POST')).toBe(false);
+
+    await entry.click();
+    await expect(page).toHaveURL(/#\/mesh$/);
+    await expect(page.getByRole('heading', { name: 'Project Mesh' })).toBeVisible();
+    expect(state.meshCalls.some(call => call.method === 'POST')).toBe(false);
 });
 
 test('Access row menus target the selected token and expose honest lifecycle capabilities', async ({ page }) => {

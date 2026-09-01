@@ -7,20 +7,21 @@ ADR-0006): :class:`live_mem.core.consolidator.ConsolidatorService` +
 MidEngine is the *mid-memory* engine port: the LLM-driven consolidation of
 append-only live notes into the durable Memory Bank, plus the async FIFO
 consolidation queue and direct mid maintenance (compaction). It WRAPS — never
-rewrites — the imported implementations with ZERO behavior change. Every method
-is pure delegation that returns the wrapped result unchanged.
+rewrites — the imported implementations. #394 adds only a private route-proof
+handoff around mutating consolidation/compaction calls.
 
-Wave-2 contract (ADR-0006 "wrap, don't rewrite" + EPIC-P3 In/Out of scope):
+Original Wave-2 contract (ADR-0006 "wrap, don't rewrite" + EPIC-P3
+In/Out of scope), with the narrow #394 compaction-authority exception below:
 
-- NEW FILE ONLY. ``core/consolidator.py`` and ``core/consolidation_queue.py``
-  are NOT edited by this child.
+- The original child was NEW FILE ONLY. #394 changes the compaction
+  prepare/apply seam and hands the registry's space-bound DirectLocal proof to
+  the consolidator. Queue mechanics remain unchanged.
 - The engine accepts an INJECTED :class:`~live_mem.core.write_sink.WriteSink`
   via the constructor, defaulting to
-  :class:`~live_mem.core.write_sink.DirectLocalWriteSink`. In Wave-2 the sink is
-  HELD but NOT CONSUMED: consolidation / compaction keep their own
-  ``storage.put`` / ``put_json`` / ``delete`` / ``delete_many`` calls (the full
-  set is enumerated in :data:`WRITE_SINK_MUTATION_CALL_SITES`). Wiring those
-  through the injected sink is #8/#9; the routing FLIP is P3-7.
+  :class:`~live_mem.core.write_sink.DirectLocalWriteSink`. Ordinary
+  consolidation keeps its legacy storage calls, but #394 consumes the resolved
+  sink only as a DirectLocal route proof before its compaction-capable pipeline
+  can read or write. Routing the general write surface remains #8/#9.
 - Per-space single-writer semantics are PRESERVED by HAND-OFF, not reimplemented:
   ``enqueue_consolidation`` delegates to the ``ConsolidationQueueService``
   singleton, whose worker already runs ``consolidate`` under
@@ -47,14 +48,20 @@ must confirm the EPIC checkbox reconciliation in the PR.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional, Union
 
 from ..consolidation_queue import (
     ConsolidationQueueService,
     get_consolidation_queue,
 )
-from ..consolidator import ConsolidatorService, get_consolidator
-from ..write_sink import DirectLocalWriteSink, WriteSink
+from ..consolidator import (
+    ConsolidatorService,
+    _bound_direct_local_compaction_sink,
+    _direct_local_compaction_authority,
+    get_consolidator,
+)
+from ..write_sink import DirectLocalWriteSink, StagedWriteNotImplemented, WriteSink
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     ProgressCallback = Callable[[dict], Union[Awaitable[None], None]]
@@ -63,14 +70,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # ─────────────────────────────────────────────────────────────────────────────
 # WriteSink durable-mutation call-site enumeration (the #8/#9 deliverable).
 #
-# Anchored on SEMANTIC descriptions; line numbers are NON-ASSERTED hints only
-# (they drift). This is the FULL eventual WriteSink mutation set for the mid /
-# bank write path, in TWO branches:
+# Anchored on SEMANTIC descriptions. The seven normal-consolidation line hints
+# are maintained source anchors (and pinned by the focused engine test); the
+# remaining branch hints are advisory. This is the FULL eventual WriteSink
+# mutation set for the mid / bank write path, in TWO branches:
 #
-#   CONSOLIDATOR branch — ConsolidatorService.{consolidate, _write_results,
-#       compact_bank} (core/consolidator.py). These are the calls the consolidate
-#       run / compaction perform directly today and that #8/#9 will route through
-#       the injected sink.
+#   CONSOLIDATOR branch — ConsolidatorService.{consolidate,
+#       _apply_prepared_normal_batch, compact_bank} (core/consolidator.py). These
+#       are the calls the consolidate run / compaction perform directly today and
+#       that #8/#9 will route through the injected sink. ``_write_results`` stays
+#       as a validation/compatibility delegator, not a mutation call site.
 #
 #   BANK-TOOL branch — bank_repair / bank_write / bank_compact mutations in
 #       tools/bank.py. These bank-tool writers are in eventual WriteSink scope
@@ -88,72 +97,62 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "branch": "consolidator",
         "op": "delete",
         "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._write_results",
+        "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/bank/<unicode-dup>",
-        "line_hint": 1345,
-        "description": "Unicode-duplicate bank file cleanup delete (rename fix).",
+        "line_hint": 5209,
+        "description": (
+            "Unicode-duplicate bank cleanup DELETE after every canonical bank "
+            "write readback succeeds."
+        ),
     },
     {
         "engine": "MidEngine",
         "branch": "consolidator",
         "op": "put",
         "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._write_results",
+        "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/bank/{filename}",
-        "line_hint": 1361,
-        "description": "Bank file PUT — create branch (new bank file).",
+        "line_hint": 5191,
+        "description": (
+            "Prepared normal bank-file PUT for every validated create, edit, or "
+            "rewrite candidate."
+        ),
     },
     {
         "engine": "MidEngine",
         "branch": "consolidator",
         "op": "put",
         "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._write_results",
-        "key_pattern": "{space_id}/bank/{filename}",
-        "line_hint": 1405,
-        "description": "Bank file PUT — replace branch (overwrite bank file).",
-    },
-    {
-        "engine": "MidEngine",
-        "branch": "consolidator",
-        "op": "put",
-        "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._write_results",
-        "key_pattern": "{space_id}/bank/{filename}",
-        "line_hint": 1451,
-        "description": "Bank file PUT — append/merge branch (updated content).",
-    },
-    {
-        "engine": "MidEngine",
-        "branch": "consolidator",
-        "op": "put",
-        "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._write_results",
+        "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/_synthesis.md",
-        "line_hint": 1477,
-        "description": "Synthesis markdown PUT (_synthesis.md).",
+        "line_hint": 5222,
+        "description": "Prepared normal synthesis markdown PUT (_synthesis.md).",
     },
     {
         "engine": "MidEngine",
         "branch": "consolidator",
         "op": "put_json",
         "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._write_results",
+        "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/_meta.json",
-        "line_hint": 1488,
-        "description": "Metadata JSON PUT (_meta.json) inside _write_results.",
+        "line_hint": 5236,
+        "description": (
+            "Private direct-application metadata JSON PUT when ``skip_meta`` is "
+            "false."
+        ),
     },
     {
         "engine": "MidEngine",
         "branch": "consolidator",
         "op": "delete_many",
         "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._write_results",
+        "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/live/* (consumed notes)",
-        "line_hint": 1491,
+        "line_hint": 5281,
         "description": (
-            "Consumed live notes deleted LAST (atomicity: bank written before "
-            "notes removed). Order must be preserved."
+            "Private direct-application consumed-note DELETE_MANY when "
+            "``defer_note_finalization`` is false, after bank/synthesis and "
+            "applicable metadata verification."
         ),
     },
     {
@@ -163,8 +162,24 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService.consolidate",
         "key_pattern": "{space_id}/_meta.json",
-        "line_hint": 809,
-        "description": "End-of-run _meta.json PUT (consolidate epilogue).",
+        "line_hint": 3983,
+        "description": (
+            "Run-level metadata JSON PUT after all completed prepared batches "
+            "are verified."
+        ),
+    },
+    {
+        "engine": "MidEngine",
+        "branch": "consolidator",
+        "op": "delete_many",
+        "module": "live_mem.core.consolidator",
+        "method": "ConsolidatorService.consolidate",
+        "key_pattern": "{space_id}/live/* (consumed notes)",
+        "line_hint": 3999,
+        "description": (
+            "Deferred consumed-note DELETE_MANY after the run-level metadata "
+            "write/readback; this is normal consolidate() finalization."
+        ),
     },
     {
         "engine": "MidEngine",
@@ -259,13 +274,15 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
 class MidEngine:
     """Mid-memory engine port: consolidation + queue over the imported services.
 
-    Thin DI facade. Wraps ``ConsolidatorService`` + ``ConsolidationQueueService``
-    with ZERO behavior change — every method delegates verbatim (async
-    await-delegation) and returns the wrapped result unchanged.
+    Thin DI facade over ``ConsolidatorService`` + ``ConsolidationQueueService``.
+    Every operation except the narrowly routed #394 manual-compaction
+    DirectLocal-authority hand-off delegates verbatim and returns the wrapped
+    result unchanged.
 
-    The injected ``WriteSink`` is HELD for #8/#9 but NOT consumed in Wave-2:
-    consolidation / compaction keep their own ``storage`` calls (the full set is
-    enumerated in :data:`WRITE_SINK_MUTATION_CALL_SITES`).
+    The injected ``WriteSink`` remains inert for ordinary durable writes. #394
+    consumes a registry-issued DirectLocal capability only for manual
+    compaction; ordinary consolidation re-resolves at its time of use. The
+    wider write-sink migration remains #8/#9.
 
     Per-space single-writer semantics are preserved by HAND-OFF to the queue
     singleton (one worker per space, FIFO, ``in_memory_best_effort``); MidEngine
@@ -289,6 +306,7 @@ class MidEngine:
         consolidator: Optional[ConsolidatorService] = None,
         queue: Optional[ConsolidationQueueService] = None,
         write_sink: Optional[WriteSink] = None,
+        direct_local_compaction_authority: object | None = None,
     ) -> None:
         # Lazy defaults — do not construct singletons / LLM / S3 clients at
         # import time (ConsolidatorService.__init__ builds AsyncOpenAI + httpx).
@@ -301,6 +319,10 @@ class MidEngine:
         self._write_sink: WriteSink = (
             write_sink if write_sink is not None else DirectLocalWriteSink()
         )
+        # Only EngineRegistry supplies this private, space-bound proof after a
+        # successful DIRECT_LOCAL route.  A default/injected bare sink remains
+        # useful for DI, but never becomes route authority by itself.
+        self._direct_local_compaction_authority = direct_local_compaction_authority
 
     @property
     def write_sink(self) -> WriteSink:
@@ -317,13 +339,16 @@ class MidEngine:
         progress_callback: "Optional[ProgressCallback]" = None,
         note_keys: Iterable[str] | None = None,
     ) -> dict:
-        """Delegate verbatim to ``ConsolidatorService.consolidate``.
+        """Delegate to ``ConsolidatorService.consolidate`` under route proof.
 
         Full signature preserved, including ``progress_callback`` and the
         ``enforce_cooldown=True`` default (matching the wrapped service). Durable
         bank/synthesis/meta writes + consumed-notes delete stay inside the
-        consolidator (``WRITE_SINK_MUTATION_CALL_SITES``); the injected sink is
-        held but not consumed here.
+        consolidator (``WRITE_SINK_MUTATION_CALL_SITES``). Even a
+        registry-built engine leaves the route proof to the service: this
+        engine can be retained after its space changes lifecycle state, so a
+        stale DirectLocal capability must not cross into consolidation. An
+        unrouted engine likewise cannot donate its bare default sink.
         """
         kwargs = {
             "agent": agent,
@@ -335,6 +360,12 @@ class MidEngine:
         # forwarded when a caller actually supplies it.
         if note_keys is not None:
             kwargs["note_keys"] = note_keys
+        if not isinstance(self._write_sink, DirectLocalWriteSink):
+            raise StagedWriteNotImplemented(
+                op="consolidate", key=f"{space_id}/bank/"
+            )
+        # An engine instance cannot donate a possibly stale sink/capability.
+        # The service performs a fresh registry route before it reads or writes.
         return await self._consolidator.consolidate(space_id, **kwargs)
 
     async def enqueue_consolidation(
@@ -365,12 +396,42 @@ class MidEngine:
         (read-only; NOT a WriteSink path)."""
         return await self._queue.get_space_summary(space_id)
 
-    async def compact_bank(self, space_id: str, dry_run: bool = True) -> dict:
-        """Delegate verbatim to ``ConsolidatorService.compact_bank``.
+    @contextmanager
+    def _tool_compaction_authority(self, space_id: str):
+        """Scope a registry verdict to the immediate ``bank_compact`` call.
 
-        ``dry_run=True`` default matches the wrapped service (scan-only). The
-        effective bank-file PUTs (``dry_run=False``) stay inside the consolidator
-        (``WRITE_SINK_MUTATION_CALL_SITES``); the injected sink is held but not
-        consumed here.
+        The public :meth:`compact_bank` method intentionally does *not* bind
+        this capability: a caller can retain a ``MidEngine`` beyond a lifecycle
+        transition, and a stale DirectLocal verdict must then be re-resolved by
+        the consolidator. The MCP tool opens this narrow context only for the
+        call it has just authorized; the compactor separately re-resolves its
+        final DirectLocal route after planning and before persistent apply.
         """
-        return await self._consolidator.compact_bank(space_id, dry_run)
+
+        authority = self._direct_local_compaction_authority
+        if authority is None:
+            raise RuntimeError("bank_compact requires a registry-issued route")
+        with _direct_local_compaction_authority(authority):
+            bound_sink = _bound_direct_local_compaction_sink(space_id)
+            if bound_sink is None or bound_sink is not self._write_sink:
+                raise RuntimeError("bank_compact route authority does not match space")
+            yield
+
+    async def compact_bank(self, space_id: str, dry_run: bool = True) -> dict:
+        """Delegate a scan or mutating compaction.
+
+        A tool-scoped DirectLocal authority, if present, lets the immediately
+        preceding route decision flow into the consolidator without a second
+        resolver call.  Ordinary/public invocations never bind it and therefore
+        make the service resolve the current lifecycle route before any effect.
+        A dry run stays a read-only verbatim scan.
+        """
+        if dry_run:
+            return await self._consolidator.compact_bank(space_id, dry_run=True)
+        if not isinstance(self._write_sink, DirectLocalWriteSink):
+            raise StagedWriteNotImplemented(op="compact", key=f"{space_id}/bank/")
+        # See consolidate(): an engine's sink (including one obtained earlier
+        # from the registry) does not by itself prove the current space route.
+        # Unless the MCP tool opened the one-call context above, the
+        # consolidator resolves freshly and fails closed after a transition.
+        return await self._consolidator.compact_bank(space_id, dry_run=False)

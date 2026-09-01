@@ -66,20 +66,20 @@ def _blocked_ip_reason(ip: "ipaddress._BaseAddress", hostname: str) -> Optional[
     """Retourne un message de refus si l'IP tombe dans une plage sensible,
     sinon None. Ordre du plus spécifique au plus général (message précis)."""
     if ip.is_loopback:
-        return f"IP loopback interdite pour Graph Memory : {hostname}"
+        return f"A loopback IP is not allowed for Graph Memory: {hostname}"
     if ip.is_link_local:
         return (
-            f"IP link-local interdite pour Graph Memory : {hostname} "
-            "(metadata cloud potentiellement exposée)"
+            f"A link-local IP is not allowed for Graph Memory: {hostname} "
+            "(cloud metadata could be exposed)"
         )
     if ip.is_unspecified:
-        return f"IP non spécifiée interdite pour Graph Memory : {hostname}"
+        return f"Unspecified IP address is forbidden for Graph Memory: {hostname}"
     if ip.is_multicast:
-        return f"IP multicast interdite pour Graph Memory : {hostname}"
+        return f"Multicast IP is not allowed for Graph Memory: {hostname}"
     if ip.is_reserved:
-        return f"IP réservée interdite pour Graph Memory : {hostname}"
+        return f"Reserved IP address is forbidden for Graph Memory: {hostname}"
     if ip.is_private:
-        return f"IP privée interdite pour Graph Memory : {hostname}"
+        return f"Private IP address is forbidden for Graph Memory: {hostname}"
     return None
 
 
@@ -115,21 +115,21 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
       TOCTOU et n'est pas couvert par cette mitigation initiale).
     """
     if not url or not url.strip():
-        return "URL Graph Memory requise"
+        return "Graph Memory URL is required"
 
     try:
         u = urlparse(url.strip())
     except Exception:
-        return f"URL Graph Memory invalide : '{url[:80]}'"
+        return f"Invalid Graph Memory URL: '{url[:80]}'"
 
     if u.scheme not in _ALLOWED_GM_SCHEMES:
         return (
-            f"Scheme non autorisé pour Graph Memory : '{u.scheme}'. "
-            f"Attendu : {', '.join(_ALLOWED_GM_SCHEMES)}."
+            f"URL scheme is not allowed for Graph Memory: '{u.scheme}'. "
+            f"Expected: {', '.join(_ALLOWED_GM_SCHEMES)}."
         )
 
     if not u.hostname:
-        return "Hostname requis dans l'URL Graph Memory"
+        return "A hostname is required in the Graph Memory URL"
 
     # Si c'est une IP littérale, on bloque directement les ranges sensibles.
     try:
@@ -167,13 +167,13 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
         # cible est sûre, donc on refuse plutôt que de laisser la connexion se
         # faire vers une IP non validée.
         _logger.warning(
-            "Graph Memory URL : résolution DNS de %r en timeout — REFUSÉE "
-            "(fail-closed, IP non vérifiable).",
+            "Graph Memory URL: DNS resolution for %r timed out and was rejected "
+            "(fail closed; target IP could not be verified).",
             u.hostname,
         )
         return (
-            f"Résolution DNS trop lente pour Graph Memory : {u.hostname!r} "
-            "— refusée (fail-closed : impossible de vérifier l'IP cible)."
+            f"DNS resolution timed out for Graph Memory host {u.hostname!r}; "
+            "rejected because the target IP could not be verified."
         )
     except socket.gaierror as e:
         # Finding 3 (Codex #150, round 2) : ne fail-OPEN QUE sur une non-résolution
@@ -190,32 +190,32 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
         }
         if e.errno in _deterministic:
             _logger.warning(
-                "Graph Memory URL : nom %r inexistant (NXDOMAIN) — accepté "
-                "(contrat DNS blackbox). L'egress-allowlist opérateur reste la garde.",
+                "Graph Memory URL: host %r does not exist (NXDOMAIN); accepted "
+                "under the DNS black-box contract. The operator egress allowlist remains the guard.",
                 u.hostname,
             )
             return None
         _logger.warning(
-            "Graph Memory URL : résolution DNS de %r indéterminée (errno=%s) — "
-            "REFUSÉE (fail-closed, IP non vérifiable).",
+            "Graph Memory URL: indeterminate DNS resolution for %r (errno=%s); "
+            "rejected because the target IP could not be verified.",
             u.hostname,
             e.errno,
         )
         return (
-            f"Résolution DNS indéterminée pour Graph Memory : {u.hostname!r} "
-            "— refusée (fail-closed : impossible de vérifier l'IP cible)."
+            f"Indeterminate DNS resolution for Graph Memory host {u.hostname!r}; "
+            "rejected because the target IP could not be verified."
         )
     except (socket.error, UnicodeError):
         # Erreur résolveur générique / indéterminée (pas un NXDOMAIN propre) →
         # fail-CLOSED pour une URL non fiable.
         _logger.warning(
-            "Graph Memory URL : erreur de résolution indéterminée pour %r — "
-            "REFUSÉE (fail-closed).",
+            "Graph Memory URL: indeterminate resolution error for %r; "
+            "rejected fail closed.",
             u.hostname,
         )
         return (
-            f"Résolution DNS impossible pour Graph Memory : {u.hostname!r} "
-            "— refusée (fail-closed : impossible de vérifier l'IP cible)."
+            f"DNS resolution failed for Graph Memory host {u.hostname!r}; "
+            "rejected because the target IP could not be verified."
         )
 
     for info in infos:
@@ -228,6 +228,6 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
             continue
         reason = _blocked_ip_reason(resolved, u.hostname)
         if reason:
-            return f"{reason} (résolue depuis le nom DNS {u.hostname!r})"
+            return f"{reason} (resolved from DNS host {u.hostname!r})"
 
     return None

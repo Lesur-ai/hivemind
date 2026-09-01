@@ -6,7 +6,7 @@
  * view functions directly. It cannot prove behaviours the REAL shell owns: hash
  * routing through admin-app.js's `_matchRoute`/`AdminRouter._dispatch`, the
  * capability-gated sidebar nav item appearing/disappearing based on a REAL
- * `GET /api/admin/mesh/status`, and the real `showDestructiveModal`'s
+ * `GET /api/admin/mesh/availability`, and the real `showDestructiveModal`'s
  * disabled-until-typed-match confirm button. This spec drives the REAL bundle
  * (admin.html + admin-api.js + admin-app.js + every view module, unmodified) in
  * headless chromium.
@@ -44,21 +44,67 @@ function serveStatic(route, relPath) {
     });
 }
 
-const FINGERPRINT = 'hm1:' + 'a'.repeat(64);
+function deferred() {
+    let resolve;
+    const promise = new Promise(res => { resolve = res; });
+    return { promise, resolve };
+}
 
-function statusBody(pairings = [], healthy = true) {
+const FINGERPRINT = 'hm1:' + 'a'.repeat(64);
+const READY_TOKEN = 'a'.repeat(64);
+
+function readySource(spaceId = 'demo') {
+    return {
+        space_id: spaceId, state: 'ready', source_ready: true,
+        source_initializable: false, can_create_invitation: true, resumable: false,
+        reason_code: 'ready', message: 'Ready to create an invitation.',
+        state_token: READY_TOKEN,
+    };
+}
+
+function initializableSource(spaceId = 'demo') {
+    return {
+        space_id: spaceId, state: 'local_only_can_prepare', source_ready: false,
+        source_initializable: true, can_create_invitation: false, resumable: false,
+        reason_code: 'local_only_can_prepare', message: 'This local space can be prepared.',
+        state_token: 'b'.repeat(64),
+    };
+}
+
+function resumableSource(spaceId = 'resume-me') {
+    return {
+        space_id: spaceId, state: 'preparing', source_ready: false,
+        source_initializable: true, can_create_invitation: false, resumable: true,
+        reason_code: 'preparing', message: 'Preparation can resume.',
+        state_token: 'c'.repeat(64),
+    };
+}
+
+function statusBody(pairings = [], healthy = true, sourceReadiness = [readySource()], overrides = {}) {
     return {
         status: 'ok', enabled: true, healthy,
         display_name: 'e2e-instance', public_url: 'https://source.e2e', fingerprint: FINGERPRINT,
-        pairings,
+        pairings, source_readiness: sourceReadiness,
+        eligible_spaces: sourceReadiness
+            .filter(entry => entry.can_create_invitation === true)
+            .map(entry => entry.space_id),
+        ...overrides,
     };
 }
 
 // Wires the standard boot sequence (health/whoami/spaces) plus a controllable
-// Mesh admin surface. `meshEnabled: false` makes /api/admin/mesh/status 404,
+// Mesh admin surface. `meshEnabled: false` makes /api/admin/mesh/availability 404,
 // exactly like the real middleware when HIVEMIND_MESH_ENABLED=false (it is
 // never mounted at all — see mesh_admin.py / server.py).
-async function routeShell(page, { permissions, meshEnabled, pairings = [], members = null, meshHealthy = true, invitationSecret = 'E2E-SECRET-VALUE' }) {
+async function routeShell(page, {
+    permissions, meshEnabled, pairings = [], members = null, meshHealthy = true,
+    invitationSecret = 'E2E-SECRET-VALUE', sourceReadiness = [readySource()],
+    prepareResponse = { status: 'ok', result: 'prepared', source: readySource() },
+    invitationResponse = null,
+    acceptResponse = { status: 'ok', pair_id: 'pair_e2e', state: 'claimed' },
+    spaceListResponse = { status: 'ok', spaces: [{ space_id: 'demo' }] },
+    pairingsTruncated = false,
+}) {
     const state = { tools: [], meshCalls: [] };
     await page.route('**/*', async route => {
         const url = new URL(route.request().url());
@@ -77,25 +123,53 @@ async function routeShell(page, { permissions, meshEnabled, pairings = [], membe
                 });
             }
             if (body.tool === 'space_list') {
-                return json(route, { status: 'ok', spaces: [{ space_id: 'demo' }] });
+                const response = typeof spaceListResponse === 'function'
+                    ? await spaceListResponse()
+                    : spaceListResponse;
+                return json(route, response);
             }
             return json(route, { status: 'error', message: 'unexpected tool ' + body.tool });
         }
 
+        if (p === '/api/admin/mesh/availability') {
+            state.meshCalls.push('availability');
+            if (!meshEnabled) return route.fulfill({ status: 404, body: 'not found' });
+            return json(route, { status: 'ok' });
+        }
         if (p === '/api/admin/mesh/status') {
             state.meshCalls.push('status');
             if (!meshEnabled) return route.fulfill({ status: 404, body: 'not found' });
             const healthy = typeof meshHealthy === 'function' ? meshHealthy() : meshHealthy;
-            return json(route, statusBody(pairings, healthy));
+            const readiness = typeof sourceReadiness === 'function' ? sourceReadiness() : sourceReadiness;
+            return json(route, statusBody(pairings, healthy, readiness, {
+                pairings_truncated: pairingsTruncated,
+            }));
+        }
+        if (p === '/api/admin/mesh/prepare-source') {
+            const body = JSON.parse(route.request().postData() || '{}');
+            state.meshCalls.push({ action: 'prepare-source', body });
+            const response = typeof prepareResponse === 'function' ? await prepareResponse(body) : prepareResponse;
+            return json(route, response, response && response.code === 'source_state_changed' ? 409 : 200);
         }
         if (p === '/api/admin/mesh/invitation') {
             const body = JSON.parse(route.request().postData() || '{}');
             state.meshCalls.push({ action: 'invitation', body });
-            return json(route, {
+            const response = typeof invitationResponse === 'function'
+                ? await invitationResponse(body)
+                : invitationResponse;
+            return json(route, response || {
                 status: 'ok', pair_id: 'pair_e2e', secret: invitationSecret,
                 invitation: 'SIGNED_INVITATION_B64', source_endpoint: 'https://source.e2e',
                 source_fingerprint: FINGERPRINT,
             });
+        }
+        if (p === '/api/admin/mesh/accept') {
+            const body = JSON.parse(route.request().postData() || '{}');
+            state.meshCalls.push({ action: 'accept', body });
+            const response = typeof acceptResponse === 'function'
+                ? await acceptResponse(body)
+                : acceptResponse;
+            return json(route, response);
         }
         if (p === '/api/admin/mesh/evict') {
             state.meshCalls.push('evict');
@@ -183,6 +257,185 @@ test('real shell: a Create Invitation modal left open across a background health
     expect(s.meshCalls.filter(c => typeof c === 'object')).toEqual([]);
 });
 
+test('real shell: Prepare for Project Mesh is neutral, typed/quiesced, refreshes readiness, and never auto-invites', async ({ page }) => {
+    let readiness = [initializableSource()];
+    const s = await routeShell(page, {
+        permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+        sourceReadiness: () => readiness,
+        prepareResponse: body => {
+            readiness = [readySource()];
+            return { status: 'ok', result: 'prepared', source: readiness[0], observed: body.space_id };
+        },
+    });
+    await page.goto(`${ORIGIN}/admin.html#/mesh`);
+    await page.getByRole('button', { name: 'Prepare for Project Mesh' }).click();
+
+    const modal = page.locator('#adminModal');
+    await expect(modal).toBeVisible();
+    await expect(modal.locator('.modal-header')).not.toHaveClass(/modal-header--danger/);
+    const confirm = page.locator('#modalConfirmBtn');
+    await expect(confirm).toBeDisabled();
+    await page.locator('#meshPrepareConfirmInput').fill('demo');
+    await expect(confirm).toBeDisabled();
+    await page.locator('#meshPrepareQuiesced').check();
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect(modal).toBeHidden();
+    await expect(page.getByText('Space prepared for Project Mesh.')).toBeVisible();
+    await expect(page.getByText('Ready to create an invitation.').first()).toBeVisible();
+
+    const prepareCalls = s.meshCalls.filter(call => call && call.action === 'prepare-source');
+    expect(prepareCalls).toHaveLength(1);
+    expect(prepareCalls[0].body).toEqual({
+        confirm: true, space_id: 'demo', quiesced: true,
+        expected_state_token: 'b'.repeat(64),
+    });
+    expect(s.meshCalls.filter(call => call && call.action === 'invitation')).toEqual([]);
+});
+
+test('real shell: Prepare and Resume have distinct space-specific accessible names', async ({ page }) => {
+    await routeShell(page, {
+        permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+        sourceReadiness: [initializableSource('alpha'), resumableSource('bravo')],
+    });
+    await page.goto(`${ORIGIN}/admin.html#/mesh`);
+    await expect(page.getByRole('button', { name: 'Prepare for Project Mesh for alpha', exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Resume preparation for bravo', exact: true })).toBeVisible();
+});
+
+test('real shell: target acceptance requires quiescence and sends its attestation', async ({ page }) => {
+    const s = await routeShell(page, {
+        permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+        acceptResponse: { status: 'ok', pair_id: 'pair_target', state: 'claimed' },
+    });
+    await page.goto(`${ORIGIN}/admin.html#/mesh`);
+    await page.getByRole('button', { name: 'Accept invitation' }).click();
+
+    const modal = page.locator('#adminModal');
+    await expect(modal).toBeVisible();
+    const confirm = page.locator('#modalConfirmBtn');
+    await expect(confirm).toBeDisabled();
+    const invitationCode = Buffer.from(JSON.stringify({
+        v: 1,
+        secret: 'one-time-secret',
+        source_endpoint: 'https://source.e2e',
+        invitation: 'SIGNED_INVITATION_B64',
+    })).toString('base64url');
+    await page.locator('#meshAccCode').fill(invitationCode);
+    await expect(confirm).toBeDisabled();
+    await page.locator('#meshAccQuiesced').check();
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect(modal).toBeHidden();
+
+    const acceptCalls = s.meshCalls.filter(call => call && call.action === 'accept');
+    expect(acceptCalls).toHaveLength(1);
+    expect(acceptCalls[0].body).toEqual({
+        confirm: true,
+        invitation: 'SIGNED_INVITATION_B64',
+        quiesced: true,
+        scopes: ['read'],
+        secret: 'one-time-secret',
+        source_endpoint: 'https://source.e2e',
+        target_space_id: 'demo',
+    });
+});
+
+test('real shell: closing Prepare during a delayed POST invalidates every late response side effect', async ({ page }) => {
+    const delayed = deferred();
+    const s = await routeShell(page, {
+        permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+        sourceReadiness: [initializableSource()],
+        prepareResponse: () => delayed.promise,
+    });
+    await page.goto(`${ORIGIN}/admin.html#/mesh`);
+    await page.getByRole('button', { name: /Prepare for Project Mesh/ }).click();
+    await page.locator('#meshPrepareConfirmInput').fill('demo');
+    await page.locator('#meshPrepareQuiesced').check();
+    await page.locator('#modalConfirmBtn').click();
+    await expect.poll(() => s.meshCalls.filter(call => call && call.action === 'prepare-source').length).toBe(1);
+    const statusCallsBeforeLateResponse = s.meshCalls.filter(call => call === 'status').length;
+    await page.locator('#adminModal .modal-close').click();
+    await expect(page.locator('#adminModal')).toBeHidden();
+
+    const completed = page.waitForResponse(response => response.url().endsWith('/api/admin/mesh/prepare-source'));
+    delayed.resolve({ status: 'ok', result: 'prepared', source: readySource() });
+    await completed;
+    await page.waitForTimeout(50);
+    await expect(page.getByText('Space prepared for Project Mesh.')).toHaveCount(0);
+    expect(s.meshCalls.filter(call => call === 'status')).toHaveLength(statusCallsBeforeLateResponse);
+    expect(s.meshCalls.filter(call => call && call.action === 'invitation')).toEqual([]);
+});
+
+test('real shell: invitation navigation and dismissal lock starts before POST and transfers to the one-time result', async ({ page }) => {
+    const delayed = deferred();
+    const s = await routeShell(page, {
+        permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+        invitationResponse: () => delayed.promise,
+    });
+    await page.goto(`${ORIGIN}/admin.html#/mesh`);
+    await page.getByRole('button', { name: 'Create invitation' }).click();
+    await page.selectOption('#meshInvSpace', 'demo');
+    await page.locator('#modalConfirmBtn').click();
+    await expect.poll(() => s.meshCalls.filter(call => call && call.action === 'invitation').length).toBe(1);
+    await expect(page.locator('#adminModal .modal-close')).toBeDisabled();
+    await expect(page.locator('#adminModal [data-action="close-modal"]')).toHaveCount(2);
+    await expect(page.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+
+    await page.evaluate(() => { window.location.hash = '#/dashboard'; });
+    await expect.poll(() => page.evaluate(() => window.location.hash)).toBe('#/mesh');
+
+    delayed.resolve({
+        status: 'ok', pair_id: 'pair_delayed', secret: 'DELAYED-SECRET',
+        invitation: 'SIGNED_DELAYED_INVITATION', source_endpoint: 'https://source.e2e',
+        source_fingerprint: FINGERPRINT,
+    });
+    await expect(page.locator('#meshInvCode')).toBeVisible();
+    await expect(page.locator('#adminModal .modal-close')).toBeEnabled();
+    await page.evaluate(() => { window.location.hash = '#/spaces'; });
+    await expect.poll(() => page.evaluate(() => window.location.hash)).toBe('#/mesh');
+    await page.locator('#adminModal .modal-close').click();
+    await page.evaluate(() => { window.location.hash = '#/dashboard'; });
+    await expect.poll(() => page.evaluate(() => window.location.hash)).toBe('#/dashboard');
+});
+
+test('real shell: Accept exposes no confirm when the fresh target-space list fails or is empty', async ({ page }) => {
+    for (const spaceListResponse of [
+        { status: 'error', message: 'List failed.' },
+        { status: 'ok', spaces: [] },
+    ]) {
+        await page.unrouteAll({ behavior: 'wait' });
+        await routeShell(page, {
+            permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+            spaceListResponse,
+        });
+        await page.goto(`${ORIGIN}/admin.html#/mesh`);
+        await page.getByRole('button', { name: 'Accept invitation' }).click();
+        await expect(page.locator('#adminModal')).toBeVisible();
+        await expect(page.locator('#modalConfirmBtn')).toHaveCount(0);
+        await page.locator('#adminModal .modal-close').click();
+    }
+});
+
+test('real shell: a Prepare modal stale after route refresh causes zero POST', async ({ page }) => {
+    const s = await routeShell(page, {
+        permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+        sourceReadiness: [initializableSource()],
+    });
+    await page.goto(`${ORIGIN}/admin.html#/mesh`);
+    await page.getByRole('button', { name: 'Prepare for Project Mesh' }).click();
+    await page.locator('#meshPrepareConfirmInput').fill('demo');
+    await page.locator('#meshPrepareQuiesced').check();
+
+    await page.evaluate(() => { window.location.hash = '#/dashboard'; });
+    await page.evaluate(() => { window.location.hash = '#/mesh'; });
+    await page.waitForTimeout(100);
+    await expect(page.locator('#adminModal')).toBeVisible();
+    await page.locator('#modalConfirmBtn').click();
+    expect(s.meshCalls.filter(call => call && call.action === 'prepare-source')).toEqual([]);
+    expect(s.meshCalls.filter(call => call && call.action === 'invitation')).toEqual([]);
+});
+
 test('real shell: Mesh nav is absent when the instance has no Mesh capability, present for an admin session when it does', async ({ page }) => {
     await routeShell(page, { permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: false });
     await page.goto(`${ORIGIN}/admin.html#/dashboard`);
@@ -206,6 +459,8 @@ test('real shell: Mesh nav appears for an admin session, and #/mesh renders via 
     await page.goto(`${ORIGIN}/admin.html#/dashboard`);
     const meshNav = page.locator('.sidebar a[data-nav="mesh"]');
     await expect(meshNav).toBeVisible();
+    expect(s.meshCalls.filter(c => c === 'availability').length).toBeGreaterThan(0);
+    expect(s.meshCalls.filter(c => c === 'status')).toHaveLength(0);
     await meshNav.click();
     await expect(page).toHaveURL(/#\/mesh$/);
     await expect(page.getByRole('heading', { name: 'Project Mesh' })).toBeVisible();
@@ -404,4 +659,28 @@ test('real shell: #/mesh/<space-id> detail route renders real numeric fields (me
     await expect(page.getByRole('columnheader', { name: 'Display name' })).toBeVisible();
 
     expect(errors).toEqual([]);
+});
+
+test('real shell: bounded Mesh diagnostics are visibly partial and never fabricate exhaustive empty history', async ({ page }) => {
+    await routeShell(page, {
+        permissions: ['read', 'write', 'manage', 'admin'], meshEnabled: true,
+        pairings: [],
+        pairingsTruncated: true,
+        members: {
+            status: 'ok', space_id: 'demo', membership_epoch: 0,
+            members: [{ node_id: 'node0', display_name: 'local', endpoint: '', fingerprint: '', scopes: null }],
+            pairing_metadata_truncated: true,
+        },
+    });
+    await page.goto(`${ORIGIN}/admin.html#/mesh`);
+    await expect(page.getByText('Pairing history is truncated')).toBeVisible();
+    await expect(page.getByText('No pairing in the loaded slice')).toBeVisible();
+    await expect(page.getByText('No pairings yet')).toHaveCount(0);
+
+    await page.goto(`${ORIGIN}/admin.html#/mesh/demo`);
+    await expect(page.getByText('LOADED PAIRING SESSIONS')).toBeVisible();
+    await expect(page.getByText('No session for this space in the loaded slice')).toBeVisible();
+    await page.getByRole('tab', { name: 'Members' }).click();
+    await expect(page.getByText('Pairing metadata is truncated')).toBeVisible();
+    await expect(page.getByText(/pairing-derived actions may be missing/)).toBeVisible();
 });

@@ -232,7 +232,7 @@ async def test_non_hivemind_stored_bytes_unchanged_across_all_p2_read_paths(
 
     # 3) BackupService.restore classification path. The read-only hive guard
     # classifies the target 'local_only' (guard inapplicable -> falls through),
-    # then the INHERITED "{space}/_meta.json existe déjà" check refuses. This
+    # then the inherited "{space}/_meta.json already exists" check refuses. This
     # reuses the already-tested restore classification path
     # (test_backup_restore_hivemind_guard.py::
     #  test_restore_over_local_only_space_still_refused_existing_behavior)
@@ -241,7 +241,7 @@ async def test_non_hivemind_stored_bytes_unchanged_across_all_p2_read_paths(
     # existing test asserts together with the read trio.
     restore = await BackupService().restore(BACKUP_ID)  # unsafe_recovery default False
     assert restore["status"] == "error"
-    assert "existe déjà" in restore["message"]  # inherited refusal, not a copy
+    assert "already exists" in restore["message"]  # inherited refusal, not a copy
     assert "files_restored" not in restore
 
     # ── THE PROOF ────────────────────────────────────────────────────────────

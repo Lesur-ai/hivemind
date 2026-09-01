@@ -315,7 +315,7 @@ async def compute_hive_status(
             parsed_until = _parse_iso(lease_until)
         except ValueError as exc:
             raise CorruptedStateError(
-                f"lease_until non parsable dans token.json : {lease_until!r}"
+                f"lease_until in token.json is not parseable: {lease_until!r}"
             ) from exc
         delta = (parsed_until - now).total_seconds()
         lease_ttl_seconds = max(0, int(delta))
@@ -334,7 +334,7 @@ async def compute_hive_status(
         if head is not None and missing:
             hive_status = HiveStatus.BLOCKED
             block_reason = (
-                f"head {head.event_id} en attente d'ACK de : "
+                f"head {head.event_id} awaiting ACK from: "
                 f"{', '.join(sorted(missing))}"
             )
         else:
@@ -344,7 +344,7 @@ async def compute_hive_status(
         # ont déjà retourné plus haut. Tout autre label ici est une incohérence
         # amont — on échoue bruyamment plutôt que de dégrader silencieusement.
         raise AssertionError(
-            f"label de statut inattendu pour un space hive : {label!r}"
+            f"unexpected status label for hive space: {label!r}"
         )
 
     peers = [

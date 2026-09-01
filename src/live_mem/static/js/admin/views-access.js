@@ -499,7 +499,7 @@
         tableEl.innerHTML = '<div class="access-token-table">' + dataTable(headers, rows) + '</div>';
     }
 
-    // §5.0 status handling: sentinels + error render honest states; French text
+    // §5.0 status handling: sentinels + error render honest states; server text
     // is passed through verbatim, never parsed.
     function renderNonOk(res) {
         res = res || {};

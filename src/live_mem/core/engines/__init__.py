@@ -42,9 +42,11 @@ internally) BEFORE invoking any legacy-backed engine mutation, so a
 Hivemind / corrupt / unsafe space fails closed before any legacy ``get_storage``
 write runs; only ``DIRECT_LOCAL`` falls through to the verbatim legacy path.
 
-WRAP-DON'T-REWRITE: the registry composes; it adds NO behaviour to the engine
-modules (``short`` / ``mid`` / ``long_engine`` / ``hive``) and does NOT edit
-``core/live.py`` / ``core/consolidator.py`` / ``core/graph_bridge.py``.
+WRAP-DON'T-REWRITE: the registry composes and adds no business serialization to
+the engine modules (``short`` / ``mid`` / ``long_engine`` / ``hive``).
+``LiveService`` retains the SHORT mutation and performs a narrow final route
+and irreversible-provenance recheck so a retained DirectLocal engine cannot
+cross or downgrade a lifecycle transition.
 
 LAZY CONSTRUCTION (mandatory): ``ConsolidatorService.__init__`` builds
 ``AsyncOpenAI`` + ``httpx`` and ``StorageService`` builds ``boto3``. Every
@@ -64,7 +66,11 @@ from ..consolidation_queue import (
     ConsolidationQueueService,
     get_consolidation_queue,
 )
-from ..consolidator import ConsolidatorService, get_consolidator
+from ..consolidator import (
+    ConsolidatorService,
+    _issue_direct_local_compaction_authority,
+    get_consolidator,
+)
 from ..graph_bridge import GraphBridgeService, get_graph_bridge
 from ..hivemind import (
     HivemindStateStore,
@@ -72,7 +78,10 @@ from ..hivemind import (
     resolve_write_route,
 )
 from ..live import LiveService, get_live_service
-from ..reservation_guard import assert_space_not_reserved
+from ..reservation_guard import (
+    assert_direct_local_allowed,
+    assert_space_not_reserved,
+)
 from ..storage import StorageService, get_storage
 from ..write_sink import (
     DirectLocalWriteSink,
@@ -234,15 +243,22 @@ class EngineRegistry:
         """
         await assert_space_not_reserved(space_id)
         storage = self._storage_dep()
-        route = await resolve_write_route(storage, space_id)  # CorruptedStateError propagates
+        # CorruptedStateError propagates.
+        route = await resolve_write_route(storage, space_id)
 
         if route is WriteRoute.DIRECT_LOCAL:
+            # Route state alone is insufficient after a restore/deletion: a
+            # fingerprint-neutral COMPLETE preparation intent is irreversible
+            # provenance and must never regain local authority.
+            await assert_direct_local_allowed(space_id)
             # Honour the existing patch seam in production (no injected storage):
             # let DirectLocalWriteSink resolve get_storage() lazily. In the DI
             # path, bind the SAME injected storage for deterministic routing.
             if self._storage is not None:
-                return DirectLocalWriteSink(storage=self._storage)
-            return DirectLocalWriteSink()
+                return DirectLocalWriteSink(
+                    storage=self._storage, space_id=space_id
+                )
+            return DirectLocalWriteSink(space_id=space_id)
 
         if route is WriteRoute.STAGED:
             # P5-8 (#16) CAPSTONE: build the real staged-commit sink. Imports are
@@ -343,11 +359,10 @@ class EngineRegistry:
         non-Hivemind space returns one carrying a :class:`DirectLocalWriteSink`.
 
         NOTE (route-first contract): ``ShortEngine.write_note`` still delegates
-        to ``LiveService.write_note``, which calls ``get_storage()`` directly —
-        the held sink is inert. Callers MUST therefore drive the STAGED refusal
-        themselves (see ``tools/live.py`` ``live_note``): for a non-DIRECT_LOCAL
-        sink, do not call ``write_note``. The registry does not edit
-        ``live.py`` (wrap-don't-rewrite).
+        to ``LiveService.write_note``, which calls ``get_storage()`` directly and
+        re-proves DIRECT_LOCAL immediately before its PUT. The held sink remains
+        inert; callers also drive the initial STAGED refusal so an already-shared
+        space never enters the legacy service path.
         """
         sink = await self.resolve_sink(space_id)
         return ShortEngine(live=self._live_dep(), write_sink=sink)
@@ -365,6 +380,11 @@ class EngineRegistry:
             consolidator=self._consolidator_dep(),
             queue=self._queue_dep(),
             write_sink=sink,
+            direct_local_compaction_authority=(
+                _issue_direct_local_compaction_authority(space_id, sink)
+                if isinstance(sink, DirectLocalWriteSink)
+                else None
+            ),
         )
 
     # ──────────────────────────────────────────────────────────────────

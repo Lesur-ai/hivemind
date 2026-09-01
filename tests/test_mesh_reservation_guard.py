@@ -13,24 +13,41 @@ import pytest
 from live_mem.core import reservation_guard
 from live_mem.core.reservation_guard import (
     PairingActivationError,
+    DirectLocalProvenanceError,
     SpaceReservedError,
+    assert_direct_local_allowed,
+    assert_no_active_source_preparation,
+    assert_no_source_preparation_provenance,
     assert_no_pairing_activation,
     assert_space_not_reserved,
+    clear_direct_local_checker,
     clear_pairing_activation_checker,
     clear_reservation_checker,
+    has_direct_local_checker,
     has_reservation_checker,
+    register_direct_local_checker,
     register_pairing_activation_checker,
     register_reservation_checker,
+    source_preparation_key,
 )
 
 
 @pytest.fixture(autouse=True)
 def _clean_checker():
     clear_reservation_checker()
+    clear_direct_local_checker()
     clear_pairing_activation_checker()
     yield
     clear_reservation_checker()
+    clear_direct_local_checker()
     clear_pairing_activation_checker()
+
+
+@pytest.mark.parametrize("space_id", [None, 1, "", "_system", "nested/space"])
+def test_source_preparation_key_rejects_invalid_domain_input(space_id: object) -> None:
+    with pytest.raises(ValueError, match="invalid source preparation space id") as exc:
+        source_preparation_key(space_id)  # type: ignore[arg-type]
+    assert type(exc.value) is ValueError
 
 
 async def test_no_op_when_no_checker_registered() -> None:
@@ -58,6 +75,123 @@ async def test_clear_restores_no_op() -> None:
     register_reservation_checker(checker)
     clear_reservation_checker()
     await assert_space_not_reserved("anything")  # back to no-op
+
+
+async def test_direct_local_checker_is_independent_and_no_op_by_default() -> None:
+    seen: list[str] = []
+
+    async def checker(space_id: str) -> None:
+        seen.append(space_id)
+        if space_id == "prepared":
+            raise SpaceReservedError(space_id)
+
+    assert has_direct_local_checker() is False
+    await assert_direct_local_allowed("prepared")
+    register_direct_local_checker(checker)
+    assert has_direct_local_checker() is True
+    await assert_direct_local_allowed("local")
+    with pytest.raises(SpaceReservedError):
+        await assert_direct_local_allowed("prepared")
+    assert seen == ["local", "prepared"]
+
+    # This slot is independent of the active-preparation reservation checker.
+    clear_reservation_checker()
+    with pytest.raises(SpaceReservedError):
+        await assert_direct_local_allowed("prepared")
+    clear_direct_local_checker()
+    await assert_direct_local_allowed("prepared")
+
+
+async def test_core_provenance_checker_has_no_negative_cache_and_fails_closed() -> None:
+    class Storage:
+        def __init__(self) -> None:
+            self.objects: dict[str, str] = {}
+            self.get_calls = 0
+            self.fail = False
+
+        async def get(self, key: str) -> str | None:
+            self.get_calls += 1
+            if self.fail:
+                raise OSError("backend detail must stay chained")
+            return self.objects.get(key)
+
+    storage = Storage()
+
+    async def checker(space_id: str) -> None:
+        await assert_no_source_preparation_provenance(storage, space_id)
+
+    register_direct_local_checker(checker)
+    await assert_direct_local_allowed("former-source")
+    storage.objects[source_preparation_key("former-source")] = "{}"
+    with pytest.raises(DirectLocalProvenanceError):
+        await assert_direct_local_allowed("former-source")
+    assert storage.get_calls == 2
+
+    storage.fail = True
+    with pytest.raises(DirectLocalProvenanceError) as exc:
+        await assert_direct_local_allowed("unrelated")
+    assert "backend detail" not in str(exc.value)
+    storage.fail = False
+    await assert_direct_local_allowed("local")
+    assert storage.get_calls == 4
+
+
+async def test_core_preparation_reservation_checker_distinguishes_complete() -> None:
+    import base64
+
+    from live_mem.mesh.canonical import canonical_dumps
+    from live_mem.mesh.identity import decode_mesh_public_key, generate_mesh_identity
+    from live_mem.mesh.pairing_state import (
+        SourcePreparationIntent,
+        SourcePreparationState,
+    )
+
+    class Storage:
+        def __init__(self, raw):
+            self.raw = raw
+
+        async def get(self, _key):
+            return self.raw
+
+    identity = generate_mesh_identity()
+    membership_key = "ed25519:" + base64.urlsafe_b64encode(
+        decode_mesh_public_key(identity.public_key)
+    ).decode("ascii").rstrip("=")
+    preparing = SourcePreparationIntent(
+        preparation_id="prep_" + "a" * 32,
+        protocol_version=1,
+        state=SourcePreparationState.PREPARING.value,
+        space_id="alpha",
+        source_fingerprint=identity.fingerprint,
+        membership_public_key=membership_key,
+        node_id=identity.fingerprint.split(":", 1)[1],
+        display_name="Mesh A",
+        public_url="https://a.example",
+        started_at_ms=1_000,
+        started_at_iso="1970-01-01T00:00:01+00:00",
+        completed_at_ms=0,
+        expected_state_token="e" * 64,
+    )
+    complete_raw = preparing.complete(2_000).canonical_bytes().decode("utf-8")
+    preparing_raw = preparing.canonical_bytes().decode("utf-8")
+
+    await assert_no_active_source_preparation(Storage(None), "alpha")
+    await assert_no_active_source_preparation(Storage(complete_raw), "alpha")
+    with pytest.raises(SpaceReservedError):
+        await assert_no_active_source_preparation(Storage(preparing_raw), "alpha")
+    # A state-only record and a state-only flip of a genuine PREPARING intent
+    # cannot forge completion in disabled mode.
+    with pytest.raises(SpaceReservedError):
+        await assert_no_active_source_preparation(Storage('{"state":"complete"}'), "alpha")
+    forged = canonical_dumps(
+        {**preparing.as_dict(), "state": "complete"}
+    ).decode("utf-8")
+    with pytest.raises(SpaceReservedError):
+        await assert_no_active_source_preparation(Storage(forged), "alpha")
+    with pytest.raises(SpaceReservedError):
+        await assert_no_active_source_preparation(Storage(complete_raw), "beta")
+    with pytest.raises(SpaceReservedError):
+        await assert_no_active_source_preparation(Storage("not-json"), "alpha")
 
 
 async def test_guard_blocks_a_real_write_entrypoint(monkeypatch) -> None:

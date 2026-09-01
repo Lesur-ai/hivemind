@@ -201,14 +201,25 @@ async function _meshFetch(path, opts = {}) {
     return body;
 }
 
+/** GET /api/admin/mesh/availability. Lightweight admin capability probe;
+ * returns null on any failure or non-'ok' response. */
+async function meshAdminAvailability() {
+    const body = await _meshFetch('availability');
+    return body && body.status === 'ok' ? body : null;
+}
+
 /** GET /api/admin/mesh/status. Returns null on any failure (network error,
  * non-JSON body, or a non-'ok' status) — callers use this as the single
- * "is Mesh reachable and enabled for this session" signal, never a
- * fabricated {enabled:false} shape (the endpoint itself never emits one:
- * disabled Mesh means the route doesn't exist at all). */
+ * authoritative readiness/status projection for the Mesh view, never a
+ * fabricated {enabled:false} shape. */
 async function meshAdminStatus() {
     const body = await _meshFetch('status');
     return body && body.status === 'ok' ? body : null;
+}
+
+/** GET /api/admin/mesh/source-readiness/<spaceId>. */
+async function meshAdminSourceReadiness(spaceId) {
+    return _meshFetch('source-readiness/' + encodeURIComponent(spaceId));
 }
 
 /** GET /api/admin/mesh/members/<spaceId>. */

@@ -85,14 +85,13 @@ class LiveService:
         Returns:
             {"status": "created", "filename": "...", ...}
         """
-        await assert_space_not_reserved(space_id)
         # VULN-07 fix : valider la taille du contenu
         if len(content) > MAX_NOTE_CONTENT_SIZE:
             return {
                 "status": "error",
                 "message": (
-                    f"Contenu trop long ({len(content)} chars, "
-                    f"max {MAX_NOTE_CONTENT_SIZE})"
+                    f"Content too long ({len(content)} characters, "
+                    f"maximum {MAX_NOTE_CONTENT_SIZE})"
                 ),
             }
 
@@ -101,8 +100,8 @@ class LiveService:
             return {
                 "status": "error",
                 "message": (
-                    f"Catégorie invalide : '{category}'. "
-                    f"Valides : {', '.join(VALID_CATEGORIES)}"
+                    f"Invalid category: '{category}'. "
+                    f"Valid values: {', '.join(VALID_CATEGORIES)}"
                 ),
             }
 
@@ -112,7 +111,7 @@ class LiveService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Agent = client_name du token (toujours, jamais de paramètre libre)
@@ -122,7 +121,7 @@ class LiveService:
         if not isinstance(agent, str) or agent == "":
             return {
                 "status": "error",
-                "message": "Identité client_name non vide requise pour écrire une note",
+                "message": "A non-empty client_name identity is required to write a note",
             }
 
         # Construire le nom de fichier unique
@@ -149,7 +148,33 @@ class LiveService:
         )
         full_content = front_matter + content
 
-        # Écrire sur S3 — 1 seul PUT, aucun lock nécessaire
+        # Re-prove the local route at the real mutation boundary.  The SHORT
+        # engine's registry-resolved sink is deliberately inert: a caller may
+        # retain that engine while Project Mesh source preparation changes the
+        # space from DIRECT_LOCAL to UNSAFE/STAGED.  This durable check plus
+        # route resolution fences both transition phases:
+        #
+        # * PREPARING is still structurally local but carries a reservation;
+        # * COMPLETE no longer reserves: HEALTHY routes STAGED, while durable
+        #   preparation provenance fences a lost/restored-empty Hivemind prefix.
+        # There is deliberately no earlier reservation probe: it would repeat
+        # the same durable preparation GET on every successful hot-path write
+        # without protecting the actual mutation boundary.
+        #
+        # Lazy imports avoid live -> engines/write_sink/lifecycle import cycles.
+        from .hivemind.lifecycle import WriteRoute, resolve_write_route
+        from .reservation_guard import assert_direct_local_allowed
+        from .write_sink import DirectLocalWriteFenced
+
+        await assert_space_not_reserved(space_id)
+        route = await resolve_write_route(storage, space_id)
+        if route is not WriteRoute.DIRECT_LOCAL:
+            raise DirectLocalWriteFenced(space_id)
+        await assert_direct_local_allowed(space_id)
+
+        # Écrire sur S3 — 1 seul PUT, aucun lock nécessaire.  Object storage
+        # has no transaction spanning the route check and PUT; Project Mesh
+        # source preparation therefore still requires operator quiescence.
         key = f"{space_id}/live/{filename}"
         await storage.put(key, full_content)
 
@@ -193,7 +218,7 @@ class LiveService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Gate Hivemind unique (fail-closed : corruption propage). Le skip du
@@ -263,7 +288,7 @@ class LiveService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Gate Hivemind unique (fail-closed) : skip du sidecar uniquement sur un

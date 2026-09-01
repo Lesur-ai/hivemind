@@ -116,12 +116,12 @@ class EmbeddingService:
             )
 
         try:
-            print(f"🔢 [Embedder] Vectorisation de {len(texts)} textes ({self._model})...", file=sys.stderr)
+            print(f"🔢 [Embedder] Vectorizing {len(texts)} texts ({self._model})...", file=sys.stderr)
 
             result = await self._embed(texts, "document")
 
             print(
-                f"✅ [Embedder] {len(result.vectors)} embeddings générés "
+                f"✅ [Embedder] Generated {len(result.vectors)} embeddings "
                 f"(dim={result.effective_dimensions})",
                 file=sys.stderr,
             )
@@ -130,11 +130,11 @@ class EmbeddingService:
 
         except InferenceError as e:
             if e.category == "timeout":
-                print(f"⏰ [Embedder] Timeout — trop de textes ou textes trop longs", file=sys.stderr)
+                print("⏰ [Embedder] Timeout — too many texts or texts are too long", file=sys.stderr)
             else:
                 # Enveloppe sûre par construction ; redaction conservée en
                 # défense en profondeur.
-                print(f"❌ [Embedder] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [Embedder] Provider error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
@@ -163,9 +163,9 @@ class EmbeddingService:
 
         except InferenceError as e:
             if e.category == "timeout":
-                print(f"⏰ [Embedder] Timeout sur la requête", file=sys.stderr)
+                print("⏰ [Embedder] Query timeout", file=sys.stderr)
             else:
-                print(f"❌ [Embedder] Erreur provider: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+                print(f"❌ [Embedder] Provider error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             raise
 
     async def embed_query(self, query: str) -> List[float]:
@@ -191,7 +191,7 @@ class EmbeddingService:
                 return {
                     "status": "error",
                     "model": "",
-                    "message": "Erreur embedding: provider embedding non configuré",
+                    "message": "Embedding error: embedding provider is not configured",
                 }
             discovery_contract = protected_certification_model_discovery(
                 role="embedding",
@@ -205,8 +205,8 @@ class EmbeddingService:
                     "model": self._model,
                     "dimensions": self._dimensions,
                     "message": (
-                        "Catalogue embedding non disponible pour le profil "
-                        "de certification protégé"
+                        "Embedding catalog unavailable for the protected "
+                        "certification profile"
                     ),
                 }
             probe = runtime.embedding_probe()
@@ -221,19 +221,19 @@ class EmbeddingService:
                 "status": "error",
                 "model": self._model,
                 # P12-3 : jamais d'URL proxy brute dans la sortie santé.
-                "message": f"Erreur embedding: {redact_proxy_secrets(str(e))}",
+                "message": f"Embedding error: {redact_proxy_secrets(str(e))}",
             }
         if result.healthy:
             return {
                 "status": "ok",
                 "model": self._model,
                 "dimensions": self._dimensions,
-                "message": f"Embedding OK ({self._model}, {self._dimensions}d attendus)",
+                "message": f"Embedding OK ({self._model}, {self._dimensions} expected dimensions)",
             }
         return {
             "status": "error",
             "model": self._model,
-            "message": "Erreur embedding: provider unreachable"
+            "message": "Embedding error: provider unreachable"
             + (
                 f" ({result.error_category})"
                 if result.error_category is not None

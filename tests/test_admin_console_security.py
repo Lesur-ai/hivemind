@@ -804,7 +804,7 @@ class TestG3SafeErrorApiLogin:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/login leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -846,7 +846,7 @@ class TestG3SafeErrorApiSpaces:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/spaces leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -889,7 +889,7 @@ class TestG3SafeErrorApiSpaceInfo:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/space/<id> leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -932,7 +932,7 @@ class TestG3SafeErrorApiLiveNotes:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/live_notes leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -942,6 +942,43 @@ class TestG3SafeErrorApiLiveNotes:
 
 class TestG3SafeErrorApiBankList:
     """§6.3 item 6: _api_bank_list must mask exception details via safe_error()."""
+
+    @pytest.mark.asyncio
+    async def test_api_bank_list_normalizes_missing_informational_size(self):
+        from live_mem.auth.middleware import StaticFilesMiddleware
+        from live_mem.auth.context import current_token_info
+
+        m = StaticFilesMiddleware(None)
+        send_fn, messages = _make_send()
+        tok = current_token_info.set(_admin_token())
+
+        async def _exists(*_args, **_kwargs):
+            return True
+
+        async def _list_objects(*_args, **_kwargs):
+            return [
+                {
+                    "Key": "myspace/bank/context.md",
+                    "Size": None,
+                    "LastModified": "",
+                }
+            ]
+
+        try:
+            with patch("live_mem.core.storage.get_storage") as mock_storage:
+                storage = MagicMock()
+                storage.exists = _exists
+                storage.list_objects = _list_objects
+                mock_storage.return_value = storage
+
+                await m._api_bank_list(send_fn, "myspace")
+        finally:
+            current_token_info.reset(tok)
+
+        assert _response_status(messages) == 200
+        assert _response_body(messages)["files"] == [
+            {"filename": "context.md", "size": 0, "last_modified": ""}
+        ]
 
     @pytest.mark.asyncio
     async def test_api_bank_list_masks_exception_with_debug_off(self):
@@ -975,7 +1012,7 @@ class TestG3SafeErrorApiBankList:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/bank_list leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -1018,7 +1055,7 @@ class TestG3SafeErrorApiBankFile:
         raw = json.dumps(resp)
 
         assert status == 500, f"Expected 500, got {status}"
-        assert resp.get("message") == "Erreur interne du serveur", (
+        assert resp.get("message") == "Internal server error", (
             f"G3 BROKEN: /api/bank_file leaked non-generic message: {resp!r}"
         )
         assert "SECRET-DETAIL" not in raw, (
@@ -1057,7 +1094,7 @@ class TestG3SafeErrorCallToolDirect:
             tools._mcp_ref = original
 
         assert result.get("status") == "error"
-        assert result.get("message") == "Erreur interne du serveur", (
+        assert result.get("message") == "Internal server error", (
             f"G3 BROKEN: call_tool_direct leaked non-generic message: {result!r}"
         )
         assert "SECRET-DETAIL" not in json.dumps(result), (

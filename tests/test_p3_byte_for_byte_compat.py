@@ -145,6 +145,7 @@ _LLM_RESULT: dict = {
             {
                 "filename": "activeContext.md",
                 "action": "create",
+                "reason": "Create the initial bank file from the batch.",
                 "content": (
                     "# Active Context\n"
                     "\n"
@@ -254,12 +255,13 @@ async def _seed(storage: ConsolidatorFakeStorage) -> None:
 
 
 async def _run_legacy(consolidator: ConsolidatorService) -> ConsolidatorFakeStorage:
-    """LEGACY reference run: patch ``consolidator.get_storage`` -> a fresh fake,
-    call ``ConsolidatorService.consolidate`` directly (no engine/registry)."""
+    """Direct-service reference run over an explicitly DirectLocal fake route."""
     storage = ConsolidatorFakeStorage()
     await _seed(storage)
+    registry = EngineRegistry(storage=storage)
     with (
         patch("live_mem.core.consolidator.get_storage", return_value=storage),
+        patch("live_mem.core.engines.get_engine_registry", return_value=registry),
         patch("live_mem.core.consolidator.datetime", _Dt),
     ):
         res = await consolidator.consolidate(_SPACE, enforce_cooldown=False)
@@ -285,6 +287,7 @@ async def _run_engine(consolidator: ConsolidatorService) -> ConsolidatorFakeStor
     )
     with (
         patch("live_mem.core.consolidator.get_storage", return_value=storage),
+        patch("live_mem.core.engines.get_engine_registry", return_value=reg),
         patch("live_mem.core.consolidator.datetime", _Dt),
     ):
         engine = await reg.mid_engine(_SPACE)

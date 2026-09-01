@@ -30,7 +30,7 @@ from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from .storage import get_storage
+from .storage import get_storage, inventory_object_size
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .write_sink import DirectLocalWriteSink
@@ -283,7 +283,9 @@ class GCService:
                     old_notes.append(
                         {
                             "key": key,
-                            "size": note_obj.get("Size", 0),
+                            "size": inventory_object_size(
+                                note_obj, missing_as_zero=True
+                            ),
                             "timestamp": ts,
                         }
                     )
@@ -332,7 +334,10 @@ class GCService:
         Returns:
             Rapport de consolidation par espace et par agent
         """
-        from .consolidator import get_consolidator
+        from .consolidator import (
+            _sanitize_compaction_failure_payloads,
+            get_consolidator,
+        )
         from .locks import get_lock_manager
 
         # Scanner d'abord
@@ -345,7 +350,7 @@ class GCService:
             scan["consolidation_failed"] = 0
             scan["consolidation_details"] = {}
             scan.pop("eligible_set_token", None)
-            scan["message"] = "Aucune note orpheline à consolider"
+            scan["message"] = "No orphaned notes to consolidate"
             return scan
 
         # Route-first, all-space preflight.  This completes before any notice,
@@ -423,14 +428,15 @@ class GCService:
                         continue
 
                     gc_notice = (
-                        f"⚠️ GARBAGE COLLECTOR — Consolidation forcée\n\n"
-                        f"Le Garbage Collector a détecté {note_count} notes "
-                        f"orphelines de l'agent '{agent_name}' (> {max_age_days} jours).\n"
-                        f"Ces notes n'ont jamais été consolidées par l'agent.\n"
-                        f"Le GC force leur intégration dans la Memory Bank.\n\n"
-                        f"**Attention** : cette consolidation est automatique. "
-                        f"Les notes intégrées peuvent manquer de contexte "
-                        f"car l'agent n'est plus actif."
+                        f"⚠️ GARBAGE COLLECTOR — Forced consolidation\n\n"
+                        f"The Garbage Collector detected {note_count} orphaned "
+                        f"notes from agent '{agent_name}' that are older than "
+                        f"{max_age_days} days.\n"
+                        f"The agent never consolidated these notes.\n"
+                        f"GC is forcing their integration into the Memory Bank.\n\n"
+                        f"**Warning**: this consolidation is automatic. "
+                        f"The integrated notes may lack context because the "
+                        f"agent is no longer active."
                     )
 
                     # Re-resolve while serialized and immediately before EACH
@@ -462,7 +468,7 @@ class GCService:
                     except Exception as e:
                         had_incomplete_agent = True
                         logger.exception(
-                            "GC: échec écriture notice pour '%s' dans '%s': %s",
+                            "GC: failed to write notice for '%s' in '%s': %s",
                             agent_name,
                             sid,
                             e,
@@ -565,6 +571,16 @@ class GCService:
                         detail["notice_cleanup_reason"] = cleanup_reason
                     if isinstance(r.get("message"), str):
                         detail["message"] = r["message"]
+                    if isinstance(r.get("failure_reason"), str):
+                        detail["failure_reason"] = r["failure_reason"]
+                    safe_compaction_failures = r.get("compaction_failures")
+                    diagnostics = _sanitize_compaction_failure_payloads(
+                        safe_compaction_failures
+                    )
+                    if diagnostics:
+                        detail["compaction_failures"] = diagnostics
+                    if isinstance(r.get("remediation"), str):
+                        detail["remediation"] = r["remediation"]
                     consolidation_results[sid][agent_name] = detail
                     total_consolidated += old_notes_processed
 
@@ -590,15 +606,15 @@ class GCService:
             scan["status"] = "partial"
             scan["reason"] = "partial_consolidation"
             scan["message"] = (
-                f"GC partiel : {total_consolidated}/{total_requested} notes "
-                "orphelines consolidées. Une partie du traitement ou du "
-                "nettoyage reste incomplète ; consultez le détail par agent."
+                f"Partial GC: {total_consolidated}/{total_requested} orphaned "
+                "notes were consolidated. Some processing or cleanup remains "
+                "incomplete; see the per-agent details."
             )
         else:
             scan["status"] = "ok"
             scan["message"] = (
-                f"GC : {total_consolidated} notes orphelines consolidées "
-                f"dans {len(scan['spaces'])} espace(s)"
+                f"GC: consolidated {total_consolidated} orphaned notes across "
+                f"{len(scan['spaces'])} space(s)"
             )
         return scan
 
@@ -629,8 +645,8 @@ class GCService:
                 "action": "delete",
                 "deleted": 0,
                 "message": (
-                    "Suppression refusée : expected_eligible_set_token valide requis "
-                    "depuis un dry-run admin_gc_notes préalable."
+                    "Deletion refused: a valid expected_eligible_set_token from a "
+                    "previous admin_gc_notes dry run is required."
                 ),
             }
 
@@ -651,9 +667,8 @@ class GCService:
                 "action": "delete",
                 "deleted": 0,
                 "message": (
-                    "Suppression refusée : l'ensemble exact des notes éligibles "
-                    "a changé depuis le dry-run. Relancez le dry-run puis confirmez "
-                    "le nouvel ensemble."
+                    "Deletion refused: the exact eligible-note set changed since the "
+                    "dry run. Run the dry run again and confirm the new set."
                 ),
             }
 
@@ -673,8 +688,8 @@ class GCService:
                 "action": "delete",
                 "deleted": 0,
                 "message": (
-                    "Suppression refusée : une consolidation est en cours sur "
-                    "au moins un espace candidat. Relancez le dry-run après sa fin."
+                    "Deletion refused: consolidation is in progress for at least one "
+                    "candidate space. Run the dry run again after it completes."
                 ),
             }
 
@@ -695,9 +710,8 @@ class GCService:
                     "action": "delete",
                     "deleted": 0,
                     "message": (
-                        "Suppression refusée : l'ensemble exact des notes éligibles "
-                        "a changé depuis le dry-run. Relancez le dry-run puis confirmez "
-                        "le nouvel ensemble."
+                        "Deletion refused: the exact eligible-note set changed since the "
+                        "dry run. Run the dry run again and confirm the new set."
                     ),
                 }
 
@@ -708,7 +722,7 @@ class GCService:
                 scan["delete_failed"] = 0
                 scan["status"] = "deleted"
                 scan.pop("eligible_set_token", None)
-                scan["message"] = "Aucune note orpheline à supprimer"
+                scan["message"] = "No orphaned notes to delete"
                 return scan
 
             # Resolve every candidate while the serialization locks are held
@@ -760,8 +774,8 @@ class GCService:
         if deleted == requested and route_failure_reason is None:
             scan["status"] = "deleted"
             scan["message"] = (
-                f"⚠️ {deleted} notes supprimées SANS consolidation "
-                f"dans {len(scan['spaces'])} espace(s)"
+                f"⚠️ Deleted {deleted} notes WITHOUT consolidation across "
+                f"{len(scan['spaces'])} space(s)"
             )
         else:
             scan["status"] = "partial"
@@ -769,16 +783,15 @@ class GCService:
             if route_failure_reason is not None:
                 scan["failure_reason"] = route_failure_reason
                 scan["message"] = (
-                    f"⚠️ Suppression partielle : {deleted}/{requested} notes "
-                    "supprimées SANS consolidation. La revalidation de route "
-                    "a refusé la suite ; les notes non supprimées restent "
-                    "présentes. Relancez un dry-run avant toute nouvelle tentative."
+                    f"⚠️ Partial deletion: {deleted}/{requested} notes were deleted "
+                    "WITHOUT consolidation. Route revalidation refused further "
+                    "deletion; undeleted notes remain. Run a new dry run before retrying."
                 )
             else:
                 scan["message"] = (
-                    f"⚠️ Suppression partielle : {deleted}/{requested} notes "
-                    "supprimées SANS consolidation. Les notes non supprimées "
-                    "restent présentes ; relancez un dry-run avant toute nouvelle tentative."
+                    f"⚠️ Partial deletion: {deleted}/{requested} notes were deleted "
+                    "WITHOUT consolidation. Undeleted notes remain; run a new dry run "
+                    "before retrying."
                 )
         return scan
 

@@ -32,6 +32,7 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_validator,
     model_serializer,
 )
 
@@ -246,9 +247,9 @@ class NodeIdentity(_HivemindBase):
     @classmethod
     def _validate_node_id(cls, v: str) -> str:
         if not v:
-            raise ValueError("node_id ne peut pas être vide")
+            raise ValueError("node_id cannot be empty")
         if "/" in v:
-            raise ValueError("node_id ne doit pas contenir '/'")
+            raise ValueError("node_id must not contain '/'")
         return v
 
 
@@ -286,7 +287,7 @@ class Member(_HivemindBase):
             sv = s.value if isinstance(s, PeerScope) else s
             if sv not in allowed:
                 raise ValueError(
-                    "scope hors vocabulaire fermé {read,propose,commit}: "
+                    "scope is outside the closed {read,propose,commit} vocabulary: "
                     f"{sv!r}"
                 )
             if sv not in out:
@@ -319,9 +320,9 @@ class Member(_HivemindBase):
             if self.node_id not in _warned_none_scopes:
                 _warned_none_scopes.add(self.node_id)
                 _logger.warning(
-                    "Hivemind member %r sans champ 'scopes' → FULL scope "
-                    "(read+propose+commit) par défaut retro-compat ADR-0016. "
-                    "Vérifier que l'absence du champ est intentionnelle.",
+                    "Hivemind member %r has no 'scopes' field → FULL scope "
+                    "(read+propose+commit) by ADR-0016 backward-compatible default. "
+                    "Verify that the field is intentionally absent.",
                     self.node_id,
                 )
             return FULL_PEER_SCOPES
@@ -350,7 +351,7 @@ class MembershipView(_HivemindBase):
     @classmethod
     def _validate_epoch(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"epoch doit être >= 0, reçu {v}")
+            raise ValueError(f"epoch must be >= 0, received {v}")
         return v
 
 
@@ -403,7 +404,7 @@ class TermState(_HivemindBase):
     @classmethod
     def _validate_term(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"term doit être >= 0, reçu {v}")
+            raise ValueError(f"term must be >= 0, received {v}")
         return v
 
 
@@ -443,7 +444,7 @@ class TokenLeaseState(_HivemindBase):
     @classmethod
     def _validate_fencing(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"fencing_token doit être >= 0, reçu {v}")
+            raise ValueError(f"fencing_token must be >= 0, received {v}")
         return v
 
     def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
@@ -453,8 +454,8 @@ class TokenLeaseState(_HivemindBase):
         active_states = {TokenState.HELD.value, TokenState.RELEASING.value}
         if self.state in active_states and self.fencing_token != self.term:
             raise ValueError(
-                f"Invariant violé : state={self.state} exige fencing_token == term "
-                f"(reçu fencing_token={self.fencing_token}, term={self.term})"
+                f"Invariant violated: state={self.state} requires fencing_token == term "
+                f"(received fencing_token={self.fencing_token}, term={self.term})"
             )
 
 
@@ -488,7 +489,7 @@ class QueueEntry(_HivemindBase):
     @classmethod
     def _validate_sequence(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"sequence doit être >= 0, reçu {v}")
+            raise ValueError(f"sequence must be >= 0, received {v}")
         return v
 
 
@@ -534,7 +535,7 @@ class BankCommitManifestEntry(_HivemindBase):
     @classmethod
     def _validate_size(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"size doit être >= 0, reçu {v}")
+            raise ValueError(f"size must be >= 0, received {v}")
         return v
 
 
@@ -564,14 +565,14 @@ class BankCommit(_HivemindBase):
     @classmethod
     def _validate_bank_version(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"bank_version doit être >= 0, reçu {v}")
+            raise ValueError(f"bank_version must be >= 0, received {v}")
         return v
 
     @field_validator("term")
     @classmethod
     def _validate_term(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"term doit être >= 0, reçu {v}")
+            raise ValueError(f"term must be >= 0, received {v}")
         return v
 
 
@@ -582,6 +583,26 @@ class BankVersionPointer(_HivemindBase):
     bank_version: int = -1  # -1 = aucun commit
     commit_id: str = ""
     updated_at: str = Field(default_factory=_now_iso)
+
+    @model_validator(mode="after")
+    def _validate_selected_commit_binding(self) -> "BankVersionPointer":
+        """Keep the no-head sentinel closed and unambiguous.
+
+        A pointer is protocol authority, not a best-effort index: ``-1, ''``
+        is the one empty-bank representation.  Accepting values below ``-1``
+        (or a positive version with no selected id) makes a valid-schema raw
+        rewrite look like an empty head to callers that gate recovery.
+        """
+
+        if self.bank_version < -1:
+            raise ValueError(
+                f"bank_version must be >= -1, received {self.bank_version}"
+            )
+        if self.bank_version == -1 and self.commit_id:
+            raise ValueError("empty bank pointer must not name a commit")
+        if self.bank_version >= 0 and not self.commit_id:
+            raise ValueError("non-empty bank pointer must name a commit")
+        return self
 
 
 # =============================================================================
@@ -680,9 +701,9 @@ class EventEnvelope(_HivemindBase):
     @classmethod
     def _validate_event_id(cls, v: str) -> str:
         if not v:
-            raise ValueError("event_id ne peut pas être vide")
+            raise ValueError("event_id cannot be empty")
         if "/" in v:
-            raise ValueError("event_id ne doit pas contenir '/'")
+            raise ValueError("event_id must not contain '/'")
         return v
 
 
@@ -714,23 +735,23 @@ class BootstrapManifestEntry(_HivemindBase):
     @classmethod
     def _validate_path(cls, v: str) -> str:
         if not v:
-            raise ValueError("path ne peut pas être vide")
+            raise ValueError("path cannot be empty")
         if v.startswith("/") or ".." in v.split("/"):
-            raise ValueError(f"path de manifest invalide: {v!r}")
+            raise ValueError(f"Invalid manifest path: {v!r}")
         return v
 
     @field_validator("sha256")
     @classmethod
     def _validate_sha256(cls, v: str) -> str:
         if not v:
-            raise ValueError("sha256 ne peut pas être vide")
+            raise ValueError("sha256 cannot be empty")
         return v
 
     @field_validator("size")
     @classmethod
     def _validate_size(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"size doit être >= 0, reçu {v}")
+            raise ValueError(f"size must be >= 0, received {v}")
         return v
 
 
@@ -765,14 +786,14 @@ class BootstrapManifest(_HivemindBase):
     @classmethod
     def _validate_epoch(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(f"membership_epoch doit être >= 0, reçu {v}")
+            raise ValueError(f"membership_epoch must be >= 0, received {v}")
         return v
 
     @field_validator("bank_version")
     @classmethod
     def _validate_bank_version(cls, v: int) -> int:
         if v < -1:
-            raise ValueError(f"bank_version doit être >= -1, reçu {v}")
+            raise ValueError(f"bank_version must be >= -1, received {v}")
         return v
 
 

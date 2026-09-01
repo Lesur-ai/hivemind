@@ -86,17 +86,17 @@ class RecoveryTriggers:
         if not ctx.is_hive:
             raise PeerChannelError(
                 PeerErrorCode.PROTOCOL_BLOCKED,
-                "resync refusé : space non-Hivemind (legacy/local) — un "
-                "déclencheur de resync ne fabrique jamais d'état Hivemind sur un "
-                "space non partagé (invariant non-Hivemind octet-pour-octet)",
+                "resync refused: non-Hivemind (legacy/local) space — a "
+                "resync trigger never creates Hivemind state on an unshared "
+                "space (non-Hivemind invariant remains byte-for-byte)",
                 {"is_hive": False, "node_status": ctx.node_status.value},
             )
         if ctx.node_status == HiveNodeStatus.UNSAFE:
             raise PeerChannelError(
                 PeerErrorCode.PROTOCOL_BLOCKED,
-                "resync refusé : contexte Hivemind non sûr (UNSAFE — structure "
-                "incomplète / import partiel) — réparation requise avant toute "
-                "mutation de santé",
+                "resync refused: unsafe Hivemind context (UNSAFE — incomplete "
+                "structure / partial import) — repair is required before any "
+                "health mutation",
                 {"is_hive": True, "node_status": ctx.node_status.value},
             )
         has_active_member = ctx.membership is not None and any(
@@ -105,10 +105,10 @@ class RecoveryTriggers:
         if ctx.node is None or not has_active_member:
             raise PeerChannelError(
                 PeerErrorCode.PROTOCOL_BLOCKED,
-                "resync refusé : contexte Hivemind structurellement INCOMPLET "
-                "(identité node.json absente ou aucun membre ACTIVE) — un "
-                "marqueur node_status solitaire n'est PAS un hive sûr à muter ; "
-                "réparation requise avant toute mutation de santé",
+                "resync refused: structurally INCOMPLETE Hivemind context "
+                "(node.json identity is absent or there is no ACTIVE member) — a "
+                "lone node_status marker is NOT a safe hive to mutate; repair is "
+                "required before any health mutation",
                 {
                     "is_hive": True,
                     "node_status": ctx.node_status.value,
@@ -137,7 +137,7 @@ class RecoveryTriggers:
         if not operator or not confirm:
             raise PeerChannelError(
                 PeerErrorCode.PERMISSION_DENIED,
-                "éviction refusée : operator + confirm=True requis",
+                "eviction refused: operator + confirm=True required",
                 {"node_id": node_id},
             )  # levé AVANT tout appel de service -> zéro écriture
         try:
@@ -172,7 +172,7 @@ class RecoveryTriggers:
         if not operator or not confirm:
             raise PeerChannelError(
                 PeerErrorCode.PERMISSION_DENIED,
-                "resync refusé : operator + confirm=True requis",
+                "resync refused: operator + confirm=True required",
                 {
                     "observed_epoch": observed_epoch,
                     "observed_bank_version": observed_bank_version,
@@ -206,7 +206,7 @@ class RecoveryTriggers:
         if not operator or not confirm:
             raise PeerChannelError(
                 PeerErrorCode.PERMISSION_DENIED,
-                "complétion resync refusée : operator + confirm=True requis",
+                "resync completion refused: operator + confirm=True required",
                 {},
             )  # levé AVANT tout appel de service -> zéro écriture
         await self._resolve_hive_or_block()

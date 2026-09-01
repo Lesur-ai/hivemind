@@ -63,7 +63,7 @@ _CANONICAL_TOKEN_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CANONICAL_SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _TARGET_NOT_INVITABLE = {
     "status": "error",
-    "message": "Token cible non invitable",
+    "message": "Target token cannot be invited",
 }
 
 
@@ -76,13 +76,13 @@ def _expiry_days_validation_error(expires_in_days: object) -> str | None:
     silencieusement les valeurs négatives.
     """
     if not isinstance(expires_in_days, int) or isinstance(expires_in_days, bool):
-        return "expires_in_days doit être un entier"
+        return "expires_in_days must be an integer"
     if expires_in_days < 0:
-        return "expires_in_days doit être >= 0"
+        return "expires_in_days must be >= 0"
     try:
         datetime.now(timezone.utc) + timedelta(days=expires_in_days)
     except (OverflowError, TypeError):
-        return "expires_in_days hors plage supportée"
+        return "expires_in_days is outside the supported range"
     return None
 
 
@@ -189,17 +189,17 @@ class TokenService:
             return {
                 "status": "error",
                 "message": (
-                    f"Hash hex trop court ({len(hex_part)} chars). "
-                    "Minimum 16 caractères hex requis."
+                    f"Hex hash is too short ({len(hex_part)} chars). "
+                    "At least 16 hexadecimal characters are required."
                 ),
             }
         if idx == -2:
             return {
                 "status": "error",
-                "message": "Préfixe de hash ambigu — plusieurs tokens correspondent. Fournissez un hash plus long.",
+                "message": "Ambiguous hash prefix: multiple tokens match. Provide a longer hash.",
             }
         if idx == -1:
-            return {"status": "not_found", "message": "Token introuvable"}
+            return {"status": "not_found", "message": "Token not found"}
         return None
 
     async def _resolve_space_ids(self, space_ids: str) -> tuple[list[str], bool]:
@@ -263,12 +263,11 @@ class TokenService:
     def _muted_token_warning() -> str:
         """Message standard pour les tokens "muets" (issue #11)."""
         return (
-            "⚠️ Ce token n'a accès à aucun espace existant (space_ids=[]). "
-            "Depuis v1.5.0, c'est la sémantique stricte par défaut. "
-            "Utilisez space_ids='*' pour un snapshot de tous les espaces "
-            "actuels, ou listez-les explicitement (ex: 'space-a,space-b'). "
-            "Un token manage autorisé peut ensuite l'inviter avec "
-            "space_invite_token."
+            "⚠️ This token cannot access any existing space (space_ids=[]). "
+            "Starting with v1.5.0, this is the strict default semantics. Use "
+            "space_ids='*' for a snapshot of all current spaces, or list them "
+            "explicitly (for example, 'space-a,space-b'). An authorized manage "
+            "token can later invite it with space_invite_token."
         )
 
     @staticmethod
@@ -368,9 +367,9 @@ class TokenService:
         """
         clean_name = (name or "").strip()
         if not clean_name:
-            return {"status": "error", "message": "Nom du token requis"}
+            return {"status": "error", "message": "Token name is required"}
         if clean_name == INTERNAL_LONG_TOKEN_NAME:
-            return {"status": "error", "message": "Nom de token réservé"}
+            return {"status": "error", "message": "Reserved token name"}
 
         # Frontière fermée jusque dans le service : FastMCP impose déjà
         # le Literal, mais aucun appel interne ne doit pouvoir contourner la
@@ -380,7 +379,7 @@ class TokenService:
             return {
                 "status": "error",
                 "message": (
-                    "Profil de permissions invalide. Valeurs acceptées : "
+                    "Invalid permission profile. Accepted values: "
                     "read | read,write | read,write,manage"
                 ),
             }
@@ -399,7 +398,7 @@ class TokenService:
             if actor is None:
                 return {
                     "status": "error",
-                    "message": "Token S3 manage ou admin actif requis",
+                    "message": "An active S3 manage or admin token is required",
                 }
 
             # Le plaintext est produit seulement après validation du caller et
@@ -443,16 +442,16 @@ class TokenService:
                         "token": raw_token,
                         "token_hash": token_hash,
                         "message": (
-                            "Persistance du token ambiguë. Conservez le secret et "
-                            "faites vérifier ce token_hash exact par un admin avant "
-                            "toute nouvelle création."
+                            "Token persistence is ambiguous. Keep the secret and have "
+                            "an admin inspect this exact token_hash before creating "
+                            "another token."
                         ),
                     }
                 confirmed = self._find_exact_token(persisted, token_hash)
                 if confirmed is None:
                     return {
                         "status": "error",
-                        "message": "Création non persistée ; aucun token n'a été créé",
+                        "message": "Creation was not persisted; no token was created",
                     }
                 if confirmed.model_dump() != token_info.model_dump():
                     return {
@@ -461,9 +460,9 @@ class TokenService:
                         "token": raw_token,
                         "token_hash": token_hash,
                         "message": (
-                            "Un enregistrement conflictuel existe pour le hash généré. "
-                            "Conservez le secret et faites inspecter le hash exact par "
-                            "un admin ; ne retentez pas automatiquement."
+                            "A conflicting record exists for the generated hash. Keep "
+                            "the secret and have an admin inspect the exact hash; do "
+                            "not retry automatically."
                         ),
                     }
 
@@ -485,10 +484,10 @@ class TokenService:
             "permissions": list(perm_list),
             "space_ids": [],
             "expires_at": expires_at,
-            "warning": "⚠️ Ce token ne sera PLUS JAMAIS affiché !",
+            "warning": "Save this token now; it will not be shown again.",
             "warning_no_access": (
-                "Ce token n'a accès à aucun espace. Un manager autorisé doit "
-                "l'inviter avec space_invite_token."
+                "This token cannot access any space. An authorized manager must "
+                "invite it with space_invite_token."
             ),
         }
 
@@ -508,7 +507,7 @@ class TokenService:
         from .space import SPACE_ID_REGEX, SpaceService
 
         if not SPACE_ID_REGEX.fullmatch(space_id or ""):
-            return {"status": "error", "message": "Identifiant d'espace invalide"}
+            return {"status": "error", "message": "Invalid space identifier"}
         if not _CANONICAL_TOKEN_HASH_RE.fullmatch(target_token_hash or ""):
             return dict(_TARGET_NOT_INVITABLE)
 
@@ -529,7 +528,7 @@ class TokenService:
                 if actor is None:
                     return {
                         "status": "error",
-                        "message": "Accès manage actif requis pour cet espace",
+                        "message": "Active manage access is required for this space",
                     }
                 actor_name = actor.name
 
@@ -541,11 +540,11 @@ class TokenService:
                     storage, space_id
                 )
                 if space_state == "absent":
-                    return {"status": "not_found", "message": "Espace introuvable"}
+                    return {"status": "not_found", "message": "Space not found"}
                 if space_state != "committed":
                     return {
                         "status": "error",
-                        "message": "Espace indisponible : récupération requise",
+                        "message": "Space unavailable: recovery required",
                         "recovery_required": True,
                     }
 
@@ -572,8 +571,8 @@ class TokenService:
                                 "status": "partial",
                                 "recovery_required": True,
                                 "message": (
-                                    "Persistance de l'invitation ambiguë. Un admin "
-                                    "doit vérifier le hash cible exact avant retry."
+                                    "Invitation persistence is ambiguous. An admin must "
+                                    "inspect the exact target hash before retrying."
                                 ),
                             }
                         confirmed = self._find_exact_token(
@@ -582,7 +581,7 @@ class TokenService:
                         if confirmed is None or space_id not in confirmed.space_ids:
                             return {
                                 "status": "error",
-                                "message": "Invitation non persistée",
+                                "message": "Invitation was not persisted",
                             }
                     added = True
 
@@ -658,27 +657,27 @@ class TokenService:
         # reserved on bank_consolidate's wire contract for explicit global
         # scope. Never mint a token that cannot be isolated as an agent.
         if not isinstance(name, str) or name == "":
-            return {"status": "error", "message": "Nom du token requis"}
+            return {"status": "error", "message": "Token name is required"}
 
         # Parser et valider les permissions
         if not isinstance(permissions, str):
-            return {"status": "error", "message": "Permissions requises"}
+            return {"status": "error", "message": "Permissions are required"}
         perm_list = [p.strip() for p in permissions.split(",") if p.strip()]
         if not perm_list:
-            return {"status": "error", "message": "Permissions requises"}
+            return {"status": "error", "message": "Permissions are required"}
         invalid = [p for p in perm_list if p not in VALID_PERMISSIONS]
         if invalid:
             return {
                 "status": "error",
                 "message": (
-                    f"Permissions invalides : {invalid}. "
-                    f"Valeurs acceptées : {sorted(VALID_PERMISSIONS)}"
+                    f"Invalid permissions: {invalid}. "
+                    f"Accepted values: {sorted(VALID_PERMISSIONS)}"
                 ),
             }
         if len(set(perm_list)) != len(perm_list):
             return {
                 "status": "error",
-                "message": "Permissions dupliquées interdites",
+                "message": "Duplicate permissions are not allowed",
             }
 
         # Les scopes d'un admin sont ignorés à l'autorisation et ne doivent pas
@@ -694,7 +693,7 @@ class TokenService:
         if len(set(sid_list)) != len(sid_list):
             return {
                 "status": "error",
-                "message": "space_ids dupliqués interdits",
+                "message": "Duplicate space_ids are not allowed",
             }
         invalid_space_ids = [
             sid for sid in sid_list if not _CANONICAL_SPACE_ID_RE.fullmatch(sid)
@@ -702,7 +701,7 @@ class TokenService:
         if invalid_space_ids:
             return {
                 "status": "error",
-                "message": f"space_ids invalides : {invalid_space_ids}",
+                "message": f"Invalid space_ids: {invalid_space_ids}",
             }
 
         # Sauvegarder sous lock. Le secret n'est généré qu'après toutes les
@@ -745,15 +744,15 @@ class TokenService:
                         "token": raw_token,
                         "token_hash": token_hash,
                         "message": (
-                            "Persistance du token ambiguë. Conservez le secret et "
-                            "faites vérifier ce token_hash exact avant tout retry."
+                            "Token persistence is ambiguous. Keep the secret and have "
+                            "this exact token_hash inspected before retrying."
                         ),
                     }
                 confirmed = self._find_exact_token(persisted, token_hash)
                 if confirmed is None:
                     return {
                         "status": "error",
-                        "message": "Création non persistée ; aucun token n'a été créé",
+                        "message": "Creation was not persisted; no token was created",
                     }
                 if confirmed.model_dump() != token_info.model_dump():
                     return {
@@ -762,8 +761,8 @@ class TokenService:
                         "token": raw_token,
                         "token_hash": token_hash,
                         "message": (
-                            "Enregistrement conflictuel pour le hash généré. "
-                            "Conservez le secret et demandez une inspection admin."
+                            "A conflicting record exists for the generated hash. Keep "
+                            "the secret and request an admin inspection."
                         ),
                     }
 
@@ -775,7 +774,7 @@ class TokenService:
             "permissions": perm_list,
             "space_ids": sid_list,
             "expires_at": expires_at,
-            "warning": "⚠️ Ce token ne sera PLUS JAMAIS affiché !",
+            "warning": "Save this token now; it will not be shown again.",
         }
 
         # Issue #11 fix : signaler explicitement les tokens "muets"
@@ -788,17 +787,17 @@ class TokenService:
         if is_admin and space_ids_stripped:
             response["scope_normalized"] = True
             response["info"] = (
-                "Un token admin a un accès global par permission : space_ids "
-                "a été ignoré et stocké vide pour empêcher tout scope dormant "
-                "lors d'un downgrade ultérieur."
+                "An admin token has global access through its permission: space_ids "
+                "was ignored and stored empty to prevent dormant scopes from becoming "
+                "active after a later downgrade."
             )
 
         if snapshot_used:
             response["snapshot_taken"] = True
             response["info"] = (
-                f"space_ids='{space_ids_stripped}' interprété comme snapshot "
-                f"des {len(sid_list)} espace(s) existant(s) au moment de la création. "
-                "Les futurs nouveaux espaces ne seront PAS automatiquement ajoutés."
+                f"space_ids='{space_ids_stripped}' was interpreted as a snapshot of "
+                f"the {len(sid_list)} existing space(s) at creation time. Future "
+                "spaces will NOT be added automatically."
             )
 
         return response
@@ -838,15 +837,15 @@ class TokenService:
         (mono-tenant, P7-4).
         """
         if not raw_token:
-            return {"status": "error", "message": "raw_token requis"}
+            return {"status": "error", "message": "raw_token is required"}
 
         perms = list(permissions) if permissions else ["read", "write"]
         if set(perms) != {"read", "write"}:
             return {
                 "status": "error",
                 "message": (
-                    "Le token interne long porte EXACTEMENT {'read','write'} "
-                    f"(P7-8, least-privilege) ; reçu : {sorted(set(perms))}"
+                    "The internal long token must have EXACTLY {'read','write'} "
+                    f"(P7-8, least privilege); received: {sorted(set(perms))}"
                 ),
             }
 
@@ -1041,7 +1040,7 @@ class TokenService:
         # LM2-07 fix : invalider dans le store global après save_store
         self._invalidate_in_fresh_store([full_hash])
 
-        return {"status": "ok", "message": f"Token '{token.name}' révoqué"}
+        return {"status": "ok", "message": f"Token '{token.name}' revoked"}
 
     async def delete_token(self, token_hash: str) -> dict:
         """
@@ -1074,7 +1073,7 @@ class TokenService:
         return {
             "status": "deleted",
             "name": deleted_name,
-            "message": f"Token '{deleted_name}' supprimé physiquement",
+            "message": f"Token '{deleted_name}' permanently deleted",
             "remaining": len(store.tokens),
         }
 
@@ -1113,7 +1112,7 @@ class TokenService:
             "deleted": deleted_count,
             "remaining": len(store.tokens),
             "mode": "revoked_only" if revoked_only else "all",
-            "message": f"{deleted_count} token(s) supprimé(s) physiquement",
+            "message": f"{deleted_count} token(s) permanently deleted",
         }
 
     # ─────────────────────────────────────────────────────────
@@ -1161,9 +1160,9 @@ class TokenService:
             return {
                 "status": "error",
                 "message": (
-                    "Paramètres incompatibles : `space_ids` (remplacement) "
-                    "et `space_ids_add`/`space_ids_remove` (delta additif) "
-                    "ne peuvent pas être combinés. Choisissez l'un ou l'autre."
+                    "Incompatible parameters: `space_ids` (replacement) and "
+                    "`space_ids_add`/`space_ids_remove` (additive delta) cannot "
+                    "be combined. Choose one mode."
                 ),
             }
 
@@ -1177,10 +1176,9 @@ class TokenService:
                 return {
                     "status": "error",
                     "message": (
-                        f"`{label}` n'accepte pas le sucre '*' / 'all' "
-                        "(sémantique ambiguë sur un delta). Listez les "
-                        "espaces explicitement ou utilisez `space_ids='*'` "
-                        "pour un remplacement complet."
+                        f"`{label}` does not accept the '*' / 'all' shorthand "
+                        "because it is ambiguous for a delta. List spaces explicitly "
+                        "or use `space_ids='*'` for a complete replacement."
                     ),
                 }
 
@@ -1314,8 +1312,8 @@ class TokenService:
                     return {
                         "status": "error",
                         "message": (
-                            f"Permissions invalides : {invalid}. "
-                            f"Valeurs acceptées : {sorted(VALID_PERMISSIONS)}"
+                            f"Invalid permissions: {invalid}. "
+                            f"Accepted values: {sorted(VALID_PERMISSIONS)}"
                         ),
                     }
 
@@ -1384,7 +1382,7 @@ class TokenService:
 
         response = {
             "status": "ok",
-            "message": f"Token '{updated_name}' mis à jour",
+            "message": f"Token '{updated_name}' updated",
         }
 
         if _authorization_profile_changed(
@@ -1421,17 +1419,16 @@ class TokenService:
             if space_ids_touched:
                 response["scope_normalized"] = True
                 response["info"] = (
-                    "Un token admin est global par permission : space_ids a été "
-                    "stocké vide pour empêcher un scope dormant."
+                    "An admin token is global through its permission: space_ids was "
+                    "stored empty to prevent a dormant scope."
                 )
 
         if snapshot_used:
             response["snapshot_taken"] = True
             response["info"] = (
-                f"space_ids='{space_ids_stripped}' interprété comme snapshot "
-                f"des {len(updated_space_ids)} espace(s) existant(s) au moment "
-                "de la mise à jour. Les futurs nouveaux espaces ne seront PAS "
-                "automatiquement ajoutés."
+                f"space_ids='{space_ids_stripped}' was interpreted as a snapshot of "
+                f"the {len(updated_space_ids)} existing space(s) at update time. "
+                "Future spaces will NOT be added automatically."
             )
 
         if delta_mode:
@@ -1543,8 +1540,8 @@ class TokenService:
             return {
                 "status": "error",
                 "message": (
-                    "Au moins un filtre requis : `names` (liste exacte), "
-                    "`name_contains` (sous-chaîne) ou `has_space` (space_id)."
+                    "At least one filter is required: `names` (exact list), "
+                    "`name_contains` (substring), or `has_space` (space_id)."
                 ),
             }
 
@@ -1559,8 +1556,8 @@ class TokenService:
             return {
                 "status": "error",
                 "message": (
-                    "Aucune opération demandée. Fournissez au moins "
-                    "`permissions`, `email`, `space_ids_add` ou `space_ids_remove`."
+                    "No operation was requested. Provide at least one of "
+                    "`permissions`, `email`, `space_ids_add`, or `space_ids_remove`."
                 ),
             }
 
@@ -1577,8 +1574,8 @@ class TokenService:
                 return {
                     "status": "error",
                     "message": (
-                        f"Permissions invalides : {invalid}. "
-                        f"Valeurs acceptées : {sorted(VALID_PERMISSIONS)}"
+                        f"Invalid permissions: {invalid}. "
+                        f"Accepted values: {sorted(VALID_PERMISSIONS)}"
                     ),
                 }
         else:
@@ -1624,13 +1621,12 @@ class TokenService:
                 if skipped_revoked:
                     response["skipped_revoked"] = skipped_revoked
                     response["message"] = (
-                        f"Aucun token actif ne correspond — "
-                        f"{len(skipped_revoked)} token(s) révoqué(s) "
-                        "matché(s) mais sautés (utilisez include_revoked=True "
-                        "pour les inclure)."
+                        f"No active tokens match — {len(skipped_revoked)} "
+                        "revoked token(s) matched but were skipped "
+                        "(use include_revoked=True to include them)."
                     )
                 else:
-                    response["message"] = "Aucun token ne correspond aux filtres."
+                    response["message"] = "No tokens match the filters."
                 return response
 
             # Application en mémoire (atomique : aucune écriture S3 tant que
@@ -1946,28 +1942,28 @@ class TokenService:
         if data is None:
             return TokensStore(version=CURRENT_TOKENS_VERSION)
         if not isinstance(data, dict):
-            raise RuntimeError("Registre de tokens corrompu : objet JSON requis")
+            raise RuntimeError("Corrupted token registry: expected a JSON object")
         version = data.get("version")
         if isinstance(version, bool) or not isinstance(version, int):
-            raise RuntimeError("Registre de tokens corrompu : version entière requise")
+            raise RuntimeError("Corrupted token registry: version must be an integer")
         if version < LEGACY_TOKENS_VERSION or version > CURRENT_TOKENS_VERSION:
-            raise RuntimeError(f"Version de registre tokens non supportée : {version}")
+            raise RuntimeError(f"Unsupported token registry version: {version}")
         if version == LEGACY_TOKENS_VERSION and not allow_legacy_v1:
             raise RuntimeError(
-                "Registre tokens v1 non migré : démarrage/migration v2 requis"
+                "Unmigrated v1 token registry: v2 startup/migration required"
             )
 
         raw_tokens = data.get("tokens")
         if not isinstance(raw_tokens, list):
             raise RuntimeError(
-                "Registre de tokens corrompu : liste tokens requise"
+                "Corrupt token registry: tokens list is required"
             )
         seen_hashes: set[str] = set()
         for index, raw_token in enumerate(raw_tokens):
             label = f"token[{index}]"
             if not isinstance(raw_token, dict):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : {label} doit être un objet"
+                    f"Corrupt token registry: {label} must be an object"
                 )
 
             token_hash = raw_token.get("hash")
@@ -1975,50 +1971,50 @@ class TokenService:
                 token_hash
             ):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : hash canonique requis pour {label}"
+                    f"Corrupt token registry: canonical hash required for {label}"
                 )
             if token_hash in seen_hashes:
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : hash dupliqué pour {label}"
+                    f"Corrupt token registry: duplicate hash for {label}"
                 )
             seen_hashes.add(token_hash)
 
             raw_permissions = raw_token.get("permissions")
             if not isinstance(raw_permissions, list):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : permissions liste requise pour {label}"
+                    f"Corrupt token registry: permissions list required for {label}"
                 )
             if any(not isinstance(item, str) for item in raw_permissions):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : permission non textuelle pour {label}"
+                    f"Corrupt token registry: non-text permission for {label}"
                 )
             if any(item not in VALID_PERMISSIONS for item in raw_permissions):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : permission inconnue pour {label}"
+                    f"Corrupt token registry: unknown permission for {label}"
                 )
             if len(set(raw_permissions)) != len(raw_permissions):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : permission dupliquée pour {label}"
+                    f"Corrupt token registry: duplicate permission for {label}"
                 )
 
             raw_space_ids = raw_token.get("space_ids")
             if not isinstance(raw_space_ids, list):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : space_ids liste requise pour {label}"
+                    f"Corrupt token registry: space_ids list required for {label}"
                 )
             if any(not isinstance(item, str) for item in raw_space_ids):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : space_id non textuel pour {label}"
+                    f"Corrupt token registry: non-text space_id for {label}"
                 )
             if any(
                 not _CANONICAL_SPACE_ID_RE.fullmatch(item) for item in raw_space_ids
             ):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : space_id invalide pour {label}"
+                    f"Corrupt token registry: invalid space_id for {label}"
                 )
             if len(set(raw_space_ids)) != len(raw_space_ids):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : space_id dupliqué pour {label}"
+                    f"Corrupt token registry: duplicate space_id for {label}"
                 )
             if (
                 version == CURRENT_TOKENS_VERSION
@@ -2026,35 +2022,35 @@ class TokenService:
                 and raw_space_ids
             ):
                 raise RuntimeError(
-                    "Registre de tokens corrompu : un token admin v2 doit "
-                    f"avoir space_ids vide pour {label}"
+                    "Corrupt token registry: a v2 admin token must "
+                    f"have empty space_ids for {label}"
                 )
 
             if "revoked" in raw_token and not isinstance(raw_token["revoked"], bool):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : revoked booléen requis pour {label}"
+                    f"Corrupt token registry: boolean revoked required for {label}"
                 )
             if "expires_at" in raw_token and not (
                 raw_token["expires_at"] is None
                 or isinstance(raw_token["expires_at"], str)
             ):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : expires_at texte/null requis pour {label}"
+                    f"Corrupt token registry: text/null expires_at required for {label}"
                 )
             if "last_used_at" in raw_token and not (
                 raw_token["last_used_at"] is None
                 or isinstance(raw_token["last_used_at"], str)
             ):
                 raise RuntimeError(
-                    f"Registre de tokens corrompu : last_used_at texte/null requis pour {label}"
+                    f"Corrupt token registry: text/null last_used_at required for {label}"
                 )
             for text_field in ("name", "email", "created_at"):
                 if text_field in raw_token and not isinstance(
                     raw_token[text_field], str
                 ):
                     raise RuntimeError(
-                        "Registre de tokens corrompu : "
-                        f"{text_field} textuel requis pour {label}"
+                        "Corrupt token registry: "
+                        f"text {text_field} required for {label}"
                     )
         return TokensStore(**data)
 

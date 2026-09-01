@@ -64,6 +64,15 @@ jobs:
             echo "::error::CHANGELOG.md has no release section for ${version}."
             exit 1
           fi
+          if [ "$(git cat-file -t "refs/tags/${TAG_NAME}")" != "tag" ]; then
+            echo "::error::Public release tag ${TAG_NAME} must be annotated."
+            exit 1
+          fi
+          tag_date="$(git for-each-ref --format='%(taggerdate:format:%Y-%m-%d)' "refs/tags/${TAG_NAME}")"
+          if ! grep -Fxq "## [${version}] — ${tag_date}" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md release date does not match annotated tag date ${tag_date}."
+            exit 1
+          fi
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$commit" >> "$GITHUB_OUTPUT"
           case "$version" in

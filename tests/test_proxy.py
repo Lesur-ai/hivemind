@@ -686,7 +686,7 @@ class TestPublicHealthProbeProxy:
 
         block = collector.body["services"]["llmaas"]
         assert block["status"] == "warning"
-        assert block["message"] == "LLMaaS non configuré"
+        assert block["message"] == "LLMaaS is not configured"
         assert block["chat"]["configured"] is False
         assert block["chat"]["connectivity"] == "not_configured"
         assert block["chat"]["discovery"] == "not_run"

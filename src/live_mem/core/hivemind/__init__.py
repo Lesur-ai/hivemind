@@ -73,6 +73,7 @@ from .models import (
 from .state import HivemindStateStore
 from .lifecycle import (
     BootstrapError,
+    BootstrapLimitError,
     BootstrapService,
     BootstrapSnapshot,
     HiveContext,
@@ -113,6 +114,7 @@ from .lease_runtime import (
     evaluate_commit_authorization,
     is_lease_expired,
     lease_is_active,
+    token_mutation_lock,
 )
 from .commit_runtime import (
     CommitApplyError,
@@ -238,6 +240,7 @@ __all__ = [
     "QueueReplayConflictError",
     "HivemindStateStore",
     "BootstrapError",
+    "BootstrapLimitError",
     "MembershipEpochError",
     "MembershipIncarnationError",
     "BootstrapService",
@@ -270,6 +273,7 @@ __all__ = [
     "CommitIntent",
     "CommitNotAuthorized",
     "LeaseRuntime",
+    "token_mutation_lock",
     "compute_lease_until",
     "evaluate_commit_authorization",
     "is_lease_expired",

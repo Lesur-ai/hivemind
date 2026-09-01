@@ -129,7 +129,7 @@ class TestLM2_02_GraphConnectSSRF:
     def test_blocks_rfc1918_private(self, url):
         err = _validate_gm_url(url)
         assert err is not None, f"Sans fix : RFC 1918 {url} accepté"
-        assert "privée" in err
+        assert "Private IP address" in err
 
     def test_blocks_aws_metadata_link_local(self):
         """169.254.169.254 = AWS/GCP metadata, vecteur SSRF principal."""
@@ -1722,7 +1722,7 @@ class TestLM2_11_ProvisioningRequiresManage:
             invalidate_token_in_store(write_only_token["token_hash"])
         assert err == {
             "status": "error",
-            "message": "Permission 'manage' requise pour cette opération",
+            "message": "The 'manage' permission is required for this operation",
         }
 
 

@@ -41,8 +41,8 @@ NO_AUTO_POLLING_CONTRACT = {
     "mode": "manual_only",
     "status_tool": "ingest_job_status",
     "instruction": (
-        "Ne pas attendre la fin ni poller automatiquement. Conserver le job_id "
-        "et n'appeler ingest_job_status que pour une vérification explicite."
+        "Do not wait for completion or poll automatically. Keep the job_id and "
+        "call ingest_job_status only for an explicit status check."
     ),
 }
 
@@ -178,10 +178,10 @@ class IngestQueueService:
                     "sha256": sha256,
                     "reason": decision["reason"],
                     "message": (
-                        "Document déjà ingéré (même source_path + checksum)."
+                        "Document already ingested with the same source_path and checksum."
                         if action == "skip" else
-                        "Le checksum a changé pour ce source_path. Relancez avec "
-                        "replace_existing=true pour remplacer explicitement."
+                        "The checksum changed for this source_path. Retry with "
+                        "replace_existing=true to replace it explicitly."
                     ),
                 }
                 if batch_id:
@@ -196,12 +196,12 @@ class IngestQueueService:
             if len(self._queues.get(memory_id, ())) >= self._max_queued_per_memory:
                 return {
                     "status": "queue_full",
-                    "message": f"File pleine pour '{memory_id}' (max {self._max_queued_per_memory}).",
+                    "message": f"Queue is full for '{memory_id}' (max {self._max_queued_per_memory}).",
                 }
             if self._queued_bytes + content_size > self._max_queued_bytes:
                 return {
                     "status": "queue_full",
-                    "message": "Capacité mémoire de la file dépassée (max_queued_bytes).",
+                    "message": "Queue memory capacity exceeded (max_queued_bytes).",
                 }
 
             # 7. Création du job (le worker rejouera resolve_ingestion avant le pipeline)
@@ -256,7 +256,7 @@ class IngestQueueService:
         async with self._state_lock:
             job = self._jobs.get(job_id)
             if not job:
-                return {"status": "not_found", "message": f"Job '{job_id}' introuvable"}
+                return {"status": "not_found", "message": f"Job '{job_id}' not found"}
             return self._job_payload(job)
 
     async def list_jobs(
@@ -318,9 +318,9 @@ class IngestQueueService:
         async with self._state_lock:
             job = self._jobs.get(job_id)
             if not job:
-                return {"status": "not_found", "message": f"Job '{job_id}' introuvable"}
+                return {"status": "not_found", "message": f"Job '{job_id}' not found"}
             if job.status in TERMINAL_STATUSES:
-                return {"status": "noop", "job_status": job.status, "message": "Job déjà terminé"}
+                return {"status": "noop", "job_status": job.status, "message": "Job already completed"}
             if job.status == "queued":
                 # Retirer de la file immédiatement
                 try:
@@ -332,14 +332,14 @@ class IngestQueueService:
                 job.current_step = "cancelled"
                 job.finished_at = _now()
                 job.updated_at = _now()
-                return {"status": "cancelled", "job_id": job_id, "message": "Job en attente annulé"}
+                return {"status": "cancelled", "job_id": job_id, "message": "Queued job cancelled"}
             # running : annulation coopérative (le pipeline s'arrête à la prochaine frontière)
             job.cancel_requested = True
             job.updated_at = _now()
             return {
                 "status": "cancelling",
                 "job_id": job_id,
-                "message": "Annulation demandée (best-effort, à la prochaine frontière de phase).",
+                "message": "Cancellation requested (best effort at the next phase boundary).",
             }
 
     # ------------------------------------------------------------------ worker
@@ -392,7 +392,7 @@ class IngestQueueService:
                 async with self._state_lock:
                     job.status = "failed"
                     job.current_step = "failed"
-                    job.error = f"Re-résolution idempotence impossible: {e}"
+                    job.error = f"Could not re-resolve idempotency: {e}"
                     job.finished_at = _now()
                     job.updated_at = _now()
                     self._finish_active_locked(memory_id, job.job_id)
@@ -467,13 +467,13 @@ class IngestQueueService:
             job.status = "cancelled"
             job.current_step = "cancelled"
             if result.get("cleanup", {}).get("errors"):
-                job.error = f"rollback incomplet: {result['cleanup']['errors']}"
+                job.error = f"incomplete rollback: {result['cleanup']['errors']}"
         elif status == "warning":
             job.status = "failed"
-            job.error = result.get("message", "Extraction texte impossible")
+            job.error = result.get("message", "Text extraction failed")
         else:
             job.status = "failed"
-            job.error = result.get("message", "Échec d'ingestion")
+            job.error = result.get("message", "Ingestion failed")
 
     # ------------------------------------------------------------------ helpers
     def _find_active_source_path_locked(self, memory_id: str, source_path: str) -> Optional[str]:
@@ -565,8 +565,8 @@ class IngestQueueService:
             payload["error"] = job.error
         if job.status in ("queued", "running"):
             payload["message"] = (
-                f"Job d'ingestion {job.status} pour '{job.memory_id}'. Ne pas attendre "
-                "la fin par défaut ; utiliser ingest_job_status pour un point explicite."
+                f"Ingestion job {job.status} for '{job.memory_id}'. Do not wait for "
+                "completion by default; use ingest_job_status for an explicit check."
             )
         return payload
 

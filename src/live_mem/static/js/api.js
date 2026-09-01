@@ -21,7 +21,7 @@ function purgeLegacyTokenStorage() {
     try {
         if (localStorage.getItem(AUTH_TOKEN_KEY)) {
             localStorage.removeItem(AUTH_TOKEN_KEY);
-            console.info('[auth] Ancien token localStorage purgé (migration LM2-04).');
+            console.info('[auth] Cleared legacy localStorage token (LM2-04 migration).');
         }
     } catch (_) {
         // localStorage indisponible (mode privé strict) : best-effort.

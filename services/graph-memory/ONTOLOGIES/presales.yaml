@@ -1,526 +1,526 @@
 # =============================================================================
-# Ontologie Presales (Avant-Vente & Propositions Commerciales)
+# Presales Ontology (Presales and Commercial Proposals)
 # =============================================================================
-# Spécialisée pour l'extraction d'informations depuis la base de connaissances
-# avant-vente de Cloud Temple et la génération de
-# réponses aux appels d'offres (RFP/RFI).
+# Specialized for extracting information from Cloud Temple's presales knowledge
+# base and generating responses to requests for proposal or information (RFP/RFI).
 
 name: presales
 version: "1.1"
 description: |
-  Ontologie spécialisée pour l'analyse de documents avant-vente et la génération
-  de propositions commerciales pour services Cloud souverains (SecNumCloud).
-  Optimisée pour lier les exigences clients (Requirements) aux capacités,
-  services, certifications et méthodologies de Cloud Temple.
+  Specialized ontology for analyzing presales documents and generating
+  commercial proposals for sovereign cloud services (SecNumCloud).
+  Optimized to link customer requirements to Cloud Temple capabilities,
+  services, certifications, and methodologies.
 
-# Instructions spécifiques pour le LLM
+# LLM-specific instructions
 context: |
-  Tu es un expert avant-vente senior chez Cloud Temple, spécialiste du Cloud de Confiance (SecNumCloud).
-  Ton rôle est d'analyser les documents de la base de connaissances pour en extraire les arguments clés,
-  les caractéristiques techniques et les engagements qui répondent aux besoins des clients.
+  You are a senior Cloud Temple presales expert specializing in trusted cloud services (SecNumCloud).
+  Your role is to analyze knowledge-base documents and extract key arguments,
+  technical characteristics, and commitments that address customer needs.
 
-  ⚠️ RÈGLES CRITIQUES D'EXTRACTION:
-  
-  1. CONTEXTUALISATION PAR DOMAINE : Chaque entité extraite DOIT être reliée à son domaine d'origine
-     via la relation PART_OF_DOMAIN (ex: "SecNumCloud" → "Sécurité et Conformité").
-  
-  2. ORIENTATION PERSONA : Identifie systématiquement quel persona est ciblé par un argument.
-     - Arguments financiers/risques → Dirigeant / Acheteur
-     - Arguments techniques/perfs → DSI / Expert Technique
-     - Arguments conformité/sécurité → RSSI / DPO
-  
-  3. RELATIONS CROSS-DOMAINES : Cherche activement les liens entre les silos :
-     - Comment une "Certification" (Sécurité) impacte un "Service" (Technique) ?
-     - Comment une "Méthodologie" (Gouvernance) garantit un "SLA" (Contractuel) ?
-  
-  4. EXIGENCES CLIENTS : Si le texte mentionne un besoin client typique (ex: "besoin de souveraineté"),
-     crée une entité "Requirement" et lie-la à la solution proposée via "ANSWERED_BY".
+  ⚠️ CRITICAL EXTRACTION RULES:
 
-  5. PRÉCISION DES VALEURS : Extrais les métriques exactes (99.99%, <4ms, 24/7, PUE 1.3).
-     Ne généralise pas ("haute disponibilité" → chercher le %) sauf si aucune valeur n'est citée.
+  1. DOMAIN CONTEXT: Every extracted entity MUST be linked to its source domain
+     through the PART_OF_DOMAIN relation (for example, "SecNumCloud" → "Security and Compliance").
+
+  2. PERSONA ORIENTATION: Systematically identify the persona targeted by each argument.
+     - Financial/risk arguments → Executive / Buyer
+     - Technical/performance arguments → CIO / Technical Expert
+     - Compliance/security arguments → CISO / DPO
+
+  3. CROSS-DOMAIN RELATIONS: Actively look for links between silos:
+     - How does a "Certification" (Security) affect a "Service" (Technical)?
+     - How does a "Methodology" (Governance) guarantee an "SLA" (Contractual)?
+
+  4. CUSTOMER REQUIREMENTS: If the text mentions a typical customer need
+     (for example, "need for sovereignty"), create a "Requirement" entity and
+     link it to the proposed solution through "ANSWERED_BY".
+
+  5. VALUE PRECISION: Extract exact metrics (99.99%, <4ms, 24/7, PUE 1.3).
+     Do not generalize ("high availability" → look for the percentage) unless no value is stated.
 
 # =============================================================================
-# Types d'entités (24 types répartis en 6 familles)
+# Entity types (24 types across 6 families)
 # =============================================================================
 entity_types:
 
   # ---------------------------------------------------------------------------
-  # 🏢 FAMILLE 1 : ACTEURS & PERSONNES
+  # 🏢 FAMILY 1: ACTORS AND PEOPLE
   # ---------------------------------------------------------------------------
   - name: Organization
-    description: Entreprise, entité juridique, partenaire ou organisme public
+    description: Company, legal entity, partner, or public body
     examples:
       - "Cloud Temple"
-      - "Groupe Neurones"
+      - "Neurones Group"
       - "ANSSI"
-      - "Cisco (Partenaire)"
-      - "Groupe Agralis (Client)"
+      - "Cisco (Partner)"
+      - "Agralis Group (Customer)"
 
   - name: Person
-    description: Personne physique nommée (expert, dirigeant, contact clé)
+    description: Named natural person (expert, executive, or key contact)
     examples:
-      - "Jean Dupont (Directeur Général)"
-      - "Marie Martin (Directrice Technique)"
-      - "Responsable Sécurité des Systèmes d'Information RSSI (si nommé)"
+      - "Jean Dupont (Chief Executive Officer)"
+      - "Marie Martin (Chief Technical Officer)"
+      - "Chief Information Security Officer (CISO) (when named)"
 
   - name: Role
-    description: Rôle fonctionnel ou poste clé dans l'organisation ou le projet
+    description: Functional role or key position in the organization or project
     examples:
       - "Service Delivery Manager (SDM)"
-      - "Architecte Cloud"
+      - "Cloud Architect"
       - "DPO (Data Protection Officer)"
       - "Technical Account Manager (TAM)"
 
   - name: Team
-    description: Équipe opérationnelle, département ou structure organisationnelle
+    description: Operational team, department, or organizational unit
     examples:
       - "SOC (Security Operations Center)"
-      - "Centre de Services"
-      - "Bureau Projets"
-      - "Équipe de réponse aux incidents (CSIRT)"
+      - "Service Center"
+      - "Project Management Office"
+      - "Incident response team (CSIRT)"
 
   - name: Persona
-    description: Profil type de l'interlocuteur client ciblé par le contenu
+    description: Target customer-contact profile addressed by the content
     examples:
-      - "Dirigeant (Focus: Risques, ROI, Souveraineté)"
-      - "DSI (Focus: Architecture, Intégration, Opérations)"
-      - "RSSI (Focus: Conformité, Audits, Menaces)"
-      - "Acheteur (Focus: Coûts, Modèle éco, Pénalités)"
-      - "Expert Technique (Focus: Specs, Perfs, APIs)"
+      - "Executive (Focus: Risk, ROI, Sovereignty)"
+      - "CIO (Focus: Architecture, Integration, Operations)"
+      - "CISO (Focus: Compliance, Audits, Threats)"
+      - "Buyer (Focus: Costs, Pricing model, Penalties)"
+      - "Technical Expert (Focus: Specifications, Performance, APIs)"
 
   # ---------------------------------------------------------------------------
-  # 🛡️ FAMILLE 2 : SÉCURITÉ & CONFORMITÉ
+  # 🛡️ FAMILY 2: SECURITY AND COMPLIANCE
   # ---------------------------------------------------------------------------
   - name: Certification
-    description: Norme, label, qualification ou certification officielle
+    description: Standard, label, qualification, or official certification
     priority: high
     examples:
-      - "SecNumCloud (Qualification ANSSI)"
-      - "HDS (Hébergement de Données de Santé)"
+      - "SecNumCloud (ANSSI qualification)"
+      - "HDS (Healthcare Data Hosting)"
       - "ISO 27001"
       - "ISAE 3402 Type II"
       - "Tier III+"
 
   - name: Regulation
-    description: Loi, règlement ou cadre juridique applicable
+    description: Applicable law, regulation, or legal framework
     examples:
-      - "RGPD (Règlement Général sur la Protection des Données)"
+      - "GDPR (General Data Protection Regulation)"
       - "DORA (Digital Operational Resilience Act)"
-      - "NIS 2"
-      - "Loi Informatique et Libertés"
+      - "NIS2"
+      - "French Data Protection Act"
 
   - name: SecurityPolicy
-    description: Politique interne, procédure de sécurité, mesure technique ou mesure de sécurité physique
+    description: Internal policy, security procedure, technical control, or physical security measure
     examples:
-      - "PSSI (Politique de Sécurité des SI)"
-      - "Politique de chiffrement"
-      - "Gestion des vulnérabilités"
-      - "Principe de moindre privilège"
-      - "Destruction certifiée des supports"
-      - "Transport sécurisé des actifs"
-      - "Journaux d'accès physiques"
-      - "Campagnes de phishing simulé (SETA)"
+      - "PSSI (Information System Security Policy)"
+      - "Encryption policy"
+      - "Vulnerability management"
+      - "Principle of least privilege"
+      - "Certified media destruction"
+      - "Secure asset transport"
+      - "Physical access logs"
+      - "Simulated phishing campaigns (SETA)"
 
   # ---------------------------------------------------------------------------
-  # ⚙️ FAMILLE 3 : TECHNIQUE & INFRASTRUCTURE
+  # ⚙️ FAMILY 3: TECHNOLOGY AND INFRASTRUCTURE
   # ---------------------------------------------------------------------------
   - name: Platform
-    description: Outil logiciel, portail ou interface majeure
+    description: Software tool, portal, or major interface
     examples:
-      - "Console Shiva"
-      - "Portail Client"
-      - "Hyperviseur VMware"
-      - "Orchestrateur Kubernetes"
+      - "Shiva Console"
+      - "Customer Portal"
+      - "VMware hypervisor"
+      - "Kubernetes orchestrator"
 
   - name: Technology
-    description: Technologie, matériel, logiciel ou modèle d'IA spécifique utilisé
+    description: Technology, hardware, software, or specific AI model in use
     examples:
-      - "IBM FlashSystem (Stockage)"
+      - "IBM FlashSystem (Storage)"
       - "Cisco UCS (Compute)"
-      - "Fortinet (Sécurité)"
+      - "Fortinet (Security)"
       - "Red Hat OpenShift"
       - "Veeam Backup"
-      - "Llama 3.3 70B (Modèle IA)"
-      - "Mistral Small (Modèle IA)"
-      - "DeepCoder (Modèle IA spécialisé code)"
+      - "Llama 3.3 70B (AI model)"
+      - "Mistral Small (AI model)"
+      - "DeepCoder (code-specialized AI model)"
 
   - name: Infrastructure
-    description: Élément physique ou logique structurant de l'infrastructure
+    description: Structuring physical or logical infrastructure component
     examples:
-      - "Datacenter Interxion"
-      - "Datacenter Telehouse 3"
-      - "Backbone 100 Gbps"
-      - "Zone de disponibilité (AZ)"
-      - "LUN de stockage"
+      - "Interxion data center"
+      - "Telehouse 3 data center"
+      - "100 Gbps backbone"
+      - "Availability Zone (AZ)"
+      - "Storage LUN"
 
   - name: Service
-    description: Service commercialisé ou prestation délivrée
+    description: Commercialized service or delivered service
     priority: high
     examples:
       - "IaaS VMware"
-      - "Hébergement SecNumCloud"
-      - "SOC 24/7"
+      - "SecNumCloud hosting"
+      - "24/7 SOC"
       - "Backup as a Service"
       - "LLMaaS (LLM as a Service)"
 
   # ---------------------------------------------------------------------------
-  # 📋 FAMILLE 4 : GOUVERNANCE & MÉTHODOLOGIE
+  # 📋 FAMILY 4: GOVERNANCE AND METHODOLOGY
   # ---------------------------------------------------------------------------
   - name: Methodology
-    description: Méthode nommée, framework ou approche structurée
+    description: Named method, framework, or structured approach
     examples:
-      - "ARISTOTE (Méthode d'exploitation)"
-      - "MATTIS (Méthode de transition)"
+      - "ARISTOTE (Operations methodology)"
+      - "MATTIS (Transition methodology)"
       - "ITIL v4"
       - "Agile / Scrum"
 
   - name: Governance
-    description: Instance de pilotage, comité, processus de gestion ou fréquence de gouvernance
+    description: Steering body, committee, management process, or governance cadence
     examples:
-      - "Comité de Pilotage (COPIL)"
-      - "Comité Stratégique"
-      - "Gestion des changements (CAB)"
-      - "Revue de service mensuelle"
-      - "Comité hebdomadaire"
-      - "Revue trimestrielle"
-      - "Comité semestriel de pilotage"
+      - "Steering Committee (COPIL)"
+      - "Strategic Committee"
+      - "Change Advisory Board (CAB)"
+      - "Monthly service review"
+      - "Weekly committee"
+      - "Quarterly review"
+      - "Semiannual steering committee"
 
   - name: ProjectPhase
-    description: Étape d'un projet ou cycle de vie d'un service
+    description: Project stage or service lifecycle phase
     examples:
-      - "Phase de Cadrage"
-      - "Phase de Transition (Build)"
-      - "Phase d'Exploitation (Run)"
-      - "Phase de Réversibilité"
+      - "Scoping phase"
+      - "Transition phase (Build)"
+      - "Operations phase (Run)"
+      - "Reversibility phase"
 
   - name: Deliverable
-    description: Document ou artefact produit dans le cadre du service
+    description: Document or artifact produced as part of the service
     examples:
-      - "PAQ (Plan d'Assurance Qualité)"
-      - "Dossier d'Architecture Technique (DAT)"
-      - "Rapport mensuel de service"
-      - "Plan de Réversibilité"
+      - "Quality Assurance Plan (PAQ)"
+      - "Technical Architecture Document (DAT)"
+      - "Monthly service report"
+      - "Reversibility Plan"
 
   # ---------------------------------------------------------------------------
-  # 💰 FAMILLE 5 : COMMERCIAL & VALEUR
+  # 💰 FAMILY 5: COMMERCIAL AND VALUE
   # ---------------------------------------------------------------------------
   - name: Differentiator
-    description: Point fort unique, avantage concurrentiel ou argument clé
+    description: Unique strength, competitive advantage, or key argument
     examples:
-      - "Souveraineté des données (Immunité lois extraterritoriales)"
-      - "Support 100% basé en France"
-      - "Pas de frais d'ingrès/égrès"
-      - "Indépendance capitalistique (Groupe Neurones)"
+      - "Data sovereignty (immunity from extraterritorial laws)"
+      - "100% France-based support"
+      - "No ingress/egress charges"
+      - "Capital independence (Neurones Group)"
 
   - name: ValueProposition
-    description: Bénéfice client ou promesse de valeur
+    description: Customer benefit or value promise
     examples:
-      - "Réduction du Time-to-Market"
-      - "Maîtrise des coûts (FinOps)"
-      - "Conformité réglementaire immédiate"
-      - "Continuité d'activité garantie"
+      - "Reduced time to market"
+      - "Cost control (FinOps)"
+      - "Immediate regulatory compliance"
+      - "Guaranteed business continuity"
 
   - name: SLA
-    description: Niveau de service, engagement chiffré ou pénalité
+    description: Service level, quantified commitment, or penalty
     priority: high
     examples:
-      - "Disponibilité 99.95%"
+      - "Availability 99.95%"
       - "GTI 15 minutes"
-      - "GTR 4 heures"
-      - "Pénalités libératoires"
+      - "GTR 4 hours"
+      - "Liquidated damages"
 
   - name: PricingModel
-    description: Modèle de facturation, unité d'œuvre ou structure de coût
+    description: Billing model, unit of work, or cost structure
     examples:
-      - "Unité d'Œuvre (UO)"
-      - "Facturation à l'usage (Pay-as-you-go)"
-      - "Forfait mensuel"
-      - "Instances réservées (1 an / 3 ans)"
+      - "Unit of Work (UO)"
+      - "Usage-based billing (Pay-as-you-go)"
+      - "Monthly fixed price"
+      - "Reserved instances (1 year / 3 years)"
 
   - name: Quote
-    description: Estimation chiffrée ou budget type pour un scénario donné
+    description: Quantified estimate or typical budget for a given scenario
     examples:
-      - "Budget mensuel estimé: 5k€"
-      - "TCO sur 3 ans: 150k€"
-      - "Coût de setup (NRC): 10k€"
+      - "Estimated monthly budget: EUR 5k"
+      - "3-year TCO: EUR 150k"
+      - "Setup cost (NRC): EUR 10k"
 
   - name: Constraint
-    description: Limite, condition d'application ou exclusion
+    description: Limit, applicability condition, or exclusion
     examples:
-      - "Engagement minimum 36 mois"
-      - "Valide uniquement en France métropolitaine"
-      - "Exclut les licences Oracle"
-      - "Nécessite une connexion MPLS dédiée"
+      - "Minimum 36-month commitment"
+      - "Valid only in metropolitan France"
+      - "Excludes Oracle licenses"
+      - "Requires a dedicated MPLS connection"
 
   - name: Requirement
-    description: Besoin, exigence ou contrainte client (explicite ou implicite)
+    description: Customer need, requirement, or constraint (explicit or implicit)
     priority: high
     examples:
-      - "Hébergement de données de santé"
-      - "Exigence de souveraineté"
-      - "Plan de Reprise d'Activité (PRA)"
-      - "Réversibilité complète"
+      - "Healthcare data hosting"
+      - "Sovereignty requirement"
+      - "Disaster Recovery Plan (DRP)"
+      - "Full reversibility"
 
   # ---------------------------------------------------------------------------
-  # 📊 FAMILLE 6 : CONTEXTE & INDICATEURS
+  # 📊 FAMILY 6: CONTEXT AND METRICS
   # ---------------------------------------------------------------------------
   - name: ClientReference
-    description: Référence client citée comme preuve (inclut le nom, secteur, budget annuel et durée de relation si disponibles)
+    description: Customer reference cited as evidence (including name, sector, annual budget, and relationship duration when available)
     examples:
-      - "Groupe Agralis (Industrie, 1.5M€/an)"
-      - "Agence Nationale de Santé (Public)"
-      - "Institut Recherche Avancée (5M€/an, depuis 10 ans)"
-      - "AquaNova (Infogérance, 2.5M€/an, 10 ans)"
-      - "Labo Sciences (36 mois, Recherche)"
+      - "Agralis Group (Industry, EUR 1.5M/year)"
+      - "National Health Agency (Public sector)"
+      - "Advanced Research Institute (EUR 5M/year, for 10 years)"
+      - "AquaNova (Managed services, EUR 2.5M/year, 10 years)"
+      - "Science Lab (36 months, Research)"
 
   - name: KPI
-    description: Indicateur de performance, métrique chiffrée ou score
+    description: Performance indicator, quantified metric, or score
     examples:
-      - "PUE < 1.3 (Efficacité énergétique)"
+      - "PUE < 1.3 (Energy efficiency)"
       - "NPS > 70 (Net Promoter Score)"
-      - "Taux de résolution au 1er appel"
-      - "Empreinte carbone (gCO2e/kWh)"
+      - "First-call resolution rate"
+      - "Carbon footprint (gCO2e/kWh)"
 
   - name: PresalesDomain
-    description: Domaine thématique de la base de connaissances (Dossier source)
+    description: Knowledge-base subject domain (source folder)
     examples:
-      - "Entreprise et Identité (00)"
-      - "Gouvernance et Pilotage (01)"
-      - "Sécurité et Conformité (02)"
-      - "Plateforme Technique (03)"
-      - "Services Managés (04)"
-      - "Projet et Transition (05)"
-      - "Aspects Contractuels et Financiers (06)"
-      - "Responsabilité Sociétale RSE (07)"
-      - "Stratégie Commerciale (08)"
-      - "Politique de Sécurité CT (09)"
+      - "Company and Identity (00)"
+      - "Governance and Steering (01)"
+      - "Security and Compliance (02)"
+      - "Technical Platform (03)"
+      - "Managed Services (04)"
+      - "Project and Transition (05)"
+      - "Contractual and Financial Aspects (06)"
+      - "Corporate Social Responsibility (CSR) (07)"
+      - "Commercial Strategy (08)"
+      - "CT Security Policy (09)"
 
   - name: Evidence
-    description: Preuve formelle, document source ou artefact justifiant une affirmation
+    description: Formal proof, source document, or artifact supporting a statement
     examples:
-      - "Certificat ISO 27001 (PDF)"
-      - "Rapport d'audit SOC 2 Type II"
-      - "Benchmark de performance (Juin 2025)"
-      - "Capture d'écran Console Shiva"
+      - "ISO 27001 certificate (PDF)"
+      - "SOC 2 Type II audit report"
+      - "Performance benchmark (June 2025)"
+      - "Shiva Console screenshot"
 
   - name: ProposalSection
-    description: Section type d'une réponse à appel d'offres
+    description: Typical section of a tender response
     examples:
       - "Executive Summary"
-      - "Matrice de Conformité"
-      - "Architecture Technique"
-      - "Plan de Transition"
-      - "Bordereau de Prix (BPU)"
+      - "Compliance Matrix"
+      - "Technical Architecture"
+      - "Transition Plan"
+      - "Price Schedule (BPU)"
 
 # =============================================================================
-# Types de relations (28 types répartis en 5 familles)
+# Relation types (28 types across 5 families)
 # =============================================================================
 relation_types:
 
   # ---------------------------------------------------------------------------
-  # CAPACITÉ & CONFORMITÉ
+  # CAPABILITY AND COMPLIANCE
   # ---------------------------------------------------------------------------
   - name: PROVIDES
-    description: Une organisation fournit un service ou une technologie
+    description: An organization provides a service or technology
     examples:
-      - "Cloud Temple → PROVIDES → IaaS SecNumCloud"
+      - "Cloud Temple → PROVIDES → SecNumCloud IaaS"
 
   - name: HAS_CERTIFICATION
-    description: Une entité possède ou est couverte par une certification
+    description: An entity holds or is covered by a certification
     priority: high
     examples:
-      - "Datacenter Interxion → HAS_CERTIFICATION → ISO 27001"
+      - "Interxion data center → HAS_CERTIFICATION → ISO 27001"
       - "Cloud Temple → HAS_CERTIFICATION → HDS"
 
   - name: COMPLIANT_WITH
-    description: Une entité respecte une réglementation ou politique
+    description: An entity complies with a regulation or policy
     examples:
-      - "Service de Stockage → COMPLIANT_WITH → RGPD"
+      - "Storage service → COMPLIANT_WITH → GDPR"
       - "Architecture → COMPLIANT_WITH → PSSI"
 
   - name: GUARANTEES
-    description: Une entité garantit un niveau de service ou une caractéristique
+    description: An entity guarantees a service level or characteristic
     priority: high
     examples:
-      - "Service IaaS → GUARANTEES → Disponibilité 99.95%"
-      - "SOC 24/7 → GUARANTEES → GTI 15min"
+      - "IaaS service → GUARANTEES → Availability 99.95%"
+      - "24/7 SOC → GUARANTEES → GTI 15min"
 
   - name: REQUIRES
-    description: Une entité nécessite un pré-requis (certification, techno, etc.)
+    description: An entity requires a prerequisite (certification, technology, etc.)
     examples:
-      - "Hébergement Santé → REQUIRES → Certification HDS"
-      - "Console Shiva → REQUIRES → Authentification MFA"
+      - "Healthcare hosting → REQUIRES → HDS certification"
+      - "Shiva Console → REQUIRES → MFA authentication"
 
   # ---------------------------------------------------------------------------
-  # TECHNIQUE
+  # TECHNOLOGY
   # ---------------------------------------------------------------------------
   - name: RUNS_ON
-    description: Un service s'exécute sur une technologie ou infrastructure
+    description: A service runs on a technology or infrastructure component
     examples:
       - "IaaS VMware → RUNS_ON → Cisco UCS"
       - "Container as a Service → RUNS_ON → Red Hat OpenShift"
 
   - name: HOSTED_AT
-    description: Un service ou équipement est hébergé dans un lieu
+    description: A service or device is hosted at a location
     examples:
-      - "Plateforme Production → HOSTED_AT → Datacenter Telehouse 3"
+      - "Production platform → HOSTED_AT → Telehouse 3 data center"
 
   - name: INTEGRATES_WITH
-    description: Une technologie s'intègre ou se connecte avec une autre
+    description: A technology integrates or connects with another
     examples:
-      - "Console Shiva → INTEGRATES_WITH → ITSM Client"
-      - "Backbone → INTEGRATES_WITH → Réseau Client (MPLS)"
+      - "Shiva Console → INTEGRATES_WITH → Customer ITSM"
+      - "Backbone → INTEGRATES_WITH → Customer network (MPLS)"
 
   - name: MANAGED_BY
-    description: Un service est géré par une équipe ou un outil
+    description: A service is managed by a team or tool
     examples:
-      - "Firewall → MANAGED_BY → Équipe Réseau"
-      - "Demandes standards → MANAGED_BY → Console Shiva"
+      - "Firewall → MANAGED_BY → Network Team"
+      - "Standard requests → MANAGED_BY → Shiva Console"
 
   - name: POWERED_BY
-    description: Un service est propulsé par une technologie partenaire
+    description: A service is powered by a partner technology
     examples:
-      - "Stockage → POWERED_BY → IBM FlashSystem"
+      - "Storage → POWERED_BY → IBM FlashSystem"
 
   # ---------------------------------------------------------------------------
-  # GOUVERNANCE
+  # GOVERNANCE
   # ---------------------------------------------------------------------------
   - name: FOLLOWS_METHODOLOGY
-    description: Un service ou projet suit une méthodologie spécifique
+    description: A service or project follows a specific methodology
     examples:
-      - "Centre de Services → FOLLOWS_METHODOLOGY → ARISTOTE"
-      - "Projet de migration → FOLLOWS_METHODOLOGY → MATTIS"
+      - "Service Center → FOLLOWS_METHODOLOGY → ARISTOTE"
+      - "Migration project → FOLLOWS_METHODOLOGY → MATTIS"
 
   - name: GOVERNED_BY
-    description: Une activité est pilotée par une instance de gouvernance
+    description: An activity is governed by a governance body
     examples:
-      - "Projet → GOVERNED_BY → COPIL"
-      - "Qualité de service → GOVERNED_BY → Revue mensuelle"
+      - "Project → GOVERNED_BY → COPIL"
+      - "Service quality → GOVERNED_BY → Monthly review"
 
   - name: RESPONSIBLE_FOR
-    description: Un rôle ou une équipe est responsable d'une activité
+    description: A role or team is responsible for an activity
     examples:
-      - "SDM → RESPONSIBLE_FOR → Reporting mensuel"
-      - "SOC → RESPONSIBLE_FOR → Gestion des incidents sécurité"
+      - "SDM → RESPONSIBLE_FOR → Monthly reporting"
+      - "SOC → RESPONSIBLE_FOR → Security incident management"
 
   - name: INCLUDES_PHASE
-    description: Une méthodologie ou projet inclut une phase
+    description: A methodology or project includes a phase
     examples:
-      - "Projet de Transition → INCLUDES_PHASE → Phase de Build"
+      - "Transition project → INCLUDES_PHASE → Build phase"
 
   - name: DELIVERS
-    description: Une phase ou activité produit un livrable
+    description: A phase or activity produces a deliverable
     examples:
-      - "Phase de Cadrage → DELIVERS → Dossier d'Architecture (DAT)"
+      - "Scoping phase → DELIVERS → Architecture Document (DAT)"
 
   # ---------------------------------------------------------------------------
-  # COMMERCIALE
+  # COMMERCIAL
   # ---------------------------------------------------------------------------
   - name: DIFFERENTIATES_FROM
-    description: Un élément différencie l'offre par rapport au marché
+    description: An element differentiates the offer from the market
     examples:
-      - "Support Français → DIFFERENTIATES_FROM → Hyperscalers US"
+      - "French support → DIFFERENTIATES_FROM → US hyperscalers"
 
   - name: TARGETS_PERSONA
-    description: Un argument ou service s'adresse spécifiquement à un persona
+    description: An argument or service specifically addresses a persona
     priority: high
     examples:
-      - "Modèle FinOps → TARGETS_PERSONA → Acheteur"
-      - "Immunité juridique → TARGETS_PERSONA → Dirigeant"
-      - "API Automation → TARGETS_PERSONA → Expert Technique"
+      - "FinOps model → TARGETS_PERSONA → Buyer"
+      - "Legal immunity → TARGETS_PERSONA → Executive"
+      - "API automation → TARGETS_PERSONA → Technical Expert"
 
   - name: PRICED_AS
-    description: Un service est facturé selon un modèle
+    description: A service is billed under a model
     examples:
-      - "VM → PRICED_AS → Facturation à l'usage"
+      - "VM → PRICED_AS → Usage-based billing"
 
   - name: HAS_SLA
-    description: Un service est associé à un SLA spécifique
+    description: A service is associated with a specific SLA
     examples:
-      - "Service Critique → HAS_SLA → GTR 2h"
+      - "Critical service → HAS_SLA → GTR 2h"
 
   - name: REFERENCED_BY
-    description: Un service ou capacité est validé par une référence client
+    description: A service or capability is validated by a customer reference
     examples:
-      - "Migration massive → REFERENCED_BY → Groupe Agralis"
+      - "Large-scale migration → REFERENCED_BY → Agralis Group"
 
   - name: ANSWERED_BY
-    description: Une exigence client est couverte par une solution/argument
+    description: A customer requirement is covered by a solution or argument
     priority: high
     examples:
-      - "Besoin de souveraineté → ANSWERED_BY → SecNumCloud"
-      - "Exigence PRA → ANSWERED_BY → Service de Réplication Synchrone"
+      - "Sovereignty need → ANSWERED_BY → SecNumCloud"
+      - "DRP requirement → ANSWERED_BY → Synchronous replication service"
 
   # ---------------------------------------------------------------------------
-  # STRUCTURELLE & CONTEXTE
+  # STRUCTURE AND CONTEXT
   # ---------------------------------------------------------------------------
   - name: PART_OF_DOMAIN
-    description: L'entité appartient à un domaine de connaissances (Dossier)
+    description: An entity belongs to a knowledge domain (folder)
     priority: high
     examples:
-      - "Méthode ARISTOTE → PART_OF_DOMAIN → Gouvernance et Pilotage"
-      - "SecNumCloud → PART_OF_DOMAIN → Sécurité et Conformité"
+      - "ARISTOTE methodology → PART_OF_DOMAIN → Governance and Steering"
+      - "SecNumCloud → PART_OF_DOMAIN → Security and Compliance"
 
   - name: RELATED_TO
-    description: Relation générique (dernier recours)
+    description: Generic relation (last resort)
     examples:
       - "Concept A → RELATED_TO → Concept B"
 
   - name: SUPERSEDES
-    description: Une version ou entité remplace une précédente
+    description: A version or entity replaces an earlier one
     examples:
-      - "Catalogue 2026 → SUPERSEDES → Catalogue 2025"
+      - "2026 catalog → SUPERSEDES → 2025 catalog"
 
   - name: CONTAINS
-    description: Une entité contient des sous-éléments
+    description: An entity contains sub-elements
     examples:
-      - "Offre IaaS → CONTAINS → Compute, Storage, Network"
+      - "IaaS offering → CONTAINS → Compute, Storage, Network"
 
   - name: MEASURES
-    description: Un KPI mesure la performance d'une entité
+    description: A KPI measures the performance of an entity
     examples:
-      - "PUE → MEASURES → Efficacité énergétique Datacenter"
+      - "PUE → MEASURES → Data-center energy efficiency"
 
   - name: ADDRESSES_RISK
-    description: Une politique ou mesure traite un risque
+    description: A policy or measure addresses a risk
     examples:
-      - "Sauvegarde immuable → ADDRESSES_RISK → Ransomware"
+      - "Immutable backup → ADDRESSES_RISK → Ransomware"
 
   - name: DEPENDS_ON
-    description: Une entité dépend fonctionnellement d'une autre
+    description: An entity functionally depends on another
     examples:
-      - "PRA → DEPENDS_ON → Liaison inter-sites"
+      - "DRP → DEPENDS_ON → Inter-site link"
 
   - name: PROVEN_BY
-    description: Une affirmation est prouvée par un document source (Evidence)
+    description: A statement is proven by a source document (Evidence)
     priority: high
     examples:
-      - "Conformité HDS → PROVEN_BY → Certificat HDS 2025.pdf"
-      - "Performance Disque → PROVEN_BY → Benchmark IOPS"
+      - "HDS compliance → PROVEN_BY → HDS Certificate 2025.pdf"
+      - "Disk performance → PROVEN_BY → IOPS benchmark"
 
   - name: CONSTRAINED_BY
-    description: Une offre ou service est soumis à une contrainte
+    description: An offer or service is subject to a constraint
     examples:
-      - "Remise volume → CONSTRAINED_BY → Engagement 36 mois"
-      - "SLA 99.99% → CONSTRAINED_BY → Architecture Haute Dispo"
+      - "Volume discount → CONSTRAINED_BY → 36-month commitment"
+      - "SLA 99.99% → CONSTRAINED_BY → High-availability architecture"
 
 # =============================================================================
-# Règles d'extraction spécifiques
+# Specific extraction rules
 # =============================================================================
 extraction_rules:
-  # Limites d'extraction (adaptées à la richesse de l'ontologie presales : 24 types x 28 relations)
+  # Extraction limits (adapted to the richness of the presales ontology: 24 types x 28 relations)
   max_entities: 60
   max_relations: 80
 
-  # Focus sur la proposition de valeur
+  # Value-proposition focus
   extract_value_propositions: true
   extract_differentiators: true
-  
-  # Précision des données
+
+  # Data precision
   extract_exact_metrics: true
-  infer_personas: true  # Tenter de déduire le persona cible si non explicite
-  
-  # Entités prioritaires
+  infer_personas: true  # Infer the target persona when it is not explicit
+
+  # Priority entities
   priority_entities:
     - Service
     - Certification
@@ -529,45 +529,44 @@ extraction_rules:
     - SLA
     - ClientReference
 
-  # Instructions contextuelles
+  # Contextual instructions
   special_instructions: |
-    - Si un paragraphe commence par "Pour le DSI..." ou "En tant que Dirigeant...",
-      crée IMMÉDIATEMENT une relation TARGETS_PERSONA.
-    
-    - Traite les "Unités d'Œuvre" (UO) comme des PricingModel.
-    
-    - Ne confonds pas "Cloud Temple" (Organization) avec "Console Shiva" (Platform).
-    
-    - Distingue bien "SecNumCloud" (Certification) de l'offre "Hébergement SecNumCloud" (Service).
-      Relation : Service → HAS_CERTIFICATION → Certification.
-    
-    - Pour les Références Clients, cherche le triplet : Nom Client + Secteur + Cas d'usage.
-      Intègre le budget annuel et la durée de relation dans le NOM de l'entité ClientReference
-      (ex: "AquaNova (2.5M€/an, 10 ans)" et non deux entités séparées "AquaNova" + "Budget 2.5M€").
+    - If a paragraph starts with "For the CIO..." or "As an Executive...",
+      IMMEDIATELY create a TARGETS_PERSONA relation.
 
-    - ⚠️ MAPPING OBLIGATOIRE : les types "MonetaryAmount" et "Duration" N'EXISTENT PAS dans cette ontologie.
-      Si tu veux extraire un montant (budget, prix, valeur contrat), intègre-le dans l'entité ClientReference
-      ou PricingModel associée. Si tu veux extraire une durée (contrat, projet, relation), intègre-la
-      dans le nom de l'entité ClientReference, ProjectPhase ou SLA correspondante.
-      Ne crée JAMAIS d'entité de type "MonetaryAmount", "Duration", "Amount" ou "Budget".
-    
-    - Les modèles d'IA (LLM, embeddings) sont des Technology : "Llama 3.3 70B" → Technology.
-    
-    - Les mesures de sécurité physique (destruction certifiée, transport sécurisé, contrôle d'accès)
-      sont des SecurityPolicy, PAS des "Other".
-    
-    - Les fréquences de comités (hebdomadaire, mensuelle, trimestrielle) doivent être
-      INTÉGRÉES dans le nom de l'entité Governance correspondante
-      (ex: "Revue mensuelle" et non une entité "Mensuelle" séparée).
-    
-    - ⚠️ NE PAS extraire comme entités :
-      * Les titres de sections de documents ("Introduction", "Présentation générale", "Organisation")
-      * Les mots isolés sans valeur métier ("Systèmes", "Stockage", "Middlewares")
-      * Les fréquences ou durées seules sans contexte ("Mensuelle", "Hebdomadaire", "Durée 2 mois")
-      → Ces éléments doivent être INTÉGRÉS comme attributs d'autres entités ou ignorés.
-    
-    - Les activités RACI (définition des besoins, validation, recette, fourniture)
-      sont des ProjectPhase, PAS des "Other".
-    
-    - Les processus opérationnels nommés (gestion des incidents, gestion des risques)
-      sont des Methodology, PAS des "Other".
+    - Treat "Units of Work" (UO) as PricingModel entities.
+
+    - Do not confuse "Cloud Temple" (Organization) with "Shiva Console" (Platform).
+
+    - Clearly distinguish "SecNumCloud" (Certification) from the "SecNumCloud hosting" offering (Service).
+      Relation: Service → HAS_CERTIFICATION → Certification.
+
+    - For Customer References, look for the triplet: Customer Name + Sector + Use Case.
+      Include the annual budget and relationship duration in the ClientReference entity NAME
+      (for example, "AquaNova (EUR 2.5M/year, 10 years)", not two separate entities: "AquaNova" + "Budget EUR 2.5M").
+
+    - ⚠️ REQUIRED MAPPING: the "MonetaryAmount" and "Duration" types DO NOT EXIST in this ontology.
+      If you want to extract an amount (budget, price, contract value), include it in the related
+      ClientReference or PricingModel entity. If you want to extract a duration (contract, project,
+      relationship), include it in the relevant ClientReference, ProjectPhase, or SLA entity name.
+      NEVER create an entity of type "MonetaryAmount", "Duration", "Amount", or "Budget".
+
+    - AI models (LLMs and embeddings) are Technology entities: "Llama 3.3 70B" → Technology.
+
+    - Physical security measures (certified destruction, secure transport, access control)
+      are SecurityPolicy entities, NOT "Other".
+
+    - Committee frequencies (weekly, monthly, quarterly) must be INCLUDED in the name
+      of the corresponding Governance entity (for example, "Monthly review", not a separate "Monthly" entity).
+
+    - ⚠️ DO NOT extract as entities:
+      * Document section headings ("Introduction", "General Overview", "Organization")
+      * Isolated words with no business value ("Systems", "Storage", "Middleware")
+      * Frequencies or durations without context ("Monthly", "Weekly", "2-month duration")
+      → These elements must be INCLUDED as attributes of other entities or ignored.
+
+    - RACI activities (requirements definition, validation, acceptance, delivery)
+      are ProjectPhase entities, NOT "Other".
+
+    - Named operational processes (incident management, risk management)
+      are Methodology entities, NOT "Other".

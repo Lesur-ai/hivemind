@@ -60,18 +60,18 @@ def validate_memory_id(memory_id: str) -> str:
         ValueError: Si le memory_id est invalide
     """
     if not memory_id:
-        raise ValueError("memory_id est requis (ne peut pas être vide)")
+        raise ValueError("memory_id is required and cannot be empty")
     
     if '\x00' in memory_id:
-        raise ValueError(f"memory_id contient des null bytes: {memory_id!r}")
+        raise ValueError(f"memory_id contains null bytes: {memory_id!r}")
     
     if '..' in memory_id:
-        raise ValueError(f"memory_id contient du path traversal: {memory_id!r}")
+        raise ValueError(f"memory_id contains path traversal: {memory_id!r}")
     
     if not VALID_MEMORY_ID.match(memory_id):
         raise ValueError(
-            f"memory_id invalide: {memory_id!r}. "
-            f"Autorisé : lettres, chiffres, tirets, underscores (1-64 chars, commence par alphanum)"
+            f"Invalid memory_id: {memory_id!r}. "
+            "Allowed: letters, digits, hyphens, and underscores; 1-64 characters and starts alphanumeric"
         )
     
     return memory_id
@@ -99,22 +99,22 @@ def validate_filename(filename: str) -> str:
         ValueError: Si le filename est invalide
     """
     if not filename:
-        raise ValueError("filename est requis (ne peut pas être vide)")
+        raise ValueError("filename is required and cannot be empty")
     
     if '\x00' in filename:
-        raise ValueError(f"filename contient des null bytes: {filename!r}")
+        raise ValueError(f"filename contains null bytes: {filename!r}")
     
     # Extraire le basename pour retirer tout chemin
     sanitized = os.path.basename(filename)
     
     if not sanitized:
-        raise ValueError(f"filename invalide après extraction du basename: {filename!r}")
+        raise ValueError(f"invalid filename after extracting the basename: {filename!r}")
     
     if '..' in sanitized:
-        raise ValueError(f"filename contient du path traversal: {filename!r}")
+        raise ValueError(f"filename contains path traversal: {filename!r}")
     
     if len(sanitized) > 255:
-        raise ValueError(f"filename trop long ({len(sanitized)} chars, max 255): {sanitized[:50]}...")
+        raise ValueError(f"filename is too long ({len(sanitized)} chars, max 255): {sanitized[:50]}...")
     
     return sanitized
 
@@ -135,19 +135,19 @@ def validate_backup_id(backup_id: str) -> tuple:
         ValueError: Si le backup_id est invalide
     """
     if not backup_id:
-        raise ValueError("backup_id est requis")
+        raise ValueError("backup_id is required")
     
     parts = backup_id.split("/")
     if len(parts) != 2:
-        raise ValueError(f"backup_id doit être au format 'memory_id/timestamp', reçu: {backup_id!r}")
+        raise ValueError(f"backup_id must use 'memory_id/timestamp' format; received: {backup_id!r}")
     
     memory_id, timestamp = parts
     
     if not VALID_BACKUP_COMPONENT.match(memory_id):
-        raise ValueError(f"Composant memory_id invalide dans backup_id: {memory_id!r}")
+        raise ValueError(f"Invalid memory_id component in backup_id: {memory_id!r}")
     
     if not VALID_BACKUP_COMPONENT.match(timestamp):
-        raise ValueError(f"Composant timestamp invalide dans backup_id: {timestamp!r}")
+        raise ValueError(f"Invalid timestamp component in backup_id: {timestamp!r}")
     
     return memory_id, timestamp
 
@@ -171,8 +171,8 @@ def validate_document_size(content: bytes, max_size: int = MAX_INGEST_SIZE_BYTES
         size_mb = size / (1024 * 1024)
         max_mb = max_size / (1024 * 1024)
         raise ValueError(
-            f"Document trop volumineux: {size_mb:.1f} MB (max {max_mb:.0f} MB). "
-            f"Réduisez la taille du document ou augmentez MAX_INGEST_SIZE_BYTES."
+            f"Document is too large: {size_mb:.1f} MB (max {max_mb:.0f} MB). "
+            "Reduce the document size or increase MAX_INGEST_SIZE_BYTES."
         )
     return content
 
@@ -200,13 +200,13 @@ def validate_entity_name(entity_name: str) -> str:
         ValueError: Si le nom est invalide
     """
     if not entity_name:
-        raise ValueError("entity_name est requis (ne peut pas être vide)")
+        raise ValueError("entity_name is required and cannot be empty")
     
     if '\x00' in entity_name:
-        raise ValueError(f"entity_name contient des null bytes")
+        raise ValueError("entity_name contains null bytes")
     
     if len(entity_name) > 500:
-        raise ValueError(f"entity_name trop long ({len(entity_name)} chars, max 500)")
+        raise ValueError(f"entity_name is too long ({len(entity_name)} chars, max 500)")
     
     return entity_name
 
@@ -232,17 +232,17 @@ def check_bootstrap_key_safety(key: str) -> None:
     ]
     
     if not key:
-        print("⚠️  [Security] ADMIN_BOOTSTRAP_KEY non définie — auth bootstrap désactivée", file=sys.stderr)
+        print("⚠️  [Security] ADMIN_BOOTSTRAP_KEY is unset; bootstrap authentication is disabled", file=sys.stderr)
         return
     
     key_lower = key.lower()
     for pattern in UNSAFE_PATTERNS:
         if pattern in key_lower:
-            print(f"🔴 [Security] ADMIN_BOOTSTRAP_KEY contient '{pattern}' — "
-                  f"CHANGEZ-LA IMMÉDIATEMENT en production ! "
-                  f"Utilisez : openssl rand -hex 32", file=sys.stderr)
+            print(f"🔴 [Security] ADMIN_BOOTSTRAP_KEY contains '{pattern}' — "
+                  f"CHANGE IT IMMEDIATELY in production! "
+                  f"Use: openssl rand -hex 32", file=sys.stderr)
             return
     
     if len(key) < 32:
-        print(f"⚠️  [Security] ADMIN_BOOTSTRAP_KEY trop courte ({len(key)} chars, recommandé: 64). "
-              f"Utilisez : openssl rand -hex 32", file=sys.stderr)
+        print(f"⚠️  [Security] ADMIN_BOOTSTRAP_KEY is too short ({len(key)} chars; recommended: 64). "
+              f"Use: openssl rand -hex 32", file=sys.stderr)

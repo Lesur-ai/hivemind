@@ -235,7 +235,7 @@ def register(mcp: FastMCP) -> int:
 
         token_info = get_effective_token_info()
         if token_info is None:
-            return {"status": "error", "message": "Authentification requise"}
+            return {"status": "error", "message": "Authentication required"}
 
         result = {
             "status": "ok",
@@ -273,7 +273,7 @@ def register(mcp: FastMCP) -> int:
 
         # Pour le bootstrap key, indiquer clairement
         if token_info.get("type") == "bootstrap":
-            result["note"] = "Bootstrap key — accès admin total, pas de token S3"
+            result["note"] = "Bootstrap key: full admin access without an S3 token"
 
         return result
 

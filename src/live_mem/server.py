@@ -94,18 +94,18 @@ _WEAK_BOOTSTRAP_KEYS = {"change_me_in_production", "changeme", "admin", "passwor
 
 
 def _reject_weak_bootstrap_key(key: str) -> None:
-    """Lève RuntimeError si ``ADMIN_BOOTSTRAP_KEY`` est par défaut/faible.
+    """Raise RuntimeError when ``ADMIN_BOOTSTRAP_KEY`` is default or weak.
 
-    HM-01 fix : appelé depuis ``create_app()`` (chokepoint de TOUS les
-    entrypoints de service), pas seulement depuis ``main()``. Sans ça, un
-    lancement par factory ASGI (``uvicorn --factory``) démarrait avec la clé
-    publique du repo → admin total sans connaissance préalable.
+    HM-01: called from ``create_app()`` (the chokepoint for every service
+    entrypoint), not only from ``main()``. Otherwise an ASGI factory launch
+    (``uvicorn --factory``) could start with the repository's public key and
+    grant full admin access without prior knowledge.
     """
     if key in _WEAK_BOOTSTRAP_KEYS or len(key) < 32:
         raise RuntimeError(
-            "ADMIN_BOOTSTRAP_KEY non configurée ou trop faible. Définissez une "
-            "clé de ≥32 caractères aléatoires dans .env avant de démarrer le "
-            "service (voir .env.example)."
+            "ADMIN_BOOTSTRAP_KEY is missing or too weak. Set a random key of "
+            "at least 32 characters in .env before starting the "
+            "service (see .env.example)."
         )
 
 
@@ -139,7 +139,7 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
 
     spaces_result = await get_space_service().list_spaces()
     if spaces_result.get("status") != "ok":
-        raise RuntimeError("Impossible de lister les espaces pour migrer tokens v1")
+        raise RuntimeError("Unable to list spaces for the v1 token migration")
     all_ids = [s["space_id"] for s in spaces_result.get("spaces", [])]
     token_service = get_token_service()
     migration = await token_service.migrate_empty_space_ids(all_ids)
@@ -157,8 +157,8 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
     embedded_token = resolve_embedded_token(settings, generate=True)
     if not embedded_token:
         raise RuntimeError(
-            "Secret local du runtime long embarqué indisponible; définir "
-            "LONG_EMBEDDED_TOKEN ou réparer /data/secrets selon "
+            "The local embedded long-runtime secret is unavailable; set "
+            "LONG_EMBEDDED_TOKEN or repair /data/secrets according to "
             "docs/DEPLOYMENT.md"
         )
     registration = await token_service.register_internal_long_token(embedded_token)
@@ -166,7 +166,7 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
         registration.get("status") != "ok"
         or registration.get("current_active") is not True
     ):
-        raise RuntimeError("Token interne du runtime long inactif ou non enregistré")
+        raise RuntimeError("Internal long-runtime token is inactive or unregistered")
     logger.info(
         "Embedded long credential startup preflight: registered=%s rotated_out=%d",
         registration.get("registered", False),
@@ -320,6 +320,32 @@ def create_app():
     mesh_namespace = None
     mesh_process_lock = None
     mesh_pairing_service = None
+    # The fingerprint-neutral preparation record is irreversible provenance,
+    # even when Mesh is disabled after a restart. Register a core-only durable
+    # GET checker before the optional Mesh imports. It resolves storage lazily,
+    # performs no write/state creation, and never negative-caches across
+    # processes. Enabled mode replaces it below with the strict parsed store.
+    from .core.reservation_guard import (
+        assert_no_active_source_preparation,
+        assert_no_source_preparation_provenance,
+        register_direct_local_checker,
+        register_reservation_checker,
+    )
+
+    async def _core_direct_local_checker(space_id: str) -> None:
+        from .core.storage import get_storage
+
+        await assert_no_source_preparation_provenance(get_storage(), space_id)
+
+    register_direct_local_checker(_core_direct_local_checker)
+
+    async def _core_preparation_reservation_checker(space_id: str) -> None:
+        from .core.storage import get_storage
+
+        await assert_no_active_source_preparation(get_storage(), space_id)
+
+    register_reservation_checker(_core_preparation_reservation_checker)
+
     if mesh_enabled:
         import time
         from pathlib import Path
@@ -328,7 +354,6 @@ def create_app():
             NotMembershipLeaderError,
             register_membership_recovery_leader_checker,
             register_pairing_activation_checker,
-            register_reservation_checker,
         )
         from .core.storage import get_storage
         from .mesh.config import load_mesh_config, load_mesh_environment
@@ -361,13 +386,23 @@ def create_app():
             sender_factory=_mesh_sender_factory,
             storage_factory=get_storage,
         )
-        # The blank-target reservation guard consults the pairing store; it is a
-        # zero-cost no-op when Mesh is disabled (no checker registered). The
-        # wrapper defers ``.store`` (and thus storage resolution) to call time.
+        # Enabled mode upgrades the core-only PREPARING guard to the pairing
+        # store so it also covers blank-target reservations. The wrapper defers
+        # ``.store`` (and thus storage resolution) to call time.
         async def _mesh_reservation_checker(space_id: str) -> None:
-            await mesh_pairing_service.store.assert_space_not_reserved(space_id)
+            await mesh_pairing_service.assert_space_not_reserved(space_id)
 
         register_reservation_checker(_mesh_reservation_checker)
+
+        # A completed preparation is not a STAGED-write reservation, but it is
+        # permanent provenance: even if its Hivemind prefix is later lost, this
+        # durable checker prevents the route from authorizing DIRECT_LOCAL.
+        async def _mesh_direct_local_checker(space_id: str) -> None:
+            await mesh_pairing_service.store.assert_direct_local_allowed(
+                space_id
+            )
+
+        register_direct_local_checker(_mesh_direct_local_checker)
 
         # The pairing-activation fence blocks an operator epoch-advancing
         # membership mutation (re-scope / add_member) while a SOURCE pairing for
@@ -434,6 +469,19 @@ def create_app():
     app = MetricsMiddleware(app)
     app = AuthMiddleware(app, peer_namespace=mesh_namespace)
     app = RequestIdMiddleware(app)
+
+    async def _migrate_target_pairing_admission_anchors() -> None:
+        """Materialize O(1) #417 target provenance before any dispatch.
+
+        The mesh process identity lock is already held above.  In disabled mode
+        this is intentionally a no-op; in enabled mode any ambiguous retained
+        intent inventory aborts process startup rather than exposing an old
+        #417 target to the legacy ordinary-write path.
+        """
+
+        if mesh_pairing_service is not None:
+            await mesh_pairing_service.migrate_target_pairing_admission_anchors()
+
     # Outermost process owner. The consolidator transport and the shared
     # inference runtime are both lazy and process-scoped, so the guard also
     # refuses `--lifespan off` before request code can acquire either.
@@ -454,7 +502,10 @@ def create_app():
                 reserve=window.claim,
                 release_reusable=window.release,
             ),
-            on_startup=(window.guard(_validate_inference_startup),),
+            on_startup=(
+                window.guard(_migrate_target_pairing_admission_anchors),
+                window.guard(_validate_inference_startup),
+            ),
             on_shutdown=(
                 window.guard(_close_core_process_resources),
                 window.guard(_close_inference_runtime),
@@ -513,7 +564,7 @@ def main():
     content_lines = []
     content_lines.append(f"  Hivemind MCP Server v{version}")
     content_lines.append("")
-    content_lines.append(f"  🔧 {len(tool_names)} outils MCP :")
+    content_lines.append(f"  🔧 {len(tool_names)} MCP tools:")
     for cat, names in categories.items():
         if names:
             content_lines.append(f"     {cat:7s}: {', '.join(names)}")

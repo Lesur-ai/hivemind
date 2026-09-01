@@ -10,7 +10,7 @@
  *
  * Escaping (contract §7.3.3 R1–R6): every dynamic value passes through the
  * shell esc() at its interpolation site; dataset values re-escaped when reused
- * in HTML; data-* JSON payloads are JSON.stringify then esc; server French text
+ * in HTML; data-* JSON payloads are JSON.stringify then esc; server text
  * renders only through serverMessage()/textContent, never parsed. All actions
  * flow through the shell [data-action] delegate (no inline handlers, CSP-safe).
  */
@@ -316,6 +316,36 @@
 
     // ───────────────────────── job inspector ─────────────────────────
 
+    function safeCompactionTargetDetail(failure) {
+        if (!failure || typeof failure !== 'object'
+            || failure.error !== 'ambiguous_or_missing_compaction_target') return '';
+        const index = failure.operation_index;
+        const resolution = failure.target_resolution;
+        const count = failure.target_match_count;
+        const sha256 = failure.target_heading_sha256;
+        if (!Number.isSafeInteger(index) || index < 0
+            || (resolution !== 'missing' && resolution !== 'ambiguous')
+            || !Number.isSafeInteger(count) || count < 0
+            || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)
+            || (resolution === 'missing' && count !== 0)
+            || (resolution === 'ambiguous' && count < 2)) return '';
+        return `operation_index=${index}; target_resolution=${resolution}; target_match_count=${count}; target_heading_sha256=${sha256}`;
+    }
+
+    function renderSafeCompactionFailures(result) {
+        const failures = result && Array.isArray(result.compaction_failures)
+            ? result.compaction_failures : [];
+        const rows = failures.map(failure => {
+            if (!failure || typeof failure !== 'object'
+                || typeof failure.filename !== 'string' || typeof failure.error !== 'string') return '';
+            const detail = safeCompactionTargetDetail(failure);
+            return `<tr><td class="mono-data">${esc(failure.filename)}</td><td class="mono-data">${esc(failure.error)}</td><td class="mono-data">${esc(detail || '—')}</td></tr>`;
+        }).join('');
+        return rows
+            ? `<div class="consol-compaction-failures"><h4>Compaction failures</h4>${dataTable(['File', 'Safe failure', 'Target resolution'], rows)}</div>`
+            : '';
+    }
+
     function renderResultMetrics(result) {
         if (!result || typeof result !== 'object') return '';
         // Zero-notes short form: only status/notes_processed/message.
@@ -366,7 +396,7 @@
         else if (qp >= 2) posLine = statusDot('warn', `Position ${qp} in queue`);
         let statusBlock = '';
         if (job.status === 'succeeded') statusBlock = renderResultMetrics(job.result);
-        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">FAILED</div>${serverMessage(job.error)}</div></div>`;
+        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">FAILED</div>${serverMessage(job.error)}</div></div>${renderSafeCompactionFailures(job.result)}`;
         else if (job.message) statusBlock = serverMessage(job.message);
         return `<div class="consol-jobinspect">
             ${progressBar(job.progress)}

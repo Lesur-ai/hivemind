@@ -12,10 +12,10 @@
  * shape — see CHANGELOG.md): `capabilities{}` is not a server field (reaching this
  * view at all already requires admin+enabled, so every mutating action is
  * inherently available — rendered as a plain statement, never a fabricated
- * per-action toggle); `eligible_spaces[]` is not precomputed — the space picker
- * lists local spaces and `create_invitation()`'s own fail-closed validation is the
- * single source of truth for eligibility, surfaced verbatim on refusal;
- * `pending_actions[]` is derived client-side from the real `pairings[]` state via
+ * per-action toggle); source readiness comes only from the server-owned
+ * `source_readiness[]` predicate and its derived `eligible_spaces[]` projection —
+ * the Create picker never guesses from `space_list`; `pending_actions[]` is
+ * derived client-side from the real `pairings[]` state via
  * the state→action matrix below, never fabricated; the signed policy export
  * (`GET /spaces/<id>/policy-export`) has zero backend implementation anywhere and
  * ships as an explanatory absence, never a disabled button that would fire a
@@ -44,6 +44,13 @@
     'use strict';
 
     const SPACE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+    const SOURCE_STATE_TOKEN_RE = /^[0-9a-f]{64}$/;
+    const SOURCE_READINESS_STATES = new Set([
+        'local_only_can_prepare', 'preparing', 'prepare_recovery_required',
+        'ready', 'busy', 'pairing_in_flight', 'mutation_in_progress',
+        'insufficient_scope', 'multi_member', 'identity_mismatch', 'unavailable', 'unsafe',
+        'resync_required', 'not_a_space',
+    ]);
     const DETAIL_TABS = ['overview', 'members', 'invitations'];
 
     // ─────────────── modal generation & staleness (mirrors views-access.js) ───────────────
@@ -51,7 +58,20 @@
 
     function _openModal(title, body, verb, onConfirm) {
         _modalGen += 1;
+        const generation = _modalGen;
         showModal(title, body, verb, onConfirm);
+        const modal = document.getElementById('adminModal');
+        if (modal) {
+            // The shell owns closeModal(), so a close does not otherwise
+            // replace this view's modal generation.  Bind explicit dismissal
+            // to the generation that rendered these controls: late awaited
+            // continuations must not write into a closed/reused overlay.
+            modal.querySelectorAll('[data-action="close-modal"]').forEach(control => {
+                control.addEventListener('click', () => {
+                    if (_modalGen === generation) _modalGen += 1;
+                });
+            });
+        }
     }
 
     function _openDestructive(opts) {
@@ -82,9 +102,14 @@
     // never left rendered over a route the operator navigated to. Self-heals on
     // a session wipe via the captured session identity.
     let _navLock = null;
+    let _invitationRequest = null;
 
     function _navLockAcquire() {
-        const lock = { hash: location.hash, session: _sessionIdentity() };
+        const lock = {
+            hash: location.hash,
+            session: _sessionIdentity(),
+            sessionGeneration: state.sessionGeneration,
+        };
         _navLock = lock;
         return lock;
     }
@@ -96,7 +121,8 @@
     function _navLockSessionCurrent(lock) {
         const overlay = document.getElementById('loginOverlay');
         if (overlay && !overlay.classList.contains('hidden')) return false;
-        return _sessionIdentity() === lock.session;
+        return _sessionIdentity() === lock.session
+            && state.sessionGeneration === lock.sessionGeneration;
     }
 
     window.addEventListener('hashchange', () => {
@@ -107,6 +133,16 @@
         }
         location.hash = _navLock.hash;
     });
+
+    function _setModalDismissEnabled(enabled) {
+        const modal = document.getElementById('adminModal');
+        if (!modal) return;
+        modal.querySelectorAll('[data-action="close-modal"]').forEach(control => {
+            control.disabled = !enabled;
+            if (enabled) control.removeAttribute('aria-disabled');
+            else control.setAttribute('aria-disabled', 'true');
+        });
+    }
 
     function _copySecret(holder, epochAtCopy, genAtCopy, sessionAtCopy, copiedLabel) {
         function stale() {
@@ -141,6 +177,147 @@
 
     function isAdmin(identity) {
         return !!(identity && Array.isArray(identity.permissions) && identity.permissions.includes('admin'));
+    }
+
+    // Source readiness is server-owned. These helpers validate/project the
+    // documented response shape but never infer eligibility from hive labels,
+    // local space metadata, or pairing state in the browser.
+    function sourceReadinessUnavailable(status) {
+        return !!(status && status.source_readiness_unavailable === true);
+    }
+
+    function sourceReadinessUnavailableNotice(status) {
+        // Map only the closed server contract to fixed operator copy. Never
+        // render source_readiness_unavailable_reason: it is diagnostic input,
+        // not trusted display text.
+        const inventoryLimitExceeded = !!(status
+            && (status.source_readiness_truncated === true
+                || status.source_readiness_unavailable_reason === 'mesh_status_inventory_too_large'));
+        const detail = inventoryLimitExceeded
+            ? 'The bounded source inventory limit was exceeded, so no partial source list is shown. Pairing history and recovery controls remain available.'
+            : 'Source readiness could not be loaded. Pairing history and recovery controls remain available.';
+        return `<div class="sd-banner sd-banner--warn" role="status">${icon('alert')}<div>
+            <strong>Source readiness is unavailable</strong>
+            <p>${esc(detail)} Refresh to retry; source preparation and invitation creation stay hidden until the inventory is authoritative.</p>
+        </div></div>`;
+    }
+
+    function sourceReadinessIsCoherent(entry) {
+        if (entry.reason_code !== entry.state) return false;
+        if (entry.can_create_invitation === true
+            && entry.source_ready !== true) return false;
+        if (entry.source_ready === true
+            && entry.state !== 'ready' && entry.state !== 'pairing_in_flight') return false;
+        if (entry.source_initializable === true
+            && entry.state !== 'local_only_can_prepare' && entry.state !== 'preparing') return false;
+        if (entry.resumable === true && entry.state !== 'preparing') return false;
+        if (entry.state === 'local_only_can_prepare') {
+            return entry.source_ready === false
+                && entry.source_initializable === true
+                && entry.can_create_invitation === false
+                && entry.resumable === false;
+        }
+        if (entry.state === 'preparing') {
+            return entry.source_ready === false
+                && entry.source_initializable === true
+                && entry.can_create_invitation === false
+                && entry.resumable === true;
+        }
+        if (entry.state === 'ready') {
+            return entry.source_ready === true
+                && entry.source_initializable === false
+                && entry.can_create_invitation === true
+                && entry.resumable === false;
+        }
+        if (entry.state !== 'pairing_in_flight') {
+            return entry.source_ready === false
+                && entry.source_initializable === false
+                && entry.can_create_invitation === false
+                && entry.resumable === false;
+        }
+        return entry.source_initializable === false && entry.resumable === false;
+    }
+
+    function sourceReadinessEntries(status) {
+        if (sourceReadinessUnavailable(status)) return [];
+        if (!status || !Array.isArray(status.source_readiness)) return [];
+        const entries = status.source_readiness.filter(entry => entry
+            && typeof entry.space_id === 'string'
+            && SPACE_ID_RE.test(entry.space_id)
+            && SOURCE_READINESS_STATES.has(entry.state)
+            && typeof entry.source_ready === 'boolean'
+            && typeof entry.source_initializable === 'boolean'
+            && typeof entry.can_create_invitation === 'boolean'
+            && typeof entry.resumable === 'boolean'
+            && typeof entry.reason_code === 'string'
+            && typeof entry.message === 'string'
+            && typeof entry.state_token === 'string'
+            && SOURCE_STATE_TOKEN_RE.test(entry.state_token)
+            && sourceReadinessIsCoherent(entry));
+        const counts = new Map();
+        entries.forEach(entry => counts.set(entry.space_id, (counts.get(entry.space_id) || 0) + 1));
+        return entries.filter(entry => counts.get(entry.space_id) === 1);
+    }
+
+    function sourceReadinessFor(spaceId, status) {
+        return sourceReadinessEntries(status || state.status)
+            .find(entry => entry.space_id === spaceId) || null;
+    }
+
+    function eligibleSourceEntries(status) {
+        if (!status || !Array.isArray(status.eligible_spaces)) return [];
+        const readiness = sourceReadinessEntries(status);
+        const byId = new Map(readiness.map(entry => [entry.space_id, entry]));
+        const seen = new Set();
+        const eligible = [];
+        status.eligible_spaces.forEach(item => {
+            if (typeof item !== 'string' || !SPACE_ID_RE.test(item)) return;
+            const spaceId = item;
+            const entry = byId.get(spaceId);
+            if (!entry || seen.has(spaceId) || entry.can_create_invitation !== true) return;
+            seen.add(spaceId);
+            eligible.push(entry);
+        });
+        return eligible;
+    }
+
+    function sourceCanPrepare(entry) {
+        if (!entry || typeof entry.state_token !== 'string'
+            || !SOURCE_STATE_TOKEN_RE.test(entry.state_token)) return false;
+        if (entry.state === 'preparing') {
+            return entry.source_initializable === true && entry.resumable === true;
+        }
+        return entry.state === 'local_only_can_prepare' && entry.source_initializable === true;
+    }
+
+    function sourceStatePill(entry) {
+        const value = entry && entry.state ? entry.state : 'unavailable';
+        const kind = value === 'ready' ? 'ok'
+            : (value === 'local_only_can_prepare' || value === 'preparing' || value === 'pairing_in_flight') ? 'warn'
+            : 'error';
+        return pill(kind, String(value).replace(/_/g, ' '));
+    }
+
+    function sourceActionButton(entry) {
+        if (!entry) return '';
+        if (entry.can_create_invitation === true) {
+            return `<button type="button" class="btn btn-primary btn-sm" data-action="mesh-create-invitation" data-space-id="${esc(entry.space_id)}">${icon('plus')}<span>Create invitation</span></button>`;
+        }
+        if (sourceCanPrepare(entry)) {
+            const label = entry.state === 'preparing' ? 'Resume preparation' : 'Prepare for Project Mesh';
+            const ariaLabel = `${label} for ${entry.space_id}`;
+            return `<button type="button" class="btn btn-secondary btn-sm" data-action="mesh-prepare-source" data-space-id="${esc(entry.space_id)}" aria-label="${esc(ariaLabel)}">${esc(label)}</button>`;
+        }
+        return '';
+    }
+
+    function sourceReasonHtml(entry) {
+        if (!entry) return stateUnavailable('Source readiness is unavailable. Refresh before taking action.');
+        const reason = entry.reason_code
+            ? `<span class="mono-data">${esc(String(entry.reason_code))}</span>`
+            : '<span class="text-faint">No reason code</span>';
+        const message = entry.message ? serverMessage(entry.message) : '';
+        return `<div class="body-small">${reason}${message}</div>`;
     }
 
     // ─────────────────────── state → action matrix (PLAN §4) ───────────────────────
@@ -345,6 +522,7 @@
         sessionGeneration: null,
         status: null,
         statusEpoch: null, // AdminRouter.epoch as of the last loadStatus() write — see meshAvailableNow()
+        statusGeneration: 0, // increments whenever authoritative readiness/status is replaced
         members: {}, // spaceId -> last meshAdminMembers() payload, or {error}
         detailTab: 'overview',
     };
@@ -361,6 +539,7 @@
         if (epoch !== AdminRouter.epoch) return;
         state.status = res || null;
         state.statusEpoch = epoch;
+        state.statusGeneration += 1;
     }
 
     // Click-time-only re-check (used by the three mutation-modal onConfirm
@@ -388,11 +567,26 @@
         state.members[spaceId] = (res && res.status === 'ok') ? res : { error: (res && res.message) || 'Request failed' };
     }
 
+    // Target selection remains a distinct predicate. Only Accept uses the
+    // ordinary local-space list; source selection above never calls it.
     function ensureSpaces() {
         return callTool('space_list', {}).then(resp => {
-            if (resp && resp.status === 'ok') cache.spaces = resp.spaces || [];
-            return resp;
-        }).catch(() => ({ status: 'error' }));
+            if (!resp || resp.status !== 'ok' || !Array.isArray(resp.spaces)) {
+                cache.spaces = [];
+                return {
+                    status: 'error',
+                    message: (resp && resp.message) || 'Local spaces are unavailable.',
+                };
+            }
+            const spaces = resp.spaces.filter(space => space
+                && typeof space.space_id === 'string'
+                && SPACE_ID_RE.test(space.space_id));
+            cache.spaces = spaces;
+            return { ...resp, spaces };
+        }).catch(() => {
+            cache.spaces = [];
+            return { status: 'error', message: 'Local spaces are unavailable.' };
+        });
     }
 
     // ─────────────────────────── overview (#/mesh) ───────────────────────────
@@ -411,18 +605,22 @@
     // control plane is exactly the "action expected to fail when clicked"
     // the design pack forbids (§3, T15). Refresh is always safe (GET-only,
     // lets the operator retry).
-    function overviewActions(available) {
+    function overviewActions(available, readinessUnavailable) {
         const refresh = `<button type="button" class="btn btn-secondary btn-sm" data-action="mesh-refresh">${icon('refresh')}<span>Refresh</span></button>`;
         if (!available) return refresh;
-        return refresh +
-            `<button type="button" class="btn btn-primary btn-sm" data-action="mesh-create-invitation">${icon('plus')}<span>Create invitation</span></button>
-            <button type="button" class="btn btn-secondary btn-sm" data-action="mesh-accept-invitation">Accept invitation</button>`;
+        const create = readinessUnavailable
+            ? ''
+            : `<button type="button" class="btn btn-primary btn-sm" data-action="mesh-create-invitation">${icon('plus')}<span>Create invitation</span></button>`;
+        return refresh + create
+            + '<button type="button" class="btn btn-secondary btn-sm" data-action="mesh-accept-invitation">Accept invitation</button>';
     }
 
     function instanceCard(s, available) {
-        const note = available
-            ? 'Signed in as an admin session — every Mesh action below is available.'
-            : 'This instance reports unhealthy — mutating Mesh actions are unavailable until it recovers.';
+        const note = !available
+            ? 'This instance reports unhealthy — mutating Mesh actions are unavailable until it recovers.'
+            : sourceReadinessUnavailable(s)
+                ? 'Pairing and recovery actions remain available; source actions are hidden until readiness can be loaded.'
+                : 'Signed in as an admin session — every Mesh action below is available.';
         return `<div class="panel-header"><h2>This instance</h2>${statusDot(s.healthy ? 'ok' : 'error', s.healthy ? 'healthy' : 'unhealthy')}</div>
             <div class="sd-meta-row">
                 <div class="sd-kv"><span class="micro-label">DISPLAY NAME</span><span class="mono-data">${esc(s.display_name || '—')}</span></div>
@@ -432,20 +630,63 @@
             <p class="body-small">${esc(note)}</p>`;
     }
 
-    function attentionSection(attention, available) {
+    function pairingHistoryTruncatedBanner() {
+        return `<div class="sd-banner sd-banner--warn" role="status">${icon('alert')}<div>
+            <strong>Pairing history is truncated</strong>
+            <p>Only a bounded diagnostic slice is shown. An absent session or action in this view is not authoritative.</p>
+        </div></div>`;
+    }
+
+    function pairingMetadataTruncatedBanner() {
+        return `<div class="sd-banner sd-banner--warn" role="status">${icon('alert')}<div>
+            <strong>Pairing metadata is truncated</strong>
+            <p>Membership is authoritative, but fingerprints, endpoints, scopes, and pairing-derived actions may be missing from this bounded diagnostic slice.</p>
+        </div></div>`;
+    }
+
+    function attentionSection(attention, available, historyTruncated) {
         const header = '<div class="panel-header"><h2>Needs your attention</h2></div>';
         if (!attention.length) {
-            return header + stateEmpty({ title: 'Nothing needs attention', hint: 'Every pairing on this instance is settled or has no pending operator action.' });
+            const hint = historyTruncated
+                ? 'No actionable session appears in the loaded slice; omitted history may still require attention.'
+                : 'Every pairing on this instance is settled or has no pending operator action.';
+            return header + stateEmpty({ title: historyTruncated ? 'No action in the loaded slice' : 'Nothing needs attention', hint });
         }
         return header + dataTable(['Space', 'Role', 'State', 'Updated', 'Action'], attention.map(p => renderPairingRow(p, { available })).join(''));
     }
 
-    function pairingsSection(pairings, available) {
+    function pairingsSection(pairings, available, historyTruncated) {
         const header = '<div class="panel-header"><h2>All pairings</h2></div>';
         if (!pairings.length) {
-            return header + stateEmpty({ title: 'No pairings yet', hint: 'Create an invitation to pair a space with another Hivemind instance.' });
+            const hint = historyTruncated
+                ? 'No session appears in the loaded slice; omitted history may contain pairings.'
+                : 'Create an invitation to pair a space with another Hivemind instance.';
+            return header + stateEmpty({ title: historyTruncated ? 'No pairing in the loaded slice' : 'No pairings yet', hint });
         }
         return header + dataTable(['Space', 'Role', 'State', 'Updated', 'Action'], pairings.map(p => renderPairingRow(p, { available })).join(''));
+    }
+
+    function sourceReadinessSection(status, available) {
+        const header = '<div class="panel-header"><h2>Invitation sources</h2></div>';
+        if (sourceReadinessUnavailable(status)) {
+            return header + sourceReadinessUnavailableNotice(status);
+        }
+        const entries = sourceReadinessEntries(status);
+        if (!entries.length) {
+            return header + stateEmpty({ title: 'No committed spaces reported', hint: 'Refresh after creating a local space.' });
+        }
+        const rows = entries.map(entry => {
+            // Ready sources are selected through the single page-level Create
+            // flow; only preparation/resume needs an inline affordance here.
+            const action = available && sourceCanPrepare(entry) ? sourceActionButton(entry) : '';
+            return `<tr>
+                <td><a class="sd-link" href="#/mesh/${encodeURIComponent(entry.space_id)}">${esc(entry.space_id)}</a></td>
+                <td>${sourceStatePill(entry)}</td>
+                <td>${sourceReasonHtml(entry)}</td>
+                <td class="mesh-row-actions">${action || '<span class="text-faint">—</span>'}</td>
+            </tr>`;
+        }).join('');
+        return header + dataTable(['Space', 'Readiness', 'Reason', 'Action'], rows);
     }
 
     function paintOverview(contentEl, epoch) {
@@ -458,11 +699,15 @@
         const available = meshAvailable(s);
         const pairings = s.pairings || [];
         const attention = pairings.filter(p => actionsFor(p, available).length > 0);
+        const historyTruncated = s.pairings_truncated === true;
+        const readinessUnavailable = sourceReadinessUnavailable(s);
         contentEl.innerHTML = `<div class="page">
-            ${pageHeader('Project Mesh', overviewActions(available))}
+            ${pageHeader('Project Mesh', overviewActions(available, readinessUnavailable))}
             ${panel(instanceCard(s, available))}
-            ${panel(attentionSection(attention, available))}
-            ${panel(pairingsSection(pairings, available))}
+            ${historyTruncated ? pairingHistoryTruncatedBanner() : ''}
+            ${panel(sourceReadinessSection(s, available))}
+            ${panel(attentionSection(attention, available, historyTruncated))}
+            ${panel(pairingsSection(pairings, available, historyTruncated))}
         </div>`;
     }
 
@@ -494,26 +739,28 @@
         });
     }
 
-    function detailOverviewPanel(spaceId, pairings, members, available) {
+    function detailOverviewPanel(spaceId, pairings, members, available, historyTruncated) {
         const epochKnown = members && !members.error && members.membership_epoch != null;
         const memberCount = members && !members.error ? (members.members || []).length : null;
         return `<div class="panel-header"><h2>Overview</h2></div>
+            ${historyTruncated ? pairingHistoryTruncatedBanner() : ''}
             <div class="sd-meta-row">
                 <div class="sd-kv"><span class="micro-label">MEMBERSHIP EPOCH</span><span class="mono-data">${epochKnown ? esc(String(members.membership_epoch)) : '—'}</span></div>
                 <div class="sd-kv"><span class="micro-label">ACTIVE MEMBERS</span><span class="mono-data">${memberCount === null ? '—' : esc(String(memberCount))}</span></div>
-                <div class="sd-kv"><span class="micro-label">PAIRING SESSIONS</span><span class="mono-data">${esc(String(pairings.length))}</span></div>
+                <div class="sd-kv"><span class="micro-label">${historyTruncated ? 'LOADED PAIRING SESSIONS' : 'PAIRING SESSIONS'}</span><span class="mono-data">${esc(String(pairings.length))}</span></div>
             </div>
             ${pairings.length
                 ? dataTable(['Role', 'State', 'Updated', 'Action'], pairings.map(p => renderPairingRow(p, { hideSpace: true, available })).join(''))
-                : stateEmpty({ title: 'No pairing sessions for this space' })}`;
+                : stateEmpty({ title: historyTruncated ? 'No session for this space in the loaded slice' : 'No pairing sessions for this space' })}`;
     }
 
     function membersPanel(members, pairings, available) {
         const header = '<div class="panel-header"><h2>Members</h2></div>';
         if (!members) return header + stateLoading('');
         if (members.error) return header + stateError({ title: "Couldn't load members", message: members.error });
+        const truncation = members.pairing_metadata_truncated === true ? pairingMetadataTruncatedBanner() : '';
         const rows = members.members || [];
-        if (!rows.length) return header + stateEmpty({ title: 'No active members' });
+        if (!rows.length) return header + truncation + stateEmpty({ title: 'No active members' });
         const body = rows.map(m => {
             const owner = (pairings || []).find(p => p.role === 'source' && p.target_fingerprint
                 && p.target_fingerprint === m.fingerprint
@@ -527,21 +774,29 @@
                 <td>${action}</td>
             </tr>`;
         }).join('');
-        return header + dataTable(['Display name', 'Fingerprint', 'Endpoint', 'Scopes', 'Evict'], body);
+        return header + truncation + dataTable(['Display name', 'Fingerprint', 'Endpoint', 'Scopes', 'Evict'], body);
     }
 
-    function invitationsPanel(spaceId, pairings, available) {
-        const createAccept = available
-            ? `<button type="button" class="btn btn-primary btn-sm" data-action="mesh-create-invitation" data-space-id="${esc(spaceId)}">${icon('plus')}<span>Create invitation</span></button>
-            <button type="button" class="btn btn-secondary btn-sm" data-action="mesh-accept-invitation" data-space-id="${esc(spaceId)}">Accept invitation</button>`
+    function invitationsPanel(spaceId, pairings, available, historyTruncated) {
+        const readinessUnavailable = sourceReadinessUnavailable(state.status);
+        const readiness = readinessUnavailable ? null : sourceReadinessFor(spaceId, state.status);
+        const sourceAction = available && !readinessUnavailable ? sourceActionButton(readiness) : '';
+        const acceptAction = available
+            ? `<button type="button" class="btn btn-secondary btn-sm" data-action="mesh-accept-invitation" data-space-id="${esc(spaceId)}">Accept invitation</button>`
             : '';
-        const header = `<div class="panel-header"><h2>Invitations & policy</h2><div class="page-header-actions">${createAccept}</div></div>`;
+        const header = `<div class="panel-header"><h2>Invitations & policy</h2><div class="page-header-actions">${sourceAction}${acceptAction}</div></div>`;
+        const readinessPanel = readinessUnavailable
+            ? `<div class="item-card"><div class="panel-header"><h3>Invitation source readiness</h3></div>${sourceReadinessUnavailableNotice(state.status)}</div>`
+            : `<div class="item-card">
+                <div class="panel-header"><h3>Invitation source readiness</h3>${readiness ? sourceStatePill(readiness) : ''}</div>
+                ${sourceReasonHtml(readiness)}
+            </div>`;
         const list = pairings.length
             ? dataTable(['Role', 'State', 'Updated', 'Action'], pairings.map(p => renderPairingRow(p, { hideSpace: true, available })).join(''))
-            : stateEmpty({ title: 'No invitations or pairing sessions for this space' });
+            : stateEmpty({ title: historyTruncated ? 'No invitation or session for this space in the loaded slice' : 'No invitations or pairing sessions for this space' });
         const policyPanel = panel(`<div class="panel-header"><h2>Signed policy export</h2></div>
             <p class="body-small">Not available yet in this build. The Mesh protocol reserves an optional signed policy export for an external Git mirror; there is no server-side implementation to call yet.</p>`);
-        return panel(header + list) + policyPanel;
+        return panel(header + (historyTruncated ? pairingHistoryTruncatedBanner() : '') + readinessPanel + list) + policyPanel;
     }
 
     function detailTabsHtml(spaceId) {
@@ -568,10 +823,11 @@
         }
         const pairings = ((state.status && state.status.pairings) || []).filter(p => p.space_id === spaceId);
         const members = state.members[spaceId];
+        const historyTruncated = state.status && state.status.pairings_truncated === true;
         let panelsHtml;
         if (state.detailTab === 'members') panelsHtml = panel(membersPanel(members, pairings, available));
-        else if (state.detailTab === 'invitations') panelsHtml = invitationsPanel(spaceId, pairings, available);
-        else panelsHtml = panel(detailOverviewPanel(spaceId, pairings, members, available));
+        else if (state.detailTab === 'invitations') panelsHtml = invitationsPanel(spaceId, pairings, available, historyTruncated);
+        else panelsHtml = panel(detailOverviewPanel(spaceId, pairings, members, available, historyTruncated));
         const actions = `<button type="button" class="btn btn-secondary btn-sm" data-action="mesh-refresh">${icon('refresh')}<span>Refresh</span></button>`;
         contentEl.innerHTML = `<div class="page">${pageHeader(spaceId, actions)}${detailTabsHtml(spaceId)}${panelsHtml}</div>`;
     }
@@ -603,25 +859,54 @@
         return spaces.map(s => `<option value="${esc(s.space_id)}"${s.space_id === selectedSpaceId ? ' selected' : ''}>${esc(s.space_id)}</option>`).join('');
     }
 
+    function eligibleSourceOptionsHtml(selectedSpaceId) {
+        return eligibleSourceEntries(state.status).map(entry =>
+            `<option value="${esc(entry.space_id)}"${entry.space_id === selectedSpaceId ? ' selected' : ''}>${esc(entry.space_id)}</option>`
+        ).join('');
+    }
+
+    function sourcePickerReadinessHtml() {
+        const entries = sourceReadinessEntries(state.status);
+        if (!entries.length) return stateUnavailable('No authoritative source readiness was returned. Refresh and try again.');
+        return entries.map(entry => {
+            const action = sourceCanPrepare(entry) ? sourceActionButton(entry) : '';
+            return `<div class="item-card">
+                <div class="panel-header"><strong>${esc(entry.space_id)}</strong>${sourceStatePill(entry)}</div>
+                ${sourceReasonHtml(entry)}
+                ${action ? `<div class="actions">${action}</div>` : ''}
+            </div>`;
+        }).join('');
+    }
+
     function openCreateInvitation(prefillSpaceId) {
         if (!isAdmin(_sessionIdentity())) { showToast('error', 'This action requires admin permission.'); return; }
-        ensureSpaces().then(() => renderCreateInvitationForm(prefillSpaceId));
+        if (!meshAvailableNow()) { showToast('error', 'Mesh status is stale or unavailable — refresh and try again.'); return; }
+        renderCreateInvitationForm(prefillSpaceId);
     }
 
     function renderCreateInvitationForm(prefillSpaceId) {
-        const options = spaceOptionsHtml(prefillSpaceId);
+        const options = eligibleSourceOptionsHtml(prefillSpaceId);
         const body =
-            '<div class="form-group"><label class="form-label" for="meshInvSpace">Space</label>' +
-            (options ? `<select class="form-input" id="meshInvSpace">${options}</select>` : '<div class="form-hint">No local spaces found.</div>') +
+            '<div class="form-group"><label class="form-label" for="meshInvSpace">Ready source space</label>' +
+            (options ? `<select class="form-input" id="meshInvSpace">${options}</select>` : '<div class="form-hint">No space is currently ready to create an invitation.</div>') +
             '</div>' +
-            '<div class="form-group"><label class="space-check"><input type="checkbox" id="meshInvCommit"> Grant commit scope (in addition to read)</label></div>' +
-            '<p class="form-hint">Creates a one-time invitation valid for 1 hour. The other administrator pastes it to accept.</p>' +
+            (options ? '<div class="form-group"><label class="space-check"><input type="checkbox" id="meshInvCommit"> Grant commit scope (in addition to read)</label></div>' : '') +
+            (options ? '<p class="form-hint">Creates a one-time invitation valid for 1 hour. The other administrator pastes it to accept.</p>' : '') +
+            '<div class="panel-header"><h3>Source readiness</h3></div>' + sourcePickerReadinessHtml() +
             '<div class="form-error" id="meshInvErr" hidden></div>';
-        _openModal('Create invitation', body, 'Create invitation', onCreateInvitationConfirm);
+        _openModal('Create invitation', body, options ? 'Create invitation' : '', options ? onCreateInvitationConfirm : null);
     }
 
     async function onCreateInvitationConfirm() {
         const errEl = document.getElementById('meshInvErr');
+        if (_invitationRequest) {
+            // Refuse a duplicate from the same live session/modal.  A request
+            // abandoned by a session wipe must not permanently poison a new
+            // login if its network response never arrives.
+            if (_navLockSessionCurrent(_invitationRequest.navLock)) return false;
+            _navLockRelease(_invitationRequest.navLock);
+            _invitationRequest = null;
+        }
         if (!meshAvailableNow()) {
             if (errEl) { errEl.textContent = 'Mesh became unavailable while this dialog was open — refresh and try again.'; errEl.hidden = false; }
             return false;
@@ -632,17 +917,48 @@
             if (errEl) { errEl.textContent = 'Select a space.'; errEl.hidden = false; }
             return false;
         }
+        const readiness = sourceReadinessFor(spaceId, state.status);
+        const eligible = eligibleSourceEntries(state.status).some(entry => entry.space_id === spaceId);
+        if (!readiness || readiness.can_create_invitation !== true || !eligible) {
+            if (errEl) { errEl.textContent = 'This source is no longer invitation-ready — refresh and try again.'; errEl.hidden = false; }
+            return false;
+        }
         const commit = document.getElementById('meshInvCommit');
         const scopes = commit && commit.checked ? ['read', 'commit'] : ['read'];
-        const epochAtCall = AdminRouter.epoch, genAtCall = _modalGen, sessionAtCall = _sessionIdentity();
+        const navLock = _navLockAcquire();
+        const ctx = {
+            modalGeneration: _modalGen,
+            sessionGeneration: state.sessionGeneration,
+            sessionIdentity: _sessionIdentity(),
+            navLock,
+        };
+        _invitationRequest = ctx;
+        _setModalDismissEnabled(false);
         let res;
         try { res = await meshAdminAction('invitation', { space_id: spaceId, scopes }); }
         catch { res = { status: 'error', message: 'Request failed' }; }
-        if (_isStale(epochAtCall, genAtCall, sessionAtCall)) return false;
-        if (res && res.status === 'ok' && res.secret && res.invitation) {
-            showInvitationCode(res);
+        finally {
+            if (_invitationRequest === ctx) _invitationRequest = null;
+        }
+
+        const stale = _modalGen !== ctx.modalGeneration
+            || _navLock !== navLock
+            || state.sessionGeneration !== ctx.sessionGeneration
+            || _sessionIdentity() !== ctx.sessionIdentity
+            || !_navLockSessionCurrent(navLock);
+        if (stale) {
+            _navLockRelease(navLock);
+            return false;
+        }
+        if (res && res.status === 'ok'
+            && typeof res.secret === 'string' && res.secret
+            && typeof res.invitation === 'string' && res.invitation
+            && typeof res.source_endpoint === 'string' && res.source_endpoint) {
+            showInvitationCode(res, navLock);
             return false; // the secret step owns the modal now
         }
+        _navLockRelease(navLock);
+        _setModalDismissEnabled(true);
         if (errEl) {
             errEl.textContent = (res && res.message) ? String(res.message) : 'The server refused or failed this operation.';
             errEl.hidden = false;
@@ -650,11 +966,119 @@
         return false;
     }
 
+    // Source preparation is an explicit, one-way maintenance action. It is
+    // intentionally separate from invitation creation: success refreshes
+    // readiness and never chains into an invitation POST.
+    function prepareContextIsStale(ctx) {
+        return _isStale(ctx.epoch, ctx.modalGeneration, ctx.sessionIdentity)
+            || state.sessionGeneration !== ctx.sessionGeneration
+            || state.statusGeneration !== ctx.statusGeneration
+            || !meshAvailableNow();
+    }
+
+    function setPrepareError(message) {
+        const errEl = document.getElementById('meshPrepareErr');
+        if (!errEl) return;
+        errEl.textContent = String(message || 'The server refused or failed this operation.');
+        errEl.hidden = false;
+    }
+
+    function openPrepareSource(spaceId) {
+        if (!isAdmin(_sessionIdentity())) { showToast('error', 'This action requires admin permission.'); return; }
+        if (!meshAvailableNow()) { showToast('error', 'Mesh status is stale or unavailable — refresh and try again.'); return; }
+        const readiness = sourceReadinessFor(spaceId, state.status);
+        if (!sourceCanPrepare(readiness)) {
+            showToast('error', 'This space cannot be prepared from the current authoritative state. Refresh and inspect its reason.');
+            return;
+        }
+
+        const label = readiness.state === 'preparing' ? 'Resume preparation' : 'Prepare for Project Mesh';
+        const ctx = {
+            spaceId,
+            stateToken: readiness.state_token,
+            epoch: AdminRouter.epoch,
+            modalGeneration: _modalGen + 1,
+            sessionGeneration: state.sessionGeneration,
+            sessionIdentity: _sessionIdentity(),
+            statusGeneration: state.statusGeneration,
+            inFlight: false,
+        };
+        const body =
+            '<p class="body-small"><strong>One-way transition in v1.4.1.</strong> This preserves the existing space content and adds Project Mesh coordination state. It cannot be reverted to local-only.</p>' +
+            '<p class="body-small">Stop every agent, consolidation, restore, repair, garbage collection, and other writer for this space before continuing. Preparation does not claim that every shared write is currently serviceable.</p>' +
+            '<div class="form-group"><label class="form-label" for="meshPrepareConfirmInput">Type <code class="typed-challenge">&quot;' + esc(spaceId) + '&quot;</code> to confirm</label>' +
+            '<input class="form-input mono" id="meshPrepareConfirmInput" autocomplete="off" data-1p-ignore data-lpignore="true"></div>' +
+            '<div class="form-group"><label class="space-check"><input type="checkbox" id="meshPrepareQuiesced"> I confirm that every same-space writer and maintenance job is quiesced.</label></div>' +
+            '<div class="form-error" id="meshPrepareErr" hidden></div>';
+
+        _openModal(label, body, label, () => onPrepareSourceConfirm(ctx));
+
+        const input = document.getElementById('meshPrepareConfirmInput');
+        const checkbox = document.getElementById('meshPrepareQuiesced');
+        const confirmBtn = document.getElementById('modalConfirmBtn');
+        if (!input || !checkbox || !confirmBtn) return;
+        const syncConfirm = () => {
+            confirmBtn.disabled = input.value !== spaceId || checkbox.checked !== true || ctx.inFlight;
+        };
+        confirmBtn.disabled = true;
+        input.addEventListener('input', syncConfirm);
+        checkbox.addEventListener('change', syncConfirm);
+    }
+
+    async function onPrepareSourceConfirm(ctx) {
+        // This check is deliberately BEFORE the fetch. A stale overlay must
+        // cause zero mutation, not merely discard a late response.
+        if (prepareContextIsStale(ctx) || ctx.inFlight) return false;
+        const input = document.getElementById('meshPrepareConfirmInput');
+        const checkbox = document.getElementById('meshPrepareQuiesced');
+        if (!input || input.value !== ctx.spaceId) {
+            setPrepareError('Type the exact space id to confirm.');
+            return false;
+        }
+        if (!checkbox || checkbox.checked !== true) {
+            setPrepareError('Confirm that all same-space writers are quiesced.');
+            return false;
+        }
+        const current = sourceReadinessFor(ctx.spaceId, state.status);
+        if (!sourceCanPrepare(current) || current.state_token !== ctx.stateToken) {
+            setPrepareError('Source readiness changed while this dialog was open — refresh and try again.');
+            return false;
+        }
+
+        ctx.inFlight = true;
+        let res;
+        try {
+            res = await meshAdminAction('prepare-source', {
+                space_id: ctx.spaceId,
+                quiesced: true,
+                expected_state_token: ctx.stateToken,
+            });
+        } catch {
+            res = { status: 'error', message: 'Request failed' };
+        } finally {
+            ctx.inFlight = false;
+        }
+        if (prepareContextIsStale(ctx)) return false;
+        if (res && res.status === 'ok'
+            && (res.result === 'prepared' || res.result === 'already_ready')) {
+            showToast('ok', res.result === 'already_ready'
+                ? 'This space is already ready for Project Mesh.'
+                : 'Space prepared for Project Mesh.');
+            AdminRouter.refresh();
+            return true;
+        }
+        if (res && res.code === 'source_state_changed') {
+            setPrepareError('Source state changed. Refresh before trying again; preparation was not retried automatically.');
+            return false;
+        }
+        setPrepareError((res && res.message) || 'The server refused or failed this operation.');
+        return false;
+    }
+
     // One-time invitation-code display (T5). Mirrors views-access.js's one-time
     // token pattern: the code lives ONLY in the `holder` closure, destroyed —
     // DOM node emptied AND closure zeroed — on every exit path.
-    function showInvitationCode(res) {
-        const navLock = _navLockAcquire();
+    function showInvitationCode(res, navLock) {
         const holder = { value: encodeInvitationCode(res) };
         const body =
             '<p class="secret-warning">' + icon('alert') +
@@ -695,27 +1119,82 @@
         }
     }
 
-    function openAcceptInvitation(prefillSpaceId) {
-        if (!isAdmin(_sessionIdentity())) { showToast('error', 'This action requires admin permission.'); return; }
-        ensureSpaces().then(() => renderAcceptForm(prefillSpaceId));
+    function acceptContextIsStale(ctx) {
+        return _isStale(ctx.epoch, ctx.modalGeneration, ctx.sessionIdentity)
+            || state.sessionGeneration !== ctx.sessionGeneration
+            || state.statusGeneration !== ctx.statusGeneration
+            || !meshAvailableNow();
     }
 
-    function renderAcceptForm(prefillSpaceId) {
+    async function openAcceptInvitation(prefillSpaceId) {
+        if (!isAdmin(_sessionIdentity())) { showToast('error', 'This action requires admin permission.'); return; }
+        if (!meshAvailableNow()) { showToast('error', 'Mesh status is stale or unavailable — refresh and try again.'); return; }
+        const loadCtx = {
+            epoch: AdminRouter.epoch,
+            modalGeneration: _modalGen,
+            sessionGeneration: state.sessionGeneration,
+            sessionIdentity: _sessionIdentity(),
+            statusGeneration: state.statusGeneration,
+        };
+        if (acceptContextIsStale(loadCtx)) return;
+        const result = await ensureSpaces();
+        if (acceptContextIsStale(loadCtx)) return;
+        renderAcceptForm(prefillSpaceId, result);
+    }
+
+    function renderAcceptForm(prefillSpaceId, result) {
+        if (!result || result.status !== 'ok' || !Array.isArray(result.spaces)) {
+            _openModal(
+                'Accept invitation',
+                stateUnavailable((result && result.message) || 'Local spaces are unavailable.'),
+                '',
+                null,
+            );
+            return;
+        }
         const options = spaceOptionsHtml(prefillSpaceId);
+        if (!options) {
+            _openModal(
+                'Accept invitation',
+                stateUnavailable('No local spaces found — create a blank target space first.'),
+                '',
+                null,
+            );
+            return;
+        }
+        const ctx = {
+            epoch: AdminRouter.epoch,
+            modalGeneration: _modalGen + 1,
+            sessionGeneration: state.sessionGeneration,
+            sessionIdentity: _sessionIdentity(),
+            statusGeneration: state.statusGeneration,
+            inFlight: false,
+        };
         const body =
             '<div class="form-group"><label class="form-label" for="meshAccCode">Invitation code</label>' +
             '<textarea class="form-input mono" id="meshAccCode" rows="4" placeholder="Paste the invitation code from the other administrator"></textarea></div>' +
             '<div class="form-group"><label class="form-label" for="meshAccSpace">Target space (must be blank)</label>' +
-            (options ? `<select class="form-input" id="meshAccSpace">${options}</select>` : '<div class="form-hint">No local spaces found — create one first.</div>') +
+            `<select class="form-input" id="meshAccSpace">${options}</select>` +
             '</div>' +
             '<div class="form-group"><label class="space-check"><input type="checkbox" id="meshAccCommit"> Request commit scope (in addition to read)</label></div>' +
+            '<p class="body-small">Before accepting, stop every same-space agent, direct writer, consolidation, repair, restore, garbage-collection, and maintenance job. This attestation is an operational precondition; it does not coordinate another running process.</p>' +
+            '<div class="form-group"><label class="space-check"><input type="checkbox" id="meshAccQuiesced"> I confirm that every same-space writer and maintenance job is quiesced.</label></div>' +
             '<div class="form-error" id="meshAccErr" hidden></div>';
-        _openModal('Accept invitation', body, 'Accept', onAcceptConfirm);
+        _openModal('Accept invitation', body, 'Accept', () => onAcceptConfirm(ctx));
+
+        const checkbox = document.getElementById('meshAccQuiesced');
+        const confirmBtn = document.getElementById('modalConfirmBtn');
+        if (!checkbox || !confirmBtn) return;
+        const syncConfirm = () => {
+            confirmBtn.disabled = checkbox.checked !== true || ctx.inFlight;
+        };
+        confirmBtn.disabled = true;
+        checkbox.addEventListener('change', syncConfirm);
     }
 
-    async function onAcceptConfirm() {
+    async function onAcceptConfirm(ctx) {
         const errEl = document.getElementById('meshAccErr');
-        if (!meshAvailableNow()) {
+        if (acceptContextIsStale(ctx) || ctx.inFlight) {
             if (errEl) { errEl.textContent = 'Mesh became unavailable while this dialog was open — refresh and try again.'; errEl.hidden = false; }
             return false;
         }
@@ -732,17 +1211,24 @@
             if (errEl) { errEl.textContent = 'Select a target space.'; errEl.hidden = false; }
             return false;
         }
+        const quiesced = document.getElementById('meshAccQuiesced');
+        if (!quiesced || quiesced.checked !== true) {
+            if (errEl) { errEl.textContent = 'Confirm that all same-space writers and maintenance jobs are quiesced.'; errEl.hidden = false; }
+            return false;
+        }
         const commit = document.getElementById('meshAccCommit');
         const scopes = commit && commit.checked ? ['read', 'commit'] : ['read'];
-        const epochAtCall = AdminRouter.epoch, genAtCall = _modalGen, sessionAtCall = _sessionIdentity();
+        ctx.inFlight = true;
         let res;
         try {
             res = await meshAdminAction('accept', {
                 invitation: parsed.invitation, secret: parsed.secret,
                 source_endpoint: parsed.source_endpoint, target_space_id: targetSpaceId, scopes,
+                quiesced: true,
             });
         } catch { res = { status: 'error', message: 'Request failed' }; }
-        if (_isStale(epochAtCall, genAtCall, sessionAtCall)) return false;
+        finally { ctx.inFlight = false; }
+        if (acceptContextIsStale(ctx)) return false;
         if (res && res.status === 'ok') {
             showToast('ok', 'Invitation accepted — waiting for the other administrator to approve.');
             AdminRouter.refresh();
@@ -761,6 +1247,8 @@
         const nextSessionGeneration = (ctx && Number.isInteger(ctx.sessionGeneration)) ? ctx.sessionGeneration : null;
         if (state.sessionGeneration !== nextSessionGeneration) {
             state.status = null;
+            state.statusEpoch = null;
+            state.statusGeneration += 1;
             state.members = {};
             state.detailTab = 'overview';
             _modalGen += 1;
@@ -779,6 +1267,7 @@
 
     registerAction('mesh-refresh', () => AdminRouter.refresh());
     registerAction('mesh-run-action', d => confirmMeshAction(d.pairId, d.meshAction));
+    registerAction('mesh-prepare-source', d => openPrepareSource(d.spaceId));
     registerAction('mesh-create-invitation', d => openCreateInvitation(d.spaceId));
     registerAction('mesh-accept-invitation', d => openAcceptInvitation(d.spaceId));
     registerAction('mesh-detail-tab', d => {

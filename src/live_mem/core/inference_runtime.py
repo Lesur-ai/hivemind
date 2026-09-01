@@ -208,7 +208,7 @@ async def build_llmaas_health_block(*, authenticated: bool) -> dict:
 
     - ``{"status": "ok", "latency_ms": ...}`` (public), plus ``model`` and
       ``model_available`` (authenticated), when the CHAT role answers;
-    - ``{"status": "warning", "message": "LLMaaS non configuré"}`` when the
+    - ``{"status": "warning", "message": "LLMaaS is not configured"}`` when the
       chat role is not configured;
     - ``{"status": "error", "message": "LLMaaS unreachable"}`` on failure.
 
@@ -250,7 +250,7 @@ async def build_llmaas_health_block(*, authenticated: bool) -> dict:
     )
 
     if chat_result is None:
-        block: dict = {"status": "warning", "message": "LLMaaS non configuré"}
+        block: dict = {"status": "warning", "message": "LLMaaS is not configured"}
     elif chat_result.healthy:
         block = {"status": "ok"}
         if authenticated:

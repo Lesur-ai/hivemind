@@ -92,6 +92,20 @@ class FakeStorage:
                     break
         return out
 
+    async def list_prefixes(
+        self, prefix: str, delimiter: str = "/", max_prefixes: int = 0
+    ) -> list[str]:
+        prefixes: set[str] = set()
+        for key in sorted(self.objects):
+            if not key.startswith(prefix):
+                continue
+            remainder = key[len(prefix) :]
+            if delimiter not in remainder:
+                continue
+            prefixes.add(prefix + remainder.split(delimiter, 1)[0] + delimiter)
+        ordered = sorted(prefixes)
+        return ordered[:max_prefixes] if max_prefixes else ordered
+
     async def exists(self, key: str) -> bool:
         return key in self.objects
 
@@ -649,7 +663,7 @@ class TestTokenLease:
             )
         )
         # Term descend (5 → 3) — DOIT être rejeté indépendamment du fencing.
-        with pytest.raises(RuntimeError, match="Term monotone"):
+        with pytest.raises(RuntimeError, match="Monotonic token term"):
             await store.set_token(
                 TokenLeaseState(
                     state=TokenState.FREE,
@@ -694,6 +708,15 @@ class TestCorruption:
         with pytest.raises(CorruptedStateError) as exc:
             await store.get_node_identity()
         assert "node.json" in str(exc.value)
+
+    async def test_non_utf8_state_raises_corrupted_state_error(
+        self, store: HivemindStateStore, storage: FakeStorage
+    ) -> None:
+        # ``StorageService.get`` decodes real object bodies before returning
+        # them.  FakeStorage injects raw bytes to exercise the same boundary.
+        storage.objects[layout.node_key("alpha")] = b"\xff"  # type: ignore[assignment]
+        with pytest.raises(CorruptedStateError, match="UTF-8"):
+            await store.get_node_identity()
 
     async def test_invalid_schema_raises_corrupted_state_error(
         self, store: HivemindStateStore, storage: FakeStorage

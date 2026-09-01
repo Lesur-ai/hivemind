@@ -407,11 +407,11 @@ function stateUnavailable(reason) {
     return `<div class="state state-unavailable"><span class="micro-label">NOT AVAILABLE</span><p>${text}</p></div>`;
 }
 
-// Verbatim server text (French included) — never parsed, never rendered as
+// Verbatim server text — never parsed, never rendered as
 // HTML/markdown (R4). msg is escaped once here at the sink.
 function serverMessage(msg) {
     if (!msg) return '';
-    return `<div class="server-msg"><span class="server-msg-label">SERVER MESSAGE</span><span class="server-msg-text" lang="fr">${esc(String(msg))}</span></div>`;
+    return `<div class="server-msg"><span class="server-msg-label">SERVER MESSAGE</span><span class="server-msg-text" lang="en">${esc(String(msg))}</span></div>`;
 }
 
 // ═══════════════ SHELL LAYOUT COMPONENTS (contract §2.3.4) ═══════════════
@@ -831,7 +831,7 @@ const NAV_PRIMARY = [
 ];
 
 // Net-new P10-4 nav entry. Rendered ONLY when the session probes admin AND
-// GET /api/admin/mesh/status succeeds (see _refreshMeshNav) — per the design
+// GET /api/admin/mesh/availability succeeds (see _refreshMeshNav) — per the design
 // pack, Mesh navigation is absent, never a disabled item that would fire a
 // request the session/instance cannot serve.
 const NAV_MESH = { name: 'mesh', label: 'Mesh', href: '#/mesh' };
@@ -870,6 +870,9 @@ function _setMeshNavVisible(visible) {
     _meshNavVisible = visible;
     buildSidebar();
     _setActiveNav(AdminRouter.current().view);
+    document.dispatchEvent(new CustomEvent('admin:mesh-availability', {
+        detail: { available: visible },
+    }));
 }
 
 // Load-time-only capability probe (contract §5.0 no-automatic-polling rule:
@@ -881,7 +884,7 @@ async function _refreshMeshNav(sessionGeneration) {
         _setMeshNavVisible(false);
         return;
     }
-    const status = await meshAdminStatus();
+    const status = await meshAdminAvailability();
     if (!sessionGenerationIsCurrent(sessionGeneration)) return;
     _setMeshNavVisible(!!status);
 }

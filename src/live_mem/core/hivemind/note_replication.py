@@ -96,11 +96,11 @@ def note_id_from_filename(filename: str) -> str:
     """
     if not filename.endswith(".md"):
         raise ValueError(
-            f"filename de note invalide (doit finir par '.md'): {filename!r}"
+            f"invalid note filename (must end in '.md'): {filename!r}"
         )
     stem = filename[:-3]
     if not stem or "/" in stem:
-        raise ValueError(f"filename invalide pour un note_id: {filename!r}")
+        raise ValueError(f"Invalid filename for a note_id: {filename!r}")
     return stem
 
 
@@ -112,7 +112,7 @@ def note_id_from_key(s3_key: str) -> str:
     ``/`` après strip de ``.md``).
     """
     if "/" not in s3_key:
-        raise ValueError(f"clé S3 invalide (pas de '/'): {s3_key!r}")
+        raise ValueError(f"Invalid S3 key (no '/'): {s3_key!r}")
     basename = s3_key.rsplit("/", 1)[-1]
     return note_id_from_filename(basename)
 
@@ -404,14 +404,14 @@ class NoteReplicationRuntime:
         # payload pour une note déjà tombstonée localement (fail-closed).
         if await self._store.get_tombstone(note_id) is not None:
             raise ValueError(
-                f"note tombstonée, ré-émission interdite (anti-résurrection): "
+                f"tombstoned note cannot be re-emitted (anti-resurrection): "
                 f"{note_id!r}"
             )
         key = self._live_key(filename)
         raw = await self._storage.get(key)
         if raw is None:
             raise ValueError(
-                f"note absente, impossible de la répliquer: {key!r}"
+                f"note is absent and cannot be replicated: {key!r}"
             )
         agent, category, tags, created_at, body = _parse_front_matter(raw)
         return ReplicatedNote(
@@ -516,9 +516,9 @@ class NoteReplicationRuntime:
             existing = await self._storage.get(key)
             if existing != note.note_md:
                 raise NoteReplicationConflictError(
-                    f"note_id {note.note_id!r} déjà répliqué sous {key!r} avec des "
-                    f"octets durables divergents (même identité, contenu différent) "
-                    f"— fail-closed, aucune réécriture"
+                    f"note_id {note.note_id!r} is already replicated at {key!r} with "
+                    f"divergent durable bytes (same identity, different content) "
+                    f"— fail-closed, no rewrite"
                 )
             # Octets identiques : RÉPARE un sidecar de provenance manquant. Une
             # tentative antérieure a pu crasher ENTRE ``put(live/)`` et
@@ -699,7 +699,7 @@ class NoteReplicationRuntime:
     def _live_key(self, filename: str) -> str:
         """Clé S3 d'une note live VIVANTE (``{space}/live/{filename}``)."""
         if not filename or "/" in filename:
-            raise ValueError(f"filename invalide: {filename!r}")
+            raise ValueError(f"Invalid filename: {filename!r}")
         return f"{self._space_id}/live/{filename}"
 
 

@@ -28,11 +28,13 @@ import tarfile
 import uuid
 from datetime import datetime, timezone
 
-from .storage import get_storage
+from .storage import get_storage, inventory_object_size
+from .locks import get_lock_manager
 from .models import mask_meta_secrets
 from .reservation_guard import (
     NotMembershipLeaderError,
     PairingActivationError,
+    assert_direct_local_allowed,
     assert_membership_recovery_leader,
     assert_no_pairing_activation,
     assert_space_not_reserved,
@@ -75,7 +77,14 @@ class BackupService:
     Service de sauvegarde et restauration d'espaces mémoire.
     """
 
-    async def create(self, space_id: str, description: str = "") -> dict:
+    async def create(
+        self,
+        space_id: str,
+        description: str = "",
+        *,
+        operation_id: str | None = None,
+        storage=None,
+    ) -> dict:
         """
         Crée un snapshot complet de l'espace sur S3.
 
@@ -84,28 +93,47 @@ class BackupService:
         Args:
             space_id: Espace à sauvegarder
             description: Description du backup (optionnel)
+            operation_id: Internal opaque 32-character lower-hex suffix used
+                when one caller needs collision-resistant same-second backup
+                identity. Public backup calls retain the timestamp-only form.
+            storage: Internal injected storage view; defaults to the normal
+                process storage service for public backup operations.
 
         Returns:
             {"status": "created", "backup_id": "...", ...}
         """
-        storage = get_storage()
+        storage = storage if storage is not None else get_storage()
 
         # Vérifier l'existence de l'espace
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
-        # Générer le timestamp pour le backup
+        # Générer le timestamp pour le backup. The historical public form
+        # remains ``space/timestamp``. A caller that must retain a distinct
+        # same-second preimage can append one opaque operation id without
+        # changing the existing backup layout or restore primitive.
         now = datetime.now(timezone.utc)
         ts = now.strftime("%Y-%m-%dT%H-%M-%S")
+        if operation_id is not None:
+            if (
+                type(operation_id) is not str
+                or len(operation_id) != 32
+                or any(character not in "0123456789abcdef" for character in operation_id)
+            ):
+                raise ValueError("operation_id must be 32 lowercase hexadecimal characters")
+            ts = f"{ts}-{operation_id}"
         backup_prefix = f"_backups/{space_id}/{ts}/"
         backup_id = f"{space_id}/{ts}"
 
         # Lister et copier tous les fichiers
         objects = await storage.list_objects(f"{space_id}/")
-        total_size = 0
+        # Preflight the COMPLETE inventory before the first copy.  Otherwise a
+        # late missing/malformed Size would leave a partial backup prefix and
+        # only then fail during arithmetic.
+        total_size = sum(inventory_object_size(obj) for obj in objects)
 
         for obj in objects:
             source_key = obj["Key"]
@@ -114,7 +142,6 @@ class BackupService:
             dest_key = backup_prefix + relative
 
             await storage.copy_object(source_key, dest_key)
-            total_size += obj["Size"]
 
         # Store backup description in the copied _meta.json (best-effort)
         if description:
@@ -169,7 +196,7 @@ class BackupService:
         if not space_ids:
             return {
                 "status": "ok",
-                "message": "Aucun espace trouvé",
+                "message": "No spaces found",
                 "spaces_backed_up": 0,
                 "spaces_failed": 0,
                 "details": [],
@@ -271,7 +298,10 @@ class BackupService:
                     # Count files in the backup prefix
                     objs = await storage.list_objects(bprefix)
                     entry["files_count"] = len(objs)
-                    entry["total_size"] = sum(o.get("Size", 0) for o in objs)
+                    entry["total_size"] = sum(
+                        inventory_object_size(o, missing_as_zero=True)
+                        for o in objs
+                    )
             except Exception:
                 pass  # best-effort enrichment
 
@@ -280,6 +310,23 @@ class BackupService:
         return {"status": "ok", "backups": backups, "total": len(backups)}
 
     async def restore(self, backup_id: str, unsafe_recovery: bool = False) -> dict:
+        """Restore while serialized with create/delete/source preparation."""
+
+        parts = backup_id.split("/", 1)
+        if len(parts) != 2:
+            return {
+                "status": "error",
+                "message": "Invalid backup_id (format: space_id/timestamp)",
+            }
+        space_id, _timestamp = parts
+        async with get_lock_manager().space_lifecycle(space_id):
+            return await self._restore_locked(
+                backup_id, unsafe_recovery=unsafe_recovery
+            )
+
+    async def _restore_locked(
+        self, backup_id: str, unsafe_recovery: bool = False
+    ) -> dict:
         """
         Restaure un espace depuis un backup.
 
@@ -336,7 +383,7 @@ class BackupService:
         if len(parts) != 2:
             return {
                 "status": "error",
-                "message": "backup_id invalide (format: space_id/timestamp)",
+                "message": "Invalid backup_id (format: space_id/timestamp)",
             }
 
         space_id, timestamp = parts
@@ -348,8 +395,12 @@ class BackupService:
         if not backup_objects:
             return {
                 "status": "not_found",
-                "message": f"Backup '{backup_id}' introuvable",
+                "message": f"Backup '{backup_id}' not found",
             }
+        # Every restore copy source must have usable inventory metadata.  Run
+        # the full proof before target classification or any restore mutation.
+        for obj in backup_objects:
+            inventory_object_size(obj)
 
         # ── Garde Hivemind refus-par-défaut (P2-5 / #37 ; ADR-0014 Accepted) ──
         # Détection READ-ONLY (ADR-0008) AVANT le check hérité _meta.json. La
@@ -366,10 +417,10 @@ class BackupService:
             return {
                 "status": "error",
                 "message": (
-                    f"Restauration refusée : l'état de coordination Hivemind de "
-                    f"'{space_id}' est corrompu / illisible. Fail-closed : refus "
-                    f"quel que soit unsafe_recovery (impossible de classer la "
-                    f"cible en toute sécurité). Voir ADR-0014 + issue #9."
+                    f"Restore refused: Hivemind coordination state for '{space_id}' "
+                    "is corrupt or unreadable. Fail-closed: restore is refused "
+                    "regardless of unsafe_recovery because the target cannot be "
+                    "classified safely. See ADR-0014 and issue #9."
                 ),
             }
 
@@ -384,12 +435,11 @@ class BackupService:
             return {
                 "status": "error",
                 "message": (
-                    f"Restauration refusée : '{space_id}' est un space Hivemind "
-                    f"partagé/unsafe (label='{label}'). Restaurer par-dessus "
-                    f"écraserait l'état de coordination Project Mesh. Passez "
-                    f"unsafe_recovery=True pour une recovery EXPLICITE unsafe "
-                    f"(forçage-en-avant champ-par-champ via CommitRuntime, "
-                    f"voir ADR-0014 / issue #87)."
+                    f"Restore refused: '{space_id}' is a shared or unsafe Hivemind "
+                    f"space (label='{label}'). Restoring over it would overwrite "
+                    "Project Mesh coordination state. Pass unsafe_recovery=True for "
+                    "an EXPLICIT unsafe recovery using field-by-field forward forcing "
+                    "through CommitRuntime. See ADR-0014 and issue #87."
                 ),
             }
 
@@ -409,12 +459,25 @@ class BackupService:
             )
 
         # Pour local_only / not_a_space, on retombe sur le chemin HÉRITÉ inchangé.
+        # A durable source-preparation provenance record permanently removes
+        # DIRECT_LOCAL authority even when the Hivemind prefix was lost. The
+        # explicit shared-Hivemind recovery branch above remains unaffected.
+        try:
+            await assert_direct_local_allowed(space_id)
+        except Exception:
+            return {
+                "status": "error",
+                "message": (
+                    f"Restore refused: '{space_id}' has irreversible Project Mesh "
+                    "source provenance and cannot be restored through the local path."
+                ),
+            }
 
         # Vérifier que l'espace N'existe PAS
         if await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "error",
-                "message": f"L'espace '{space_id}' existe déjà. Supprimez-le d'abord.",
+                "message": f"Space '{space_id}' already exists. Delete it first.",
             }
 
         # Copier tous les fichiers du backup vers l'espace
@@ -516,8 +579,8 @@ class BackupService:
             return {
                 "status": "error",
                 "message": (
-                    f"Restauration refusée : état Hivemind critique corrompu "
-                    f"({exc}). Fail-closed (voir ADR-0014)."
+                    f"Restore refused: critical Hivemind state is corrupt ({exc}). "
+                    "Fail-closed; see ADR-0014."
                 ),
             }
 
@@ -529,11 +592,10 @@ class BackupService:
             return {
                 "status": "error",
                 "message": (
-                    f"Restauration refusée : aucune NodeIdentity locale dans "
-                    f"'{space_id}'. Bootstrap d'une identité de nœud requis "
-                    f"avant un unsafe_recovery (sinon le journal d'audit et "
-                    f"le BankCommit auraient un origin_node_id vide). Voir "
-                    f"ADR-0014 / issue #87."
+                    f"Restore refused: '{space_id}' has no local NodeIdentity. "
+                    "Bootstrap a node identity before unsafe_recovery; otherwise the "
+                    "audit log and BankCommit would have an empty origin_node_id. "
+                    "See ADR-0014 and issue #87."
                 ),
             }
 
@@ -552,10 +614,10 @@ class BackupService:
             return {
                 "status": "error",
                 "message": (
-                    f"Restauration refusée : backup '{backup_id}' contient un "
-                    f"état Hivemind corrompu ({exc}). Fail-closed AVANT "
-                    f"marker RESYNC_REQUIRED (le node live reste classé "
-                    f"inchangé). Voir ADR-0014."
+                    f"Restore refused: backup '{backup_id}' contains corrupt "
+                    f"Hivemind state ({exc}). Fail-closed before the RESYNC_REQUIRED "
+                    "marker, so the live node classification remains unchanged. "
+                    "See ADR-0014."
                 ),
             }
 
@@ -580,12 +642,10 @@ class BackupService:
             return {
                 "status": "error",
                 "message": (
-                    f"Restauration refusée : la bank_version du backup "
-                    f"({backup_pointer_version}) est SUPÉRIEURE au pointeur "
-                    f"live ({live_pointer_version}). Précondition violée. "
-                    f"Utiliser rebuild_pointer_from_commits AVANT, ou "
-                    f"restaurer sur un nœud vierge (fresh node). Voir "
-                    f"ADR-0014 / issue #87."
+                    f"Restore refused: backup bank_version ({backup_pointer_version}) "
+                    f"is GREATER than the live pointer ({live_pointer_version}). "
+                    "The precondition is violated. Run rebuild_pointer_from_commits "
+                    "first, or restore on a fresh node. See ADR-0014 and issue #87."
                 ),
             }
 
@@ -703,11 +763,10 @@ class BackupService:
                 return {
                     "status": "error",
                     "message": (
-                        f"Restauration avortée : la membership de '{space_id}' a "
-                        f"avancé pendant la fenêtre de recovery (courant "
-                        f"{fresh.epoch} >= cible {new_epoch}) — le nœud reste "
-                        f"RESYNC_REQUIRED, relancer après convergence/éviction du "
-                        f"pairing en vol."
+                        f"Restore aborted: membership for '{space_id}' advanced during "
+                        f"the recovery window (current {fresh.epoch} >= target {new_epoch}). "
+                        "The node remains RESYNC_REQUIRED; retry after the in-flight "
+                        "pairing converges or is evicted."
                     ),
                 }
             await store.set_membership(
@@ -862,11 +921,11 @@ class BackupService:
             return {
                 "status": "error",
                 "message": (
-                    f"Restauration interrompue : assert_commit_allowed refuse "
-                    f"({exc.reason.value}: {exc}). État partiellement avancé "
-                    f"(epoch/term/tombstones/queue/acks/watermarks DÉJÀ "
-                    f"forçés en avant ; bank et pointer INCHANGÉS). Voir "
-                    f"ADR-0014 / issue #87."
+                    "Restore interrupted: assert_commit_allowed refused "
+                    f"({exc.reason.value}: {exc}). State was partially advanced "
+                    "(epoch/term/tombstones/queue/acks/watermarks were ALREADY "
+                    "forward-forced; bank and pointer are UNCHANGED). See ADR-0014 "
+                    "and issue #87."
                 ),
             }
 
@@ -1165,27 +1224,27 @@ class BackupService:
                 data = _json.loads(raw)
             except (_json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise CorruptedStateError(
-                    f"Backup _hivemind/{key} : JSON invalide ({exc})"
+                    f"Backup _hivemind/{key}: invalid JSON ({exc})"
                 ) from exc
             if not isinstance(data, dict):
                 raise CorruptedStateError(
-                    f"Backup _hivemind/{key} : racine non-objet "
+                    f"Backup _hivemind/{key}: non-object root "
                     f"({type(data).__name__})"
                 )
             try:
                 return model_cls.model_validate(data)
             except ValidationError as exc:
                 raise CorruptedStateError(
-                    f"Backup _hivemind/{key} : schéma {model_cls.__name__} "
-                    f"violé ({exc})"
+                    f"Backup _hivemind/{key}: {model_cls.__name__} schema "
+                    f"violation ({exc})"
                 ) from exc
             except (ValueError, TypeError) as exc:
                 # ``model_post_init`` (TokenLeaseState invariants) lève
                 # ``ValueError`` brute — on l'aplatit en CorruptedStateError
                 # pour la même taxonomie fail-closed.
                 raise CorruptedStateError(
-                    f"Backup _hivemind/{key} : invariant {model_cls.__name__} "
-                    f"violé ({exc})"
+                    f"Backup _hivemind/{key}: {model_cls.__name__} invariant "
+                    f"violation ({exc})"
                 ) from exc
 
         # Validation Pydantic stricte des fichiers critiques (Codex R2 high
@@ -1226,16 +1285,16 @@ class BackupService:
         # On re-vérifie explicitement pour aligner sur le contrat fail-closed.
         if backup_epoch < 0:
             raise CorruptedStateError(
-                f"Backup _hivemind/members.json : epoch négatif ({backup_epoch})"
+                f"Backup _hivemind/members.json: negative epoch ({backup_epoch})"
             )
         if backup_term < 0:
             raise CorruptedStateError(
-                f"Backup _hivemind/term.json : term négatif ({backup_term})"
+                f"Backup _hivemind/term.json: negative term ({backup_term})"
             )
         if backup_bank_version < -1:
             raise CorruptedStateError(
-                f"Backup _hivemind/bank_version.json : bank_version "
-                f"sous-canonique ({backup_bank_version}, attendu >= -1)"
+                f"Backup _hivemind/bank_version.json: non-canonical "
+                f"bank_version ({backup_bank_version}, expected >= -1)"
             )
 
         # Tombstones : tout fichier non-parsable refuse le restore (Codex
@@ -1252,13 +1311,13 @@ class BackupService:
                 data = _json.loads(raw)
             except (_json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise CorruptedStateError(
-                    f"Backup tombstone '{obj['Key']}' : JSON invalide ({exc})"
+                    f"Backup tombstone '{obj['Key']}': invalid JSON ({exc})"
                 ) from exc
             try:
                 backup_tombs.append(Tombstone.model_validate(data))
             except ValidationError as exc:
                 raise CorruptedStateError(
-                    f"Backup tombstone '{obj['Key']}' : schéma invalide ({exc})"
+                    f"Backup tombstone '{obj['Key']}': invalid schema ({exc})"
                 ) from exc
 
         return backup_epoch, backup_term, backup_bank_version, backup_tombs
@@ -1317,7 +1376,7 @@ class BackupService:
 
         parts = backup_id.split("/", 1)
         if len(parts) != 2:
-            return {"status": "error", "message": "backup_id invalide"}
+            return {"status": "error", "message": "Invalid backup_id"}
 
         space_id, timestamp = parts
         backup_prefix = f"_backups/{space_id}/{timestamp}/"
@@ -1326,7 +1385,7 @@ class BackupService:
         if not all_objects:
             return {
                 "status": "not_found",
-                "message": f"Backup '{backup_id}' introuvable",
+                "message": f"Backup '{backup_id}' not found",
             }
 
         # Créer l'archive tar.gz
@@ -1379,7 +1438,7 @@ class BackupService:
 
         parts = backup_id.split("/", 1)
         if len(parts) != 2:
-            return {"status": "error", "message": "backup_id invalide"}
+            return {"status": "error", "message": "Invalid backup_id"}
 
         space_id, timestamp = parts
         backup_prefix = f"_backups/{space_id}/{timestamp}/"
@@ -1388,7 +1447,7 @@ class BackupService:
         if not objects:
             return {
                 "status": "not_found",
-                "message": f"Backup '{backup_id}' introuvable",
+                "message": f"Backup '{backup_id}' not found",
             }
 
         keys = [o["Key"] for o in objects]

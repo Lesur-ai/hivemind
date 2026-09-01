@@ -317,14 +317,14 @@ RECETTE_NOTES = [
 
 async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
     """Suite RECETTE : pipeline agent → notes → consolidation → bank."""
-    header("🧪 SUITE : RECETTE — Pipeline agent complet")
+    header("🧪 SUITE: RECIPE — Complete agent pipeline")
 
     manager_token = ""
     agent_token = ""
     agent_hash = ""
 
     # 1. Health check
-    section("Recette 1/7 — Health check")
+    section("Recipe 1/7 — Health check")
     try:
         r = await admin.call_tool("system_health", {})
         if r.get("status") in ("healthy", "degraded"):
@@ -338,7 +338,7 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
 
     # 2. Bootstrap/admin crée un manager persistant. Le nouveau token_create
     # refuse volontairement le bootstrap (pas de hash revalidable en store).
-    section("Recette 2/7 — Manager de provisioning")
+    section("Recipe 2/7 — Provisioning manager")
     try:
         r = await admin.call_tool(
             "admin_create_token",
@@ -363,7 +363,7 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
     )
 
     # 3. Le manager crée le space, crée un writer sans scope, puis l'invite.
-    section("Recette 3/7 — Espace + rules")
+    section("Recipe 3/7 — Space + rules")
     try:
         r = await manager.call_tool(
             "space_create",
@@ -396,7 +396,7 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
             return
         agent_token = r["token"]
         agent_hash = r["token_hash"]
-        test_pass("token_create", "writer sans scope initial")
+        test_pass("token_create", "writer without an initial scope")
 
         r = await manager.call_tool(
             "space_invite_token",
@@ -414,10 +414,10 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
         base_url=url, token=agent_token, timeout=600, call_delay=CALL_DELAY
     )
 
-    pause("Space créé → Notes")
+    pause("Space created → Notes")
 
     # 4. Écrire les notes
-    section("Recette 4/7 — Notes live")
+    section("Recipe 4/7 — Live notes")
     notes_ok = 0
     for cat, content in RECETTE_NOTES:
         try:
@@ -441,7 +441,7 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
     pause("Notes written → Consolidation")
 
     # 5. Consolidation
-    section("Recette 5/7 — Consolidation LLM")
+    section("Recipe 5/7 — LLM consolidation")
     consolidation_ready = False
     try:
         t0 = time.monotonic()
@@ -458,20 +458,20 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
                 f"{notes_processed} notes → bank ({dur}s, terminal=succeeded)",
             )
         elif outcome.get("status") == "succeeded":
-            test_fail("consolidate", "terminal=succeeded mais aucune note traitée")
+            test_fail("consolidate", "terminal=succeeded but no notes were processed")
         else:
             test_fail("consolidate", _consolidation_failure_detail(outcome))
     except Exception as e:
         test_fail("consolidate", str(e))
 
     if not consolidation_ready:
-        test_skip("bank_read_all", "consolidation non terminée avec succès")
-        test_skip("bank coherence", "consolidation non terminée avec succès")
+        test_skip("bank_read_all", "consolidation did not complete successfully")
+        test_skip("bank coherence", "consolidation did not complete successfully")
     else:
-        pause("Consolidation terminale OK → Bank")
+        pause("Consolidation succeeded → Bank")
 
         # 6. Lire la bank uniquement après le statut terminal succeeded.
-        section("Recette 6/8 — Lecture bank")
+        section("Recipe 6/8 — Read bank")
         try:
             r = await agent.call_tool("bank_read_all", {"space_id": RECETTE_SPACE})
             files = r.get("files", [])
@@ -479,15 +479,15 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
                 names = [f.get("filename", "?") for f in files]
                 test_pass(
                     "bank_read_all",
-                    f"{len(files)} fichiers : {', '.join(names[:5])}",
+                    f"{len(files)} files: {', '.join(names[:5])}",
                 )
             else:
-                test_fail("bank_read_all", "aucun fichier")
+                test_fail("bank_read_all", "no files")
         except Exception as e:
             test_fail("bank_read_all", str(e))
 
         # 7. Vérifier que bank_read fonctionne pour CHAQUE fichier.
-        section("Recette 7/8 — Cohérence bank_read vs bank_list")
+        section("Recipe 7/8 — bank_read vs bank_list consistency")
         try:
             r_list = await agent.call_tool("bank_list", {"space_id": RECETTE_SPACE})
             bank_files = r_list.get("files", [])
@@ -510,26 +510,26 @@ async def suite_recette(admin: MCPClient, url: str, do_cleanup: bool):
             if broken:
                 test_fail(
                     "bank coherence",
-                    f"{len(broken)} fichier(s) illisibles via bank_read : {broken}",
+                    f"{len(broken)} unreadable file(s) via bank_read: {broken}",
                 )
             elif readable > 0:
                 test_pass(
                     "bank coherence",
-                    f"{readable}/{len(bank_files)} fichiers lisibles via bank_read",
+                    f"{readable}/{len(bank_files)} files readable via bank_read",
                 )
             else:
-                test_skip("bank coherence", "aucun fichier bank")
+                test_skip("bank coherence", "no bank files")
         except Exception as e:
             test_fail("bank coherence", str(e))
 
     # 8. Cleanup
     if do_cleanup:
-        section("Recette 7/7 — Cleanup")
+        section("Recipe 7/7 — Cleanup")
         try:
             await admin.call_tool(
                 "space_delete", {"space_id": RECETTE_SPACE, "confirm": True}
             )
-            test_pass("cleanup recette", f"space '{RECETTE_SPACE}' supprimé")
+            test_pass("recipe cleanup", f"space '{RECETTE_SPACE}' deleted")
         except Exception:
             pass
         try:
@@ -561,7 +561,7 @@ Contexte de test.
 
 async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
     """Suite ISOLATION : vérifie l'allowlist inter-spaces mono-tenant."""
-    header("🔒 SUITE : ISOLATION — allowlist inter-spaces")
+    header("🔒 SUITE: ISOLATION — Cross-space allowlist")
 
     token_a = token_b = token_ro = token_manager = ""
 
@@ -599,7 +599,7 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             test_fail(f"token {label}", str(e))
 
     if not (token_a and token_b and token_ro and token_manager):
-        test_fail("setup", "tokens manquants, arrêt")
+        test_fail("setup", "tokens missing; stopping")
         return
 
     for sid in [ISO_SPACE_A, ISO_SPACE_B]:
@@ -613,7 +613,7 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
                 },
             )
             if r.get("status") in ("created", "already_exists"):
-                test_pass(f"space {sid}", "créé")
+                test_pass(f"space {sid}", "created")
             else:
                 test_fail(f"space {sid}", r.get("message", ""))
         except Exception as e:
@@ -648,18 +648,18 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
         base_url=url, token=token_manager, timeout=120, call_delay=CALL_DELAY
     )
 
-    pause("Setup OK → Isolation")
+    pause("Setup complete → Isolation")
 
     # ── ISOLATION ──────────────────────────────────────
-    section("Isolation 2/6 — Accès inter-espaces")
+    section("Isolation 2/6 — Cross-space access")
 
     # A ne peut pas lire B
     try:
         r = await ca.call_tool("live_read", {"space_id": ISO_SPACE_B, "limit": 10})
         if r.get("status") == "error":
-            test_pass("A → B REFUSÉ", "isolation OK")
+            test_pass("A → B DENIED", "isolation OK")
         else:
-            test_fail("A → B DEVRAIT ÉCHOUER", f"status={r.get('status')}")
+            test_fail("A → B SHOULD FAIL", f"status={r.get('status')}")
     except Exception as e:
         test_fail("A → B", str(e))
 
@@ -667,9 +667,9 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
     try:
         r = await cb.call_tool("live_read", {"space_id": ISO_SPACE_A, "limit": 10})
         if r.get("status") == "error":
-            test_pass("B → A REFUSÉ", "isolation OK")
+            test_pass("B → A DENIED", "isolation OK")
         else:
-            test_fail("B → A DEVRAIT ÉCHOUER", f"status={r.get('status')}")
+            test_fail("B → A SHOULD FAIL", f"status={r.get('status')}")
     except Exception as e:
         test_fail("B → A", str(e))
 
@@ -679,7 +679,7 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
         if r.get("status") == "ok":
             test_pass("A → A OK", f"{r.get('total', 0)} notes")
         else:
-            test_fail("A → A DEVRAIT OK", r.get("message", ""))
+            test_fail("A → A SHOULD SUCCEED", r.get("message", ""))
     except Exception as e:
         test_fail("A → A", str(e))
 
@@ -694,27 +694,27 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             },
         )
         if r.get("status") == "error":
-            test_pass("A écrire B REFUSÉ", "isolation OK")
+            test_pass("A → B write DENIED", "isolation OK")
         else:
-            test_fail("A écrire B DEVRAIT ÉCHOUER", f"status={r.get('status')}")
+            test_fail("A → B write SHOULD FAIL", f"status={r.get('status')}")
     except Exception as e:
-        test_fail("A écrire B", str(e))
+        test_fail("A → B write", str(e))
 
     # space_list filtré
     try:
         r = await ca.call_tool("space_list", {})
         spaces = [s.get("space_id") for s in r.get("spaces", [])]
         if ISO_SPACE_A in spaces and ISO_SPACE_B not in spaces:
-            test_pass("space_list A filtré", f"voit {spaces}")
+            test_pass("space_list A filtered", f"sees {spaces}")
         else:
             test_fail("space_list A", f"spaces={spaces}")
     except Exception as e:
         test_fail("space_list A", str(e))
 
-    pause("Isolation OK → Backup filtering")
+    pause("Isolation complete → Backup filtering")
 
     # ── BACKUP FILTERING ──────────────────────────────
-    section("Isolation 3/6 — Filtrage backup_list")
+    section("Isolation 3/6 — backup_list filtering")
 
     try:
         r = await ca.call_tool("backup_list", {})
@@ -723,9 +723,9 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             b.get("space_id", b.get("backup_id", "").split("/")[0]) for b in backups
         }
         if ISO_SPACE_B not in bk_spaces:
-            test_pass("backup_list A filtré", f"ne voit PAS {ISO_SPACE_B}")
+            test_pass("backup_list A filtered", f"does NOT see {ISO_SPACE_B}")
         else:
-            test_fail("backup_list A VOIT B", f"spaces={bk_spaces}")
+            test_fail("backup_list A sees B", f"spaces={bk_spaces}")
     except Exception as e:
         test_fail("backup_list A", str(e))
 
@@ -736,25 +736,25 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             b.get("space_id", b.get("backup_id", "").split("/")[0]) for b in backups
         }
         if ISO_SPACE_A not in bk_spaces:
-            test_pass("backup_list B filtré", f"ne voit PAS {ISO_SPACE_A}")
+            test_pass("backup_list B filtered", f"does NOT see {ISO_SPACE_A}")
         else:
-            test_fail("backup_list B VOIT A", f"spaces={bk_spaces}")
+            test_fail("backup_list B sees A", f"spaces={bk_spaces}")
     except Exception as e:
         test_fail("backup_list B", str(e))
 
     pause("Backup OK → Read-only")
 
     # ── READ-ONLY ─────────────────────────────────────
-    section("Isolation 4/6 — Read-only ne peut pas écrire")
+    section("Isolation 4/6 — Read-only cannot write")
 
     try:
         r = await ro.call_tool("live_read", {"space_id": ISO_SPACE_A, "limit": 10})
         if r.get("status") == "ok":
-            test_pass("reader lire A OK", f"{r.get('total', 0)} notes")
+            test_pass("reader reads A OK", f"{r.get('total', 0)} notes")
         else:
-            test_fail("reader lire A", r.get("message", ""))
+            test_fail("reader reads A", r.get("message", ""))
     except Exception as e:
-        test_fail("reader lire A", str(e))
+        test_fail("reader reads A", str(e))
 
     try:
         r = await ro.call_tool(
@@ -766,11 +766,11 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             },
         )
         if r.get("status") == "error" and "write" in r.get("message", "").lower():
-            test_pass("reader écrire REFUSÉ", "write requis")
+            test_pass("reader write DENIED", "write required")
         else:
-            test_fail("reader écrire DEVRAIT ÉCHOUER", f"status={r.get('status')}")
+            test_fail("reader write SHOULD FAIL", f"status={r.get('status')}")
     except Exception as e:
-        test_fail("reader écrire", str(e))
+        test_fail("reader write", str(e))
 
     try:
         r = await ro.call_tool(
@@ -782,10 +782,10 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             },
         )
         if r.get("status") == "error":
-            test_pass("reader space_create REFUSÉ", "manage requis")
+            test_pass("reader space_create DENIED", "manage required")
         else:
             test_fail(
-                "reader space_create DEVRAIT ÉCHOUER", f"status={r.get('status')}"
+                "reader space_create SHOULD FAIL", f"status={r.get('status')}"
             )
     except Exception as e:
         test_fail("reader space_create", str(e))
@@ -802,9 +802,9 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             },
         )
         if r.get("status") == "error" and "manage" in r.get("message", "").lower():
-            test_pass("writer space_create REFUSÉ", "manage requis")
+            test_pass("writer space_create DENIED", "manage required")
         else:
-            test_fail("writer space_create DEVRAIT ÉCHOUER", str(r))
+            test_fail("writer space_create SHOULD FAIL", str(r))
     except Exception as e:
         test_fail("writer space_create", str(e))
 
@@ -832,21 +832,21 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
         r = await ca.call_tool("bank_consolidate", {"space_id": ISO_SPACE_A})
         if r.get("status") in ("ok", "running", "queued"):
             test_pass(
-                "write+agent omis → caller",
+                "write+agent omitted → caller",
                 f"status={r.get('status')}",
             )
         elif (
             r.get("status") == "error" and "permission" in r.get("message", "").lower()
         ):
-            test_fail("write+agent omis REFUSÉ", r.get("message", ""))
+            test_fail("write+agent omitted DENIED", r.get("message", ""))
         else:
             # Peut échouer pour d'autres raisons (pas de notes, timeout...) — pas un problème de permission
             test_pass(
-                "write+agent omis → pas d'erreur permission",
+                "write+agent omitted → no permission error",
                 f"status={r.get('status')}",
             )
     except Exception as e:
-        test_fail("write+agent omis", str(e))
+        test_fail("write+agent omitted", str(e))
 
     # write + agent="" explicite → REFUSÉ (scope global exige manage)
     try:
@@ -854,10 +854,10 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             "bank_consolidate", {"space_id": ISO_SPACE_A, "agent": ""}
         )
         if r.get("status") == "error" and "manage" in r.get("message", "").lower():
-            test_pass("write+agent='' REFUSÉ", "manage requis")
+            test_pass("write+agent='' DENIED", "manage required")
         else:
             test_fail(
-                "write+agent='' DEVRAIT ÉCHOUER",
+                "write+agent='' SHOULD FAIL",
                 f"status={r.get('status')}, msg={r.get('message', '')}",
             )
     except Exception as e:
@@ -873,29 +873,29 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
             },
         )
         if r.get("status") == "error" and "manage" in r.get("message", "").lower():
-            test_pass("write+agent=autre REFUSÉ", "manage requis")
+            test_pass("write+agent=other DENIED", "manage required")
         else:
             test_fail(
-                "write+agent=autre DEVRAIT ÉCHOUER",
+                "write+agent=other SHOULD FAIL",
                 f"status={r.get('status')}, msg={r.get('message', '')}",
             )
     except Exception as e:
-        test_fail("write+agent=autre", str(e))
+        test_fail("write+agent=other", str(e))
 
     # read-only ne peut pas consolider
     try:
         r = await ro.call_tool("bank_consolidate", {"space_id": ISO_SPACE_A})
         if r.get("status") == "error" and "write" in r.get("message", "").lower():
-            test_pass("reader consolidate REFUSÉ", "write requis")
+            test_pass("reader consolidate DENIED", "write required")
         else:
-            test_fail("reader consolidate DEVRAIT ÉCHOUER", f"status={r.get('status')}")
+            test_fail("reader consolidate SHOULD FAIL", f"status={r.get('status')}")
     except Exception as e:
         test_fail("reader consolidate", str(e))
 
-    pause("Consolidation OK → Auto-ajout")
+    pause("Consolidation complete → Automatic addition")
 
     # ── AUTO-AJOUT MANAGER ────────────────────────────
-    section("Isolation 6/7 — Manager crée et reçoit le nouveau space (LM2-11)")
+    section("Isolation 6/7 — Manager creates and receives the new space (LM2-11)")
 
     try:
         r = await manager.call_tool(
@@ -911,9 +911,9 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
         )
         if r.get("status") == "created":
             if r.get("token_auto_updated"):
-                test_pass("auto-ajout space → token", r.get("token_message", "OK"))
+                test_pass("automatic space addition → token", r.get("token_message", "OK"))
             else:
-                test_pass("space_create OK", "(token non restreint ou déjà ajouté)")
+                test_pass("space_create OK", "(token unrestricted or already added)")
         else:
             test_fail("space_create C", r.get("message", ""))
     except Exception as e:
@@ -922,13 +922,13 @@ async def suite_isolation(admin: MCPClient, url: str, do_cleanup: bool):
     try:
         r = await manager.call_tool("space_info", {"space_id": ISO_SPACE_C})
         if r.get("status") == "ok":
-            test_pass("A → space-C accessible", "auto-ajout fonctionnel")
+            test_pass("A → space-C accessible", "automatic addition works")
         else:
-            test_fail("A → space-C DEVRAIT OK", r.get("message", ""))
+            test_fail("A → space-C SHOULD SUCCEED", r.get("message", ""))
     except Exception as e:
         test_fail("A → space-C", str(e))
 
-    pause("Auto-ajout OK → Cleanup")
+    pause("Automatic addition complete → Cleanup")
 
     # ── CLEANUP ───────────────────────────────────────
     if do_cleanup:
@@ -974,10 +974,10 @@ QUALITE_TOKEN = "test-agent-qualite"
 
 async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
     """Suite QUALITE : teste les principaux outils MCP."""
-    header("🧪 SUITE : QUALITE — Outils MCP")
+    header("🧪 SUITE: QUALITY — MCP tools")
 
     # System
-    section("Qualité — System")
+    section("Quality — System")
     try:
         r = await admin.call_tool("system_health", {})
         if r.get("status") in ("healthy", "degraded"):
@@ -995,7 +995,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         if r.get("status") == "ok" and r.get("tools_count", 0) >= 25:
             test_pass(
                 "system_about",
-                f"{r.get('tools_count')} outils v{r.get('version', '?')}",
+                f"{r.get('tools_count')} tools v{r.get('version', '?')}",
             )
         else:
             test_fail("system_about", str(r))
@@ -1016,7 +1016,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         test_fail("system_whoami", str(e))
 
     # Admin tokens
-    section("Qualité — Admin tokens")
+    section("Quality — Admin tokens")
     agent_token = ""
     try:
         r = await admin.call_tool(
@@ -1042,9 +1042,9 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         r = await admin.call_tool("admin_list_tokens", {})
         found = any(t.get("name") == QUALITE_TOKEN for t in r.get("tokens", []))
         if found:
-            test_pass("admin_list_tokens", f"{QUALITE_TOKEN} trouvé")
+            test_pass("admin_list_tokens", f"{QUALITE_TOKEN} found")
         else:
-            test_fail("admin_list_tokens", "token non trouvé")
+            test_fail("admin_list_tokens", "token not found")
     except Exception as e:
         test_fail("admin_list_tokens", str(e))
 
@@ -1053,7 +1053,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
     )
 
     # Space
-    section("Qualité — Space")
+    section("Quality — Space")
     try:
         r = await admin.call_tool(
             "space_create",
@@ -1096,14 +1096,14 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
                 "rules": "# Test Rules v1.2.0\n\nRules de test pour space_update_rules.",
             },
         )
-        test_pass("space_update_rules", f"OK ({r.get('rules_size', '?')} o)") if r.get(
+        test_pass("space_update_rules", f"OK ({r.get('rules_size', '?')} bytes)") if r.get(
             "status"
         ) == "ok" else test_fail("space_update_rules", str(r))
     except Exception as e:
         test_fail("space_update_rules", str(e))
 
     # Live
-    section("Qualité — Live")
+    section("Quality — Live")
     try:
         r = await agent.call_tool(
             "live_note",
@@ -1133,7 +1133,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
             test_fail(tool, str(e))
 
     # Bank
-    section("Qualité — Bank")
+    section("Quality — Bank")
     consolidation_ready = False
     try:
         t0 = time.monotonic()
@@ -1151,7 +1151,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
             )
         elif outcome.get("status") == "succeeded":
             test_fail(
-                "bank_consolidate", "terminal=succeeded mais aucune note traitée"
+                "bank_consolidate", "terminal=succeeded but no notes were processed"
             )
         else:
             test_fail("bank_consolidate", _consolidation_failure_detail(outcome))
@@ -1171,11 +1171,11 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
             except Exception as e:
                 test_fail(tool, str(e))
     else:
-        test_skip("bank_list", "consolidation non terminée avec succès")
-        test_skip("bank_read_all", "consolidation non terminée avec succès")
+        test_skip("bank_list", "consolidation did not complete successfully")
+        test_skip("bank_read_all", "consolidation did not complete successfully")
 
     # Bank admin tools — tests sous-dossiers v0.9.0
-    section("Qualité — Bank sous-dossiers (v0.9.0)")
+    section("Quality — Bank subdirectories (v0.9.0)")
 
     # 1. Écrire un fichier dans un sous-dossier
     try:
@@ -1189,7 +1189,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         )
         if r.get("status") == "ok":
             test_pass(
-                "bank_write (subdir)", f"subdir/test_file.md ({r.get('size', 0)} o)"
+                "bank_write (subdir)", f"subdir/test_file.md ({r.get('size', 0)} bytes)"
             )
         else:
             test_fail("bank_write (subdir)", str(r))
@@ -1202,15 +1202,15 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         filenames = [f.get("filename", "") for f in r.get("files", [])]
         if "subdir/test_file.md" in filenames:
             test_pass(
-                "bank_list (relpath)", f"'subdir/test_file.md' trouvé dans {filenames}"
+                "bank_list (relpath)", f"'subdir/test_file.md' found in {filenames}"
             )
         elif "test_file.md" in filenames:
             test_fail(
                 "bank_list (relpath)",
-                f"retourne basename au lieu du chemin relatif: {filenames}",
+                f"returned basename instead of relative path: {filenames}",
             )
         else:
-            test_fail("bank_list (relpath)", f"fichier non trouvé dans: {filenames}")
+            test_fail("bank_list (relpath)", f"file not found in: {filenames}")
     except Exception as e:
         test_fail("bank_list (relpath)", str(e))
 
@@ -1219,12 +1219,12 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         r = await agent.call_tool("bank_read_all", {"space_id": QUALITE_SPACE})
         filenames = [f.get("filename", "") for f in r.get("files", [])]
         if "subdir/test_file.md" in filenames:
-            test_pass("bank_read_all (relpath)", "'subdir/test_file.md' trouvé")
+            test_pass("bank_read_all (relpath)", "'subdir/test_file.md' found")
         elif "test_file.md" in filenames:
-            test_fail("bank_read_all (relpath)", f"retourne basename: {filenames}")
+            test_fail("bank_read_all (relpath)", f"returned basename: {filenames}")
         else:
             test_fail(
-                "bank_read_all (relpath)", f"fichier non trouvé dans: {filenames}"
+                "bank_read_all (relpath)", f"file not found in: {filenames}"
             )
     except Exception as e:
         test_fail("bank_read_all (relpath)", str(e))
@@ -1239,7 +1239,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
             },
         )
         if r.get("status") == "ok" and "Test" in r.get("content", ""):
-            test_pass("bank_read (subdir)", f"OK ({r.get('size', 0)} o)")
+            test_pass("bank_read (subdir)", f"OK ({r.get('size', 0)} bytes)")
         else:
             test_fail("bank_read (subdir)", str(r))
     except Exception as e:
@@ -1256,7 +1256,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
             },
         )
         if r.get("status") == "deleted":
-            test_pass("bank_delete (subdir)", f"{r.get('files_deleted', 0)} supprimés")
+            test_pass("bank_delete (subdir)", f"{r.get('files_deleted', 0)} deleted")
         else:
             test_fail("bank_delete (subdir)", str(r))
     except Exception as e:
@@ -1274,7 +1274,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         if r.get("status") == "ok":
             test_pass(
                 "bank_repair",
-                f"scan: {r.get('files_ok', 0)} OK, {r.get('files_to_repair', 0)} à réparer, {r.get('duplicates_found', 0)} doublons",
+                f"scan: {r.get('files_ok', 0)} OK, {r.get('files_to_repair', 0)} to repair, {r.get('duplicates_found', 0)} duplicates",
             )
         else:
             test_fail("bank_repair", str(r))
@@ -1282,7 +1282,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
         test_fail("bank_repair", str(e))
 
     # Backup
-    section("Qualité — Backup")
+    section("Quality — Backup")
     backup_id = ""
     try:
         r = await admin.call_tool(
@@ -1317,7 +1317,7 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
             test_fail("backup_delete", str(e))
 
     # GC
-    section("Qualité — GC")
+    section("Quality — GC")
     try:
         r = await admin.call_tool(
             "admin_gc_notes",
@@ -1336,12 +1336,12 @@ async def suite_qualite(admin: MCPClient, url: str, do_cleanup: bool):
 
     # Cleanup
     if do_cleanup:
-        section("Qualité — Cleanup")
+        section("Quality — Cleanup")
         try:
             await admin.call_tool(
                 "space_delete", {"space_id": QUALITE_SPACE, "confirm": True}
             )
-            test_pass("cleanup qualité", "OK")
+            test_pass("quality cleanup", "OK")
         except Exception:
             pass
         try:
@@ -1410,10 +1410,10 @@ async def suite_graph(
     graph_token: str = "",
 ):
     """Suite GRAPH : test de l'override Hivemind → Graph Memory."""
-    header("🌉 SUITE : GRAPH — Pont vers Graph Memory")
+    header("🌉 SUITE: GRAPH — Graph Memory bridge")
 
     if not graph_url or not graph_token:
-        test_skip("graph (toute la suite)", "pas de --graph-url ou --graph-token")
+        test_skip("graph (entire suite)", "--graph-url or --graph-token not provided")
         return
 
     agent_token = ""
@@ -1489,7 +1489,7 @@ async def suite_graph(
             )
         elif outcome.get("status") == "succeeded":
             test_fail(
-                "consolidate graph", "terminal=succeeded mais aucune note traitée"
+                "consolidate graph", "terminal=succeeded but no notes were processed"
             )
         else:
             test_fail("consolidate graph", _consolidation_failure_detail(outcome))
@@ -1499,13 +1499,13 @@ async def suite_graph(
     if not consolidation_ready:
         test_skip(
             "graph connect/push",
-            "consolidation non terminée avec succès; aucun push long exécuté",
+            "consolidation did not complete successfully; no long-memory push was run",
         )
         if do_cleanup:
             await _cleanup_graph_suite(admin)
         return
 
-    pause("Consolidation terminale OK → Connect")
+    pause("Consolidation succeeded → Connect")
 
     # Connect
     section("Graph 2/6 — graph_connect")
@@ -1535,7 +1535,7 @@ async def suite_graph(
         r = await agent.call_tool("graph_push", {"space_id": GRAPH_SPACE})
         dur = round(time.monotonic() - t0, 1)
         if r.get("status") == "ok":
-            test_pass("graph_push", f"{r.get('pushed', 0)} fichiers ({dur}s)")
+            test_pass("graph_push", f"{r.get('pushed', 0)} files ({dur}s)")
         else:
             test_fail("graph_push", r.get("message", str(r)))
     except Exception as e:
@@ -1561,7 +1561,7 @@ async def suite_graph(
     try:
         r = await agent.call_tool("graph_disconnect", {"space_id": GRAPH_SPACE})
         if r.get("status") in ("ok", "disconnected"):
-            test_pass("graph_disconnect", "déconnecté")
+            test_pass("graph_disconnect", "disconnected")
         else:
             test_fail("graph_disconnect", r.get("message", str(r)))
     except Exception as e:
@@ -1578,13 +1578,13 @@ async def suite_graph(
 
 SUITES = {
     "recette": (
-        "🧪 Pipeline agent complet (notes → consolidation → bank)",
+        "🧪 Complete agent pipeline (notes → consolidation → bank)",
         suite_recette,
     ),
-    "isolation": ("🔒 Allowlist inter-spaces (mono-tenant)", suite_isolation),
-    "qualite": ("🧪 Tests de qualité des outils MCP", suite_qualite),
+    "isolation": ("🔒 Cross-space allowlist (single-tenant)", suite_isolation),
+    "qualite": ("🧪 MCP tool quality tests", suite_qualite),
     "graph": (
-        "🌉 Pont vers Graph Memory (nécessite --graph-url et --graph-token)",
+        "🌉 Graph Memory bridge (requires --graph-url and --graph-token)",
         suite_graph,
     ),
 }
@@ -1608,14 +1608,14 @@ async def run_all(
     )
     t0 = time.monotonic()
 
-    header(f"🏗️  RECETTE GLOBALE — Hivemind {PRODUCT_VERSION}")
-    print(f"  {C}Serveur :{Z} {url}")
-    print(f"  {C}Suites  :{Z} {', '.join(suites_to_run)}")
+    header(f"🏗️  GLOBAL RECIPE — Hivemind {PRODUCT_VERSION}")
+    print(f"  {C}Server:{Z} {url}")
+    print(f"  {C}Test suites:{Z} {', '.join(suites_to_run)}")
 
     for name in suites_to_run:
         if name not in SUITES:
-            print(f"\n  {R}❌ Suite inconnue : '{name}'{Z}")
-            print(f"  Suites disponibles : {', '.join(SUITES.keys())}")
+            print(f"\n  {R}❌ Unknown suite: '{name}'{Z}")
+            print(f"  Available suites: {', '.join(SUITES.keys())}")
             continue
         desc, func = SUITES[name]
         if name == "graph":
@@ -1629,7 +1629,7 @@ async def run_all(
     duration = round(time.monotonic() - t0, 1)
     total = passed + failed
 
-    header("📊 RÉSUMÉ GLOBAL")
+    header("📊 GLOBAL SUMMARY")
     print()
     for status, name in results:
         icon = {"PASS": f"{G}✅", "FAIL": f"{R}❌", "SKIP": f"{Y}⏭ "}[status]
@@ -1639,13 +1639,13 @@ async def run_all(
     print(f"  {G}Passed   :{Z} {passed}")
     print(f"  {R}Failed   :{Z} {failed}")
     print(f"  {Y}Skipped  :{Z} {skipped}")
-    print(f"  {C}Suites   :{Z} {', '.join(suites_to_run)}")
+    print(f"  {C}Test suites:{Z} {', '.join(suites_to_run)}")
     print(f"  {C}Duration :{Z} {duration}s")
 
     if failed == 0:
-        print(f"\n  {G}{B}🎉 RECETTE OK — {passed} PASS, 0 FAIL{Z}")
+        print(f"\n  {G}{B}🎉 RECIPE PASSED — {passed} PASS, 0 FAIL{Z}")
     else:
-        print(f"\n  {R}{B}💥 RECETTE KO — {failed} test(s) en erreur{Z}")
+        print(f"\n  {R}{B}💥 RECIPE FAILED — {failed} failing test(s){Z}")
 
     return failed
 
@@ -1676,66 +1676,66 @@ def main():
     os.environ["HIVEMIND_ACTIVE_TEST_RUNNER"] = f"manual:{os.getpid()}"
 
     ap = argparse.ArgumentParser(
-        description=f"Recette globale — Hivemind {PRODUCT_VERSION}",
+        description=f"Global recipe — Hivemind {PRODUCT_VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Exemples :
-  uv run python scripts/test_recette.py                          # Toutes les suites
-  uv run python scripts/test_recette.py --suite isolation       # Juste isolation
-  uv run python scripts/test_recette.py --suite recette,qualite # Plusieurs suites
-  uv run python scripts/test_recette.py --list                  # Lister les suites
+Examples:
+  uv run python scripts/test_recette.py                          # All test suites
+  uv run python scripts/test_recette.py --suite isolation       # Isolation only
+  uv run python scripts/test_recette.py --suite recette,qualite # Multiple test suites
+  uv run python scripts/test_recette.py --list                  # List test suites
   uv run python scripts/test_recette.py --suite isolation -v --step
 """,
     )
     ap.add_argument(
         "--url",
         default=os.environ.get("MCP_URL", "http://localhost:8080"),
-        help="URL du serveur Hivemind (défaut: $MCP_URL ou localhost:8080)",
+        help="Hivemind server URL (default: $MCP_URL or localhost:8080)",
     )
     ap.add_argument(
         "--token",
         default=os.environ.get("ADMIN_BOOTSTRAP_KEY", ""),
-        help="Bootstrap key admin (défaut: $ADMIN_BOOTSTRAP_KEY ou .env)",
+        help="Admin bootstrap key (default: $ADMIN_BOOTSTRAP_KEY or .env)",
     )
     ap.add_argument(
         "--suite",
         default="",
-        help=f"Suites à exécuter, séparées par virgules (défaut: toutes). "
-        f"Disponibles: {', '.join(SUITES.keys())}",
+        help=f"Comma-separated test suites to run (default: all). "
+        f"Available: {', '.join(SUITES.keys())}",
     )
     ap.add_argument(
-        "--list", action="store_true", help="Lister les suites disponibles et quitter"
+        "--list", action="store_true", help="List available test suites and exit"
     )
     ap.add_argument(
-        "--no-cleanup", action="store_true", help="Conserver les données de test"
+        "--no-cleanup", action="store_true", help="Keep test data"
     )
-    ap.add_argument("--step", action="store_true", help="Mode pas-à-pas")
+    ap.add_argument("--step", action="store_true", help="Step-by-step mode")
     ap.add_argument(
         "--pause",
         type=int,
         default=0,
-        help="Pause N secondes entre étapes clés (permet d'observer sur /live)",
+        help="Pause N seconds between key steps (allows observation on /live)",
     )
-    ap.add_argument("-v", "--verbose", action="store_true", help="Affichage détaillé")
+    ap.add_argument("-v", "--verbose", action="store_true", help="Detailed output")
     ap.add_argument(
         "--graph-url",
         default=os.environ.get("GRAPH_MEM_URL", ""),
-        help="URL de Graph Memory (pour --suite graph)",
+        help="Graph Memory URL (for --suite graph)",
     )
     ap.add_argument(
         "--graph-token",
         default=os.environ.get("GRAPH_MEM_TOKEN", ""),
-        help="Token Graph Memory (pour --suite graph)",
+        help="Graph Memory token (for --suite graph)",
     )
     a = ap.parse_args()
 
     # --list : afficher les suites et quitter
     if a.list:
-        print(f"\n{B}Suites disponibles :{Z}\n")
+        print(f"\n{B}Available test suites:{Z}\n")
         for name, (desc, _) in SUITES.items():
             print(f"  {C}{name:12s}{Z}  {desc}")
         print(
-            f"\n  Utilisation : uv run python scripts/test_recette.py --suite {','.join(SUITES.keys())}"
+            f"\n  Usage: uv run python scripts/test_recette.py --suite {','.join(SUITES.keys())}"
         )
         sys.exit(0)
 
@@ -1746,7 +1746,7 @@ Exemples :
     if not a.token:
         a.token = _read_key()
     if not a.token:
-        print("\033[91m❌ ADMIN_BOOTSTRAP_KEY requis (--token ou .env)\033[0m")
+        print("\033[91m❌ ADMIN_BOOTSTRAP_KEY is required (--token or .env)\033[0m")
         sys.exit(1)
 
     # Déterminer les suites à exécuter

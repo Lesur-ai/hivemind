@@ -16,7 +16,7 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.4.0-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.4.1-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#requirements)
@@ -248,7 +248,7 @@ explicit authorization or confirmation gates:
 
 | Tool | Guard |
 | --- | --- |
-| `bank_compact` | `manage`; dry-run by default |
+| `bank_compact` | `manage`; dry-run by default; apply is DirectLocal-only |
 | `bank_repair` | `manage`; dry-run by default |
 | `mid_write` (`bank_write`) | `manage`; writes a bank file directly |
 | `mid_delete` (`bank_delete`) | `manage`; requires `confirm=True` |
@@ -257,6 +257,16 @@ explicit authorization or confirmation gates:
 | `admin_purge_tokens` | `admin`; destructive modes require confirmation |
 | `long_push` (`graph_push`) | `include_volatile=True` is opt-in and requires `manage` |
 | `long_status` (`graph_status`) | `include_graph` is opt-in |
+
+`bank_compact` reports every historical size field in persisted UTF-8 bytes.
+`COMPACT_THRESHOLD` is a finite aggregate context-pressure ratio in `(0, 1]`;
+`BANK_FILE_MAX_SIZE` is a positive hard per-file byte limit. A manual apply is
+available only on a DirectLocal route. A shared Project Mesh route refuses
+before the provider, preimage, or bank write rather than falling back to a
+local write. Oversized or context-incompatible documents fail closed instead
+of being split; multipart compaction and crash-durable recovery are deferred to
+v1.5.0. See the [MCP tool specification](docs/MCP_TOOLS_SPEC.md)
+for the recovery result contract.
 
 ## Security and boundaries
 

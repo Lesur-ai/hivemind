@@ -140,3 +140,23 @@ def _isolate_inference_holders():
     finally:
         for target, snapshot in stateful:
             target.restore_for_tests(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_reservation_guard_checkers():
+    """Keep ASGI app checker closures from leaking into unrelated tests.
+
+    ``create_app()`` intentionally installs four process-wide authority hooks.
+    Production owns one serving lifecycle, but the suite constructs many apps
+    in one interpreter. Restore the exact prior callables after every test so a
+    disabled-mode core checker cannot later resolve real S3 from a fake-backed
+    unit test.
+    """
+
+    from live_mem.core import reservation_guard
+
+    snapshot = reservation_guard.snapshot_for_tests()
+    try:
+        yield
+    finally:
+        reservation_guard.restore_for_tests(snapshot)

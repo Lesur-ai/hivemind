@@ -1132,7 +1132,10 @@ def test_server_disabled_mode_does_not_import_or_create_mesh_state(
             "-c",
             (
                 "import sys; from live_mem.server import create_app; "
-                "create_app(); assert 'live_mem.mesh' not in sys.modules; "
+                "create_app(); from live_mem.core.reservation_guard import "
+                "has_direct_local_checker, has_reservation_checker; "
+                "assert has_direct_local_checker(); assert has_reservation_checker(); "
+                "assert 'live_mem.mesh' not in sys.modules; "
                 "print('ok')"
             ),
         ],
@@ -1146,6 +1149,35 @@ def test_server_disabled_mode_does_not_import_or_create_mesh_state(
     assert result.returncode == 0, result.stderr
     assert result.stdout == "ok\n"
     assert not (secure_parent / "mesh-process-locks").exists()
+
+
+def test_server_disabled_create_app_installs_core_checkers_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberately leave create_app's process-global closures installed."""
+
+    from live_mem import server
+    from live_mem.core.reservation_guard import (
+        has_direct_local_checker,
+        has_reservation_checker,
+    )
+
+    monkeypatch.setattr(server.settings, "admin_bootstrap_key", "A" * 32)
+    monkeypatch.setattr(server.settings, "hivemind_mesh_enabled", "false")
+    server.create_app()
+    assert has_reservation_checker()
+    assert has_direct_local_checker()
+
+
+async def test_following_fake_engine_isolated_from_create_app_checkers() -> None:
+    """The suite fixture restores checker state between adjacent tests."""
+
+    from live_mem.core.engines import EngineRegistry
+    from live_mem.core.write_sink import DirectLocalWriteSink
+    from tests.test_hivemind_state import FakeStorage
+
+    sink = await EngineRegistry(storage=FakeStorage()).resolve_sink("local-space")
+    assert isinstance(sink, DirectLocalWriteSink)
 
 
 def test_server_default_mode_fails_closed_without_mesh_identity(tmp_path: Path) -> None:
@@ -1192,6 +1224,8 @@ def test_server_enabled_mode_acquires_secure_process_identity_lock(
             (
                 _NON_LINUX_PROCESS_LOCK_TEST_SEAM
                 + "from live_mem.server import create_app, mcp; create_app(); "
+                "from live_mem.core.reservation_guard import has_direct_local_checker; "
+                "assert has_direct_local_checker(); "
                 "assert all(not tool.name.startswith('mesh_') for tool in "
                 "mcp._tool_manager.list_tools()); print('ok')"
             ),

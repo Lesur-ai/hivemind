@@ -88,6 +88,7 @@ function createHarness() {
     const actions = {};
     const calls = [];
     const pendingGc = [];
+    const pendingCompact = [];
     const modals = [];
     const serverMessages = [];
     const toasts = [];
@@ -137,9 +138,14 @@ function createHarness() {
                     spaces: [{ space_id: 'alpha' }, { space_id: 'beta' }],
                 });
             }
-            assert.equal(tool, 'admin_gc_notes', `unexpected tool ${tool}`);
             const item = deferred();
-            pendingGc.push({ ...item, args });
+            if (tool === 'admin_gc_notes') {
+                pendingGc.push({ ...item, args });
+            } else if (tool === 'bank_compact') {
+                pendingCompact.push({ ...item, args });
+            } else {
+                assert.fail(`unexpected tool ${tool}`);
+            }
             return item.promise;
         },
         showModal(title, bodyHTML, btnLabel, onConfirm) {
@@ -162,6 +168,7 @@ function createHarness() {
             return `<SERVER>${escapeHtml(message)}</SERVER>`;
         },
         fmtSize: value => `${String(value ?? '—')}B`,
+        statusDot: (_kind, label) => `<STATUS>${escapeHtml(label)}</STATUS>`,
     };
     vm.createContext(context);
     vm.runInContext(source, context, { filename: viewPath });
@@ -174,6 +181,7 @@ function createHarness() {
         elements,
         modals,
         pendingGc,
+        pendingCompact,
         serverMessages,
         toasts,
         async render(sessionGeneration) {
@@ -201,11 +209,63 @@ function createHarness() {
         gcCalls() {
             return calls.filter(call => call.tool === 'admin_gc_notes');
         },
+        compactCalls() {
+            return calls.filter(call => call.tool === 'bank_compact');
+        },
         lastModal(kind = null) {
             const matching = kind ? modals.filter(modal => modal.kind === kind) : modals;
             assert.ok(matching.length, `no ${kind || ''} modal recorded`);
             return matching.at(-1);
         },
+    };
+}
+
+function compactResponse({ dryRun, before = 400, after = before } = {}) {
+    const source = 'a'.repeat(64);
+    const result = 'b'.repeat(64);
+    return {
+        status: 'ok',
+        dry_run: dryRun,
+        files_total: 1,
+        files_over_limit: before > 100 ? 1 : 0,
+        total_size_before: before,
+        total_size_after: after,
+        ...(dryRun ? {} : { preimage_id: 'alpha/2026-08-18T12-00-00-deadbeef' }),
+        files: [{
+            filename: 'facts.md',
+            size: before,
+            max_size: 100,
+            over_limit: before > 100,
+            ratio: before / 100,
+            source_sha256: dryRun && after < before ? result : source,
+            ...(dryRun ? {} : {
+                compacted_size: after,
+                reduction_pct: 85,
+                result_sha256: result,
+            }),
+        }],
+    };
+}
+
+function compactRecoveryResponse() {
+    return {
+        status: 'partial',
+        recovery_required: true,
+        failure_reason: 'compaction_apply_recovery_unverified',
+        failed_phase: 'apply',
+        rollback_outcome: 'unverified',
+        apply_may_have_mutated: true,
+        total_size_after: null,
+        files_applied_before_failure: 1,
+        preimage_id: 'alpha/2026-08-18T12-00-00-deadbeef',
+        failures: [{ filename: 'facts.md', error: 'compaction_apply_failed' }],
+        files: [{
+            filename: 'facts.md',
+            source_sha256: 'c'.repeat(64),
+            result_sha256: 'd'.repeat(64),
+        }],
+        remediation: 'Inspect the retained preimage before manual recovery.',
+        message: 'recovery <server-message>',
     };
 }
 
@@ -473,11 +533,120 @@ async function invalidThresholdsNeverReachTheServer() {
     }
 }
 
+async function compactEvidenceAndTargetInvalidation() {
+    // A -> B -> A must invalidate EVERY maintenance lane. An old compact scan
+    // may never re-authorise an Apply after the target was changed.
+    const stale = createHarness();
+    await stale.render(71);
+    stale.target('alpha');
+    stale.action('op-compact-dry');
+    const oldScan = stale.pendingCompact[0];
+    stale.elements.opMaintSpace.value = 'beta';
+    stale.elements.opMaintSpace.emit('change');
+    stale.elements.opMaintSpace.value = 'alpha';
+    stale.elements.opMaintSpace.emit('change');
+    oldScan.resolve(compactResponse({ dryRun: true }));
+    await flushTasks();
+    assert.doesNotMatch(stale.elements.opCompactResults.innerHTML, /facts\.md/);
+    stale.action('op-compact-apply');
+    assert.match(stale.elements.opCompactResults.innerHTML, /Run a dry run/);
+
+    // An apply's verified hashes/preimage remain visible both while and after
+    // the mandatory re-scan, even when that re-scan itself fails in transport.
+    const applied = createHarness();
+    await applied.render(72);
+    applied.target('alpha');
+    applied.action('op-compact-dry');
+    applied.pendingCompact[0].resolve(compactResponse({ dryRun: true }));
+    await flushTasks();
+    applied.action('op-compact-apply');
+    const confirmation = applied.lastModal('neutral');
+    assert.equal(confirmation.title, 'Apply compaction');
+    await confirmation.onConfirm();
+    await flushTasks();
+    assert.deepEqual(plain(applied.compactCalls()[1].args), {
+        space_id: 'alpha', dry_run: false,
+    });
+    applied.pendingCompact[1].resolve(compactResponse({ dryRun: false, after: 60 }));
+    await flushTasks();
+    assert.equal(applied.pendingCompact.length, 3, 'apply must trigger its required re-scan');
+    const whileRescanning = applied.elements.opCompactResults.innerHTML;
+    assert.match(whileRescanning, /Verified compaction apply evidence/);
+    assert.match(whileRescanning, /alpha\/2026-08-18T12-00-00-deadbeef/);
+    assert.match(whileRescanning, /bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/);
+    applied.pendingCompact[2].reject(new Error('transport failure'));
+    await flushTasks();
+    const afterTransportFailure = applied.elements.opCompactResults.innerHTML;
+    assert.match(afterTransportFailure, /Verified compaction apply evidence/);
+    assert.match(afterTransportFailure, /Result SHA-256/);
+    assert.match(afterTransportFailure, /ERROR:Compact failed/);
+
+    // A terminal recovery result is not a successful scan or apply. Render its
+    // typed diagnostics, escape its server message, and never toast/retry.
+    const recovery = createHarness();
+    await recovery.render(73);
+    recovery.target('alpha');
+    recovery.action('op-compact-dry');
+    recovery.pendingCompact[0].resolve(compactRecoveryResponse());
+    await flushTasks();
+    const recoveryHtml = recovery.elements.opCompactResults.innerHTML;
+    assert.match(recoveryHtml, /state-degraded/);
+    assert.match(recoveryHtml, /role="status"/);
+    assert.match(recoveryHtml, /Compaction recovery required/);
+    assert.match(recoveryHtml, /failure_reason:<\/strong> compaction_apply_recovery_unverified/);
+    assert.match(recoveryHtml, /failed_phase:<\/strong> apply/);
+    assert.match(recoveryHtml, /rollback_outcome:<\/strong> unverified/);
+    assert.match(recoveryHtml, /unknown \/ not asserted/);
+    assert.match(recoveryHtml, /alpha\/2026-08-18T12-00-00-deadbeef/);
+    assert.match(recoveryHtml, /c{64}/);
+    assert.match(recoveryHtml, /d{64}/);
+    assert.match(recoveryHtml, /recovery &lt;server-message&gt;/);
+    assert.doesNotMatch(recoveryHtml, /recovery <server-message>/);
+    assert.match(recoveryHtml, /No automatic retry or restore was performed/);
+    assert.equal(recovery.toasts.length, 0);
+    assert.equal(recovery.compactCalls().length, 1);
+}
+
+async function compactTargetResolutionDiagnosticIsContentFree() {
+    const h = createHarness();
+    await h.render(74);
+    h.target('alpha');
+    h.action('op-compact-dry');
+    h.pendingCompact[0].resolve({
+        status: 'error',
+        failure_reason: 'compaction_prepare_failed',
+        failed_phase: 'prepare',
+        rollback_outcome: 'not_needed',
+        total_size_after: null,
+        failures: [{
+            filename: 'facts.md',
+            error: 'ambiguous_or_missing_compaction_target',
+            operation_index: 2,
+            target_resolution: 'missing',
+            target_match_count: 0,
+            target_heading_sha256: 'e'.repeat(64),
+            heading: 'UI_RAW_COMPLETION_HEADING_SECRET_4f27',
+        }],
+        remediation: 'Correct the source before retrying.',
+    });
+    await flushTasks();
+    const html = h.elements.opCompactResults.innerHTML;
+    assert.match(html, /Target resolution/);
+    assert.match(html, /operation_index=2/);
+    assert.match(html, /target_resolution=missing/);
+    assert.match(html, /target_match_count=0/);
+    assert.match(html, /e{64}/);
+    assert.doesNotMatch(html, /UI_RAW_COMPLETION_HEADING_SECRET_4f27/);
+    assert.equal(h.compactCalls().length, 1, 'target refusal must not auto-retry');
+}
+
 await exactDeleteProofAndEscaping();
 await neutralConsolidationAndPartialDetails();
 await typedConflictAndPartialDeleteAreHonest();
 await proofInvalidationAndReorderedScans();
 await sessionGenerationOwnsProofAndContinuations();
 await invalidThresholdsNeverReachTheServer();
+await compactEvidenceAndTargetInvalidation();
+await compactTargetResolutionDiagnosticIsContentFree();
 
 console.log('admin GC runtime: ok');

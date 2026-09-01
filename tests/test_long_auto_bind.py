@@ -421,7 +421,7 @@ async def test_use_embedded_refuses_to_overwrite_concurrent_binding_change() -> 
     )
 
     assert res["status"] == "error"
-    assert "a changé" in res["message"]
+    assert "changed" in res["message"]
     assert storage.raw_meta()["graph_memory"]["memory_id"] == "concurrent-memory"
 
 
@@ -497,7 +497,7 @@ async def test_embedded_marker_url_mismatch_fail_closed() -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# race : memory_create renvoie "existe déjà" en DICT d'erreur MCP
+# Race: memory_create returns an "already exists" MCP error dictionary.
 # ─────────────────────────────────────────────────────────────
 
 
@@ -506,14 +506,14 @@ async def test_memory_create_exists_errordict_converges() -> None:
     storage.objects[_META] = json.dumps(_space_meta())
     settings = _settings()
     mid = derive_memory_id(_SPACE)
-    # 1er memory_list : vide → tente create ; create → erreur "existe déjà" ;
-    # re-check memory_list : présent → succès.
+    # First memory_list is empty, create reports "already exists", and the
+    # follow-up memory_list finds the converged memory.
     responses = {
         "memory_list": [
             {"status": "ok", "memories": []},
             {"status": "ok", "memories": [{"memory_id": mid}]},
         ],
-        "memory_create": {"status": "error", "message": f"La mémoire '{mid}' existe déjà"},
+        "memory_create": {"status": "error", "message": f"Memory '{mid}' already exists"},
     }
     bridge, _ = _bridge(responses=responses)
 
@@ -591,7 +591,7 @@ async def test_provision_rejects_inactive_exact_internal_token() -> None:
         res = await bridge.push(_SPACE)
 
     assert res.get("connected") is False
-    assert "inactif" in res.get("message", "")
+    assert "inactive" in res.get("message", "")
     assert factory.instances == []
     assert "graph_memory" not in storage.raw_meta()
 

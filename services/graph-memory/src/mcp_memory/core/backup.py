@@ -73,13 +73,13 @@ class BackupService:
             ValueError si le format est invalide ou contient des caractères dangereux
         """
         if not backup_id or not isinstance(backup_id, str):
-            raise ValueError("backup_id requis")
+            raise ValueError("backup_id is required")
         
         parts = backup_id.split("/", 1)
         if len(parts) != 2:
             raise ValueError(
-                f"backup_id invalide: '{backup_id}'. "
-                f"Format attendu: 'MEMORY_ID/TIMESTAMP'"
+                f"Invalid backup_id: '{backup_id}'. "
+                "Expected format: 'MEMORY_ID/TIMESTAMP'"
             )
         
         memory_id, timestamp = parts
@@ -87,13 +87,13 @@ class BackupService:
         # Valider chaque composant (alphanumérique + tirets + underscores uniquement)
         if not _SAFE_ID_RE.match(memory_id):
             raise ValueError(
-                f"memory_id invalide dans backup_id: '{memory_id}'. "
-                f"Caractères autorisés: A-Z, a-z, 0-9, -, _"
+                f"Invalid memory_id in backup_id: '{memory_id}'. "
+                "Allowed characters: A-Z, a-z, 0-9, -, _"
             )
         if not _SAFE_ID_RE.match(timestamp):
             raise ValueError(
-                f"timestamp invalide dans backup_id: '{timestamp}'. "
-                f"Caractères autorisés: A-Z, a-z, 0-9, -, _"
+                f"Invalid timestamp in backup_id: '{timestamp}'. "
+                "Allowed characters: A-Z, a-z, 0-9, -, _"
             )
         
         return memory_id, timestamp
@@ -146,16 +146,16 @@ class BackupService:
         # Vérifier que la mémoire existe
         memory = await self._graph.get_memory(memory_id)
         if not memory:
-            raise ValueError(f"Mémoire '{memory_id}' non trouvée")
+            raise ValueError(f"Memory '{memory_id}' not found")
         
         timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
         backup_prefix = self._backup_s3_prefix(memory_id, timestamp)
         backup_id = f"{memory_id}/{timestamp}"
         
-        await _log(f"Démarrage backup: {backup_id}")
+        await _log(f"Starting backup: {backup_id}")
         
         # === 1. Export Neo4j ===
-        await _log("📊 Export graphe Neo4j...")
+        await _log("📊 Exporting Neo4j graph...")
         graph_data = await self._graph.export_memory_data(memory_id)
         graph_json = json.dumps(graph_data, ensure_ascii=False, indent=2)
         graph_hash = hashlib.sha256(graph_json.encode()).hexdigest()
@@ -166,19 +166,19 @@ class BackupService:
             "relations": len(graph_data.get("relations", [])),
             "mentions": len(graph_data.get("mentions", []))
         }
-        await _log(f"✅ Graphe: {graph_stats['entities']} entités, "
+        await _log(f"✅ Graph: {graph_stats['entities']} entities, "
                     f"{graph_stats['relations']} relations, "
                     f"{graph_stats['documents']} docs")
         
         # === 2. Export Qdrant ===
-        await _log("🔢 Export vecteurs Qdrant...")
+        await _log("🔢 Exporting Qdrant vectors...")
         qdrant_export = await self._vectors.export_collection(memory_id)
         if (
             type(qdrant_export) is not dict
             or type(qdrant_export.get("identity")) is not dict
             or type(qdrant_export.get("points")) is not list
         ):
-            raise RuntimeError("Export Qdrant invalide")
+            raise RuntimeError("Invalid Qdrant export")
         qdrant_identity = qdrant_export["identity"]
         qdrant_points = qdrant_export["points"]
         
@@ -189,10 +189,10 @@ class BackupService:
         qdrant_jsonl = "\n".join(qdrant_lines)
         qdrant_hash = hashlib.sha256(qdrant_jsonl.encode()).hexdigest()
         
-        await _log(f"✅ Qdrant: {len(qdrant_points)} vecteurs exportés")
+        await _log(f"✅ Qdrant: exported {len(qdrant_points)} vectors")
         
         # === 3. Références documents S3 ===
-        await _log("📄 Collecte des références documents S3...")
+        await _log("📄 Collecting S3 document references...")
         document_keys = []
         for doc in graph_data.get("documents", []):
             uri = doc.get("uri", "")
@@ -214,7 +214,7 @@ class BackupService:
         doc_keys_hash = hashlib.sha256(doc_keys_json.encode()).hexdigest()
         
         total_doc_size = sum(d.get("size_bytes", 0) for d in document_keys)
-        await _log(f"✅ Documents: {len(document_keys)} références "
+        await _log(f"✅ Documents: {len(document_keys)} references "
                     f"({self._human_size(total_doc_size)})")
         
         # === 4. Construire le manifest ===
@@ -250,7 +250,7 @@ class BackupService:
         manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
         
         # === 5. Upload sur S3 ===
-        await _log("📤 Upload sur S3...")
+        await _log("📤 Uploading to S3...")
         
         files_to_upload = [
             ("manifest.json", manifest_json.encode("utf-8"), "application/json"),
@@ -278,10 +278,10 @@ class BackupService:
         if self._retention > 0:
             deleted_backups = await self._apply_retention(memory_id)
             if deleted_backups:
-                await _log(f"🧹 Rétention: {len(deleted_backups)} ancien(s) backup(s) supprimé(s)")
+                await _log(f"🧹 Retention: deleted {len(deleted_backups)} old backup(s)")
         
         total_elapsed = round(_time.monotonic() - _t0, 1)
-        await _log(f"🏁 Backup terminé en {total_elapsed}s: {backup_id}")
+        await _log(f"🏁 Backup completed in {total_elapsed}s: {backup_id}")
         
         return {
             "status": "ok",
@@ -332,7 +332,7 @@ class BackupService:
                     manifest["s3_size"] = obj["size"]
                     manifests.append(manifest)
                 except Exception as e:
-                    print(f"⚠️ [Backup] Erreur lecture manifest {obj['key']}: {e}",
+                    print(f"⚠️ [Backup] Error reading manifest {obj['key']}: {e}",
                           file=sys.stderr)
         
         # Trier par date décroissante
@@ -397,25 +397,25 @@ class BackupService:
         # Valider le backup_id (anti path-traversal)
         memory_id, timestamp = self._validate_backup_id(backup_id)
         
-        await _log(f"Démarrage restauration: {backup_id}")
+        await _log(f"Starting restore: {backup_id}")
         backup_prefix = self._backup_s3_prefix(memory_id, timestamp)
         
         # === 1. Télécharger et vérifier le manifest ===
-        await _log("📋 Lecture du manifest...")
+        await _log("📋 Reading manifest...")
         manifest = await self._download_json(f"{backup_prefix}/manifest.json")
         
         if manifest.get("version") != BACKUP_FORMAT_VERSION:
             raise ValueError(
-                f"Version de backup incompatible: {manifest.get('version')} "
-                f"(attendue: {BACKUP_FORMAT_VERSION})"
+                f"Incompatible backup version: {manifest.get('version')} "
+                f"(expected: {BACKUP_FORMAT_VERSION})"
             )
         
         await _log(f"✅ Manifest OK: {manifest.get('memory_name', '?')} "
-                    f"({manifest['stats']['entities']} entités, "
-                    f"{manifest['stats']['qdrant_vectors']} vecteurs)")
+                    f"({manifest['stats']['entities']} entities, "
+                    f"{manifest['stats']['qdrant_vectors']} vectors)")
         
         # === 2. Télécharger les données du graphe ===
-        await _log("📊 Chargement des données graphe...")
+        await _log("📊 Loading graph data...")
         graph_data = await self._download_json(f"{backup_prefix}/graph_data.json")
         
         # Vérifier le checksum
@@ -424,14 +424,14 @@ class BackupService:
         expected_hash = manifest.get("checksums", {}).get("graph_data")
         if expected_hash and actual_hash != expected_hash:
             raise ValueError(
-                f"Checksum graphe invalide ! Attendu: {expected_hash[:16]}..., "
-                f"Obtenu: {actual_hash[:16]}... Le backup est peut-être corrompu."
+                f"Invalid graph checksum. Expected: {expected_hash[:16]}..., "
+                f"received: {actual_hash[:16]}.... The backup may be corrupt."
             )
         
-        await _log("✅ Données graphe vérifiées (checksum OK)")
+        await _log("✅ Graph data verified (checksum OK)")
         
         # === 3. Télécharger les vecteurs Qdrant ===
-        await _log("🔢 Chargement des vecteurs Qdrant...")
+        await _log("🔢 Loading Qdrant vectors...")
         qdrant_jsonl = await self._download_text(f"{backup_prefix}/qdrant_vectors.jsonl")
         
         qdrant_points = []
@@ -445,17 +445,17 @@ class BackupService:
         expected_hash = manifest.get("checksums", {}).get("qdrant_vectors")
         if expected_hash and actual_hash != expected_hash:
             raise ValueError(
-                f"Checksum vecteurs invalide ! Le backup est peut-être corrompu."
+                "Invalid vector checksum. The backup may be corrupt."
             )
         
-        await _log(f"✅ {len(qdrant_points)} vecteurs chargés (checksum OK)")
+        await _log(f"✅ Loaded {len(qdrant_points)} vectors (checksum OK)")
 
         qdrant_identity = manifest.get("qdrant_identity")
 
         # Garde de compatibilité lecture seule #277. Elle précède toute mutation
         # Neo4j/Qdrant ; la restauration multi-backend qui suit n'est pas
         # transactionnelle.
-        await _log("📊 Restauration du graphe Neo4j...")
+        await _log("📊 Restoring the Neo4j graph...")
         await self._vectors.preflight_import(
             memory_id,
             qdrant_identity,
@@ -464,19 +464,19 @@ class BackupService:
 
         # === 4. Restaurer le graphe Neo4j ===
         graph_counters = await self._graph.import_memory_data(graph_data)
-        await _log(f"✅ Graphe restauré: {graph_counters}")
+        await _log(f"✅ Graph restored: {graph_counters}")
         
         # === 5. Restaurer les vecteurs Qdrant ===
-        await _log("🔢 Restauration des vecteurs Qdrant...")
+        await _log("🔢 Restoring Qdrant vectors...")
         vectors_imported = await self._vectors.import_collection(
             memory_id,
             qdrant_points,
             identity=qdrant_identity,
         )
-        await _log(f"✅ Qdrant: {vectors_imported} vecteurs restaurés")
+        await _log(f"✅ Qdrant: restored {vectors_imported} vectors")
         
         # === 6. Vérifier les documents S3 ===
-        await _log("📄 Vérification des documents S3...")
+        await _log("📄 Verifying S3 documents...")
         doc_keys = await self._download_json(f"{backup_prefix}/document_keys.json")
         
         docs_ok = 0
@@ -489,12 +489,12 @@ class BackupService:
                     docs_ok += 1
                 else:
                     docs_missing += 1
-                    print(f"⚠️ [Restore] Document S3 manquant: {uri}", file=sys.stderr)
+                    print(f"⚠️ [Restore] Missing S3 document: {uri}", file=sys.stderr)
         
-        await _log(f"📄 Documents S3: {docs_ok} OK, {docs_missing} manquant(s)")
+        await _log(f"📄 S3 documents: {docs_ok} OK, {docs_missing} missing")
         
         total_elapsed = round(_time.monotonic() - _t0, 1)
-        await _log(f"🏁 Restauration terminée en {total_elapsed}s")
+        await _log(f"🏁 Restore completed in {total_elapsed}s")
         
         return {
             "status": "ok",
@@ -543,7 +543,7 @@ class BackupService:
         memory_id, timestamp = self._validate_backup_id(backup_id)
         backup_prefix = self._backup_s3_prefix(memory_id, timestamp)
         
-        await _log(f"Préparation archive: {backup_id}")
+        await _log(f"Preparing archive: {backup_id}")
         
         # Créer l'archive tar.gz en mémoire
         buf = io.BytesIO()
@@ -575,11 +575,11 @@ class BackupService:
                     
                     await _log(f"  📁 {filename} ({self._human_size(len(content))})")
                 except Exception as e:
-                    await _log(f"  ⚠️ {filename} manquant: {e}")
+                    await _log(f"  ⚠️ {filename} missing: {e}")
             
             # Optionnel : inclure les documents originaux
             if include_documents:
-                await _log("📄 Ajout des documents originaux...")
+                await _log("📄 Adding original documents...")
                 
                 doc_keys_text = await self._download_text(
                     f"{backup_prefix}/document_keys.json"
@@ -622,9 +622,9 @@ class BackupService:
     def _archive_memory_id(archive_bytes: bytes) -> str:
         """Read and validate the manifest namespace before admission."""
         if not isinstance(archive_bytes, bytes):
-            raise ValueError("archive_bytes doit être un contenu bytes")
+            raise ValueError("archive_bytes must be bytes")
         if len(archive_bytes) > MAX_ARCHIVE_SIZE_BYTES:
-            raise ValueError("Archive trop volumineuse")
+            raise ValueError("Archive is too large")
 
         try:
             with tarfile.open(
@@ -642,18 +642,18 @@ class BackupService:
                 )
                 if manifest_name is None:
                     raise ValueError(
-                        "manifest.json introuvable dans l'archive"
+                        "manifest.json was not found in the archive"
                     )
                 manifest_file = archive.extractfile(manifest_name)
                 if manifest_file is None:
                     raise ValueError(
-                        "Impossible de lire 'manifest.json' dans l'archive"
+                        "Could not read 'manifest.json' from the archive"
                     )
                 manifest = json.loads(manifest_file.read().decode("utf-8"))
         except ValueError:
             raise
         except Exception as error:
-            raise ValueError(f"Archive tar.gz invalide: {error}") from error
+            raise ValueError(f"Invalid tar.gz archive: {error}") from error
 
         memory_id = manifest.get("memory_id") if isinstance(manifest, dict) else None
         from .validators import validate_memory_id
@@ -661,7 +661,7 @@ class BackupService:
         try:
             return validate_memory_id(memory_id)
         except (TypeError, ValueError):
-            raise ValueError("memory_id invalide dans le manifest") from None
+            raise ValueError("Invalid memory_id in the manifest") from None
     
     async def restore_from_archive(
         self,
@@ -717,18 +717,18 @@ class BackupService:
         archive_size = len(archive_bytes)
         if archive_size > MAX_ARCHIVE_SIZE_BYTES:
             raise ValueError(
-                f"Archive trop volumineuse: {self._human_size(archive_size)} "
+                f"Archive is too large: {self._human_size(archive_size)} "
                 f"(max: {self._human_size(MAX_ARCHIVE_SIZE_BYTES)})"
             )
         
-        await _log(f"Archive reçue: {self._human_size(archive_size)}")
+        await _log(f"Archive received: {self._human_size(archive_size)}")
         
         # === 1. Extraire l'archive en mémoire ===
         buf = io.BytesIO(archive_bytes)
         try:
             tar = tarfile.open(fileobj=buf, mode='r:gz')
         except Exception as e:
-            raise ValueError(f"Archive tar.gz invalide: {e}")
+            raise ValueError(f"Invalid tar.gz archive: {e}")
         
         # Trouver les fichiers dans l'archive (peut être dans un sous-dossier)
         members = tar.getnames()
@@ -744,47 +744,47 @@ class BackupService:
             """Lit le contenu d'un membre de l'archive."""
             f = tar.extractfile(member_name)
             if f is None:
-                raise ValueError(f"Impossible de lire '{member_name}' dans l'archive")
+                raise ValueError(f"Unable to read '{member_name}' from the archive")
             return f.read()
         
         # === 2. Lire et vérifier le manifest ===
         manifest_path = _find_member("manifest.json")
         if not manifest_path:
             tar.close()
-            raise ValueError("manifest.json introuvable dans l'archive")
+            raise ValueError("manifest.json not found in the archive")
         
         manifest = json.loads(_read_member(manifest_path).decode("utf-8"))
         
         if manifest.get("version") != BACKUP_FORMAT_VERSION:
             tar.close()
             raise ValueError(
-                f"Version de backup incompatible: {manifest.get('version')} "
-                f"(attendue: {BACKUP_FORMAT_VERSION})"
+                f"Incompatible backup version: {manifest.get('version')} "
+                f"(expected: {BACKUP_FORMAT_VERSION})"
             )
         
         memory_id = manifest.get("memory_id")
         if not memory_id:
             tar.close()
-            raise ValueError("memory_id manquant dans le manifest")
+            raise ValueError("memory_id is missing from the manifest")
         
-        await _log(f"✅ Manifest OK: mémoire '{memory_id}' "
-                    f"({manifest['stats']['entities']} entités, "
-                    f"{manifest['stats']['qdrant_vectors']} vecteurs)")
+        await _log(f"✅ Manifest OK: memory '{memory_id}' "
+                    f"({manifest['stats']['entities']} entities, "
+                    f"{manifest['stats']['qdrant_vectors']} vectors)")
         
         # Vérifier que la mémoire n'existe pas
         existing = await self._graph.get_memory(memory_id)
         if existing:
             tar.close()
             raise ValueError(
-                f"La mémoire '{memory_id}' existe déjà. "
-                f"Supprimez-la d'abord avec memory_delete."
+                f"Memory '{memory_id}' already exists. "
+                "Delete it with memory_delete first."
             )
         
         # === 3. Lire les données du graphe ===
         graph_path = _find_member("graph_data.json")
         if not graph_path:
             tar.close()
-            raise ValueError("graph_data.json introuvable dans l'archive")
+            raise ValueError("graph_data.json not found in the archive")
         
         graph_data = json.loads(_read_member(graph_path).decode("utf-8"))
         
@@ -794,15 +794,15 @@ class BackupService:
         expected_hash = manifest.get("checksums", {}).get("graph_data")
         if expected_hash and actual_hash != expected_hash:
             tar.close()
-            raise ValueError("Checksum graphe invalide ! Archive corrompue ?")
+            raise ValueError("Invalid graph checksum; the archive may be corrupted")
         
-        await _log("✅ Données graphe vérifiées (checksum OK)")
+        await _log("✅ Graph data verified (checksum OK)")
         
         # === 4. Lire les vecteurs Qdrant ===
         qdrant_path = _find_member("qdrant_vectors.jsonl")
         if not qdrant_path:
             tar.close()
-            raise ValueError("qdrant_vectors.jsonl introuvable dans l'archive")
+            raise ValueError("qdrant_vectors.jsonl not found in the archive")
         
         qdrant_jsonl = _read_member(qdrant_path).decode("utf-8")
         qdrant_points = []
@@ -816,12 +816,12 @@ class BackupService:
         expected_hash = manifest.get("checksums", {}).get("qdrant_vectors")
         if expected_hash and actual_hash != expected_hash:
             tar.close()
-            raise ValueError("Checksum vecteurs invalide ! Archive corrompue ?")
+            raise ValueError("Invalid vector checksum; the archive may be corrupted")
         
-        await _log(f"✅ {len(qdrant_points)} vecteurs chargés (checksum OK)")
+        await _log(f"✅ Loaded {len(qdrant_points)} vectors (checksum OK)")
         
         # === 5. Re-uploader les documents S3 ===
-        await _log("📄 Re-upload des documents sur S3...")
+        await _log("📄 Re-uploading documents to S3...")
         
         # Trouver les fichiers documents/ dans l'archive
         doc_members = [m for m in members if "/documents/" in m and not m.endswith("/")]
@@ -833,14 +833,14 @@ class BackupService:
             doc_keys_list = json.loads(_read_member(doc_keys_path).decode("utf-8"))
         if type(doc_keys_list) is not list:
             tar.close()
-            raise ValueError("document_keys.json invalide")
+            raise ValueError("Invalid document_keys.json")
         
         # Construire un mapping filename → key S3 original
         filename_to_key = {}
         for dk in doc_keys_list:
             if type(dk) is not dict:
                 tar.close()
-                raise ValueError("document_keys.json invalide")
+                raise ValueError("Invalid document_keys.json")
             fn = dk.get("filename")
             key = dk.get("key")
             namespace_prefix = f"{memory_id}/documents/"
@@ -853,7 +853,7 @@ class BackupService:
                 or fn in filename_to_key
             ):
                 tar.close()
-                raise ValueError("document_keys.json invalide")
+                raise ValueError("Invalid document_keys.json")
             filename_to_key[fn] = key
         
         docs_uploaded = 0
@@ -883,7 +883,7 @@ class BackupService:
             # === SÉCURITÉ : anti path-traversal ===
             # Rejeter les noms contenant ../ ou commençant par /
             if ".." in doc_filename or doc_filename.startswith("/"):
-                print(f"🔒 [RestoreArchive] Nom de fichier rejeté (path traversal): "
+                print(f"🔒 [RestoreArchive] Filename rejected (path traversal): "
                       f"'{doc_filename}'", file=sys.stderr)
                 docs_skipped += 1
                 continue
@@ -891,7 +891,7 @@ class BackupService:
             import os.path as _osp
             safe_filename = _osp.basename(doc_filename)
             if safe_filename != doc_filename:
-                print(f"🔒 [RestoreArchive] Nom normalisé: '{doc_filename}' → "
+                print(f"🔒 [RestoreArchive] Normalized filename: '{doc_filename}' → "
                       f"'{safe_filename}'", file=sys.stderr)
                 doc_filename = safe_filename
             
@@ -929,33 +929,33 @@ class BackupService:
                         content=doc_content
                     )
                     docs_uploaded += 1
-                    await _log(f"  📄 {doc_filename} (nouvelle clé S3)")
+                    await _log(f"  📄 {doc_filename} (new S3 key)")
                 except Exception as e:
                     await _log(f"  ⚠️ {doc_filename}: {e}")
         
         if not doc_members:
-            await _log("⚠️ Aucun document dans l'archive (backup léger)")
+            await _log("⚠️ No documents in the archive (lightweight backup)")
         else:
-            await _log(f"✅ {docs_uploaded} documents uploadés sur S3")
+            await _log(f"✅ Uploaded {docs_uploaded} documents to S3")
         
         tar.close()
         
         # === 6. Restaurer le graphe Neo4j ===
-        await _log("📊 Restauration du graphe Neo4j...")
+        await _log("📊 Restoring the Neo4j graph...")
         graph_counters = await self._graph.import_memory_data(graph_data)
-        await _log(f"✅ Graphe restauré: {graph_counters}")
+        await _log(f"✅ Graph restored: {graph_counters}")
         
         # === 7. Restaurer les vecteurs Qdrant ===
-        await _log("🔢 Restauration des vecteurs Qdrant...")
+        await _log("🔢 Restoring Qdrant vectors...")
         vectors_imported = await self._vectors.import_collection(
             memory_id,
             qdrant_points,
             identity=qdrant_identity,
         )
-        await _log(f"✅ Qdrant: {vectors_imported} vecteurs restaurés")
+        await _log(f"✅ Qdrant: restored {vectors_imported} vectors")
         
         total_elapsed = round(_time.monotonic() - _t0, 1)
-        await _log(f"🏁 Restauration depuis archive terminée en {total_elapsed}s")
+        await _log(f"🏁 Archive restore completed in {total_elapsed}s")
         
         return {
             "status": "ok",
@@ -988,8 +988,8 @@ class BackupService:
         
         result = await self._storage.delete_prefix(f"{prefix}/")
         
-        print(f"🗑️ [Backup] Supprimé: {backup_id} "
-              f"({result['deleted_count']} fichiers)", file=sys.stderr)
+        print(f"🗑️ [Backup] Deleted: {backup_id} "
+              f"({result['deleted_count']} files)", file=sys.stderr)
         
         return {
             "status": "ok",
@@ -1033,7 +1033,7 @@ class BackupService:
                     await self.delete_backup(bid)
                     deleted_ids.append(bid)
                 except Exception as e:
-                    print(f"⚠️ [Retention] Erreur suppression {bid}: {e}",
+                    print(f"⚠️ [Retention] Error deleting {bid}: {e}",
                           file=sys.stderr)
         
         return deleted_ids
@@ -1056,7 +1056,7 @@ class BackupService:
             )
             return response["Body"].read().decode("utf-8")
         except Exception as e:
-            raise FileNotFoundError(f"Fichier S3 non trouvé: {key} ({e})")
+            raise FileNotFoundError(f"S3 file not found: {key} ({e})")
     
     @staticmethod
     def _human_size(size_bytes: int) -> str:

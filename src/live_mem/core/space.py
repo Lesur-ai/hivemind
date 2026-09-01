@@ -13,18 +13,22 @@ Voir S3_DATA_MODEL.md pour l'arborescence S3 des espaces.
 Voir MCP_TOOLS_SPEC.md pour les signatures et retours attendus.
 """
 
-import re
 import base64
-import tarfile
 import io
+import json
+import re
+import tarfile
 from datetime import datetime, timezone
 from typing import Optional
 
-from .storage import get_storage, bank_relpath
+from .storage import bank_relpath, get_storage, inventory_object_size
 from .locks import get_lock_manager
 from .models import SpaceMeta, mask_meta_secrets
 from .hivemind import hive_status_label, CorruptedStateError
-from .reservation_guard import assert_space_not_reserved
+from .reservation_guard import (
+    assert_direct_local_allowed,
+    assert_space_not_reserved,
+)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -116,8 +120,8 @@ class SpaceService:
             return {
                 "status": "error",
                 "message": (
-                    f"space_id invalide : '{space_id}'. "
-                    "Attendu : alphanumérique + tirets/underscores, 1-64 chars."
+                    f"Invalid space_id: '{space_id}'. Expected 1-64 "
+                    "alphanumeric characters, hyphens, or underscores."
                 ),
             }
 
@@ -125,12 +129,12 @@ class SpaceService:
         if len(rules) > MAX_RULES_SIZE:
             return {
                 "status": "error",
-                "message": f"Rules trop longues ({len(rules)} chars, max {MAX_RULES_SIZE})",
+                "message": f"Rules are too long ({len(rules)} characters, maximum {MAX_RULES_SIZE})",
             }
         if description and len(description) > MAX_DESCRIPTION_SIZE:
             return {
                 "status": "error",
-                "message": f"Description trop longue ({len(description)} chars, max {MAX_DESCRIPTION_SIZE})",
+                "message": f"Description is too long ({len(description)} characters, maximum {MAX_DESCRIPTION_SIZE})",
             }
 
         storage = get_storage()
@@ -156,7 +160,7 @@ class SpaceService:
                     if actor is None:
                         return {
                             "status": "error",
-                            "message": "Token S3 manage ou admin actif requis",
+                            "message": "An active S3 manage or admin token is required",
                         }
                 return await self._create_locked(
                     storage,
@@ -170,31 +174,40 @@ class SpaceService:
                 )
 
     @staticmethod
-    async def classify_committed_state(storage, space_id: str) -> tuple[str, str]:
-        """Classe le marker + les objets constitutifs d'un espace.
+    async def inspect_committed_state(
+        storage, space_id: str
+    ) -> tuple[str, str]:
+        """Classify the product commit prefix without erasing availability.
 
-        Returns:
-            ``("committed", "")`` si le marker est valide et rules/keeps
-            existent, ``("absent", "")`` si aucun marker n'existe, sinon
-            ``("unsafe", reason)``. Cette classification unique est partagée
-            par ``space_create`` et ``space_invite_token``.
+        The returned state is one of ``committed``, ``absent``, ``unsafe`` or
+        ``unavailable``.  Product callers intentionally retain their historic
+        broad fail-closed projection through :meth:`classify_committed_state`,
+        while Mesh readiness needs to show a transient storage failure as a
+        non-actionable per-source ``unavailable`` result.  Keeping the object
+        contract here prevents the two callers from drifting on what makes a
+        product space committed.
         """
         meta_key = f"{space_id}/_meta.json"
         try:
             if not await storage.exists(meta_key):
                 return ("absent", "")
         except Exception:
-            return ("unsafe", "Impossible de déterminer si le commit marker existe.")
+            return ("unavailable", "Could not determine whether the commit marker exists.")
 
         try:
             existing_meta = await storage.get_json(meta_key)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            return ("unsafe", "The commit marker exists but is corrupt or unreadable.")
+        except Exception:
+            return ("unavailable", "The commit marker exists but is unreadable.")
+        try:
             parsed_meta = SpaceMeta(**(existing_meta or {}))
         except Exception:
-            return ("unsafe", "Commit marker présent mais corrompu ou illisible.")
+            return ("unsafe", "The commit marker exists but is corrupt or unreadable.")
         if parsed_meta.space_id != space_id:
             return (
                 "unsafe",
-                "Commit marker présent mais rattaché à un autre space_id.",
+                "The commit marker exists but belongs to another space_id.",
             )
 
         required = {
@@ -205,19 +218,42 @@ class SpaceService:
         for key, exact_content in required.items():
             try:
                 content = await storage.get(key)
+            except UnicodeDecodeError:
+                return (
+                    "unsafe",
+                    "The space is marked committed but a required object is corrupt.",
+                )
             except Exception:
-                content = None
+                return (
+                    "unavailable",
+                    "The space is marked committed but a required object is unreadable.",
+                )
             if content is None:
                 return (
                     "unsafe",
-                    "Espace marqué committé mais objet constitutif absent/illisible.",
+                    "The space is marked committed but a required object is missing.",
                 )
             if exact_content is not None and content != exact_content:
                 return (
                     "unsafe",
-                    "Espace marqué committé mais sentinel constitutif invalide.",
+                    "The space is marked committed but a required sentinel is invalid.",
                 )
         return ("committed", "")
+
+    @staticmethod
+    async def classify_committed_state(storage, space_id: str) -> tuple[str, str]:
+        """Return the historic broad fail-closed product classification.
+
+        ``space_create`` and token invitation callers predate the Mesh
+        readiness taxonomy and deliberately expose neither backend details nor
+        an actionable retry state.  They therefore map the shared detailed
+        ``unavailable`` result to their existing safe ``unsafe`` result.
+        """
+
+        state, reason = await SpaceService.inspect_committed_state(storage, space_id)
+        if state == "unavailable":
+            return ("unsafe", reason)
+        return (state, reason)
 
     @staticmethod
     def _partial_create(
@@ -231,15 +267,15 @@ class SpaceService:
         if not recovery_action:
             if retry_safe:
                 recovery_action = (
-                    "Retentez space_create avec exactement les mêmes space_id, "
-                    "description, owner et rules ; la reprise est additive et "
-                    "n'écrase aucun objet existant."
+                    "Retry space_create with exactly the same space_id, description, "
+                    "owner, and rules; recovery is additive and does not overwrite "
+                    "existing objects."
                 )
             else:
                 recovery_action = (
-                    "N'effectuez aucune reprise automatique. Un admin doit inspecter "
-                    f"le préfixe exact '{space_id}/' et ne le retirer qu'après avoir "
-                    "confirmé qu'il ne contient aucun état à conserver."
+                    "Do not attempt automatic recovery. An admin must inspect the exact "
+                    f"'{space_id}/' prefix and remove it only after confirming that it "
+                    "contains no state that must be preserved."
                 )
         return {
             "status": "partial",
@@ -292,15 +328,21 @@ class SpaceService:
         if committed_state == "committed":
             return {
                 "status": "already_exists",
-                "message": f"L'espace '{space_id}' existe déjà",
+                "message": f"Space '{space_id}' already exists",
             }
+
+        # A committed source remains idempotently ``already_exists`` above.
+        # Once absent, however, its fingerprint-neutral preparation evidence is
+        # irreversible: recreating the id as a local space would downgrade the
+        # old shared authority. Check before any prefix write or scope grant.
+        await assert_direct_local_allowed(space_id)
 
         try:
             existing = await storage.list_objects(f"{space_id}/")
         except Exception:
             return self._partial_create(
                 space_id,
-                "Impossible de classer le préfixe existant ; aucune mutation effectuée.",
+                "Could not classify the existing prefix; no mutation was performed.",
             )
         existing_keys = {str(obj.get("Key", "")) for obj in existing}
         unexpected = existing_keys - set(expected_objects)
@@ -309,7 +351,7 @@ class SpaceService:
             # sans commit marker ne doit jamais être assimilé à un space vierge.
             return self._partial_create(
                 space_id,
-                "Préfixe non committé contenant un état inattendu ou Hivemind.",
+                "The uncommitted prefix contains unexpected or Hivemind state.",
             )
 
         for key in existing_keys:
@@ -318,12 +360,12 @@ class SpaceService:
             except Exception:
                 return self._partial_create(
                     space_id,
-                    "Préfixe non committé illisible ; reprise refusée.",
+                    "The uncommitted prefix is unreadable; recovery refused.",
                 )
             if content != expected_objects[key]:
                 return self._partial_create(
                     space_id,
-                    "Préfixe non committé en conflit avec la requête.",
+                    "The uncommitted prefix conflicts with the request.",
                 )
 
         # ABA delete→recreate : une suppression ancienne/interrompue ou un
@@ -341,29 +383,25 @@ class SpaceService:
         if scoped_tokens:
             if existing_keys:
                 message = (
-                    "Reprise refusée : la préparation compatible porte encore "
-                    "au moins une référence de scope persistée."
+                    "Recovery refused: the compatible preparation still has at "
+                    "least one persisted scope reference."
                 )
                 recovery_action = (
-                    f"Un admin doit retirer explicitement '{space_id}' des "
-                    "space_ids de tous les tokens signalés, y compris admin, "
-                    "révoqués ou expirés, puis retenter exactement la même "
-                    "création. Aucun rollback automatique."
+                    f"An admin must explicitly remove '{space_id}' from the space_ids "
+                    "of every reported token, including admin, revoked, and expired "
+                    "tokens, then retry exactly the same creation. No automatic rollback."
                 )
             else:
                 message = (
-                    "Création refusée : un préfixe absent porte encore des "
-                    "références de scope persistées."
+                    "Creation refused: the absent prefix still has persisted scope references."
                 )
                 recovery_action = (
-                    "Cet état ambigu peut être un pré-grant intentionnel ou le "
-                    "résidu d'une suppression connue. Pour une suppression "
-                    f"connue de '{space_id}', un manager encore autorisé ou un "
-                    "admin appelle space_delete(confirm=True, "
-                    "recover_access_grants=True). Pour un pré-grant "
-                    "intentionnel, un admin modifie ou retire explicitement les "
-                    "space_ids de tous les tokens concernés. Retentez ensuite "
-                    "exactement la même création."
+                    "This ambiguous state may be an intentional pre-grant or residue "
+                    f"from a known deletion. For a known deletion of '{space_id}', an "
+                    "authorized manager or admin calls space_delete(confirm=True, "
+                    "recover_access_grants=True). For an intentional pre-grant, an admin "
+                    "explicitly updates or removes the space_ids of every affected token. "
+                    "Then retry exactly the same creation."
                 )
             return self._partial_create(
                 space_id,
@@ -372,10 +410,9 @@ class SpaceService:
             )
 
         post_grant_recovery = (
-            f"Un admin doit d'abord inspecter '{meta_key}'. Si le marker est "
-            f"absent ou non committé, il doit retirer explicitement '{space_id}' "
-            "des space_ids de tous les tokens, puis retenter exactement "
-            "la même création. Aucun rollback automatique."
+            f"An admin must first inspect '{meta_key}'. If the marker is absent "
+            f"or uncommitted, explicitly remove '{space_id}' from the space_ids "
+            "of every token, then retry exactly the same creation. No automatic rollback."
         )
 
         # Reprise additive : seuls les objets préparatoires absents sont écrits.
@@ -394,7 +431,7 @@ class SpaceService:
                 if confirmed != content:
                     return self._partial_create(
                         space_id,
-                        "Préparation S3 incomplète ; reprise requise.",
+                        "S3 preparation is incomplete; recovery is required.",
                         retry_safe=True,
                     )
 
@@ -415,21 +452,20 @@ class SpaceService:
                     except Exception:
                         return self._partial_create(
                             space_id,
-                            "Grant du manager illisible après un PUT ambigu ; "
-                            "espace non committé.",
+                            "The manager grant is unreadable after an ambiguous PUT; "
+                            "the space is uncommitted.",
                             recovery_action=post_grant_recovery,
                         )
                     if confirmed_actor is None:
                         return self._partial_create(
                             space_id,
-                            "Le token acteur a disparu pendant la création ; "
-                            "espace non committé.",
+                            "The actor token disappeared during creation; the space is uncommitted.",
                             recovery_action=post_grant_recovery,
                         )
                     if space_id not in confirmed_actor.space_ids:
                         return self._partial_create(
                             space_id,
-                            "Grant du manager non confirmé ; espace non committé.",
+                            "The manager grant was not confirmed; the space is uncommitted.",
                             retry_safe=True,
                         )
                 grant_added = True
@@ -446,7 +482,7 @@ class SpaceService:
             if confirmed_actor is None or space_id not in confirmed_actor.space_ids:
                 return self._partial_create(
                     space_id,
-                    "Grant du manager non observable ; espace non committé.",
+                    "The manager grant is not observable; the space is uncommitted.",
                     recovery_action=post_grant_recovery,
                 )
 
@@ -468,20 +504,20 @@ class SpaceService:
         except Exception:
             return self._partial_create(
                 space_id,
-                "Commit marker _meta.json illisible après un PUT ambigu.",
+                "The _meta.json commit marker is unreadable after an ambiguous PUT.",
                 recovery_action=post_grant_recovery if grant_added else "",
             )
         if committed_meta is None:
             return self._partial_create(
                 space_id,
-                "Commit marker _meta.json absent ; reprise requise.",
+                "The _meta.json commit marker is absent; recovery is required.",
                 retry_safe=not grant_added,
                 recovery_action=post_grant_recovery if grant_added else "",
             )
         if committed_meta != meta:
             return self._partial_create(
                 space_id,
-                "Commit marker _meta.json conflictuel ; reprise automatique refusée.",
+                "The _meta.json commit marker conflicts with the request; automatic recovery refused.",
                 recovery_action=post_grant_recovery if grant_added else "",
             )
 
@@ -540,7 +576,7 @@ class SpaceService:
         if meta is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Appliquer les modifications
@@ -556,7 +592,7 @@ class SpaceService:
             return {
                 "status": "ok",
                 "space_id": space_id,
-                "message": "Aucun champ à modifier",
+                "message": "No fields to update",
                 "updated_fields": [],
             }
 
@@ -612,13 +648,13 @@ class SpaceService:
         if len(rules) > MAX_RULES_SIZE:
             return {
                 "status": "error",
-                "message": f"Rules trop longues ({len(rules)} chars, max {MAX_RULES_SIZE})",
+                "message": f"Rules are too long ({len(rules)} characters, maximum {MAX_RULES_SIZE})",
             }
 
         if not rules.strip():
             return {
                 "status": "error",
-                "message": "Le contenu des rules ne peut pas être vide",
+                "message": "Rules content cannot be empty",
             }
 
         storage = get_storage()
@@ -627,7 +663,7 @@ class SpaceService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # P5-8 (#16) ROUTE-FIRST: resolve the per-space WriteSink BEFORE the
@@ -651,7 +687,7 @@ class SpaceService:
             "status": "ok",
             "space_id": space_id,
             "rules_size": len(rules.encode("utf-8")),
-            "message": f"Rules mises à jour ({len(rules.encode('utf-8'))} octets)",
+            "message": f"Rules updated ({len(rules.encode('utf-8'))} bytes)",
         }
 
     async def list_spaces(self, allowed_space_ids: Optional[list[str]] = None) -> dict:
@@ -731,7 +767,7 @@ class SpaceService:
         if meta is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Stats des notes live
@@ -764,11 +800,17 @@ class SpaceService:
             "created_at": meta.get("created_at", ""),
             "live": {
                 "notes_count": len(live_files),
-                "total_size": sum(o["Size"] for o in live_files),
+                "total_size": sum(
+                    inventory_object_size(o, missing_as_zero=True)
+                    for o in live_files
+                ),
             },
             "bank": {
                 "files_count": len(bank_files),
-                "total_size": sum(o["Size"] for o in bank_files),
+                "total_size": sum(
+                    inventory_object_size(o, missing_as_zero=True)
+                    for o in bank_files
+                ),
                 "files": [bank_relpath(o["Key"], space_id) for o in bank_files],
             },
             "last_consolidation": meta.get("last_consolidation"),
@@ -793,7 +835,7 @@ class SpaceService:
         if rules is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         return {"status": "ok", "space_id": space_id, "rules": rules}
@@ -815,7 +857,7 @@ class SpaceService:
         if meta is None:
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         rules = await storage.get(f"{space_id}/_rules.md") or ""
@@ -871,7 +913,7 @@ class SpaceService:
         if not await storage.exists(f"{space_id}/_meta.json"):
             return {
                 "status": "not_found",
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # Lire tous les fichiers de l'espace
@@ -957,8 +999,8 @@ class SpaceService:
                         return {
                             "status": "error",
                             "message": (
-                                "Token S3 manage ou admin actif et autorisé "
-                                "sur ce space requis"
+                                "An active S3 manage or admin token authorized "
+                                "for this space is required"
                             ),
                         }
                 return await self._delete_locked(
@@ -1020,8 +1062,7 @@ class SpaceService:
             return {
                 "status": "error",
                 "message": (
-                    "Identité stockée du manager requise avant toute "
-                    "suppression"
+                    "Stored manager identity is required before deletion"
                 ),
             }
 
@@ -1043,21 +1084,20 @@ class SpaceService:
         ) -> dict:
             if marker_preserved is True:
                 action = (
-                    "Retentez space_delete avec le même space_id : le commit "
-                    "marker est conservé et seuls les objets encore présents "
-                    "seront supprimés. Ne recréez pas l'espace entre-temps."
+                    "Retry space_delete with the same space_id: the commit marker "
+                    "is preserved and only remaining objects will be deleted. Do "
+                    "not recreate the space in the meantime."
                 )
             elif marker_preserved is False:
                 action = (
-                    f"Un admin doit inspecter le préfixe exact '{space_id}/' ; "
-                    "le commit marker est absent. Ne recréez pas cet identifiant "
-                    "et ne supprimez aucun résidu sans confirmer son origine."
+                    f"An admin must inspect the exact '{space_id}/' prefix; the commit "
+                    "marker is absent. Do not recreate this identifier or delete any "
+                    "residue without confirming its origin."
                 )
             else:
                 action = (
-                    "Retentez space_delete avec le même space_id. Si le marker "
-                    "est déjà absent, vérifiez que le préfixe est vide avant "
-                    "de considérer la suppression terminée."
+                    "Retry space_delete with the same space_id. If the marker is already "
+                    "absent, verify that the prefix is empty before considering deletion complete."
                 )
             return {
                 "status": "partial",
@@ -1153,8 +1193,7 @@ class SpaceService:
                     "space_id": space_id,
                     "recovery_required": True,
                     "message": (
-                        "Données du space supprimées, mais confirmation de la "
-                        "révocation des droits impossible."
+                        "Space data was deleted, but access revocation could not be confirmed."
                     ),
                     "files_total": files_total,
                     "files_deleted": files_deleted,
@@ -1164,11 +1203,10 @@ class SpaceService:
                     "recovery": {
                         "retry_safe": None,
                         "action": (
-                            "Un admin doit inspecter puis retenter space_delete "
-                            "avec recover_access_grants=True pour "
-                            f"'{space_id}'. Ne recréez pas cet identifiant "
-                            "avant d'avoir confirmé zéro référence dans "
-                            "_system/tokens.json."
+                            "An admin must inspect the state, then retry space_delete "
+                            f"for '{space_id}' with recover_access_grants=True. Do not "
+                            "recreate this identifier until _system/tokens.json has "
+                            "been confirmed to contain no references."
                         ),
                     },
                 }
@@ -1190,24 +1228,22 @@ class SpaceService:
                     )
                 if actor_can_retry:
                     action = (
-                        "Retentez space_delete avec le même space_id et "
-                        "recover_access_grants=True : le préfixe est déjà vide "
-                        "et seule la révocation des droits restants sera reprise."
+                        "Retry space_delete with the same space_id and "
+                        "recover_access_grants=True: the prefix is already empty and "
+                        "only the remaining access revocations will be retried."
                     )
                 else:
                     action = (
-                        "Le caller ne possède plus une autorité réessayable. "
-                        "Un admin doit retenter space_delete avec "
-                        "recover_access_grants=True pour terminer la révocation "
-                        "des droits."
+                        "The caller no longer has authority to retry. An admin must "
+                        "retry space_delete with recover_access_grants=True to complete "
+                        "access revocation."
                     )
                 return {
                     "status": "partial",
                     "space_id": space_id,
                     "recovery_required": True,
                     "message": (
-                        "Données du space supprimées, mais révocation des "
-                        "droits incomplète."
+                        "Space data was deleted, but access revocation is incomplete."
                     ),
                     "files_total": files_total,
                     "files_deleted": files_deleted,
@@ -1249,7 +1285,7 @@ class SpaceService:
             marker_exists = await storage.exists(meta_key)
         except Exception:
             return partial_delete(
-                "Impossible de confirmer l'existence du commit marker.",
+                "Could not confirm whether the commit marker exists.",
                 files_total=0,
                 files_deleted=0,
                 failed_keys=[meta_key],
@@ -1260,7 +1296,7 @@ class SpaceService:
                 residual = await storage.list_objects(f"{space_id}/")
             except Exception:
                 return partial_delete(
-                    "Commit marker absent mais préfixe impossible à vérifier.",
+                    "The commit marker is absent, but the prefix could not be verified.",
                     files_total=0,
                     files_deleted=0,
                     failed_keys=[meta_key],
@@ -1269,8 +1305,8 @@ class SpaceService:
             residual_keys = [str(item.get("Key", "")) for item in residual]
             if residual_keys:
                 return partial_delete(
-                    "Commit marker absent avec des objets résiduels ; nettoyage "
-                    "automatique refusé.",
+                    "The commit marker is absent and residual objects remain; "
+                    "automatic cleanup was refused.",
                     files_total=len(residual_keys),
                     files_deleted=0,
                     failed_keys=residual_keys,
@@ -1285,10 +1321,9 @@ class SpaceService:
                         "status": "not_found",
                         "space_id": space_id,
                         "message": (
-                            f"Espace '{space_id}' introuvable. Les droits "
-                            "existants sont conservés car ils peuvent être des "
-                            "pré-grants intentionnels. Pour reprendre une "
-                            "suppression antérieure connue, retentez avec "
+                            f"Space '{space_id}' was not found. Existing access "
+                            "grants are preserved because they may be intentional "
+                            "pre-grants. To resume a known earlier deletion, retry with "
                             "recover_access_grants=True."
                         ),
                     }
@@ -1300,7 +1335,7 @@ class SpaceService:
             return {
                 "status": "not_found",
                 "space_id": space_id,
-                "message": f"Espace '{space_id}' introuvable",
+                "message": f"Space '{space_id}' not found",
             }
 
         # ── Garde Hivemind refus-par-défaut (HM-10, symétrique de restore) ──
@@ -1310,10 +1345,10 @@ class SpaceService:
             return {
                 "status": "error",
                 "message": (
-                    f"Suppression refusée : l'état de coordination Hivemind de "
-                    f"'{space_id}' est corrompu / illisible. Fail-closed : refus "
-                    f"quel que soit unsafe_recovery (impossible de classer la "
-                    f"cible en toute sécurité). Voir ADR-0014."
+                    f"Deletion refused: Hivemind coordination state for '{space_id}' "
+                    "is corrupt or unreadable. Fail-closed: deletion is refused "
+                    "regardless of unsafe_recovery because the target cannot be "
+                    "classified safely. See ADR-0014."
                 ),
             }
 
@@ -1324,13 +1359,25 @@ class SpaceService:
             return {
                 "status": "error",
                 "message": (
-                    f"Suppression refusée : '{space_id}' est un space Hivemind "
-                    f"partagé/unsafe (label='{label}'). Supprimer effacerait "
-                    f"l'état de coordination Project Mesh et ferait basculer les "
-                    f"autres pairs en resync/unsafe. Passez unsafe_recovery=True "
-                    f"pour une suppression EXPLICITE unsafe. Voir ADR-0014."
+                    f"Deletion refused: '{space_id}' is a shared or unsafe Hivemind "
+                    f"space (label='{label}'). Deletion would erase Project Mesh "
+                    "coordination state and move other peers to resync/unsafe. Pass "
+                    "unsafe_recovery=True for an EXPLICIT unsafe deletion. See ADR-0014."
                 ),
             }
+
+        if not unsafe_recovery and label in ("local_only", "not_a_space"):
+            try:
+                await assert_direct_local_allowed(space_id)
+            except Exception:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Deletion refused: '{space_id}' has irreversible Project "
+                        "Mesh source provenance. Pass unsafe_recovery=True only for "
+                        "an explicit destructive recovery."
+                    ),
+                }
 
         # Lister puis dédupliquer tous les objets observés. Le marker est
         # ajouté explicitement si LIST ne le renvoie pas malgré le HEAD initial.
@@ -1338,7 +1385,7 @@ class SpaceService:
             all_objects = await storage.list_objects(f"{space_id}/")
         except Exception:
             return partial_delete(
-                "Impossible de lister les objets à supprimer.",
+                "Could not list the objects to delete.",
                 files_total=1,
                 files_deleted=0,
                 failed_keys=[],
@@ -1364,7 +1411,7 @@ class SpaceService:
                 failed_payload.append(key)
         if failed_payload:
             return partial_delete(
-                "Suppression payload incomplète ; commit marker conservé.",
+                "Payload deletion is incomplete; the commit marker was preserved.",
                 files_total=files_total,
                 files_deleted=files_deleted,
                 failed_keys=failed_payload,
@@ -1377,8 +1424,8 @@ class SpaceService:
             remaining = await storage.list_objects(f"{space_id}/")
         except Exception:
             return partial_delete(
-                "Payload supprimé mais préfixe final impossible à confirmer ; "
-                "commit marker conservé.",
+                "The payload was deleted, but the final prefix could not be confirmed; "
+                "the commit marker was preserved.",
                 files_total=files_total,
                 files_deleted=files_deleted,
                 failed_keys=[],
@@ -1391,7 +1438,7 @@ class SpaceService:
         ]
         if remaining_payload:
             return partial_delete(
-                "Objets payload encore présents ; commit marker conservé.",
+                "Payload objects remain; the commit marker was preserved.",
                 files_total=max(files_total, files_deleted + len(remaining_payload) + 1),
                 files_deleted=files_deleted,
                 failed_keys=remaining_payload,
@@ -1404,7 +1451,7 @@ class SpaceService:
         marker_absent = await delete_and_confirm(meta_key)
         if marker_absent is not True:
             return partial_delete(
-                "Payload supprimé mais suppression du commit marker non confirmée.",
+                "The payload was deleted, but commit-marker deletion was not confirmed.",
                 files_total=files_total,
                 files_deleted=files_deleted,
                 failed_keys=[meta_key],

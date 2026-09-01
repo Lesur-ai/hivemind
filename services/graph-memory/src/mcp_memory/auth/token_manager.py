@@ -121,7 +121,7 @@ class TokenManager:
                 expires_at=expires_at.isoformat() if expires_at else None
             )
         
-        print(f"🔑 [Auth] Token créé pour client '{client_name}'", file=sys.stderr)
+        print(f"🔑 [Auth] Token created for client '{client_name}'", file=sys.stderr)
         
         # Retourner le token en clair (seule fois où il est accessible)
         return token
@@ -160,7 +160,7 @@ class TokenManager:
                 try:
                     expires_at = datetime.fromisoformat(node["expires_at"])
                     if expires_at < datetime.utcnow():
-                        print(f"⚠️ [Auth] Token expiré pour '{node['client_name']}'", file=sys.stderr)
+                        print(f"⚠️ [Auth] Token expired for '{node['client_name']}'", file=sys.stderr)
                         return None
                 except:
                     pass
@@ -199,7 +199,7 @@ class TokenManager:
             record = await result.single()
             
             if record:
-                print(f"🚫 [Auth] Token révoqué: {token_hash[:8]}...", file=sys.stderr)
+                print(f"🚫 [Auth] Token revoked: {token_hash[:8]}...", file=sys.stderr)
                 return True
             return False
     
@@ -307,7 +307,7 @@ class TokenManager:
                 memory_ids=new_memories
             )
             
-            print(f"🔑 [Auth] Token {token_hash[:8]}... mémoires mises à jour: {new_memories}", file=sys.stderr)
+            print(f"🔑 [Auth] Token {token_hash[:8]}... memories updated: {new_memories}", file=sys.stderr)
             
             return {
                 "token_hash": token_hash,
@@ -338,7 +338,9 @@ class TokenManager:
         valid_permissions = {"read", "write", "admin"}
         invalid = set(permissions) - valid_permissions
         if invalid:
-            raise ValueError(f"Permissions invalides: {invalid}. Valides: {valid_permissions}")
+            raise ValueError(
+                f"Invalid permissions: {invalid}. Valid values: {valid_permissions}"
+            )
         
         async with self.graph.session() as session:
             # Récupérer le token
@@ -364,7 +366,7 @@ class TokenManager:
                 permissions=permissions
             )
             
-            action = "promu admin" if "admin" in permissions and "admin" not in previous_permissions else "mis à jour"
+            action = "promoted to admin" if "admin" in permissions and "admin" not in previous_permissions else "updated"
             print(f"🔑 [Auth] Token {token_hash[:8]}... permissions {action}: {permissions}", file=sys.stderr)
             
             return {
@@ -394,7 +396,7 @@ class TokenManager:
                 "MATCH (t:Token {hash: $hash}) SET t.email = $email, t.updated_at = datetime()",
                 hash=token_hash, email=email
             )
-            print(f"🔑 [Auth] Token {token_hash[:8]}... email mis à jour: {email}", file=sys.stderr)
+            print(f"🔑 [Auth] Token {token_hash[:8]}... email updated: {email}", file=sys.stderr)
             return {
                 "token_hash": token_hash,
                 "client_name": node["client_name"],

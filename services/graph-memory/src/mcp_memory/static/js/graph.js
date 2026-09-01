@@ -156,7 +156,7 @@ function renderGraph(nodes, edges) {
     });
 
     // Log de rendu
-    console.log(`📊 [Graph] ${nodes.length} nœuds, ${edges.length} arêtes | labels:${showLabels ? 'ON' : 'OFF'} ombres:${showShadows ? 'ON' : 'OFF'} smooth:${showSmooth ? 'ON' : 'OFF'}`);
+    console.log(`📊 [Graph] ${nodes.length} nodes, ${edges.length} edges | labels:${showLabels ? 'ON' : 'OFF'} shadows:${showShadows ? 'ON' : 'OFF'} smooth:${showSmooth ? 'ON' : 'OFF'}`);
 
     // Clic nœud → détails
     appState.network.on('click', function (params) {

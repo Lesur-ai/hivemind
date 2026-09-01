@@ -336,7 +336,7 @@ async def test_graph_health_skips_unsupported_catalogue_in_strict_mode(
     assert result["status"] == "ok"
     assert calls == []
     assert discovery_calls == [_HEALTH_DISCOVERY_IDENTITIES[role]]
-    assert "Catalogue" in result["message"]
+    assert "catalog" in result["message"]
 
 
 @pytest.mark.parametrize("role", ("chat", "embedding"))

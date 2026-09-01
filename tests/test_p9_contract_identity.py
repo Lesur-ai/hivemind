@@ -85,7 +85,7 @@ async def test_system_health_uses_real_status_enum_and_hivemind_name(
     assert result["service_name"] == "Hivemind"
     assert result["services"]["s3"]["status"] == "ok"
     assert result["services"]["llmaas"]["status"] == "warning"
-    assert result["services"]["llmaas"]["message"] == "LLMaaS non configuré"
+    assert result["services"]["llmaas"]["message"] == "LLMaaS is not configured"
     assert result["spaces_count"] == 1
 
 
@@ -212,6 +212,69 @@ def test_readme_tool_tables_keep_manage_and_confirmation_contracts() -> None:
     assert "56 registered" not in mapping
 
 
+def test_compaction_diagnostics_are_documented_for_manual_and_job_results() -> None:
+    spec = _read("docs/MCP_TOOLS_SPEC.md")
+    manual = spec.split("### `bank_compact`", 1)[1].split("### `bank_repair`", 1)[0]
+    job = spec.split("**Job result contract", 1)[1].split("### `bank_consolidation_status`", 1)[0]
+
+    for token in ("hivemind_state_corrupt", "compaction_tool_failure"):
+        assert token in manual
+    assert "failed_phase" in manual and "rollback_outcome" in manual
+    assert "failed_phase" in job and "rollback_outcome" in job
+
+
+def test_compaction_configuration_validation_changelog_has_upgrade_actions() -> None:
+    # The private release evidence changelog is intentionally excluded and
+    # replaced by release/public-overlay/CHANGELOG.md in the staged public
+    # tree. This assertion belongs to the private source contract only.
+    if not (ROOT / "release" / "public-overlay").exists():
+        pytest.skip("private changelog is intentionally absent from the public tree")
+
+    version = _read("VERSION").strip()
+    changelog = _read("CHANGELOG.md").split("## Inherited Live Memory history", 1)[0]
+    section_start = changelog.index(f"## [{version}] — ")
+    section_end = changelog.index("\n## [", section_start + 1)
+    current = " ".join(changelog[section_start:section_end].split())
+
+    assert "Before upgrading, replace any previously accepted non-finite" in current
+    assert "`COMPACT_THRESHOLD` or value outside `(0, 1]`" in current
+    assert "including `0`, negative values, and values above `1`" in current
+    assert "finite value in `(0, 1]`" in current
+    assert "`BANK_FILE_MAX_SIZE` below `1`" in current
+    assert "positive UTF-8 byte limit" in current
+
+
+def test_mesh_activation_release_notes_are_versioned_and_bound_recovery() -> None:
+    if not (ROOT / "release" / "public-overlay").exists():
+        pytest.skip("private changelog is intentionally absent from the public tree")
+
+    version = _read("VERSION").strip()
+    changelog = _read("CHANGELOG.md").split("## Inherited Live Memory history", 1)[0]
+    current_start = changelog.index(f"## [{version}] — ")
+    current_end = changelog.index("\n## [", current_start + 1)
+    current = " ".join(changelog[current_start:current_end].split())
+    unreleased = " ".join(changelog[:current_start].split())
+
+    for required in (
+        "Project Mesh readiness and activation recovery (#417).",
+        "availability failures during bounded product-storage probes",
+        "Mesh-local pairing-store read failures remain fail-closed as `unsafe`",
+        "admin Mesh status inventory",
+        "can fail closed before a readiness projection is available",
+        "not guaranteed to degrade to an `unsafe` entry",
+        "signed, durable per-space authority",
+        "same-space writers/jobs must be quiesced",
+        "Coordinated loss or restoration",
+        "Object Lock/versioning",
+        "resync or rebuild",
+    ):
+        assert required in current
+
+    assert "transient unavailable dependency" not in current
+    assert "otherwise healthy sources report `unsafe`" not in current
+    assert "Project Mesh readiness and activation recovery (#417)." not in unreleased
+
+
 def test_public_docker_quickstarts_pin_the_compose_feature_floor() -> None:
     for relative in (
         "README.md",
@@ -233,7 +296,7 @@ def test_deployment_bootstrap_curl_uses_the_exported_credential() -> None:
 
 @pytest.mark.parametrize("key", ["", "admin", "not-long-enough", "x" * 31])
 def test_bootstrap_gate_rejects_every_key_shorter_than_32(key: str) -> None:
-    with pytest.raises(RuntimeError, match="≥32"):
+    with pytest.raises(RuntimeError, match="at least 32"):
         live_mem_server._reject_weak_bootstrap_key(key)
 
 

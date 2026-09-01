@@ -26,12 +26,34 @@ An intentionally non-Mesh deployment must set `HIVEMIND_MESH_ENABLED=false`.
 The normal operator journey deliberately has three actions and no protocol
 wizard:
 
+If the intended source is an existing committed space whose Mesh status is
+**Local only**, first choose **Prepare for Project Mesh**. This is a separate,
+one-way prerequisite, not a fourth pairing action and not an implicit part of
+Create. Stop every same-space agent, writer, consolidation, repair, restore,
+GC, and other maintenance job before confirming the writers/jobs-quiesced
+attestation. The service records a durable intent, marks the source `UNSAFE`
+before adding its single-member genesis, validates every persisted object, and
+writes `HEALTHY` last. Existing rules, SHORT, MID, metadata, and long binding
+are not rewritten.
+
+If preparation is interrupted at an exact expected prefix, the console offers
+**Resume preparation**. Corrupt, unexpected, gapped, identity-mismatched, or
+otherwise divergent state remains fail-closed as recovery-required; it is not
+overwritten or downgraded to local-only. This maintenance boundary is not an
+online atomic-conversion claim. After preparation, shared writes still need a
+real locally HELD lease and the normal Mesh commit path; unsupported mutation
+paths may continue to fail closed. Preparation never manufactures a lease just
+to make the source appear writable.
+
 1. An administrator on the initialized source creates one invitation. It is
    opaque, one-time, and expires after exactly **3,600 seconds**.
-2. An administrator on a verifiably blank target pastes and accepts that code.
-   The target validates the signed source and reserves the space before its
-   claim; it does not ask for a key, endpoint, epoch, manifest, snapshot, or
-   per-peer ACK.
+2. An administrator on a verifiably blank target stops every same-space agent,
+   direct writer, consolidation, repair, restore, GC, and maintenance job;
+   confirms that quiescence; then pastes and accepts the code. The target
+   validates the signed source and reserves the space before its claim; the
+   confirmation is an operational precondition, not a cross-process write
+   transaction. It does not ask for a key, endpoint, epoch, manifest, snapshot,
+   or per-peer ACK.
 3. The source administrator verifies the derived target identity and approves.
    The services complete the full-mesh membership ACK, signed bounded bootstrap,
    final ACK, and activation in the background.
@@ -41,11 +63,38 @@ and provisions a two-node mesh. It fails closed when the source already has
 more than one active member. Adding a third node, or otherwise enrolling into
 an existing two-node mesh, is not supported by this workflow in V1.
 
+The target's durable reservation is backed by signed, direct per-space fence
+records, so an independent missing or corrupt reservation/fence record cannot
+silently reopen ordinary writes. Those records are not a substitute for storage
+rollback protection: deletion or loss of the raw reservation together with every
+direct target record (admission anchor, floor, current tail, and fence), or
+restoring that complete historical set of target-local S3 objects, is
+indistinguishable to the ordinary-write fence, which deliberately performs no
+session scan, from a never-paired or genuine historical state. Treat such an
+incident as a storage-integrity recovery, use the bucket versioning and
+Object Lock controls described in [the security model](SECURITY.md), and resync
+or rebuild the node explicitly rather than attempting a local pairing repair.
+
+If Accept crashes before it has stored its first local pairing artifact/session,
+the target reservation is intentionally retained. An administrator may use the
+explicit **Recover orphaned target reservation** action only for that exact
+pair/space after the service has re-proved that the target is blank and that no
+outbound claim/session makes the reservation ambiguous. A retained signed join
+claim is ambiguous even if the local target session is missing: the session may
+have been lost after that claim reached the source. The action is audited; it
+never cancels a post-membership/import tail and never merges populated data.
+Any other incomplete pairing remains fenced and follows its reported resume,
+resync, or eviction recovery path.
+
 Use `/admin#/mesh` and `/admin#/mesh/<space-id>` for this workflow. Project
 Mesh is not an MCP tool family: regular agent discovery remains capped at 24
 canonical tools and exposes no `mesh_*` name. If a post-mutation step fails,
 the session reports `blocked_recovery`; use its explicit resume, resync, or
 eviction guidance rather than attempting a rollback.
+
+The console enables **Create invitation** only for a freshly inspected `ready`
+source. Create never initializes or repairs the source; preparation and
+invitation issuance remain distinct confirmed admin operations.
 
 ## Product Vocabulary
 

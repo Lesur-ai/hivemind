@@ -355,7 +355,7 @@ async def test_archive_restore_rejects_cross_namespace_document_key_before_effec
         }
     ]
 
-    with pytest.raises(ValueError, match=r"^document_keys\.json invalide$"):
+    with pytest.raises(ValueError, match=r"^Invalid document_keys\.json$"):
         await service.restore_from_archive(
             _archive_bytes(document_keys=forged_keys)
         )

@@ -63,6 +63,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from ..models import meta_shared_projection
+from ..reservation_guard import assert_no_pairing_activation, assert_space_not_reserved
 from ..storage import StorageService
 from . import layout
 
@@ -231,9 +232,9 @@ def assert_parent_contiguous(commit: BankCommit) -> None:
     if commit.parent_bank_version != expected:
         raise CommitApplyError(
             CommitApplyReason.PARENT_MISMATCH,
-            f"commit fermé: parent non contigu "
+            f"commit closed: non-contiguous parent "
             f"(bank_version={commit.bank_version}, "
-            f"parent={commit.parent_bank_version}, attendu={expected})",
+            f"parent={commit.parent_bank_version}, expected={expected})",
             {
                 "bank_version": commit.bank_version,
                 "parent": commit.parent_bank_version,
@@ -267,7 +268,7 @@ def assert_intent_matches_commit(commit: BankCommit, intent: CommitIntent) -> No
     if intent.bank_version != commit.bank_version:
         raise CommitApplyError(
             CommitApplyReason.INTENT_PARENT_MISMATCH,
-            f"commit fermé: version cible du CAS divergente du commit "
+            f"commit closed: CAS target version diverges from commit "
             f"(intent.bank_version={intent.bank_version}, "
             f"commit.bank_version={commit.bank_version})",
             {
@@ -278,7 +279,7 @@ def assert_intent_matches_commit(commit: BankCommit, intent: CommitIntent) -> No
     if intent.previous_bank_version != commit.parent_bank_version:
         raise CommitApplyError(
             CommitApplyReason.INTENT_PARENT_MISMATCH,
-            f"commit fermé: parent du CAS divergent du parent du commit "
+            f"commit closed: CAS parent diverges from commit parent "
             f"(intent.previous={intent.previous_bank_version}, "
             f"commit.parent={commit.parent_bank_version})",
             {
@@ -289,14 +290,14 @@ def assert_intent_matches_commit(commit: BankCommit, intent: CommitIntent) -> No
     if intent.term != commit.term:
         raise CommitApplyError(
             CommitApplyReason.INTENT_TERM_MISMATCH,
-            f"commit fermé: term autorisé divergent du commit "
+            f"commit closed: authorized term diverges from commit "
             f"(intent.term={intent.term}, commit.term={commit.term})",
             {"intent_term": intent.term, "commit_term": commit.term},
         )
     if intent.commit_id != commit.commit_id:
         raise CommitApplyError(
             CommitApplyReason.INTENT_COMMIT_ID_MISMATCH,
-            f"commit fermé: commit_id autorisé divergent du commit appliqué "
+            f"commit closed: authorized commit_id diverges from applied commit "
             f"(intent.commit_id={intent.commit_id!r}, "
             f"commit.commit_id={commit.commit_id!r})",
             {
@@ -307,7 +308,7 @@ def assert_intent_matches_commit(commit: BankCommit, intent: CommitIntent) -> No
     if intent.holder_node_id != commit.committed_by_node_id:
         raise CommitApplyError(
             CommitApplyReason.INTENT_HOLDER_MISMATCH,
-            f"commit fermé: holder autorisé divergent du committer du commit "
+            f"commit closed: authorized holder diverges from commit committer "
             f"(intent.holder_node_id={intent.holder_node_id!r}, "
             f"commit.committed_by_node_id={commit.committed_by_node_id!r})",
             {
@@ -354,9 +355,9 @@ def assert_durable_commit_matches(
     if mismatches:
         raise CommitApplyError(
             CommitApplyReason.RESUME_COMMIT_DIVERGENT,
-            f"resume fermé: le commit fourni diverge du record durable "
-            f"commits/{commit.bank_version} sur {sorted(mismatches)} "
-            f"(le pointeur nomme cette version mais le payload diffère)",
+            f"resume closed: supplied commit diverges from durable record "
+            f"commits/{commit.bank_version} on {sorted(mismatches)} "
+            f"(the pointer names this version but the payload differs)",
             {
                 "bank_version": commit.bank_version,
                 "commit_id": commit.commit_id,
@@ -397,9 +398,9 @@ def assert_staging_manifest_matches(
     if staged_manifest is None:
         raise CommitApplyError(
             CommitApplyReason.STAGING_MANIFEST_MISSING,
-            f"commit fermé: marqueur de publication "
-            f"staging/{commit.commit_id}/MANIFEST.json ABSENT "
-            f"(stage jamais publié ou incomplet — manifest-last non atteint)",
+            f"commit closed: publication marker "
+            f"staging/{commit.commit_id}/MANIFEST.json is ABSENT "
+            f"(stage was never published or is incomplete — manifest-last was not reached)",
             {"commit_id": commit.commit_id, "bank_version": commit.bank_version},
         )
     mismatches: list[str] = []
@@ -422,9 +423,9 @@ def assert_staging_manifest_matches(
     if mismatches:
         raise CommitApplyError(
             CommitApplyReason.STAGING_MANIFEST_DIVERGENT,
-            f"commit fermé: le marqueur staging/{commit.commit_id}/MANIFEST.json "
-            f"diverge du commit fourni sur {sorted(mismatches)} "
-            f"(stage publié pour un autre commit/forme)",
+            f"commit closed: staging marker staging/{commit.commit_id}/MANIFEST.json "
+            f"diverges from supplied commit on {sorted(mismatches)} "
+            f"(stage was published for another commit/shape)",
             {
                 "commit_id": commit.commit_id,
                 "bank_version": commit.bank_version,
@@ -464,16 +465,16 @@ def verify_manifest_against_staged(
     if missing:
         raise CommitApplyError(
             CommitApplyReason.MANIFEST_INCOMPLETE,
-            f"commit fermé: stage incomplet, paths du manifest absents "
-            f"{sorted(missing)} (stage partiel jamais publié)",
+            f"commit closed: incomplete stage, manifest paths are missing "
+            f"{sorted(missing)} (partial stage was never published)",
             {"missing_paths": sorted(missing)},
         )
     extra = staged_paths - manifest_paths
     if extra:
         raise CommitApplyError(
             CommitApplyReason.PARTIAL_STAGE,
-            f"commit fermé: fichiers stagés hors manifest {sorted(extra)} "
-            f"(set incohérent)",
+            f"commit closed: staged files outside manifest {sorted(extra)} "
+            f"(inconsistent set)",
             {"extra_paths": sorted(extra)},
         )
     for e in commit.manifest:
@@ -481,9 +482,9 @@ def verify_manifest_against_staged(
         if len(raw) != e.size or _sha256_bytes(raw) != e.sha256:
             raise CommitApplyError(
                 CommitApplyReason.CHECKSUM_MISMATCH,
-                f"commit fermé: checksum/taille divergent pour {e.path!r} "
-                f"(attendu sha256={e.sha256} size={e.size}, "
-                f"observé sha256={_sha256_bytes(raw)} size={len(raw)})",
+                f"commit closed: checksum/size diverges for {e.path!r} "
+                f"(expected sha256={e.sha256} size={e.size}, "
+                f"observed sha256={_sha256_bytes(raw)} size={len(raw)})",
                 {"path": e.path},
             )
 
@@ -501,8 +502,8 @@ def assert_no_graph_memory_in_manifest(
         if e.path == "_meta.json" and "graph_memory" in json.loads(staged[e.path]):
             raise CommitApplyError(
                 CommitApplyReason.GRAPH_MEMORY_IN_MANIFEST,
-                "commit fermé: _meta.json stagé contient un bloc graph_memory "
-                "(local-only, ADR-0012) — jamais répliqué dans un commit",
+                "commit closed: staged _meta.json contains a graph_memory block "
+                "(local-only, ADR-0012) — never replicated in a commit",
                 {"path": e.path},
             )
 
@@ -627,6 +628,13 @@ class CommitRuntime:
         jamais appliqué ; un re-run au même ``commit_id`` écrase idempotemment.
         Rien dans ``commits/``, ``bank_version.json``, ni le bank vivant ne bouge.
         """
+        # Pairing e+1/e+2 is an all-ACK transition, not an interval in which
+        # a source may publish unrelated shared state.  Check both target
+        # reservation and the source activation fence before creating even a
+        # recoverable staging prefix: a later pointer/term/head is not signed
+        # authority for the target's retained e+1 import proof.
+        await assert_space_not_reserved(self._space_id)
+        await assert_no_pairing_activation(self._space_id)
         entries = build_manifest(proposed_bank)
         commit = BankCommit(
             bank_version=bank_version,
@@ -841,6 +849,14 @@ class CommitRuntime:
         redesign explicitement HORS SCOPE de cette PR. Aucun rollback compensatoire :
         la récupération est TOUJOURS un roll-forward par replay idempotent.
         """
+        # Recheck at the actual durable mutation boundary.  A commit may have
+        # been staged before a pairing admitted its e+1 pending target; it must
+        # not roll forward into the fixed activation snapshot afterwards.
+        # ``stage_commit`` carries the same gate so a fresh refused commit leaves
+        # no staging residue; this second gate closes pre-staged/retry paths.
+        await assert_space_not_reserved(self._space_id)
+        await assert_no_pairing_activation(self._space_id)
+
         now = self._clock()
 
         # --- Roll-forward : reprise post-crash après le POINT DE LINÉARISATION ---
@@ -858,7 +874,7 @@ class CommitRuntime:
         if fencing_token != intent.fencing_token:
             raise CommitApplyError(
                 CommitApplyReason.FENCING_TOKEN_MISMATCH,
-                f"commit fermé: fencing_token explicite divergent de l'intent "
+                f"commit refused: explicit fencing_token differs from intent "
                 f"(fencing_token={fencing_token}, "
                 f"intent.fencing_token={intent.fencing_token})",
                 {
@@ -890,10 +906,10 @@ class CommitRuntime:
             durable = await self._store.get_commit(commit.bank_version)
             if durable is None:
                 raise CorruptedStateError(
-                    f"resume fermé: le pointeur nomme bank_version="
-                    f"{commit.bank_version} commit_id={commit.commit_id!r} mais le "
-                    f"record durable commits/{commit.bank_version} est ABSENT "
-                    f"(état critique incohérent, jamais réparé en silence)"
+                    f"resume closed: pointer names bank_version="
+                    f"{commit.bank_version} commit_id={commit.commit_id!r} but durable "
+                    f"record commits/{commit.bank_version} is ABSENT "
+                    f"(inconsistent critical state; never repaired silently)"
                 )
             assert_durable_commit_matches(commit, durable)
             # On finit sur le record DURABLE (pas le payload fourni) : même après la
@@ -940,11 +956,11 @@ class CommitRuntime:
         ):
             if existing_pointer is None:
                 raise CorruptedStateError(
-                    f"roll-forward fermé: le record durable "
+                    f"roll-forward closed: durable record "
                     f"commits/{commit.bank_version} (commit_id={commit.commit_id!r}) "
-                    f"existe mais bank_version.json est ABSENT — pointeur perdu, état "
-                    f"critique incohérent. Jamais matérialisé sans autorisation "
-                    f"(fail-closed) : recovery explicite requise hors apply_commit."
+                    f"exists but bank_version.json is ABSENT — lost pointer, "
+                    f"inconsistent critical state. Never materialized without "
+                    f"authorization (fail-closed): explicit recovery is required outside apply_commit."
                 )
             if existing_pointer.bank_version >= commit.bank_version:
                 # Pointeur présent au-delà ou égal : commit superseded, reprise no-op

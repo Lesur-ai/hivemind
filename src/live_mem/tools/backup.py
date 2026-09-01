@@ -27,7 +27,9 @@ from pydantic import Field
 # Le space_id doit matcher SPACE_ID_REGEX (déjà validé par check_access),
 # et le timestamp doit matcher le format ISO produit par BackupService.create.
 _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
-_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$")
+_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:-[0-9a-f]{32})?$"
+)
 
 
 def _parse_backup_id(backup_id: str) -> tuple[str | None, str | None, dict | None]:
@@ -48,7 +50,7 @@ def _parse_backup_id(backup_id: str) -> tuple[str | None, str | None, dict | Non
         return (
             None,
             None,
-            {"status": "error", "message": "backup_id requis"},
+            {"status": "error", "message": "backup_id is required"},
         )
 
     parts = backup_id.split("/", 1)
@@ -58,7 +60,7 @@ def _parse_backup_id(backup_id: str) -> tuple[str | None, str | None, dict | Non
             None,
             {
                 "status": "error",
-                "message": "backup_id invalide (format attendu: space_id/timestamp)",
+                "message": "Invalid backup_id (expected format: space_id/timestamp)",
             },
         )
 
@@ -69,7 +71,7 @@ def _parse_backup_id(backup_id: str) -> tuple[str | None, str | None, dict | Non
             None,
             {
                 "status": "error",
-                "message": f"space_id invalide dans backup_id : '{sid[:64]}'",
+                "message": f"Invalid space_id in backup_id: '{sid[:64]}'",
             },
         )
     if not _TIMESTAMP_RE.match(ts):
@@ -79,8 +81,8 @@ def _parse_backup_id(backup_id: str) -> tuple[str | None, str | None, dict | Non
             {
                 "status": "error",
                 "message": (
-                    f"timestamp invalide dans backup_id : '{ts[:32]}' "
-                    "(attendu : YYYY-MM-DDTHH-MM-SS)"
+                    f"Invalid timestamp in backup_id: '{ts[:32]}' "
+                    "(expected: YYYY-MM-DDTHH-MM-SS or a suffixed operation id)"
                 ),
             },
         )
@@ -99,19 +101,22 @@ def register(mcp: FastMCP) -> int:
         Nombre d'outils enregistrés (5)
     """
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False))
+    @mcp.tool(
+        description="Create an S3 backup of one space or all spaces.",
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False),
+    )
     async def backup_create(
         space_id: Annotated[
             str,
             Field(
-                description="Identifiant de l'espace à sauvegarder (vide = TOUS les espaces, admin requis)"
+                description="Space to back up (empty means all spaces and requires admin)"
             ),
         ],
         description: Annotated[
             str,
             Field(
                 default="",
-                description="Description du backup (optionnel, ex: 'avant migration')",
+                description="Optional backup description (for example, 'before migration')",
             ),
         ] = "",
     ) -> dict:
@@ -162,13 +167,16 @@ def register(mcp: FastMCP) -> int:
 
             return safe_error(e, "backup")
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @mcp.tool(
+        description="List backups visible to the caller.",
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
     async def backup_list(
         space_id: Annotated[
             str,
             Field(
                 default="",
-                description="Filtrer par espace (vide = tous les espaces accessibles)",
+                description="Filter by space (empty = all accessible spaces)",
             ),
         ] = "",
     ) -> dict:
@@ -196,7 +204,7 @@ def register(mcp: FastMCP) -> int:
         try:
             token_info = _get_effective_token_info()
             if token_info is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             # Si un espace est spécifié, vérifier l'accès
             if space_id:
@@ -306,7 +314,7 @@ def register(mcp: FastMCP) -> int:
             if not confirm:
                 return {
                     "status": "error",
-                    "message": "Restauration refusée : confirm=True requis.",
+                    "message": "Restore refused: confirm=True is required.",
                 }
 
             return await get_backup_service().restore(
@@ -317,11 +325,14 @@ def register(mcp: FastMCP) -> int:
 
             return safe_error(e, "backup")
 
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    @mcp.tool(
+        description="Download a backup as a base64-encoded tar archive.",
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )
     async def backup_download(
         backup_id: Annotated[
             str,
-            Field(description="Identifiant du backup au format 'space_id/timestamp'"),
+            Field(description="Backup identifier in 'space_id/timestamp' format"),
         ],
     ) -> dict:
         """
@@ -340,7 +351,7 @@ def register(mcp: FastMCP) -> int:
         try:
             token_info = _get_effective_token_info()
             if token_info is None:
-                return {"status": "error", "message": "Authentification requise"}
+                return {"status": "error", "message": "Authentication required"}
 
             # LM2-09 fix : valider strictement le backup_id avant accès S3
             space_id, _ts, parse_err = _parse_backup_id(backup_id)
@@ -357,17 +368,20 @@ def register(mcp: FastMCP) -> int:
 
             return safe_error(e, "backup")
 
-    @mcp.tool(annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True))
+    @mcp.tool(
+        description="Permanently delete a backup.",
+        annotations=ToolAnnotations(destructiveHint=True, idempotentHint=True),
+    )
     async def backup_delete(
         backup_id: Annotated[
             str,
-            Field(description="Identifiant du backup au format 'space_id/timestamp'"),
+            Field(description="Backup identifier in 'space_id/timestamp' format"),
         ],
         confirm: Annotated[
             bool,
             Field(
                 default=False,
-                description="Doit être True pour confirmer la suppression (sécurité, irréversible)",
+                description="Must be true to confirm permanent deletion",
             ),
         ] = False,
     ) -> dict:
@@ -403,7 +417,7 @@ def register(mcp: FastMCP) -> int:
             if not confirm:
                 return {
                     "status": "error",
-                    "message": "Suppression refusée : confirm=True requis.",
+                    "message": "Deletion refused: confirm=True is required.",
                 }
 
             return await get_backup_service().delete(backup_id)

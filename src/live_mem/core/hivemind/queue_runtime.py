@@ -478,16 +478,16 @@ class QueueRuntime:
                 }
                 if identities != {incoming_identity}:
                     raise QueueReplayConflictError(
-                        f"event_id={event_id!r} présent avec une ou plusieurs "
-                        f"identités divergentes : persistées={sorted(identities)} "
-                        f"vs soumis={incoming_identity} "
+                        f"event_id={event_id!r} is present with one or more "
+                        f"divergent identities: persisted={sorted(identities)} "
+                        f"vs submitted={incoming_identity} "
                         f"(requester_node_id, term, membership_epoch, "
-                        f"bank_version) — même event_id identifie UN seul "
-                        f"événement logique. Couvre AUSSI le cas où DEUX objets "
-                        f"durables {{sequence}}_{{event_id}} préexistants "
-                        f"divergent entre eux (un seq bas fidèle masquerait "
-                        f"sinon un seq haut divergent). ERREUR PROTOCOLE, "
-                        f"fail-closed, aucune seconde écriture."
+                        f"bank_version) — one event_id identifies exactly one "
+                        f"logical event. This also covers two existing durable "
+                        f"{{sequence}}_{{event_id}} objects that diverge from "
+                        f"each other (a faithful low sequence would otherwise "
+                        f"hide a divergent high sequence). PROTOCOL ERROR; "
+                        f"fail-closed, no second write."
                     )
                 # Toutes les entrées (et l'incoming) partagent la même identité
                 # -> rejeu fidèle idempotent. On retourne l'entrée CANONIQUE :
@@ -547,9 +547,9 @@ class QueueRuntime:
         expected = active_requester_ids(membership)
         if not expected:
             raise CorruptedStateError(
-                f"is_fully_acked refuse un ensemble ACTIVE vide pour "
-                f"event_id={event_id!r} (membership absente ou sans membre "
-                f"ACTIVE : état critique incomplet, fail-closed)"
+                f"is_fully_acked refuses an empty ACTIVE set for "
+                f"event_id={event_id!r} (membership is absent or has no "
+                f"ACTIVE member: incomplete critical state; fail-closed)"
             )
         received = {
             a.ack_by_node_id for a in await self._store.list_acks(event_id)

@@ -1,167 +1,167 @@
 # =============================================================================
-# Ontologie Générique (General Purpose Knowledge Base)
+# General-Purpose Ontology
 # =============================================================================
-# Ontologie universelle pour tout document ne rentrant pas dans les ontologies
-# spécialisées (legal, cloud_products, presales, technical, managed-services).
-# Optimisée pour : FAQs, référentiels, certifications, RSE, specs produits,
-# knowledge bases, RFI/RFP, indicateurs, références clients.
+# Universal ontology for documents that do not belong to specialized ontologies
+# (legal, cloud_products, presales, technical, managed-services). Optimized for
+# FAQs, standards, certifications, CSR, product specifications, knowledge bases,
+# RFIs/RFPs, metrics, and customer references.
 
 name: general
 version: "1.1"
 description: |
-  Ontologie générique pour l'extraction d'informations depuis tout type de document
-  professionnel : FAQ, référentiels normatifs, fiches produits partenaires,
-  bilans RSE, knowledge bases Q&A, indicateurs de performance.
-  
-  Conçue comme filet de sécurité intelligent : types larges mais significatifs,
-  mappings stricts pour éviter les entités "Other".
+  General ontology for extracting information from any type of professional document:
+  FAQs, normative standards, partner product sheets, CSR reports, Q&A knowledge
+  bases, and performance indicators.
+
+  Designed as an intelligent safety net: broad but meaningful types, with strict
+  mappings to avoid "Other" entities.
 
 context: |
-  Tu es un expert en extraction de connaissances pour des documents professionnels variés.
-  Tu dois identifier les entités clés et leurs relations dans des documents hétérogènes :
-  FAQs, référentiels, certifications, bilans environnementaux, specs techniques, etc.
+  You are an expert in knowledge extraction from varied professional documents.
+  You must identify key entities and their relations in heterogeneous documents:
+  FAQs, standards, certifications, environmental reports, technical specifications, and more.
 
-  ⚠️ RÈGLES CRITIQUES D'EXTRACTION :
+  ⚠️ CRITICAL EXTRACTION RULES:
 
-  1. QUESTIONS & RÉPONSES : Si le document est structuré en Q&A ou FAQ,
-     extrais chaque question comme une entité Question et sa réponse comme Answer.
-     Lie-les TOUJOURS avec la relation ANSWERS.
+  1. QUESTIONS AND ANSWERS: If the document is structured as Q&A or FAQ,
+     extract each question as a Question entity and its answer as an Answer entity.
+     ALWAYS link them with the ANSWERS relation.
 
-  2. PRÉCISION DES VALEURS : Extrais les métriques exactes avec unités.
-     ✅ Bon : "99.99%", "2 133 tCO2e", "0.9€/million tokens", "42 Gbps"
-     ❌ Mauvais : "haute disponibilité", "faible empreinte carbone"
+  2. VALUE PRECISION: Extract exact metrics with units.
+     ✅ Good: "99.99%", "2,133 tCO2e", "EUR 0.9/million tokens", "42 Gbps"
+     ❌ Bad: "high availability", "low carbon footprint"
 
-  3. INDICATEURS & CIBLES : Pour les KPI, extrais TOUJOURS la valeur actuelle
-     ET l'objectif si disponible. Intègre les deux dans le nom de l'entité.
-     Ex: "NPS 42 (2024, objectif 50 en 2025)" et non "NPS" seul.
+  3. INDICATORS AND TARGETS: For KPIs, ALWAYS extract the current value
+     AND the target when available. Include both in the entity name.
+     Example: "NPS 42 (2024, target 50 in 2025)", not just "NPS".
 
-  4. RÉFÉRENCES CLIENTS : Intègre budget, durée et secteur dans le nom.
-     Ex: "Acme Corp (2.5M€/an, 10 ans, Industrie/Énergie)" et non "Acme Corp" seul.
+  4. CUSTOMER REFERENCES: Include budget, duration, and sector in the name.
+     Example: "Acme Corp (EUR 2.5M/year, 10 years, Industry/Energy)", not just "Acme Corp".
 
-  5. SPECS PRODUITS : Pour les matrices de produits (Fortinet, serveurs, etc.),
-     chaque modèle est un ProductModel avec ses Specifications.
-     Ne crée PAS une entité par valeur technique isolée.
+  5. PRODUCT SPECIFICATIONS: For product matrices (Fortinet, servers, etc.),
+     each model is a ProductModel with its Specifications.
+     Do NOT create one entity for each isolated technical value.
 
-  6. COUVERTURE FAQ : Si une réponse indique "Disponible: Oui/Non" et
-     "Couverture: Intégralement/Partiellement", intègre ces infos dans l'Answer.
+  6. FAQ COVERAGE: If an answer indicates "Available: Yes/No" and
+     "Coverage: Full/Partial", include that information in the Answer entity.
 
 # =============================================================================
-# TYPES D'ENTITÉS (28 types, 5 familles)
+# ENTITY TYPES (28 types, 5 families)
 # =============================================================================
 entity_types:
 
   # ---------------------------------------------------------------------------
-  # 📚 FAMILLE 1 : CONNAISSANCE & CONTENU
+  # 📚 FAMILY 1: KNOWLEDGE AND CONTENT
   # ---------------------------------------------------------------------------
   - name: Topic
-    description: Sujet, thème ou domaine de connaissance
+    description: Subject, theme, or knowledge domain
     examples:
-      - "Réseau (section 2.1.1)"
-      - "Stockage objet (section 2.1.2)"
-      - "Gestion des identités et accès"
-      - "Impact environnemental"
-      - "Quantisation des LLM"
+      - "Network (section 2.1.1)"
+      - "Object storage (section 2.1.2)"
+      - "Identity and access management"
+      - "Environmental impact"
+      - "LLM quantization"
 
   - name: Question
-    description: Question posée, exigence formulée ou point d'interrogation
+    description: Asked question, stated requirement, or point to investigate
     priority: high
     examples:
-      - "Pilotage des équipements réseaux : segmentation ?"
-      - "Date de la qualification SNC (obtenue ou estimée) ?"
-      - "Quel modèle Fortinet pour 100k sessions ?"
-      - "Quelle est la relation entre ATOS et Cloud Temple ?"
+      - "Network equipment management: segmentation?"
+      - "SNC qualification date (obtained or estimated)?"
+      - "Which Fortinet model supports 100k sessions?"
+      - "What is the relationship between ATOS and Cloud Temple?"
 
   - name: Answer
-    description: Réponse structurée à une question (inclut disponibilité et couverture si FAQ)
+    description: Structured answer to a question (including availability and coverage for an FAQ)
     priority: high
     examples:
-      - "Disponible: Oui, Intégralement — Segmentation via VLANs Console Shiva"
-      - "Non disponible — Security groups non natifs, filtrage via firewalls dédiés"
-      - "Cloud Temple est une filiale du groupe NEURONES, pas d'ATOS"
+      - "Available: Yes, Full — VLAN segmentation through Shiva Console"
+      - "Not available — no native security groups; filtering through dedicated firewalls"
+      - "Cloud Temple is a NEURONES Group subsidiary, not an ATOS subsidiary"
 
   - name: Definition
-    description: Explication formelle d'un terme, concept ou technologie
+    description: Formal explanation of a term, concept, or technology
     examples:
-      - "tCO2e : tonne équivalent CO2 (unité standardisée)"
-      - "Quantisation : réduction de la précision des poids d'un LLM"
-      - "PUE : Power Usage Effectiveness (efficacité énergétique DC)"
+      - "tCO2e: tonne of CO2 equivalent (standardized unit)"
+      - "Quantization: reducing the precision of an LLM's weights"
+      - "PUE: Power Usage Effectiveness (data-center energy efficiency)"
 
   - name: Fact
-    description: Affirmation factuelle vérifiable avec une valeur précise
+    description: Verifiable factual statement with a precise value
     examples:
-      - "Qualification SecNumCloud obtenue le 30/05/2025"
-      - "Compatibilité API S3 à 97%"
-      - "Backbone inter-AZ : 2x100 Gbps"
+      - "SecNumCloud qualification obtained on 30/05/2025"
+      - "S3 API compatibility: 97%"
+      - "Inter-AZ backbone: 2x100 Gbps"
 
   # ---------------------------------------------------------------------------
-  # 🏢 FAMILLE 2 : ORGANISATIONS & ACTEURS
+  # 🏢 FAMILY 2: ORGANIZATIONS AND ACTORS
   # ---------------------------------------------------------------------------
   - name: Organization
-    description: Entreprise, agence, institution ou organisme
+    description: Company, agency, institution, or organization
     examples:
       - "Cloud Temple"
-      - "Groupe NEURONES"
+      - "NEURONES Group"
       - "ANSSI"
       - "Bpifrance"
       - "ADEME"
       - "Fortinet"
 
   - name: Person
-    description: Personne physique nommée
+    description: Named natural person
     examples:
-      - "Jean Dupont (Directeur Technique)"
+      - "Jean Dupont (Chief Technical Officer)"
 
   - name: ClientReference
-    description: Référence client avec contexte (secteur, budget, durée, périmètre)
+    description: Customer reference with context (sector, budget, duration, and scope)
     priority: high
     examples:
-      - "Groupe Agralis (Agroalimentaire, 1.5M€/an, 800 VM)"
-      - "FinRégul (Régulateur financier, 1.2M€/an, 500 VM)"
-      - "AquaNova (Environnement, 2.5M€/an, 200+ VM, 10 ans, NIS2)"
-      - "Agence Santé — SI Urgences (Santé, 600k€/an)"
+      - "Agralis Group (Agrifood, EUR 1.5M/year, 800 VMs)"
+      - "FinRegul (Financial regulator, EUR 1.2M/year, 500 VMs)"
+      - "AquaNova (Environment, EUR 2.5M/year, 200+ VMs, 10 years, NIS2)"
+      - "Health Agency — Emergency Information System (Healthcare, EUR 600k/year)"
 
   - name: Partner
-    description: Partenaire technologique, commercial ou intégrateur
+    description: Technology, commercial, or integration partner
     examples:
-      - "AlphaTech (partenaire sur appels d'offres publics)"
-      - "CyberSec Partners (CERT qualifié ANSSI)"
-      - "DefenseTech (partenariat défense/santé)"
-      - "AuditConseil (conformité HDS)"
+      - "AlphaTech (partner for public tenders)"
+      - "CyberSec Partners (ANSSI-qualified CERT)"
+      - "DefenseTech (defense/healthcare partnership)"
+      - "AuditConseil (HDS compliance)"
 
   - name: Stakeholder
-    description: Partie prenante identifiée dans une analyse de matérialité, un bilan RSE ou une cartographie des acteurs
+    description: Stakeholder identified in a materiality analysis, CSR report, or actor mapping
     examples:
-      - "Stakeholder – Collaborateurs (Salariés, 2024)"
-      - "Stakeholder – Clients utilisateurs produits (Clients, 2024)"
-      - "Stakeholder – Hébergeurs (Infrastructure, 2024)"
-      - "Stakeholder – Communautés (Société civile, 2024)"
-      - "Stakeholder – Nature (Environnement, 2024)"
+      - "Stakeholder — Employees (Workforce, 2024)"
+      - "Stakeholder — Product users (Customers, 2024)"
+      - "Stakeholder — Hosting providers (Infrastructure, 2024)"
+      - "Stakeholder — Communities (Civil society, 2024)"
+      - "Stakeholder — Nature (Environment, 2024)"
 
   # ---------------------------------------------------------------------------
-  # ⚙️ FAMILLE 3 : PRODUITS & TECHNOLOGIE
+  # ⚙️ FAMILY 3: PRODUCTS AND TECHNOLOGY
   # ---------------------------------------------------------------------------
   - name: Product
-    description: Service, offre ou solution commercialisée
+    description: Commercialized service, offering, or solution
     priority: high
     examples:
       - "IaaS VMware"
       - "LLMaaS (LLM as a Service)"
       - "Managed Kubernetes"
-      - "Object Storage S3"
-      - "SOC managé 24/7"
-      - "Bare Metal (pour Oracle/SAP)"
+      - "S3 Object Storage"
+      - "Managed 24/7 SOC"
+      - "Bare Metal (for Oracle/SAP)"
 
   - name: ProductModel
-    description: Modèle ou SKU spécifique avec ses caractéristiques (matériel, appliance, config)
+    description: Specific model or SKU with its characteristics (hardware, appliance, configuration)
     priority: high
     examples:
       - "FortiGate FG-900G (164 Gbps FW, 55G IPsec, 16M sessions)"
       - "FortiGate FG-100F (20 Gbps FW, 1.5M sessions, 1RU)"
-      - "Cisco UCS B200 M5 (lame compute)"
+      - "Cisco UCS B200 M5 (compute blade)"
       - "Thales Luna S790 (HSM FIPS 140-3 L3)"
 
   - name: Technology
-    description: Technologie, logiciel, protocole ou standard technique
+    description: Technology, software, protocol, or technical standard
     examples:
       - "VMware vSphere"
       - "Red Hat OpenShift"
@@ -169,289 +169,289 @@ entity_types:
       - "IBM FlashSystem"
       - "Terraform"
       - "Kubernetes"
-      - "Stormshield (qualifié ANSSI)"
+      - "Stormshield (ANSSI-qualified)"
 
   - name: Specification
-    description: Valeur technique précise avec unité
+    description: Precise technical value with a unit
     examples:
       - "Firewall 164 Gbps (1518B)"
-      - "16 millions sessions concurrentes"
-      - "Latence 3.78 μs"
-      - "25 Gbps par lame"
-      - "Bande passante 95ème percentile"
+      - "16 million concurrent sessions"
+      - "3.78 μs latency"
+      - "25 Gbps per blade"
+      - "95th-percentile bandwidth"
 
   - name: PricingInfo
-    description: Tarif, modèle de facturation ou structure de coût
+    description: Price, billing model, or cost structure
     examples:
-      - "0.9€/million tokens en entrée (LLMaaS)"
-      - "4€/million tokens en sortie"
-      - "0.03€ HT/Gio/mois (stockage objet)"
-      - "Facturation au 95ème percentile (bande passante)"
-      - "Pas de frais d'égrès"
+      - "EUR 0.9/million input tokens (LLMaaS)"
+      - "EUR 4/million output tokens"
+      - "EUR 0.03 excl. VAT/GiB/month (object storage)"
+      - "95th-percentile billing (bandwidth)"
+      - "No egress charges"
 
   # ---------------------------------------------------------------------------
-  # 🛡️ FAMILLE 4 : CONFORMITÉ & ENGAGEMENTS
+  # 🛡️ FAMILY 4: COMPLIANCE AND COMMITMENTS
   # ---------------------------------------------------------------------------
   - name: Certification
-    description: Norme, label, qualification ou certification officielle
+    description: Standard, label, qualification, or official certification
     priority: high
     examples:
       - "SecNumCloud v3.2 (ANSSI, 30/05/2025)"
       - "ISO 27001:2022 (Certi-Trust, 16/12/2027)"
-      - "HDS activités 2 à 6 (Certi-Trust, 16/12/2027)"
+      - "HDS activities 2 to 6 (Certi-Trust, 16/12/2027)"
       - "ISAE 3402 Type II"
       - "C5 (Naolys Audit, 31/05/2026)"
 
   - name: Regulation
-    description: Loi, directive, référentiel réglementaire
+    description: Law, directive, or regulatory framework
     examples:
-      - "NIS2 (Directive EU 2022/2555)"
-      - "DORA (Règlement EU 2022/2554)"
-      - "RGPD"
-      - "Référentiel SecNumCloud v3.2"
-      - "Référentiel HDS"
+      - "NIS2 (EU Directive 2022/2555)"
+      - "DORA (EU Regulation 2022/2554)"
+      - "GDPR"
+      - "SecNumCloud Framework v3.2"
+      - "HDS Framework"
 
   - name: Requirement
-    description: Exigence, besoin ou contrainte (client, réglementaire ou technique)
+    description: Requirement, need, or constraint (customer, regulatory, or technical)
     examples:
-      - "Localisation des données en France"
-      - "Hébergement de données de santé"
-      - "PRA avec RPO zéro"
-      - "Filtrage réseau Est-Ouest"
+      - "Data localization in France"
+      - "Healthcare data hosting"
+      - "Disaster Recovery Plan with zero RPO"
+      - "East-west network filtering"
 
   - name: SLA
-    description: Engagement de niveau de service chiffré
+    description: Quantified service-level commitment
     examples:
-      - "Disponibilité 99.99%"
+      - "Availability 99.99%"
       - "GTI 15 minutes"
-      - "GTR 4 heures"
-      - "Support 24/7 en option"
+      - "GTR 4 hours"
+      - "Optional 24/7 support"
 
   - name: LegalProvision
-    description: Article de loi, considérant, disposition, amendement ou annexe d'un texte réglementaire
+    description: Article of law, recital, provision, amendment, or annex of a regulatory text
     priority: high
     examples:
-      - "Article 21 – Mesures de gestion des risques cybersécurité (NIS2)"
-      - "Article 17 – Processus de gestion des incidents TIC (DORA)"
-      - "Article 32 – Mesures de supervision des entités essentielles"
-      - "Considérant 45 – Principe de proportionnalité"
-      - "Annexe I – Secteurs hautement critiques (NIS2)"
+      - "Article 21 — Cybersecurity risk-management measures (NIS2)"
+      - "Article 17 — ICT incident-management process (DORA)"
+      - "Article 32 — Oversight measures for essential entities"
+      - "Recital 45 — Principle of proportionality"
+      - "Annex I — Highly critical sectors (NIS2)"
 
   - name: Sector
-    description: Secteur ou sous-secteur d'activité réglementé (annexes NIS2, DORA, NACE)
+    description: Regulated sector or subsector (NIS2, DORA, or NACE annexes)
     examples:
-      - "Secteur Énergie (critique, Annexe I NIS2)"
-      - "Subsecteur Électricité (gestionnaires de réseaux, producteurs)"
-      - "Secteur Infrastructure numérique (DNS, registres, IXP)"
-      - "Secteur Bancaire (établissements de crédit)"
-      - "Secteur fabrication de dispositifs médicaux (NACE)"
+      - "Energy sector (critical, NIS2 Annex I)"
+      - "Electricity subsector (network operators, producers)"
+      - "Digital infrastructure sector (DNS, registries, IXPs)"
+      - "Banking sector (credit institutions)"
+      - "Medical-device manufacturing sector (NACE)"
 
   - name: Sanction
-    description: Sanction administrative, amende, astreinte, mesure d'exécution ou pénalité réglementaire
+    description: Administrative sanction, fine, periodic penalty, enforcement measure, or regulatory penalty
     examples:
-      - "Amende administrative – Min 10M€ ou 2% CA mondial (entités essentielles NIS2)"
-      - "Amende administrative – Min 7M€ ou 1.4% CA mondial (entités importantes NIS2)"
-      - "Astreinte – Max 1% CA quotidien mondial pendant 6 mois (DORA)"
-      - "Suspension temporaire d'une certification ou autorisation"
-      - "Interdiction temporaire d'exercice de fonctions de direction"
+      - "Administrative fine — minimum EUR 10M or 2% worldwide turnover (NIS2 essential entities)"
+      - "Administrative fine — minimum EUR 7M or 1.4% worldwide turnover (NIS2 important entities)"
+      - "Periodic penalty — maximum 1% daily worldwide turnover for 6 months (DORA)"
+      - "Temporary suspension of a certification or authorization"
+      - "Temporary prohibition on exercising management duties"
 
   # ---------------------------------------------------------------------------
-  # 📊 FAMILLE 5 : INDICATEURS & STRATÉGIE
+  # 📊 FAMILY 5: INDICATORS AND STRATEGY
   # ---------------------------------------------------------------------------
   - name: KPI
-    description: Indicateur de performance mesurable avec valeur et objectif
+    description: Measurable performance indicator with a value and target
     priority: high
     examples:
-      - "NPS 42 (2024, objectif 50 en 2025)"
+      - "NPS 42 (2024, target 50 in 2025)"
       - "PUE < 1.45"
-      - "Émissions GES 2133 tCO2e (2023)"
-      - "Intensité carbone 47 kg CO2e/k€ CA"
-      - "Égalité HF 89% (2024, objectif 90% en 2025)"
-      - "Collaborateurs sensibilisés NR 79% (objectif 100%)"
+      - "GHG emissions 2,133 tCO2e (2023)"
+      - "Carbon intensity 47 kg CO2e/EUR k turnover"
+      - "Gender equality index 89% (2024, target 90% in 2025)"
+      - "Employees trained in digital responsibility 79% (target 100%)"
 
   - name: Target
-    description: Objectif chiffré avec échéance
+    description: Quantified target with a deadline
     examples:
-      - "−41% émissions relatives d'ici 2030"
-      - "−30% GES par euro dépensé"
-      - "Net-zero scope 1/2 −90% d'ici 2050 (SBTi)"
-      - "Parité HF management (ratio = 1)"
-      - "75% valorisation fin de vie DC (2025)"
+      - "−41% relative emissions by 2030"
+      - "−30% GHG per euro spent"
+      - "Net-zero scope 1/2 −90% by 2050 (SBTi)"
+      - "Gender parity in management (ratio = 1)"
+      - "75% end-of-life data-center recovery (2025)"
 
   - name: Action
-    description: Mesure, initiative ou plan d'action concret
+    description: Concrete measure, initiative, or action plan
     examples:
-      - "Éco-conditions dans la politique d'achats"
-      - "Allongement durée de vie serveurs (3→7 ans)"
-      - "Remplacement flotte véhicules électriques"
-      - "Sensibilisation fresque du climat"
-      - "Migration SAP S4/HANA sur Cloud de confiance"
+      - "Eco-conditions in procurement policy"
+      - "Extended server lifespan (3→7 years)"
+      - "Electric vehicle fleet replacement"
+      - "Climate-awareness workshop"
+      - "SAP S4/HANA migration to trusted cloud"
 
   - name: Evidence
-    description: Preuve formelle, rapport, attestation ou document source
+    description: Formal proof, report, certificate, or source document
     examples:
-      - "Décision ANSSI N° 918/ANSSI/SDE/NP"
-      - "Rapport Diag Décarbon'Action (Bpifrance, 12/2024)"
-      - "Certificat ISO 27001 (Certi-Trust)"
-      - "Attestation ISAE 3402 Type II (Guibert & Co)"
+      - "ANSSI Decision No. 918/ANSSI/SDE/NP"
+      - "Decarbonization Diagnostic Report (Bpifrance, 12/2024)"
+      - "ISO 27001 Certificate (Certi-Trust)"
+      - "ISAE 3402 Type II Attestation (Guibert & Co)"
 
 # =============================================================================
-# TYPES DE RELATIONS (24 types, 6 familles)
+# RELATION TYPES (24 types, 6 families)
 # =============================================================================
 relation_types:
 
   # ---------------------------------------------------------------------------
-  # CONNAISSANCE
+  # KNOWLEDGE
   # ---------------------------------------------------------------------------
   - name: ANSWERS
-    description: Une réponse couvre une question
+    description: An answer addresses a question
     priority: high
     examples:
-      - "Réponse segmentation VLANs → ANSWERS → Question pilotage réseau"
+      - "VLAN segmentation answer → ANSWERS → Network-management question"
 
   - name: COVERS
-    description: Un produit, une réponse ou un document couvre un sujet
+    description: A product, answer, or document covers a topic
     examples:
-      - "IaaS VMware → COVERS → Topic Stockage bloc"
-      - "Answer chiffrement SSE → COVERS → Topic Stockage objet"
+      - "IaaS VMware → COVERS → Block-storage topic"
+      - "SSE encryption answer → COVERS → Object-storage topic"
 
   - name: DEFINES
-    description: Une définition explique un terme
+    description: A definition explains a term
     examples:
-      - "Définition tCO2e → DEFINES → émissions GES"
+      - "tCO2e definition → DEFINES → GHG emissions"
 
   - name: PROVEN_BY
-    description: Une affirmation est prouvée par un document source
+    description: A statement is proven by a source document
     priority: high
     examples:
-      - "Certification SecNumCloud → PROVEN_BY → Décision ANSSI N°918"
+      - "SecNumCloud certification → PROVEN_BY → ANSSI Decision No. 918"
 
   # ---------------------------------------------------------------------------
-  # CAPACITÉ & CONFORMITÉ
+  # CAPABILITY AND COMPLIANCE
   # ---------------------------------------------------------------------------
   - name: PROVIDES
-    description: Une organisation fournit un produit ou service
+    description: An organization provides a product or service
     examples:
       - "Cloud Temple → PROVIDES → IaaS VMware"
 
   - name: HAS_CERTIFICATION
-    description: Une entité possède une certification
+    description: An entity holds a certification
     priority: high
     examples:
-      - "IaaS Secure Temple → HAS_CERTIFICATION → SecNumCloud v3.2"
+      - "Secure Temple IaaS → HAS_CERTIFICATION → SecNumCloud v3.2"
       - "Cloud Temple → HAS_CERTIFICATION → ISO 27001:2022"
 
   - name: COMPLIANT_WITH
-    description: Un service respecte une réglementation
+    description: A service complies with a regulation
     examples:
-      - "Stockage objet → COMPLIANT_WITH → RGPD"
+      - "Object storage → COMPLIANT_WITH → GDPR"
 
   - name: HAS_SLA
-    description: Un produit est associé à un engagement de service
+    description: A product is associated with a service-level commitment
     priority: high
     examples:
-      - "IaaS VMware → HAS_SLA → Disponibilité 99.99%"
+      - "IaaS VMware → HAS_SLA → Availability 99.99%"
 
   - name: REQUIRES
-    description: Une entité nécessite un prérequis
+    description: An entity requires a prerequisite
     examples:
-      - "Hébergement santé → REQUIRES → Certification HDS"
+      - "Healthcare hosting → REQUIRES → HDS certification"
 
   # ---------------------------------------------------------------------------
-  # TECHNIQUE & PRODUIT
+  # TECHNOLOGY AND PRODUCT
   # ---------------------------------------------------------------------------
   - name: USES_TECHNOLOGY
-    description: Un produit utilise une technologie
+    description: A product uses a technology
     examples:
-      - "Sécurité réseau → USES_TECHNOLOGY → Fortinet FortiGate"
+      - "Network security → USES_TECHNOLOGY → Fortinet FortiGate"
 
   - name: HAS_MODEL
-    description: Un produit ou gamme inclut un modèle spécifique
+    description: A product or product range includes a specific model
     examples:
       - "FortiGate → HAS_MODEL → FG-900G (164 Gbps)"
 
   - name: HAS_SPEC
-    description: Un modèle possède une spécification technique
+    description: A model has a technical specification
     examples:
-      - "FG-900G → HAS_SPEC → 16M sessions concurrentes"
+      - "FG-900G → HAS_SPEC → 16M concurrent sessions"
 
   - name: PRICED_AT
-    description: Un produit a un tarif
+    description: A product has a price
     examples:
-      - "LLMaaS → PRICED_AT → 0.9€/M tokens entrée"
+      - "LLMaaS → PRICED_AT → EUR 0.9/M input tokens"
 
   - name: INTEGRATES_WITH
-    description: Un produit s'intègre avec un autre
+    description: A product integrates with another
     examples:
-      - "Console Shiva → INTEGRATES_WITH → Terraform"
+      - "Shiva Console → INTEGRATES_WITH → Terraform"
 
   # ---------------------------------------------------------------------------
-  # RÉFÉRENCES & ACTEURS
+  # REFERENCES AND ACTORS
   # ---------------------------------------------------------------------------
   - name: DEPLOYED_FOR
-    description: Un produit/solution a été déployé pour un client
+    description: A product or solution has been deployed for a customer
     priority: high
     examples:
-      - "Cloud SecNumCloud → DEPLOYED_FOR → FinRégul (500 VM, 1.2M€/an)"
+      - "SecNumCloud Cloud → DEPLOYED_FOR → FinRegul (500 VMs, EUR 1.2M/year)"
 
   - name: PARTNERED_WITH
-    description: Une organisation a un partenariat avec une autre
+    description: An organization has a partnership with another
     examples:
       - "Cloud Temple → PARTNERED_WITH → AlphaTech"
 
   # ---------------------------------------------------------------------------
-  # STRATÉGIE & INDICATEURS
+  # STRATEGY AND INDICATORS
   # ---------------------------------------------------------------------------
   - name: MEASURED_BY
-    description: Une entité est mesurée par un indicateur
+    description: An entity is measured by an indicator
     examples:
-      - "Efficacité énergétique DC → MEASURED_BY → PUE < 1.45"
+      - "Data-center energy efficiency → MEASURED_BY → PUE < 1.45"
 
   - name: TARGETS
-    description: Un KPI ou une action vise un objectif
+    description: A KPI or action targets an objective
     examples:
-      - "Plan décarbonation → TARGETS → −41% émissions 2030"
+      - "Decarbonization plan → TARGETS → −41% emissions by 2030"
 
   - name: ADDRESSES
-    description: Une action traite un enjeu ou risque
+    description: An action addresses an issue or risk
     examples:
-      - "Allongement durée vie serveurs → ADDRESSES → Empreinte carbone immobilisations"
+      - "Extended server lifespan → ADDRESSES → Capital-equipment carbon footprint"
 
   # ---------------------------------------------------------------------------
   # STRUCTURE
   # ---------------------------------------------------------------------------
   - name: PART_OF
-    description: Une entité fait partie d'un ensemble
+    description: An entity is part of a larger whole
     examples:
-      - "Stockage objet → PART_OF → Topic Fonctionnalités attendues"
+      - "Object storage → PART_OF → Expected capabilities topic"
 
   - name: RELATED_TO
-    description: Relation générique (dernier recours)
+    description: Generic relation (last resort)
     examples:
       - "Concept A → RELATED_TO → Concept B"
 
   - name: SUPERSEDES
-    description: Une version remplace une précédente
+    description: A version replaces an earlier version
     examples:
       - "SecNumCloud v3.2 → SUPERSEDES → SecNumCloud v3.1"
 
   # ---------------------------------------------------------------------------
-  # RÉGLEMENTAIRE
+  # REGULATORY
   # ---------------------------------------------------------------------------
   - name: APPLIES_TO
-    description: Un texte réglementaire ou une disposition s'applique à un secteur ou une catégorie d'entités
+    description: A regulatory text or provision applies to a sector or category of entities
     examples:
-      - "NIS2 → APPLIES_TO → Secteur Infrastructure numérique"
-      - "DORA → APPLIES_TO → Entité financière"
+      - "NIS2 → APPLIES_TO → Digital infrastructure sector"
+      - "DORA → APPLIES_TO → Financial entity"
 
   - name: IMPOSES
-    description: Une réglementation ou autorité impose une sanction ou une obligation
+    description: A regulation or authority imposes a sanction or obligation
     examples:
-      - "NIS2 Article 34 → IMPOSES → Amende administrative 10M€"
-      - "DORA Article 35 → IMPOSES → Astreinte 1% CA quotidien"
+      - "NIS2 Article 34 → IMPOSES → EUR 10M administrative fine"
+      - "DORA Article 35 → IMPOSES → 1% daily-turnover periodic penalty"
 
 # =============================================================================
-# RÈGLES D'EXTRACTION
+# EXTRACTION RULES
 # =============================================================================
 extraction_rules:
   max_entities: 60
@@ -470,203 +470,202 @@ extraction_rules:
     - Sanction
 
   special_instructions: |
-    # --- RÈGLES POUR LES FAQ / Q&A ---
-    - Si le document est structuré en sections Q&A, chaque question = une entité Question
-      et chaque réponse = une entité Answer, liées par ANSWERS.
-    - Intègre "Disponible: Oui/Non" et "Couverture: Intégralement/Partiellement" 
-      dans le nom de l'Answer (ex: "Oui, Intégralement — Segmentation via VLANs").
-    - NE PAS créer une entité par section de FAQ. Crée des Questions individuelles.
+    # --- RULES FOR FAQS / Q&A ---
+    - If the document is structured in Q&A sections, each question = one Question entity
+      and each answer = one Answer entity, linked with ANSWERS.
+    - Include "Available: Yes/No" and "Coverage: Full/Partial"
+      in the Answer name (for example, "Yes, Full — VLAN segmentation").
+    - DO NOT create one entity per FAQ section. Create individual Question entities.
 
-    # --- RÈGLES POUR LES RÉFÉRENCES CLIENTS ---
-    - Intègre TOUJOURS budget annuel, nombre de VM, durée de relation et secteur
-      dans le nom de l'entité ClientReference.
-      ✅ "FinRégul (Régulateur, 1.2M€/an, 500 VM)"
-      ❌ "FinRégul" seul + entité "Budget 1.2M€" séparée
+    # --- RULES FOR CUSTOMER REFERENCES ---
+    - ALWAYS include annual budget, VM count, relationship duration, and sector
+      in the ClientReference entity name.
+      ✅ "FinRegul (Regulator, EUR 1.2M/year, 500 VMs)"
+      ❌ "FinRegul" alone + a separate "Budget EUR 1.2M" entity
 
-    # --- RÈGLES POUR LES SPECS PRODUITS (Fortinet, serveurs, etc.) ---
-    - Chaque modèle distinct = une entité ProductModel.
-    - Les specs clés (débit, sessions, latence, interfaces) = entités Specification
-      liées par HAS_SPEC.
-    - NE PAS créer une entité par ligne de tableau. Regroupe par modèle.
+    # --- RULES FOR PRODUCT SPECS (Fortinet, servers, etc.) ---
+    - Each distinct model = one ProductModel entity.
+    - Key specifications (throughput, sessions, latency, interfaces) = Specification entities
+      linked through HAS_SPEC.
+    - DO NOT create one entity per table row. Group data by model.
 
-    # --- RÈGLES POUR LES INDICATEURS RSE ---
-    - Un KPI doit TOUJOURS contenir : nom + valeur + année + objectif si dispo.
-      ✅ "NPS 42 (2024, objectif 50 en 2025)"
-      ❌ "NPS" seul
-    - Les plans d'action RSE = entités Action, liées aux Target via TARGETS.
+    # --- RULES FOR CSR INDICATORS ---
+    - A KPI must ALWAYS contain: name + value + year + target when available.
+      ✅ "NPS 42 (2024, target 50 in 2025)"
+      ❌ "NPS" alone
+    - CSR action plans = Action entities, linked to Targets through TARGETS.
 
-    # --- MAPPINGS OBLIGATOIRES (anti-"Other") ---
+    # --- REQUIRED MAPPINGS (anti-"Other") ---
 
-    - ⚠️ Les montants (budget, prix, valeur contrat, chiffre d'affaires) doivent être
-      INTÉGRÉS dans ClientReference, PricingInfo ou KPI. Ne crée JAMAIS de type
-      "MonetaryAmount", "Amount", "Budget" ou "Revenue".
+    - ⚠️ Amounts (budget, price, contract value, turnover) must be
+      INCLUDED in ClientReference, PricingInfo, or KPI. NEVER create the types
+      "MonetaryAmount", "Amount", "Budget", or "Revenue".
 
-    - ⚠️ Les durées (contrat, projet, engagement, validité) doivent être INTÉGRÉES
-      dans le nom de l'entité associée (ClientReference, Certification, SLA).
-      Ne crée JAMAIS de type "Duration", "Period" ou "Timeframe".
+    - ⚠️ Durations (contract, project, commitment, validity) must be INCLUDED
+      in the name of the associated entity (ClientReference, Certification, SLA).
+      NEVER create the types "Duration", "Period", or "Timeframe".
 
-    - ⚠️ Les dates (obtention, expiration, publication) doivent être INTÉGRÉES
-      dans le nom de l'entité. Ex: "SecNumCloud v3.2 (30/05/2025, valide 30/05/2028)".
-      Ne crée JAMAIS de type "Date" ou "Timestamp".
+    - ⚠️ Dates (award, expiry, publication) must be INCLUDED in the entity name.
+      Example: "SecNumCloud v3.2 (30/05/2025, valid through 30/05/2028)".
+      NEVER create the types "Date" or "Timestamp".
 
-    - ⚠️ Les pourcentages et scores isolés doivent être intégrés dans KPI ou SLA.
-      Ne crée JAMAIS de type "Percentage", "Score" ou "Metric" — utilise KPI.
+    - ⚠️ Isolated percentages and scores must be included in a KPI or SLA.
+      NEVER create the types "Percentage", "Score", or "Metric" — use KPI.
 
-    - ⚠️ Les noms de sections, titres de documents ou en-têtes ne sont PAS des entités.
-      Ne crée JAMAIS de type "Section", "Chapter" ou "DocumentTitle".
+    - ⚠️ Section names, document titles, and headings are NOT entities.
+      NEVER create the types "Section", "Chapter", or "DocumentTitle".
 
-    - ⚠️ Les processus opérationnels (gestion incidents, MCO, infogérance) sont des Product.
-      Ne crée JAMAIS de type "Process" ou "Workflow".
+    - ⚠️ Operational processes (incident management, maintenance, managed services) are Product entities.
+      NEVER create the types "Process" or "Workflow".
 
-    - ⚠️ Les profils types (SDM, architecte, ingénieur) sont des entités Person
-      uniquement s'ils sont nommés, sinon IGNORER.
-      Ne crée JAMAIS de type "JobTitle" ou "Profile".
+    - ⚠️ Role profiles (SDM, architect, engineer) are Person entities only when NAMED;
+      otherwise IGNORE them. NEVER create the types "JobTitle" or "Profile".
 
-    - ⚠️ Les unités de mesure seules (Gbps, IOPS, tCO2e, €) ne sont PAS des entités.
-      Elles doivent être intégrées dans Specification, KPI ou PricingInfo.
+    - ⚠️ Standalone units of measure (Gbps, IOPS, tCO2e, EUR) are NOT entities.
+      They must be included in Specification, KPI, or PricingInfo.
 
     # --- EXCLUSIONS ---
-    - ⚠️ NE PAS extraire comme entités :
-      * Les mots isolés sans contexte ("Sécurité", "Performance", "Réseau")
-      * Les abréviations seules sans définition ("HA", "DR", "NR")
-      * Les numéros de section ("2.1.1", "Section 3.2")
-      * Les formulations vagues ("haute disponibilité", "sécurité renforcée")
-      * Les paramètres CLI ou variables d'environnement
-      → Ces éléments doivent être IGNORÉS ou intégrés comme attributs.
+    - ⚠️ DO NOT extract as entities:
+      * Isolated words without context ("Security", "Performance", "Network")
+      * Standalone abbreviations without a definition ("HA", "DR", "NR")
+      * Section numbers ("2.1.1", "Section 3.2")
+      * Vague formulations ("high availability", "enhanced security")
+      * CLI parameters or environment variables
+      → These elements must be IGNORED or included as attributes.
 
-    # --- RÈGLES POUR LES TEXTES RÉGLEMENTAIRES (NIS2, DORA, SecNumCloud, HDS, PAMS) ---
-    - Chaque article numéroté d'un texte de loi/directive/règlement = LegalProvision.
-      Inclure le numéro ET le titre dans le nom.
-      ✅ "Article 21 – Mesures de gestion des risques cybersécurité (NIS2)"
-      ❌ "Article 21" seul
-    - Les considérants (Recital) = LegalProvision aussi.
-    - Les annexes numérotées = LegalProvision ("Annexe I – Secteurs hautement critiques").
-    - Les secteurs et sous-secteurs des annexes réglementaires = Sector.
-      ✅ "Secteur Énergie (critique, Annexe I NIS2)"
-      ❌ "Énergie" seul
-    - Les sanctions (amendes, astreintes, suspensions, interdictions) = Sanction.
-      Inclure TOUJOURS le montant/seuil si disponible.
-      ✅ "Amende administrative – Min 10M€ ou 2% CA mondial (entités essentielles NIS2)"
-      ❌ "Amende administrative" seul
+    # --- RULES FOR REGULATORY TEXTS (NIS2, DORA, SecNumCloud, HDS, PAMS) ---
+    - Each numbered article of a law/directive/regulation = LegalProvision.
+      Include the number AND title in the name.
+      ✅ "Article 21 — Cybersecurity risk-management measures (NIS2)"
+      ❌ "Article 21" alone
+    - Recitals = LegalProvision entities as well.
+    - Numbered annexes = LegalProvision entities ("Annex I — Highly critical sectors").
+    - Sectors and subsectors of regulatory annexes = Sector entities.
+      ✅ "Energy sector (critical, NIS2 Annex I)"
+      ❌ "Energy" alone
+    - Sanctions (fines, periodic penalties, suspensions, prohibitions) = Sanction entities.
+      ALWAYS include the amount/threshold when available.
+      ✅ "Administrative fine — minimum EUR 10M or 2% worldwide turnover (NIS2 essential entities)"
+      ❌ "Administrative fine" alone
 
-    # --- RÈGLES POUR LES RAPPORTS RSE / MATÉRIALITÉ ---
-    - Les parties prenantes des analyses de matérialité = Stakeholder.
-      ✅ "Stakeholder – Hébergeurs (Infrastructure, 2024)"
-      ❌ "Hébergeurs" seul
-    - Les impacts, risques et opportunités RSE = KPI (inclure nature +/-, horizon).
-    - Les résolutions d'assemblée générale = Action.
-    - Les plans d'actions gratuites / rachats d'actions = Action.
+    # --- RULES FOR CSR / MATERIALITY REPORTS ---
+    - Stakeholders in materiality analyses = Stakeholder entities.
+      ✅ "Stakeholder — Hosting providers (Infrastructure, 2024)"
+      ❌ "Hosting providers" alone
+    - CSR impacts, risks, and opportunities = KPIs (include nature +/− and horizon).
+    - General-assembly resolutions = Action entities.
+    - Free-share plans / share buybacks = Action entities.
 
-    # --- MAPPINGS OBLIGATOIRES ADDITIONNELS (anti-"Other") ---
+    # --- ADDITIONAL REQUIRED MAPPINGS (anti-"Other") ---
 
-    - ⚠️ Les qualifications ANSSI (PAMS, PASSI, PDIS, PRIS, SecNumCloud) = Certification.
-      Ne crée JAMAIS de type "Qualification" ou "Acronym".
+    - ⚠️ ANSSI qualifications (PAMS, PASSI, PDIS, PRIS, SecNumCloud) = Certification.
+      NEVER create the types "Qualification" or "Acronym".
 
-    - ⚠️ Les rapports officiels (ENISA, CSIRT, EU-CyCLONe, bilans RSE) = Evidence.
-      Ne crée JAMAIS de type "Report" ou "Publication".
+    - ⚠️ Official reports (ENISA, CSIRT, EU-CyCLONe, CSR reports) = Evidence.
+      NEVER create the types "Report" or "Publication".
 
-    - ⚠️ Les zones de sécurité (zone de confiance, zone d'interconnexion) = Topic.
-      Ne crée JAMAIS de type "Zone", "SecurityZone" ou "Component".
+    - ⚠️ Security zones (trusted zone, interconnection zone) = Topic.
+      NEVER create the types "Zone", "SecurityZone", or "Component".
 
-    - ⚠️ Les comités (comité d'audit, comité éthique, comité de groupe) = Organization.
-      Ne crée JAMAIS de type "Committee".
+    - ⚠️ Committees (audit committee, ethics committee, group committee) = Organization.
+      NEVER create the type "Committee".
 
-    - ⚠️ Les réunions du conseil, assemblées générales = Action.
-      Ne crée JAMAIS de type "Meeting", "Event" ou "Session".
+    - ⚠️ Board meetings and general assemblies = Action.
+      NEVER create the types "Meeting", "Event", or "Session".
 
-    - ⚠️ Les rôles (RSSI, DPO) = Person uniquement si NOMMÉE, sinon IGNORER.
-      Ne crée JAMAIS de type "Role" ou "JobTitle".
+    - ⚠️ Roles (CISO, DPO) = Person only when NAMED; otherwise IGNORE them.
+      NEVER create the types "Role" or "JobTitle".
 
-    - ⚠️ Les acronymes seuls (DSCP, SMSI) = Definition.
-      Ne crée JAMAIS de type "Acronym".
+    - ⚠️ Standalone acronyms (DSCP, ISMS) = Definition.
+      NEVER create the type "Acronym".
 
-    - ⚠️ Les guides et référentiels ANSSI (GUIDE_ACHAT, NT_ADMIN) = Evidence.
+    - ⚠️ ANSSI guides and frameworks (GUIDE_ACHAT, NT_ADMIN) = Evidence.
 
-    - ⚠️ Les deadlines isolées doivent être INTÉGRÉES dans LegalProvision ou Requirement.
-      ✅ "Article 41 – Transposition (deadline 17/10/2024)"
-      ❌ "Deadline 17 octobre 2024" comme entité séparée
+    - ⚠️ Standalone deadlines must be INCLUDED in LegalProvision or Requirement.
+      ✅ "Article 41 — Transposition (deadline 17/10/2024)"
+      ❌ "Deadline 17 October 2024" as a separate entity
 
-    - ⚠️ Les durées isolées (5 ans, 26 mois) = INTÉGRÉES dans l'entité parente.
-      ❌ "Duration 5 years" comme entité séparée
+    - ⚠️ Standalone durations (5 years, 26 months) = INCLUDED in the parent entity.
+      ❌ "Duration 5 years" as a separate entity
 
-    - ⚠️ Les fréquences (trimestriel, semestriel) = INTÉGRÉES dans Evidence.
-      ✅ "Rapport de synthèse ENISA (trimestriel)"
-      ❌ "Fréquence trimestrielle" comme entité séparée
+    - ⚠️ Frequencies (quarterly, semiannual) = INCLUDED in Evidence.
+      ✅ "ENISA summary report (quarterly)"
+      ❌ "Quarterly frequency" as a separate entity
 
-    - ⚠️ Les limites financières (plafonds, décotes, seuils) = INTÉGRÉES dans Action.
-      ❌ "Capacité maximale d'émission 9M€" comme entité séparée
+    - ⚠️ Financial limits (caps, discounts, thresholds) = INCLUDED in Action.
+      ❌ "Maximum issuance capacity EUR 9M" as a separate entity
 
-    - ⚠️ Les status ("Non utilisée", "En cours") ne sont PAS des entités. IGNORER.
+    - ⚠️ Statuses ("Unused", "In progress") are NOT entities. IGNORE them.
 
-    # --- QUALITÉ DES NOMS ---
-    - Chaque entité doit avoir un nom descriptif et auto-suffisant.
+    # --- NAME QUALITY ---
+    - Each entity must have a descriptive, self-contained name.
       ✅ "FortiGate FG-900G (164 Gbps FW, 16M sessions)"
       ❌ "FG-900G"
       ✅ "SecNumCloud v3.2 (ANSSI, 30/05/2025)"
       ❌ "SecNumCloud"
-      ✅ "Émissions GES 2133 tCO2e (FY2023, −41% objectif 2030)"
-      ❌ "Émissions GES"
+      ✅ "GHG emissions 2,133 tCO2e (FY2023, −41% target 2030)"
+      ❌ "GHG emissions"
 
 # =============================================================================
-# EXEMPLES D'EXTRACTION
+# EXTRACTION EXAMPLES
 # =============================================================================
 examples:
-  - context: "FAQ RFI ANSSI — section Réseau"
+  - context: "ANSSI RFI FAQ — Network section"
     input: |
-      ## 2.1.1 Réseau - Protection anti-DDoS
-      **Réponse Cloud Temple :**
-      - **Disponible :** Oui
-      - **Couverture :** Intégralement
-      - **Détails :** Protection DDoS volumétrique incluse en standard,
-        filtrage en amont par partenaires opérateurs.
+      ## 2.1.1 Network — Anti-DDoS protection
+      **Cloud Temple answer:**
+      - **Available:** Yes
+      - **Coverage:** Full
+      - **Details:** Volumetric DDoS protection is included by default,
+        with upstream filtering by operator partners.
     expected_entities:
-      - {name: "Protection anti-DDoS disponible ?", type: "Question"}
-      - {name: "Oui, Intégralement — DDoS volumétrique inclus, filtrage amont opérateurs", type: "Answer"}
-      - {name: "Réseau (section 2.1.1)", type: "Topic"}
-      - {name: "Anti-DDoS (inclus dans connectivité Internet)", type: "Product"}
+      - {name: "Anti-DDoS protection available?", type: "Question"}
+      - {name: "Yes, Full — Volumetric DDoS included, upstream operator filtering", type: "Answer"}
+      - {name: "Network (section 2.1.1)", type: "Topic"}
+      - {name: "Anti-DDoS (included in Internet connectivity)", type: "Product"}
     expected_relations:
-      - {from: "Oui, Intégralement — DDoS volumétrique", to: "Protection anti-DDoS disponible ?", type: "ANSWERS"}
-      - {from: "Protection anti-DDoS disponible ?", to: "Réseau (section 2.1.1)", type: "PART_OF"}
+      - {from: "Yes, Full — Volumetric DDoS", to: "Anti-DDoS protection available?", type: "ANSWERS"}
+      - {from: "Anti-DDoS protection available?", to: "Network (section 2.1.1)", type: "PART_OF"}
       - {from: "Anti-DDoS", to: "Cloud Temple", type: "PROVIDES"}
 
-  - context: "Référence client — AquaNova"
+  - context: "Customer reference — AquaNova"
     input: |
-      Client : le groupe AquaNova
-      Infrastructures : Cloud de confiance SecNumCloud, CMP Shiva, NIS2.
-      Plus de 200 VM, coût annuel 2,5 M€, confiance renouvelée depuis 10 ans.
+      Customer: AquaNova Group
+      Infrastructure: SecNumCloud trusted cloud, CMP Shiva, NIS2.
+      More than 200 VMs, annual cost of EUR 2.5M, renewed trust for 10 years.
     expected_entities:
-      - {name: "AquaNova (Environnement, 2.5M€/an, 200+ VM, 10 ans, NIS2)", type: "ClientReference"}
-      - {name: "Cloud de confiance SecNumCloud", type: "Product"}
-      - {name: "Console CMP Shiva", type: "Technology"}
-      - {name: "NIS2 (Directive EU 2022/2555)", type: "Regulation"}
+      - {name: "AquaNova (Environment, EUR 2.5M/year, 200+ VMs, 10 years, NIS2)", type: "ClientReference"}
+      - {name: "SecNumCloud trusted cloud", type: "Product"}
+      - {name: "CMP Shiva Console", type: "Technology"}
+      - {name: "NIS2 (EU Directive 2022/2555)", type: "Regulation"}
     expected_relations:
-      - {from: "Cloud de confiance SecNumCloud", to: "AquaNova", type: "DEPLOYED_FOR"}
+      - {from: "SecNumCloud trusted cloud", to: "AquaNova", type: "DEPLOYED_FOR"}
       - {from: "AquaNova", to: "NIS2", type: "COMPLIANT_WITH"}
 
-  - context: "Bilan RSE — indicateurs"
+  - context: "CSR report — indicators"
     input: |
-      Émissions totales : 2 133 tCO2e (FY2023).
-      Intensité carbone : 47 kg CO2e / k€ de CA.
-      Objectif : −41% d'émissions relatives d'ici 2030.
+      Total emissions: 2,133 tCO2e (FY2023).
+      Carbon intensity: 47 kg CO2e / EUR k turnover.
+      Target: −41% relative emissions by 2030.
     expected_entities:
-      - {name: "Émissions GES 2133 tCO2e (FY2023)", type: "KPI"}
-      - {name: "Intensité carbone 47 kg CO2e/k€ CA (FY2023)", type: "KPI"}
-      - {name: "−41% émissions relatives d'ici 2030", type: "Target"}
+      - {name: "GHG emissions 2,133 tCO2e (FY2023)", type: "KPI"}
+      - {name: "Carbon intensity 47 kg CO2e/EUR k turnover (FY2023)", type: "KPI"}
+      - {name: "−41% relative emissions by 2030", type: "Target"}
     expected_relations:
-      - {from: "Émissions GES 2133 tCO2e", to: "−41% émissions relatives 2030", type: "TARGETS"}
+      - {from: "GHG emissions 2,133 tCO2e", to: "−41% relative emissions 2030", type: "TARGETS"}
 
-  - context: "Article NIS2 — Sanctions"
+  - context: "NIS2 Article — Sanctions"
     input: |
-      Article 34 – Conditions générales pour imposer des amendes administratives.
-      Les amendes pour les entités essentielles s'élèvent à un minimum de
-      10 000 000 EUR ou 2% du chiffre d'affaires annuel mondial.
-      Les entités importantes : minimum 7 000 000 EUR ou 1,4%.
-      NIS2 s'applique aux secteurs hautement critiques (Annexe I) dont l'Énergie.
+      Article 34 — General conditions for imposing administrative fines.
+      Fines for essential entities amount to a minimum of
+      EUR 10,000,000 or 2% of annual worldwide turnover.
+      Important entities: minimum EUR 7,000,000 or 1.4%.
+      NIS2 applies to highly critical sectors (Annex I), including Energy.
     expected_entities:
-      - {name: "Article 34 – Conditions générales amendes administratives (NIS2)", type: "LegalProvision"}
-      - {name: "Amende – Min 10M€ ou 2% CA mondial (entités essentielles NIS2)", type: "Sanction"}
-      - {name: "Amende – Min 7M€ ou 1.4% CA mondial (entités importantes NIS2)", type: "Sanction"}
-      - {name: "Secteur Énergie (critique, Annexe I NIS2)", type: "Sector"}
+      - {name: "Article 34 — General conditions for administrative fines (NIS2)", type: "LegalProvision"}
+      - {name: "Fine — minimum EUR 10M or 2% worldwide turnover (NIS2 essential entities)", type: "Sanction"}
+      - {name: "Fine — minimum EUR 7M or 1.4% worldwide turnover (NIS2 important entities)", type: "Sanction"}
+      - {name: "Energy sector (critical, NIS2 Annex I)", type: "Sector"}
     expected_relations:
-      - {from: "Article 34 – Conditions générales", to: "Amende – Min 10M€", type: "IMPOSES"}
-      - {from: "NIS2", to: "Secteur Énergie", type: "APPLIES_TO"}
+      - {from: "Article 34 — General conditions", to: "Fine — minimum EUR 10M", type: "IMPOSES"}
+      - {from: "NIS2", to: "Energy sector", type: "APPLIES_TO"}

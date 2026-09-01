@@ -55,6 +55,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
+from ..reservation_guard import assert_no_pairing_activation, assert_space_not_reserved
 from .models import (
     BankVersionPointer,
     CorruptedStateError,
@@ -101,7 +102,7 @@ def _parse_lease_until(value: str) -> datetime:
         p = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, TypeError, AttributeError) as exc:
         raise CorruptedStateError(
-            f"lease_until non parsable (état token corrompu): {value!r}"
+            f"unparseable lease_until (corrupt token state): {value!r}"
         ) from exc
     return p if p.tzinfo else p.replace(tzinfo=timezone.utc)
 
@@ -120,7 +121,7 @@ def compute_lease_until(now: datetime, ttl_seconds: int) -> str:
     ``ttl_seconds <= 0`` (une lease à TTL nul/négatif serait expirée d'emblée).
     """
     if ttl_seconds <= 0:
-        raise ValueError(f"ttl_seconds doit être > 0, reçu {ttl_seconds}")
+        raise ValueError(f"ttl_seconds must be > 0, received {ttl_seconds}")
     base = now.replace(microsecond=0)
     return (base + timedelta(seconds=ttl_seconds)).isoformat()
 
@@ -160,18 +161,18 @@ def is_lease_expired(token: TokenLeaseState, now: datetime) -> bool:
     # lease est présente et bien formée.
     if is_active_state and not token.holder_node_id:
         raise CorruptedStateError(
-            "token actif sans holder_node_id (état critique incomplet): "
+            "active token without holder_node_id (incomplete critical state): "
             f"state={token.state}, holder={token.holder_node_id!r}, "
-            f"term={token.term} — un HELD/RELEASING DOIT porter une identité de "
-            "holder ; fail-closed, jamais une lease vivante anonyme"
+            f"term={token.term} — a HELD/RELEASING token MUST carry a holder "
+            "identity; fail-closed, never an anonymous live lease"
         )
     if token.lease_until is None:
         if is_active_state:
             raise CorruptedStateError(
-                "token actif sans lease_until (état critique incomplet): "
+                "active token without lease_until (incomplete critical state): "
                 f"state={token.state}, holder={token.holder_node_id!r}, "
-                f"term={token.term} — un HELD/RELEASING DOIT porter une borne de "
-                "lease valide ; fail-closed, jamais valide-à-vie"
+                f"term={token.term} — a HELD/RELEASING token MUST carry a valid "
+                "lease bound; fail-closed, never valid forever"
             )
         return False
     return now > _parse_lease_until(token.lease_until)
@@ -256,16 +257,16 @@ def assert_active_token_term_consistent(
         return
     if term is None:
         raise CorruptedStateError(
-            "token actif sans term.json vivant (état critique incomplet): "
+            "active token without live term.json (incomplete critical state): "
             f"state={token.state}, holder={token.holder_node_id!r}, "
-            f"token.term={token.term} — un HELD/RELEASING implique un grant ayant "
-            "bumpé le term ; fail-closed, jamais défaut à 0"
+            f"token.term={token.term} — a HELD/RELEASING token implies a grant that "
+            "bumped the term; fail-closed, never default to 0"
         )
     if token.term > term.term:
         raise CorruptedStateError(
-            f"token actif au term {token.term} > term.json {term.term} "
-            "(impossible: acquire bumpe le term AVANT d'écrire le token) — "
-            "fail-closed, jamais préservé/renouvelé/effacé comme légitime"
+            f"active token at term {token.term} > term.json {term.term} "
+            "(impossible: acquire bumps the term BEFORE writing the token) — "
+            "fail-closed, never preserved/renewed/cleared as legitimate"
         )
 
 
@@ -438,9 +439,9 @@ def evaluate_commit_authorization(
     if token is None or term is None or pointer is None:
         raise CommitNotAuthorized(
             CommitDenyReason.BLOCKED,
-            "commit refusé: état protocole critique absent "
+            "commit refused: critical protocol state is absent "
             f"(token={token is not None}, term={term is not None}, "
-            f"bank_version={pointer is not None}) — fail-closed, jamais "
+            f"bank_version={pointer is not None}) — fail-closed, never "
             "default-allow",
             {
                 "has_token": token is not None,
@@ -456,9 +457,9 @@ def evaluate_commit_authorization(
     ):
         raise CommitNotAuthorized(
             CommitDenyReason.NOT_HOLDER,
-            f"commit refusé: {intent.holder_node_id!r} ne tient pas le token "
-            f"(state={token.state}, holder={token.holder_node_id!r}) — un "
-            "non-holder n'autorise jamais un commit partagé",
+            f"commit refused: {intent.holder_node_id!r} does not hold the token "
+            f"(state={token.state}, holder={token.holder_node_id!r}) — a "
+            "non-holder never authorizes a shared commit",
             {
                 "token_state": token.state,
                 "token_holder": token.holder_node_id,
@@ -476,11 +477,11 @@ def evaluate_commit_authorization(
     ):
         raise CommitNotAuthorized(
             CommitDenyReason.STALE_TERM,
-            "commit refusé: term/fencing périmé — chaîne d'égalité rompue "
+            "commit refused: stale term/fencing — equality chain is broken "
             f"(token.term={token.term}, token.fencing={token.fencing_token}, "
             f"term.json={term.term}, intent.term={intent.term}, "
             f"intent.fencing={intent.fencing_token}) — holder superseded, "
-            "jamais ré-autorisé",
+            "never re-authorized",
             {
                 "token_term": token.term,
                 "token_fencing": token.fencing_token,
@@ -494,9 +495,9 @@ def evaluate_commit_authorization(
     if is_lease_expired(token, now):
         raise CommitNotAuthorized(
             CommitDenyReason.FENCED,
-            "commit refusé: lease expirée à l'horloge "
+            "commit refused: lease expired at clock time "
             f"(lease_until={token.lease_until!r}, now={now.isoformat()}) — "
-            "holder expiré fencé, jamais auto-ré-autorisé (HIVEMIND.md §6.2)",
+            "expired holder fenced, never automatically re-authorized (HIVEMIND.md §6.2)",
             {
                 "lease_until": token.lease_until,
                 "now": now.isoformat(),
@@ -508,9 +509,9 @@ def evaluate_commit_authorization(
     if intent.previous_bank_version != pointer.bank_version:
         raise CommitNotAuthorized(
             CommitDenyReason.VERSION_CONFLICT,
-            "commit refusé: parent bank_version divergent "
+            "commit refused: parent bank_version diverges "
             f"(intent.previous={intent.previous_bank_version} != "
-            f"pointeur={pointer.bank_version}) — lost-update interdit (CAS)",
+            f"pointer={pointer.bank_version}) — lost update is forbidden (CAS)",
             {
                 "intent_previous_bank_version": intent.previous_bank_version,
                 "current_bank_version": pointer.bank_version,
@@ -564,6 +565,12 @@ def _token_lock(space_id: str) -> asyncio.Lock:
     return entry[1]
 
 
+def token_mutation_lock(space_id: str) -> asyncio.Lock:
+    """Shared per-space lock for operations that must freeze term/token state."""
+
+    return _token_lock(space_id)
+
+
 class LeaseRuntime:
     """
     Wrapper async mince autour du ``HivemindStateStore`` pour la lease du token.
@@ -603,7 +610,7 @@ class LeaseRuntime:
                 f"queue.space_id={queue.space_id!r}"
             )
         if ttl_seconds <= 0:
-            raise ValueError(f"ttl_seconds doit être > 0, reçu {ttl_seconds}")
+            raise ValueError(f"ttl_seconds must be > 0, received {ttl_seconds}")
         self._store = store
         self._space_id = space_id
         self._queue = queue
@@ -613,6 +620,20 @@ class LeaseRuntime:
     @property
     def space_id(self) -> str:
         return self._space_id
+
+    async def _assert_mesh_mutation_allowed(self) -> None:
+        """Fence ordinary lease/term mutations during Mesh enrollment.
+
+        A source's e+1 snapshot binds its exact term and token.  Once a target
+        is pending, any new grant, renewal, release, or stale-holder repair
+        would create state that the target cannot have all-ACKed.  Run this
+        check under the token mutation lock at every mutating entry point so it
+        linearizes with the source final-ACK fence.  The core checkers are
+        no-ops when Mesh is disabled.
+        """
+
+        await assert_space_not_reserved(self._space_id)
+        await assert_no_pairing_activation(self._space_id)
 
     # ─────────────────────────────────────────────────────────────────
     # acquire — grant unique (bump term, token HELD, lease) sous all-ACK
@@ -676,6 +697,7 @@ class LeaseRuntime:
           re-bumper le term ni buter sur G3.
         """
         async with _token_lock(self._space_id):
+            await self._assert_mesh_mutation_allowed()
             return await self._acquire_locked(
                 membership=membership,
                 holder_node_id=holder_node_id,
@@ -801,14 +823,14 @@ class LeaseRuntime:
                 # (3) ensemble PENDING same-event ambigu -> fail-closed.
                 raise CommitNotAuthorized(
                     CommitDenyReason.BLOCKED,
-                    "acquire (resume) refusé: l'ensemble PENDING pour l'event "
-                    f"{event_id!r} n'est pas réductible à la seule entrée canonique "
-                    f"de {holder_node_id!r} "
-                    f"({len(pending_same_event)} PENDING same-event ; "
-                    f"head={head.event_id if head else None!r} demandée par "
-                    f"{head.requester_node_id if head else None!r}) — état de queue "
-                    "ambigu/divergent, fail-closed (jamais un succès silencieux ni "
-                    "une consommation masquant un doublon)",
+                    "acquire (resume) refused: the PENDING set for event "
+                    f"{event_id!r} cannot be reduced to the one canonical entry "
+                    f"from {holder_node_id!r} "
+                    f"({len(pending_same_event)} same-event PENDING entries; "
+                    f"head={head.event_id if head else None!r} requested by "
+                    f"{head.requester_node_id if head else None!r}) — ambiguous/"
+                    "divergent queue state, fail-closed (never a silent success or "
+                    "a consumption hiding a duplicate)",
                     {
                         "event_id": event_id,
                         "holder": holder_node_id,
@@ -824,8 +846,8 @@ class LeaseRuntime:
         if not await self._queue.is_fully_acked(event_id, membership):
             raise CommitNotAuthorized(
                 CommitDenyReason.BLOCKED,
-                f"acquire refusé: all-ACK non satisfait pour event {event_id!r} "
-                "(un membre ACTIVE n'a pas ACKé) — V1 bloque, ne progresse pas",
+                f"acquire refused: all-ACK is not satisfied for event {event_id!r} "
+                "(an ACTIVE member has not ACKed) — V1 blocks and does not progress",
                 {"event_id": event_id},
             )
 
@@ -834,9 +856,9 @@ class LeaseRuntime:
         if head is None or head.event_id != event_id:
             raise CommitNotAuthorized(
                 CommitDenyReason.BLOCKED,
-                f"acquire refusé: event {event_id!r} n'est pas le head de queue "
-                f"(head={head.event_id if head else None!r}) — grant hors-ordre "
-                "interdit (la lease demande le head à la queue, ADR-0009)",
+                f"acquire refused: event {event_id!r} is not the queue head "
+                f"(head={head.event_id if head else None!r}) — out-of-order grant "
+                "is forbidden (the lease requires the queue head, ADR-0009)",
                 {
                     "event_id": event_id,
                     "head_event_id": head.event_id if head else None,
@@ -845,9 +867,9 @@ class LeaseRuntime:
         if head.requester_node_id != holder_node_id:
             raise CommitNotAuthorized(
                 CommitDenyReason.BLOCKED,
-                f"acquire refusé: le head {event_id!r} a été demandé par "
-                f"{head.requester_node_id!r}, pas par {holder_node_id!r} — "
-                "seul le demandeur du head peut acquérir",
+                f"acquire refused: head {event_id!r} was requested by "
+                f"{head.requester_node_id!r}, not {holder_node_id!r} — "
+                "only the head requester may acquire",
                 {
                     "head_requester": head.requester_node_id,
                     "asserting_holder": holder_node_id,
@@ -864,11 +886,11 @@ class LeaseRuntime:
         if lease_is_active(held, now):
             raise CommitNotAuthorized(
                 CommitDenyReason.BLOCKED,
-                "acquire refusé: lease active détenue par "
-                f"{held.holder_node_id!r} au term {held.term} "
-                f"(state={held.state}), non expirée — un second détenteur "
-                "valide est interdit (V1 mutual-exclusion). Attendre release "
-                "(FREE) ou expiration de lease",
+                "acquire refused: active lease held by "
+                f"{held.holder_node_id!r} at term {held.term} "
+                f"(state={held.state}), not expired — a second valid holder "
+                "is forbidden (V1 mutual exclusion). Wait for release "
+                "(FREE) or lease expiration",
                 {
                     "active_holder": held.holder_node_id,
                     "active_term": held.term,
@@ -955,6 +977,7 @@ class LeaseRuntime:
         périmé pendant le renew (split-brain).
         """
         async with _token_lock(self._space_id):
+            await self._assert_mesh_mutation_allowed()
             return await self._renew_locked(holder_node_id=holder_node_id)
 
     async def _renew_locked(self, *, holder_node_id: str) -> TokenLeaseState:
@@ -976,7 +999,7 @@ class LeaseRuntime:
         ):
             raise CommitNotAuthorized(
                 CommitDenyReason.NOT_HOLDER,
-                f"renew refusé: {holder_node_id!r} ne tient pas le token "
+                f"renew refused: {holder_node_id!r} does not hold the token "
                 f"(state={current.state if current else None}, "
                 f"holder={current.holder_node_id if current else None!r})",
                 {
@@ -994,18 +1017,18 @@ class LeaseRuntime:
         if current.term != term_state.term:
             raise CommitNotAuthorized(
                 CommitDenyReason.STALE_TERM,
-                f"renew refusé: holder superseded (token.term={current.term} != "
-                f"term.json={term_state.term}) — un ancien holder revenu après un "
-                "bump de term est fencé, jamais ré-autorisé à prolonger sa lease "
+                f"renew refused: holder superseded (token.term={current.term} != "
+                f"term.json={term_state.term}) — an old holder returning after a "
+                "term bump is fenced, never re-authorized to extend its lease "
                 "(HIVEMIND.md §6.2)",
                 {"token_term": current.term, "current_term": term_state.term},
             )
         if is_lease_expired(current, now):
             raise CommitNotAuthorized(
                 CommitDenyReason.FENCED,
-                "renew refusé: lease déjà expirée "
+                "renew refused: lease already expired "
                 f"(lease_until={current.lease_until!r}, now={now.isoformat()}) — "
-                "ré-acquisition via la queue requise, pas de renew en place",
+                "re-acquisition through the queue is required; no in-place renew",
                 {"lease_until": current.lease_until, "now": now.isoformat()},
             )
         renewed = current.model_copy(
@@ -1042,6 +1065,7 @@ class LeaseRuntime:
         fb6f112) : sérialisé avec acquire / renew / reconcile.
         """
         async with _token_lock(self._space_id):
+            await self._assert_mesh_mutation_allowed()
             return await self._release_locked(holder_node_id=holder_node_id)
 
     async def _release_locked(self, *, holder_node_id: str) -> TokenLeaseState:
@@ -1051,7 +1075,7 @@ class LeaseRuntime:
         if current is None:
             raise CommitNotAuthorized(
                 CommitDenyReason.NOT_HOLDER,
-                f"release refusé: aucun token à libérer pour {holder_node_id!r}",
+                f"release refused: no token to release for {holder_node_id!r}",
                 {"asserting_holder": holder_node_id},
             )
         # Fail-closed AVANT toute décision/écriture : un actif corrompu remonte
@@ -1067,7 +1091,7 @@ class LeaseRuntime:
         ):
             raise CommitNotAuthorized(
                 CommitDenyReason.NOT_HOLDER,
-                f"release refusé: {holder_node_id!r} ne tient pas le token "
+                f"release refused: {holder_node_id!r} does not hold the token "
                 f"(holder={current.holder_node_id!r}, state={current.state})",
                 {
                     "token_holder": current.holder_node_id,
@@ -1117,6 +1141,7 @@ class LeaseRuntime:
         fb6f112) : sérialisé avec acquire / renew / release.
         """
         async with _token_lock(self._space_id):
+            await self._assert_mesh_mutation_allowed()
             return await self._reconcile_stale_holder_locked()
 
     async def _reconcile_stale_holder_locked(self) -> TokenLeaseState | None:

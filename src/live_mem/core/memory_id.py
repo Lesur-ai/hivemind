@@ -51,7 +51,7 @@ def derive_memory_id(space_id: str) -> str:
         ValueError: si ``space_id`` est vide.
     """
     if not space_id:
-        raise ValueError("space_id requis pour dériver un memory_id")
+        raise ValueError("space_id is required to derive a memory_id")
     # Hash sur le space_id BRUT (anti-collision post-sanitization).
     digest = hashlib.blake2b(
         space_id.encode("utf-8"), digest_size=_HASH_BYTES

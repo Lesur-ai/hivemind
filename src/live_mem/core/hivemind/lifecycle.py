@@ -56,6 +56,8 @@ from .models import (
     MembershipView,
     NodeHealth,
     NodeIdentity,
+    TermState,
+    TokenLeaseState,
     TokenState,
 )
 from .state import HivemindStateStore
@@ -70,6 +72,10 @@ from ..reservation_guard import assert_no_pairing_activation
 
 class BootstrapError(RuntimeError):
     """Erreur de cycle de vie bootstrap/membership/resync (fail-closed)."""
+
+
+class BootstrapLimitError(BootstrapError):
+    """A bounded bootstrap inventory or payload limit was exceeded."""
 
 
 class MembershipIncarnationError(BootstrapError):
@@ -190,8 +196,8 @@ async def _validate_full_hivemind_state(
     )
     if latest_commit_bv > pointer_bv:
         raise CorruptedStateError(
-            f"commit orphelin en avance sur le pointeur (dernier commit "
-            f"{latest_commit_bv} > pointeur {pointer_bv})"
+            f"orphan commit ahead of pointer (latest commit "
+            f"{latest_commit_bv} > pointer {pointer_bv})"
         )
     await store.list_events()
     for event_id in await _all_ack_event_ids(storage, space_id):
@@ -203,15 +209,15 @@ async def _validate_full_hivemind_state(
         ]
         if any(not m.node_id for m in active):
             raise CorruptedStateError(
-                "membre ACTIVE avec node_id vide dans la MembershipView "
-                "(attente d'ACK pour '' — bloquerait l'all-ACK)"
+                "ACTIVE member with an empty node_id in MembershipView "
+                "(would wait for ACK from '' and block all-ACK)"
             )
         for member in active:
             try:
                 _load_public_key(member.public_key)
             except PeerChannelError as exc:
                 raise CorruptedStateError(
-                    "clé publique Ed25519 invalide pour le membre ACTIVE "
+                    "invalid Ed25519 public key for ACTIVE member "
                     f"{member.node_id!r}: {exc}"
                 ) from exc
         # Unicité des identités ACTIVE (node_id + public_key). Validée ICI (et
@@ -221,13 +227,13 @@ async def _validate_full_hivemind_state(
         node_ids = [m.node_id for m in active]
         if len(set(node_ids)) != len(node_ids):
             raise CorruptedStateError(
-                "node_id ACTIVE dupliqué dans la MembershipView"
+                "duplicate ACTIVE node_id in MembershipView"
             )
         pubkeys = [m.public_key for m in active]
         if len(set(pubkeys)) != len(pubkeys):
             raise CorruptedStateError(
-                "public_key ACTIVE dupliquée dans la MembershipView — une clé "
-                "authentifierait plusieurs nodes"
+                "duplicate ACTIVE public_key in MembershipView — one key "
+                "would authenticate multiple nodes"
             )
 
 
@@ -558,10 +564,10 @@ class MembershipService:
             or health_status not in (None, HiveNodeStatus.HEALTHY)
         ):
             raise BootstrapError(
-                "mutation de membership refusée : contexte Hivemind incomplet ou "
-                f"non sain (node.json={'present' if node else 'absent'}, "
-                f"membre_actif={has_active}, node_status={health_status}) — "
-                "initialisation/resync requis avant toute mutation"
+                "membership mutation refused: incomplete or unhealthy Hivemind "
+                f"context (node.json={'present' if node else 'absent'}, "
+                f"active_member={has_active}, node_status={health_status}) — "
+                "initialization/resync required before any mutation"
             )
         assert view is not None  # garanti par has_active
         return view
@@ -617,8 +623,8 @@ class MembershipService:
     async def _add_member_locked(self, member: Member) -> MembershipView:
         if not member.node_id:
             raise BootstrapError(
-                "add_member refusé : node_id vide — identité de membre invalide "
-                "(créerait une attente d'ACK pour '' et un peer inutilisable)"
+                "add_member refused: empty node_id — invalid member identity "
+                "(would create an ACK wait for '' and an unusable peer)"
             )
         # Fence: refuse an epoch-advancing operator mutation while a Mesh pairing is
         # mid-activation (promotion -> confirmed), so it cannot split source/target
@@ -630,11 +636,11 @@ class MembershipService:
             for m in view.members
         ):
             raise BootstrapError(
-                f"node_id {member.node_id!r} est déjà un membre ACTIVE"
+                f"node_id {member.node_id!r} is already an ACTIVE member"
             )
         if not member.public_key:
             raise BootstrapError(
-                f"add_member exige une public_key pour {member.node_id!r} "
+                f"add_member requires a public_key for {member.node_id!r} "
                 "(auth pair #4)"
             )
         # Unicité de la clé publique parmi les membres ACTIVE : une même clé
@@ -648,8 +654,8 @@ class MembershipService:
             for m in view.members
         ):
             raise BootstrapError(
-                "public_key déjà utilisée par un autre membre ACTIVE — "
-                "identité ambiguë"
+                "public_key is already used by another ACTIVE member — "
+                "ambiguous identity"
             )
         # La public_key doit parser comme une vraie clé Ed25519 AVANT d'écrire :
         # une clé non-vide mais malformée serait admise ACTIVE, comptée dans
@@ -659,7 +665,7 @@ class MembershipService:
             _load_public_key(member.public_key)
         except PeerChannelError as exc:
             raise BootstrapError(
-                f"add_member refusé : public_key non-Ed25519 pour "
+                f"add_member refused: non-Ed25519 public_key for "
                 f"{member.node_id!r} ({exc})"
             ) from exc
 
@@ -726,7 +732,7 @@ class MembershipService:
         )
         if target is None or target.status != MemberStatus.ACTIVE.value:
             raise BootstrapError(
-                f"update_member_scopes: {node_id!r} absent ou non-ACTIVE"
+                f"update_member_scopes: {node_id!r} is absent or not ACTIVE"
             )
         if target.scopes == scopes:  # idempotent : aucun bump.
             return view
@@ -795,11 +801,11 @@ class MembershipService:
         """
         if not confirm:
             raise BootstrapError(
-                "éviction refusée : confirmation opérateur explicite requise "
+                "eviction refused: explicit operator confirmation required "
                 "(confirm=True)"
             )
         if not operator:
-            raise BootstrapError("éviction refusée : identité opérateur requise")
+            raise BootstrapError("Eviction refused: operator identity is required")
 
         async with self._space_lock():
             return await self._evict_member_locked(
@@ -817,24 +823,22 @@ class MembershipService:
         target = next((m for m in view.members if m.node_id == node_id), None)
         if target is None:
             raise BootstrapError(
-                f"éviction impossible : node_id {node_id!r} absent de la membership"
+                f"eviction impossible: node_id {node_id!r} is absent from membership"
             )
         # Compare-and-evict incarnation gate (atomic under the space lock): the
         # target the caller intends to evict must still be the exact incarnation it
         # named. A re-admission of the same identity carries a fresh incarnation, so
-        # this fails closed rather than evicting the newer live member. A member with
-        # NO incarnation (``None``) predates the tag (legacy/pre-P10-3 or a genesis
-        # member) — there is no newer incarnation to protect, so the caller's
-        # explicit assertion governs (the gate applies only when the CURRENT member
-        # carries a DIFFERENT tag, i.e. an actual re-admission happened).
+        # this fails closed rather than evicting the newer live member. ``None`` is
+        # not an exception when the caller supplied an expected value: bootstrap
+        # export intentionally strips source-local tags on peers, and accepting a
+        # missing tag would let a retained stale pairing evict a re-enrolled member.
         if (
             expected_incarnation is not None
-            and target.incarnation is not None
             and target.incarnation != expected_incarnation
         ):
             raise MembershipIncarnationError(
-                "éviction refusée : incarnation obsolète — le node a été ré-enrôlé "
-                "depuis cet appariement"
+                "eviction refused: stale incarnation — node was re-enrolled "
+                "since this pairing"
             )
 
         # Idempotence : un node déjà non-ACTIVE (EVICTED/LEAVING) n'est PAS
@@ -855,8 +859,8 @@ class MembershipService:
         ]
         if target.status == MemberStatus.ACTIVE.value and not remaining_active:
             raise BootstrapError(
-                "éviction refusée : dernier membre ACTIVE — un space sans membre "
-                "actif paraîtrait non-Hivemind (teardown explicite hors V1)"
+                "eviction refused: last ACTIVE member — a space without active "
+                "members would appear non-Hivemind (explicit teardown is outside V1)"
             )
 
         # Fence: this is an epoch-advancing eviction. Refuse it while a DIFFERENT
@@ -953,16 +957,16 @@ class MembershipService:
         activation_pair_id: Optional[str] = None,
     ) -> MembershipView:
         if not candidate.node_id:
-            raise BootstrapError("admit_pending refusé : node_id vide")
+            raise BootstrapError("admit_pending refused: node_id is empty")
         if not candidate.public_key:
             raise BootstrapError(
-                f"admit_pending exige une public_key pour {candidate.node_id!r}"
+                f"admit_pending requires a public_key for {candidate.node_id!r}"
             )
         view = await self._current_view()
         if expected_epoch is not None and view.epoch != expected_epoch:
             raise MembershipEpochError(
-                f"admit_pending refusé : epoch attendu {expected_epoch}, "
-                f"courant {view.epoch} (mutation concurrente)"
+                f"admit_pending refused: expected epoch {expected_epoch}, "
+                f"current {view.epoch} (concurrent mutation)"
             )
         occupied = (MemberStatus.ACTIVE.value, MemberStatus.PENDING.value)
         if any(
@@ -970,7 +974,7 @@ class MembershipService:
             for m in view.members
         ):
             raise BootstrapError(
-                f"node_id {candidate.node_id!r} est déjà membre ACTIVE ou PENDING"
+                f"node_id {candidate.node_id!r} is already an ACTIVE or PENDING member"
             )
         if any(
             m.public_key == candidate.public_key
@@ -979,14 +983,14 @@ class MembershipService:
             for m in view.members
         ):
             raise BootstrapError(
-                "public_key déjà utilisée par un autre membre ACTIVE/PENDING — "
-                "identité ambiguë"
+                "public_key is already used by another ACTIVE/PENDING member — "
+                "ambiguous identity"
             )
         try:
             _load_public_key(candidate.public_key)
         except PeerChannelError as exc:
             raise BootstrapError(
-                f"admit_pending refusé : public_key non-Ed25519 pour "
+                f"admit_pending refused: non-Ed25519 public_key for "
                 f"{candidate.node_id!r} ({exc})"
             ) from exc
         # Fence: this admission bumps the epoch. Refuse it while a DIFFERENT Mesh
@@ -1042,6 +1046,27 @@ class MembershipService:
                 activation_pair_id=activation_pair_id,
             )
 
+    async def promote_pending_to_active_locked(
+        self,
+        node_id: str,
+        *,
+        expected_epoch: Optional[int] = None,
+        activation_pair_id: Optional[str] = None,
+    ) -> MembershipView:
+        """Locked counterpart to :meth:`promote_pending_to_active`.
+
+        Callers that need to make a protocol-state revalidation and Transition 2
+        one local critical section MUST already hold :meth:`space_lock`.  Keeping
+        this public, symmetric with ``admit_pending_candidate_locked``, avoids a
+        non-reentrant lock reacquisition between the check and promotion.
+        """
+
+        return await self._promote_pending_to_active_locked(
+            node_id,
+            expected_epoch=expected_epoch,
+            activation_pair_id=activation_pair_id,
+        )
+
     async def _promote_pending_to_active_locked(
         self,
         node_id: str,
@@ -1053,18 +1078,18 @@ class MembershipService:
         target = next((m for m in view.members if m.node_id == node_id), None)
         if target is None:
             raise BootstrapError(
-                f"promotion impossible : node_id {node_id!r} absent de la membership"
+                f"promotion impossible: node_id {node_id!r} is absent from membership"
             )
         if target.status == MemberStatus.ACTIVE.value:
             return view  # idempotent no-op (l'epoch n'est pas contrôlé ici)
         if expected_epoch is not None and view.epoch != expected_epoch:
             raise MembershipEpochError(
-                f"promotion refusée : epoch attendu {expected_epoch}, "
-                f"courant {view.epoch} (mutation concurrente)"
+                f"promotion refused: expected epoch {expected_epoch}, "
+                f"current {view.epoch} (concurrent mutation)"
             )
         if target.status != MemberStatus.PENDING.value:
             raise BootstrapError(
-                f"promotion refusée : node_id {node_id!r} n'est pas PENDING "
+                f"promotion refused: node_id {node_id!r} is not PENDING "
                 f"(status={target.status})"
             )
         # Fence: this IS Transition 2 (the e+1 -> e+2 promotion). The pairing that
@@ -1105,6 +1130,7 @@ class MembershipService:
         operator: str,
         reason: str = "",
         confirm: bool = False,
+        expected_incarnation: Optional[str] = None,
         activation_pair_id: Optional[str] = None,
     ) -> MembershipView:
         """Retire un candidat PENDING via l'autorité membership (PEER_EVICTED, +1).
@@ -1114,14 +1140,15 @@ class MembershipService:
         sort du candidate set par un bump d'epoch. Ne retire QUE des PENDING.
         """
         if not confirm:
-            raise BootstrapError("retrait candidat refusé : confirmation requise")
+            raise BootstrapError("Candidate removal refused: confirmation is required")
         if not operator:
-            raise BootstrapError("retrait candidat refusé : identité opérateur requise")
+            raise BootstrapError("Candidate removal refused: operator identity is required")
         async with self._space_lock():
             return await self._remove_pending_candidate_locked(
                 node_id,
                 operator=operator,
                 reason=reason,
+                expected_incarnation=expected_incarnation,
                 activation_pair_id=activation_pair_id,
             )
 
@@ -1131,13 +1158,26 @@ class MembershipService:
         *,
         operator: str,
         reason: str,
+        expected_incarnation: Optional[str] = None,
         activation_pair_id: Optional[str] = None,
     ) -> MembershipView:
         view = await self._current_view()
         target = next((m for m in view.members if m.node_id == node_id), None)
         if target is None:
             raise BootstrapError(
-                f"retrait impossible : node_id {node_id!r} absent de la membership"
+                f"candidate removal impossible: node_id {node_id!r} is absent from membership"
+            )
+        # The source pairing's give-up is a compare-and-remove operation, just
+        # like force eviction is compare-and-evict.  Without this exact check a
+        # valid-schema rewrite of a PENDING member's incarnation could make a
+        # retained pairing remove a different candidate under the same node id.
+        if (
+            expected_incarnation is not None
+            and target.incarnation != expected_incarnation
+        ):
+            raise MembershipIncarnationError(
+                "candidate removal refused: stale incarnation — node was re-enrolled "
+                "since this pairing"
             )
         # Ne retire QUE des PENDING ; un ACTIVE passe par evict_member (garde
         # dernier-actif). Un déjà-non-PENDING est idempotent no-op.
@@ -1191,53 +1231,67 @@ class MembershipService:
         ``expected_epoch+1`` avec self ACTIVE -> no-op.
         """
         async with self._space_lock():
-            node = await self._store.get_node_identity()
-            view = await self._store.get_membership()
-            if node is None or view is None:
-                raise BootstrapError(
-                    "self-activation refusée : état local incomplet (node/membership)"
-                )
-            self_id = node.node_id
-            target = next((m for m in view.members if m.node_id == self_id), None)
-            if target is None:
-                raise BootstrapError(
-                    "self-activation refusée : node local absent de la membership"
-                )
-            new_epoch = expected_epoch + 1
-            if view.epoch == new_epoch and target.status == MemberStatus.ACTIVE.value:
-                return view  # idempotent : déjà appliqué
-            if view.epoch != expected_epoch:
-                raise BootstrapError(
-                    f"self-activation refusée : epoch local {view.epoch} != "
-                    f"attendu {expected_epoch}"
-                )
-            if target.status != MemberStatus.PENDING.value:
-                raise BootstrapError(
-                    f"self-activation refusée : node local n'est pas PENDING "
-                    f"(status={target.status})"
-                )
-            next_members = [
-                (
-                    m.model_copy(update={"status": MemberStatus.ACTIVE.value})
-                    if m.node_id == self_id
-                    else m
-                )
-                for m in view.members
-            ]
-            new_view = MembershipView(epoch=new_epoch, members=next_members)
-            await self._append_event(
-                EventType.MEMBERSHIP_UPDATED,
-                new_epoch,
-                {
-                    "node_id": self_id,
-                    "epoch": new_epoch,
-                    "status": MemberStatus.ACTIVE.value,
-                },
-                event_id=self._membership_event_id(
-                    EventType.MEMBERSHIP_UPDATED, self_id, new_epoch
-                ),
+            return await self.apply_self_activation_locked(
+                expected_epoch=expected_epoch
             )
-            return await self._store.set_membership(new_view)
+
+    async def apply_self_activation_locked(
+        self, *, expected_epoch: int
+    ) -> MembershipView:
+        """Locked counterpart to :meth:`apply_self_activation`.
+
+        Mesh activation can validate an import authority and promote the local
+        PENDING member only while the caller holds :meth:`space_lock`; exposing
+        this avoids a non-reentrant lock gap between those two operations.
+        """
+
+        node = await self._store.get_node_identity()
+        view = await self._store.get_membership()
+        if node is None or view is None:
+            raise BootstrapError(
+                "self-activation refused: incomplete local state (node/membership)"
+            )
+        self_id = node.node_id
+        target = next((m for m in view.members if m.node_id == self_id), None)
+        if target is None:
+            raise BootstrapError(
+                "self-activation refused: local node is absent from membership"
+            )
+        new_epoch = expected_epoch + 1
+        if view.epoch == new_epoch and target.status == MemberStatus.ACTIVE.value:
+            return view  # idempotent : déjà appliqué
+        if view.epoch != expected_epoch:
+            raise BootstrapError(
+                f"self-activation refused: local epoch {view.epoch} != "
+                f"expected {expected_epoch}"
+            )
+        if target.status != MemberStatus.PENDING.value:
+            raise BootstrapError(
+                f"self-activation refused: local node is not PENDING "
+                f"(status={target.status})"
+            )
+        next_members = [
+            (
+                m.model_copy(update={"status": MemberStatus.ACTIVE.value})
+                if m.node_id == self_id
+                else m
+            )
+            for m in view.members
+        ]
+        new_view = MembershipView(epoch=new_epoch, members=next_members)
+        await self._append_event(
+            EventType.MEMBERSHIP_UPDATED,
+            new_epoch,
+            {
+                "node_id": self_id,
+                "epoch": new_epoch,
+                "status": MemberStatus.ACTIVE.value,
+            },
+            event_id=self._membership_event_id(
+                EventType.MEMBERSHIP_UPDATED, self_id, new_epoch
+            ),
+        )
+        return await self._store.set_membership(new_view)
 
     async def apply_membership_plan(
         self,
@@ -1282,9 +1336,9 @@ class MembershipService:
         # intercalée -> fail-closed sans rien appliquer (jamais un plan périmé).
         if view.epoch != base_view.epoch:
             raise BootstrapError(
-                "plan d'enrollment périmé : la membership a changé "
-                f"(epoch attendu {base_view.epoch}, vue verrouillée {view.epoch}) "
-                "— réconciliation refusée, aucune mutation"
+                "stale enrollment plan: membership changed "
+                f"(expected epoch {base_view.epoch}, locked view {view.epoch}) "
+                "— reconciliation refused; no mutation"
             )
 
         revoke_set = set(revoke)
@@ -1300,7 +1354,7 @@ class MembershipService:
             target = active_by_id.get(node_id)
             if target is None:
                 raise BootstrapError(
-                    f"révocation impossible : {node_id!r} absent ou non-ACTIVE"
+                    f"revocation impossible: {node_id!r} is absent or not ACTIVE"
                 )
 
         # --- Validation ADD : node_id pas déjà ACTIVE, clé valide & unique. --
@@ -1314,31 +1368,31 @@ class MembershipService:
         for member in add:
             if not member.node_id:
                 raise BootstrapError(
-                    "add_member refusé : node_id vide — identité invalide"
+                    "add_member refused: empty node_id — invalid identity"
                 )
             if (
                 member.node_id in active_by_id
                 and member.node_id not in revoke_set
             ):
                 raise BootstrapError(
-                    f"node_id {member.node_id!r} est déjà un membre ACTIVE"
+                    f"node_id {member.node_id!r} is already an ACTIVE member"
                 )
             if not member.public_key:
                 raise BootstrapError(
-                    f"add_member exige une public_key pour {member.node_id!r}"
+                    f"add_member requires a public_key for {member.node_id!r}"
                 )
             try:
                 _load_public_key(member.public_key)
             except PeerChannelError as exc:
                 raise BootstrapError(
-                    f"add_member refusé : public_key non-Ed25519 pour "
+                    f"add_member refused: non-Ed25519 public_key for "
                     f"{member.node_id!r} ({exc})"
                 ) from exc
             owner = surviving_keys.get(member.public_key)
             if owner is not None and owner != member.node_id:
                 raise BootstrapError(
-                    "public_key déjà utilisée par un autre membre ACTIVE — "
-                    "identité ambiguë"
+                    "public_key is already used by another ACTIVE member — "
+                    "ambiguous identity"
                 )
             surviving_keys[member.public_key] = member.node_id
 
@@ -1348,7 +1402,7 @@ class MembershipService:
             target = active_by_id.get(node_id)
             if target is None:
                 raise BootstrapError(
-                    f"update_member_scopes: {node_id!r} absent ou non-ACTIVE"
+                    f"update_member_scopes: {node_id!r} is absent or not ACTIVE"
                 )
             # Valide/normalise via le validator pydantic sur une COPIE (jamais
             # ``model_copy(update=...)`` qui shunte les field_validators) : un
@@ -1363,8 +1417,8 @@ class MembershipService:
         remaining_active = (set(active_by_id) - revoke_set) | added_ids
         if not remaining_active:
             raise BootstrapError(
-                "application refusée : le plan retirerait le dernier membre "
-                "ACTIVE — un space sans actif paraîtrait non-Hivemind"
+                "application refused: plan would remove the last ACTIVE member "
+                "— a space without active members would appear non-Hivemind"
             )
 
         # --- Construction de la vue cible EN MÉMOIRE (aucun write encore). ---
@@ -1524,11 +1578,11 @@ class ResyncService:
         reasons = []
         if future_epoch:
             reasons.append(
-                f"epoch futur observé {observed_epoch} > local {local_epoch}"
+                f"observed future epoch {observed_epoch} > local {local_epoch}"
             )
         if missed_bank_version:
             reasons.append(
-                f"bank_version manquée {observed_bank_version} > local "
+                f"missed bank_version {observed_bank_version} > local "
                 f"{local_bank_version}"
             )
         health = NodeHealth(
@@ -1558,7 +1612,7 @@ class ResyncService:
         health = await self._store.get_node_status()
         if health is None or HiveNodeStatus(health.status) != HiveNodeStatus.RESYNC_REQUIRED:
             raise BootstrapError(
-                "mark_resync_complete: l'état node-local n'est pas RESYNC_REQUIRED"
+                "mark_resync_complete: local node state is not RESYNC_REQUIRED"
             )
 
         membership = await self._store.get_membership()
@@ -1570,12 +1624,12 @@ class ResyncService:
             local_bank_version < health.observed_bank_version
         ):
             raise BootstrapError(
-                "mark_resync_complete refusé : l'état local n'a pas rattrapé la "
-                f"cible (epoch local {local_epoch}/{health.observed_epoch}, "
+                "mark_resync_complete refused: local state has not caught up with "
+                f"target (local epoch {local_epoch}/{health.observed_epoch}, "
                 f"bank_version {local_bank_version}/{health.observed_bank_version})"
             )
 
-        healthy = NodeHealth(status=HiveNodeStatus.HEALTHY, reason="resync complété")
+        healthy = NodeHealth(status=HiveNodeStatus.HEALTHY, reason="resync completed")
         persisted = await self._store.set_node_status(healthy)
         await self._append_event(EventType.RESYNC_COMPLETED, {})
         return persisted
@@ -1605,14 +1659,18 @@ _NODE_LOCAL_HIVEMIND_PATHS = frozenset(
     }
 )
 
+# Maximum-width representation emitted by ``datetime.now(UTC).isoformat()``.
+# Admission capacity projection uses it for every newly-created timestamp so a
+# rare exact-second value (which omits ``.000000``) can never make preflight
+# seven bytes smaller than the subsequent durable membership/event/manifest.
+_CAPACITY_MAX_WIDTH_ISO = "2000-01-01T00:00:00.000000+00:00"
+
 # Champs ``_meta.json`` d'IDENTITÉ locale de la cible : jamais hérités de la
 # source à l'import. ``space_id`` surtout — réécrire le space_id source sur la
 # cible corromprait son identité. ``graph_memory`` n'est pas listé ici car il
 # est déjà exclu du snapshot (whitelist partagée) ; le merge partant de la méta
 # cible le préserve donc naturellement.
 _META_IDENTITY_LOCAL = frozenset({"space_id", "owner", "created_at"})
-
-
 @dataclass(frozen=True)
 class BootstrapSnapshot:
     """Snapshot de bootstrap transportable : manifest + contenu par fichier."""
@@ -1646,7 +1704,468 @@ class BootstrapService:
     # Export
     # ------------------------------------------------------------------
 
-    async def export_snapshot(self, space_id: str) -> BootstrapSnapshot:
+    async def _validate_export_source(
+        self,
+        space_id: str,
+        *,
+        initializing_reason: str | None = None,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> tuple[HivemindStateStore, NodeIdentity, MembershipView, int, str]:
+        """Validate the complete source-side bootstrap authority.
+
+        Normal export accepts only an absent/HEALTHY local marker. The sole
+        exception is the validation-only Project Mesh preparation seam: it may
+        inspect an exact UNSAFE marker with the caller-supplied bounded reason
+        before HEALTHY is published. It does not export or transport anything.
+        """
+
+        if max_objects is not None:
+            inventory_cap = max_objects + len(_NODE_LOCAL_HIVEMIND_PATHS) + 1
+            inventory = await self._storage.list_objects(
+                f"{space_id}/_hivemind/", max_keys=inventory_cap
+            )
+            shared_inventory = []
+            size_floor = 0
+            for obj in inventory:
+                key = obj.get("Key") if isinstance(obj, dict) else None
+                if not isinstance(key, str) or not key.startswith(f"{space_id}/"):
+                    raise BootstrapLimitError(
+                        "export Hivemind inventory is malformed"
+                    )
+                rel = key[len(space_id) + 1 :]
+                if not self._is_shared_export_path(rel):
+                    continue
+                shared_inventory.append(obj)
+                size_hint = obj.get("Size")
+                if max_bytes is not None:
+                    if type(size_hint) is not int or size_hint < 0:
+                        raise BootstrapLimitError(
+                            "export object size metadata is invalid"
+                        )
+                    if size_hint > max_bytes:
+                        raise BootstrapLimitError(
+                            "export object exceeds the byte bound"
+                        )
+                    if rel != "_hivemind/members.json":
+                        size_floor += size_hint
+                    if size_floor > max_bytes:
+                        raise BootstrapLimitError(
+                            "export exceeds the byte bound"
+                        )
+            if len(shared_inventory) > max_objects or len(inventory) >= inventory_cap:
+                raise BootstrapLimitError(
+                    "export Hivemind inventory exceeds its safety bound"
+                )
+
+        store = HivemindStateStore(storage=self._storage, space_id=space_id)
+        node = await store.get_node_identity()
+        if node is None:
+            raise BootstrapError(
+                f"export impossible: {space_id!r} has no Hivemind identity"
+            )
+        token = await store.get_token()
+        if token is not None and token.state in (
+            TokenState.HELD.value,
+            TokenState.RELEASING.value,
+        ):
+            raise BootstrapError(
+                f"export refused: token {token.state!r} on {space_id!r} "
+                "(mutation in progress)"
+            )
+
+        source_health = await store.get_node_status()
+        if initializing_reason is None:
+            health_allowed = source_health is None or (
+                HiveNodeStatus(source_health.status) == HiveNodeStatus.HEALTHY
+            )
+        else:
+            health_allowed = source_health is not None and (
+                HiveNodeStatus(source_health.status) == HiveNodeStatus.UNSAFE
+                and source_health.reason == initializing_reason
+            )
+        if not health_allowed:
+            status = source_health.status if source_health is not None else "absent"
+            if initializing_reason is None:
+                operation = "export"
+                health_requirement = "bootstrap only from a HEALTHY source"
+            else:
+                operation = "source preparation validation"
+                health_requirement = (
+                    "requires the exact initializing UNSAFE marker"
+                )
+            raise BootstrapError(
+                f"{operation} refused: source {space_id!r} is in state "
+                f"{status!r} ({health_requirement})"
+            )
+
+        membership = await store.get_membership()
+        if not active_members(membership):
+            raise BootstrapError(
+                f"export refused: {space_id!r} has no MembershipView with "
+                "ACTIVE members — bootstrap impossible (HIVEMIND.md §5.1.5)"
+            )
+        assert membership is not None  # narrowed by active_members above
+        source_member = next(
+            (
+                m
+                for m in membership.members
+                if m.node_id == node.node_id
+                and m.status == MemberStatus.ACTIVE.value
+            ),
+            None,
+        )
+        if source_member is None:
+            raise BootstrapError(
+                f"export refused: source node {node.node_id!r} is not an "
+                "ACTIVE member of MembershipView (evicted?)"
+            )
+        if not source_member.public_key or source_member.public_key != node.public_key:
+            raise BootstrapError(
+                f"export refused: source member {node.node_id!r} has no "
+                "public_key consistent with node.json — an imported peer could "
+                "not authenticate the source (UNKNOWN_PEER)"
+            )
+
+        pointer = await store.get_bank_version_pointer()
+        bank_version = pointer.bank_version if pointer is not None else -1
+        commit_id = pointer.commit_id if pointer is not None else ""
+        try:
+            await _validate_full_hivemind_state(store, self._storage, space_id)
+        except CorruptedStateError as exc:
+            raise BootstrapError(
+                f"export refused: invalid source Hivemind state ({exc})"
+            ) from exc
+        if bank_version >= 0:
+            src_commit = await store.get_commit(bank_version)
+            if src_commit is None or src_commit.commit_id != commit_id:
+                raise BootstrapError(
+                    "export refused: inconsistent source bank_version pointer — "
+                    f"commit {bank_version} absent or commit_id diverges"
+                )
+        return store, node, membership, bank_version, commit_id
+
+    async def _collect_shared_export_files(
+        self,
+        space_id: str,
+        *,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> tuple[dict[str, str], list[BootstrapManifestEntry]]:
+        """Read and project every path that a bootstrap would export."""
+
+        files: dict[str, str] = {}
+        entries: list[BootstrapManifestEntry] = []
+        prefix = f"{space_id}/"
+        projected_bytes = 0
+
+        async def add_object(obj: dict) -> None:
+            nonlocal projected_bytes
+            key = obj["Key"]
+            rel = key[len(prefix):]
+            if not self._is_shared_export_path(rel):
+                return
+            if rel in files:
+                return
+            if max_objects is not None and len(files) >= max_objects:
+                raise BootstrapLimitError("export exceeds the object-count bound")
+            size_hint = obj.get("Size")
+            if max_bytes is not None:
+                if type(size_hint) is not int or size_hint < 0:
+                    raise BootstrapLimitError(
+                        "export object size metadata is invalid"
+                    )
+                if size_hint > max_bytes:
+                    raise BootstrapLimitError("export object exceeds the byte bound")
+                if (
+                    rel not in {"_meta.json", "_hivemind/members.json"}
+                    and projected_bytes + size_hint > max_bytes
+                ):
+                    raise BootstrapLimitError("export exceeds the byte bound")
+            content = await self._storage.get(key)
+            if content is None:
+                return
+            content = self._project_export_content(rel, content)
+            files[rel] = content
+            raw = content.encode("utf-8")
+            projected_bytes += len(raw)
+            if max_bytes is not None and projected_bytes > max_bytes:
+                raise BootstrapLimitError("export exceeds the byte bound")
+            entries.append(
+                BootstrapManifestEntry(
+                    path=rel, sha256=_sha256_bytes(raw), size=len(raw)
+                )
+            )
+
+        # Top-level shared files are exact keys. Listing each exact prefix gives
+        # a Size precheck without walking unrelated graph/local objects.
+        for rel in ("_meta.json", "_rules.md", "_synthesis.md"):
+            exact_key = prefix + rel
+            matches = await self._storage.list_objects(exact_key, max_keys=2)
+            exact = next(
+                (
+                    obj
+                    for obj in matches
+                    if isinstance(obj, dict) and obj.get("Key") == exact_key
+                ),
+                None,
+            )
+            if exact is not None:
+                await add_object(exact)
+
+        async def add_prefix(rel_prefix: str, *, allowance: int) -> None:
+            remaining = 0 if max_objects is None else max_objects - len(files)
+            raw_cap = 0 if max_objects is None else remaining + allowance + 1
+            objects = await self._storage.list_objects(
+                prefix + rel_prefix, max_keys=raw_cap
+            )
+            before = len(files)
+            for obj in objects:
+                if not isinstance(obj, dict) or not isinstance(obj.get("Key"), str):
+                    raise BootstrapLimitError("export object inventory is malformed")
+                await add_object(obj)
+            if raw_cap and len(objects) >= raw_cap and len(files) - before <= remaining:
+                # The bounded page was exhausted without proving that every
+                # later object is excluded. Never return a partial snapshot.
+                raise BootstrapLimitError(
+                    "export object inventory exceeds its safety bound"
+                )
+
+        await add_prefix("bank/", allowance=1)
+        await add_prefix("live/", allowance=1)
+        await add_prefix(
+            "_hivemind/", allowance=len(_NODE_LOCAL_HIVEMIND_PATHS)
+        )
+        entries.sort(key=lambda entry: entry.path)
+        return files, entries
+
+    @classmethod
+    def _project_export_content(cls, rel: str, content: str) -> str:
+        """Apply the exact per-path projection used by every snapshot."""
+
+        if rel == "_meta.json":
+            return cls._project_meta(content)
+        if rel == "_hivemind/members.json":
+            return cls._project_members(content)
+        return content
+
+    @staticmethod
+    def _storage_json(model: Any) -> str:
+        """Serialize a model exactly like ``StorageService.put_json``."""
+
+        return json.dumps(
+            model.model_dump(mode="json"), indent=2, ensure_ascii=False
+        )
+
+    @staticmethod
+    def _snapshot_from_files(
+        files: dict[str, str],
+        *,
+        source_node_id: str,
+        membership_epoch: int,
+        bank_version: int,
+        commit_id: str,
+    ) -> BootstrapSnapshot:
+        entries = []
+        for path, content in sorted(files.items()):
+            raw = content.encode("utf-8")
+            entries.append(
+                BootstrapManifestEntry(
+                    path=path, sha256=_sha256_bytes(raw), size=len(raw)
+                )
+            )
+        manifest = BootstrapManifest(
+            source_node_id=source_node_id,
+            membership_epoch=membership_epoch,
+            bank_version=bank_version,
+            commit_id=commit_id,
+            entries=entries,
+        )
+        manifest.manifest_sha256 = manifest_content_hash(manifest)
+        return BootstrapSnapshot(manifest=manifest, files=files)
+
+    async def project_source_preparation_snapshot(
+        self,
+        space_id: str,
+        *,
+        node: NodeIdentity,
+        membership: MembershipView,
+        term: TermState,
+        token: TokenLeaseState,
+        pointer: BankVersionPointer,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> BootstrapSnapshot:
+        """Project the exact snapshot that source genesis would later export.
+
+        The current business files use the normal export collector (including
+        ``_meta`` projection). The four shared genesis models are serialized as
+        ``put_json`` will persist them, then passed through the same members
+        projection as a real export. Node identity and health stay node-local.
+        This method is read-only and is therefore safe before the durable intent.
+        """
+
+        files, _entries = await self._collect_shared_export_files(
+            space_id, max_objects=max_objects, max_bytes=max_bytes
+        )
+        projected_models = {
+            "_hivemind/members.json": membership,
+            "_hivemind/term.json": term,
+            "_hivemind/token.json": token,
+            "_hivemind/bank_version.json": pointer,
+        }
+        for rel, model in projected_models.items():
+            files[rel] = self._project_export_content(
+                rel, self._storage_json(model)
+            )
+        projected = self._snapshot_from_files(
+            files,
+            source_node_id=node.node_id,
+            membership_epoch=membership.epoch,
+            bank_version=pointer.bank_version,
+            commit_id=pointer.commit_id,
+        )
+        manifest = projected.manifest.model_copy(
+            update={"created_at": _CAPACITY_MAX_WIDTH_ISO}
+        )
+        return BootstrapSnapshot(manifest=manifest, files=projected.files)
+
+    async def validate_source_preparation(
+        self,
+        space_id: str,
+        *,
+        initializing_reason: str,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> BootstrapSnapshot:
+        """Validate an exact initializing source before publishing HEALTHY.
+
+        This method is deliberately validation-only. It accepts only the exact
+        UNSAFE reason supplied by the preparation service, validates all normal
+        export authority and parses every shared export path, then discards the
+        in-memory projection.
+        """
+
+        if type(initializing_reason) is not str or not initializing_reason:
+            raise BootstrapError("source preparation reason is required")
+        _store, node, membership, bank_version, commit_id = await self._validate_export_source(
+            space_id,
+            initializing_reason=initializing_reason,
+            max_objects=max_objects,
+            max_bytes=max_bytes,
+        )
+        files, _entries = await self._collect_shared_export_files(
+            space_id, max_objects=max_objects, max_bytes=max_bytes
+        )
+        return self._snapshot_from_files(
+            files,
+            source_node_id=node.node_id,
+            membership_epoch=membership.epoch,
+            bank_version=bank_version,
+            commit_id=commit_id,
+        )
+
+    def project_membership_admission_snapshot(
+        self,
+        snapshot: BootstrapSnapshot,
+        *,
+        space_id: str,
+        candidate: Member,
+        source_node: NodeIdentity,
+        term: TermState,
+    ) -> BootstrapSnapshot:
+        """Project the exact-size e+1 export produced by candidate admission.
+
+        Admission replaces ``members.json`` and appends one deterministic
+        membership event. Generated timestamps have the repository's fixed ISO
+        representation, so their values may differ at apply time but their JSON
+        and manifest path lengths do not; the serialized capacity proof is exact.
+        """
+
+        members_path = "_hivemind/members.json"
+        raw_members = snapshot.files.get(members_path)
+        if raw_members is None:
+            raise BootstrapError("admission projection requires members.json")
+        current = MembershipView.model_validate_json(raw_members)
+        next_members = [
+            member for member in current.members if member.node_id != candidate.node_id
+        ]
+        next_members.append(
+            candidate.model_copy(update={"status": MemberStatus.PENDING.value})
+        )
+        new_epoch = current.epoch + 1
+        projected_view = MembershipView(
+            epoch=new_epoch,
+            members=next_members,
+            updated_at=_CAPACITY_MAX_WIDTH_ISO,
+        )
+        event = EventEnvelope(
+            event_id=uuid.uuid5(
+                uuid.NAMESPACE_OID,
+                f"{space_id}:{EventType.MEMBERSHIP_UPDATED.value}:"
+                f"{candidate.node_id}:{new_epoch}",
+            ).hex,
+            type=EventType.MEMBERSHIP_UPDATED,
+            origin_node_id=source_node.node_id,
+            term=term.term,
+            membership_epoch=new_epoch,
+            created_at=_CAPACITY_MAX_WIDTH_ISO,
+            payload={
+                "node_id": candidate.node_id,
+                "epoch": new_epoch,
+                "status": MemberStatus.PENDING.value,
+            },
+        )
+        files = dict(snapshot.files)
+        files[members_path] = self._project_members(
+            self._storage_json(projected_view)
+        )
+        event_suffix = f"_{event.event_id}.json"
+        event_already_persisted = any(
+            path.startswith("_hivemind/events/") and path.endswith(event_suffix)
+            for path in files
+        )
+        if not event_already_persisted:
+            event_key = layout.event_key(space_id, event.created_at, event.event_id)
+            files[event_key[len(space_id) + 1 :]] = self._storage_json(event)
+        projected = self._snapshot_from_files(
+            files,
+            source_node_id=source_node.node_id,
+            membership_epoch=new_epoch,
+            bank_version=snapshot.manifest.bank_version,
+            commit_id=snapshot.manifest.commit_id,
+        )
+        manifest = projected.manifest.model_copy(
+            update={"created_at": _CAPACITY_MAX_WIDTH_ISO}
+        )
+        return BootstrapSnapshot(manifest=manifest, files=projected.files)
+
+    async def validate_export_authority(
+        self,
+        space_id: str,
+        *,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> None:
+        """Validate source protocol authority without materializing a snapshot.
+
+        Admin source-readiness uses this bounded protocol-state check. The
+        later approval/export still reads and hashes every shared object, while
+        the preparation transition uses :meth:`validate_source_preparation` to
+        perform that full read before its one-time HEALTHY publication.
+        """
+
+        await self._validate_export_source(
+            space_id, max_objects=max_objects, max_bytes=max_bytes
+        )
+
+    async def export_snapshot(
+        self,
+        space_id: str,
+        *,
+        max_objects: int | None = None,
+        max_bytes: int | None = None,
+    ) -> BootstrapSnapshot:
         """
         Exporte tous les fichiers partagés du space source en un snapshot
         versionné + manifest (sha256 par-fichier + manifest_sha256).
@@ -1659,144 +2178,15 @@ class BootstrapService:
         token) sont exclus ; le reste de l'état (members/term/bank_version/
         commits/...) est inclus pour préserver epoch + bank_version source.
         """
-        store = HivemindStateStore(storage=self._storage, space_id=space_id)
-
-        node = await store.get_node_identity()
-        if node is None:
-            raise BootstrapError(
-                f"export impossible : {space_id!r} n'a pas d'identité Hivemind"
+        _store, node, membership, bank_version, commit_id = (
+            await self._validate_export_source(
+                space_id, max_objects=max_objects, max_bytes=max_bytes
             )
-        token = await store.get_token()
-        if token is not None and token.state in (
-            TokenState.HELD.value,
-            TokenState.RELEASING.value,
-        ):
-            raise BootstrapError(
-                f"export refusé : token {token.state!r} sur {space_id!r} "
-                "(mutation en cours)"
-            )
-
-        # Un bootstrap ne part QUE d'une source saine : exporter depuis un node
-        # UNSAFE/RESYNC_REQUIRED propagerait un état partiel/stale à un peer
-        # vierge qui se croirait HEALTHY. node_status absent = source jamais
-        # passée par un import/resync (saine par défaut, cf. resolve_hive_context).
-        source_health = await store.get_node_status()
-        if source_health is not None and (
-            HiveNodeStatus(source_health.status) != HiveNodeStatus.HEALTHY
-        ):
-            raise BootstrapError(
-                f"export refusé : source {space_id!r} en état "
-                f"{source_health.status!r} (bootstrap uniquement depuis une "
-                "source HEALTHY)"
-            )
-
-        membership = await store.get_membership()
-        # Un bootstrap exige que tous les participants partagent la même
-        # MembershipView (HIVEMIND.md §5.1.5). Sans membres ACTIVE, le snapshot
-        # serait inimportable (le self-lookup d'identité échouerait après que la
-        # cible a déjà été écrite, la laissant UNSAFE) : on échoue up-front.
-        if not active_members(membership):
-            raise BootstrapError(
-                f"export refusé : {space_id!r} n'a pas de MembershipView avec "
-                "des membres ACTIVE — bootstrap impossible (HIVEMIND.md §5.1.5)"
-            )
-        # Le node SOURCE lui-même doit être ACTIVE : un node évincé (alors qu'un
-        # autre pair reste actif) produirait sinon un snapshot dont le
-        # source_node_id n'est pas un membre actif — un peer importé passerait
-        # le bootstrap puis rejetterait la source comme inconnue/évincée.
-        source_member = next(
-            (
-                m
-                for m in membership.members
-                if m.node_id == node.node_id
-                and m.status == MemberStatus.ACTIVE.value
-            ),
-            None,
         )
-        if source_member is None:
-            raise BootstrapError(
-                f"export refusé : le node source {node.node_id!r} n'est pas un "
-                "membre ACTIVE de la MembershipView (évincé ?)"
-            )
-        # Le membre source doit porter une public_key non-vide ET cohérente avec
-        # node.json : node.json est exclu du snapshot, donc le peer importé
-        # n'authentifie la source QUE via members.json. Une clé vide/divergente
-        # ferait rejeter les messages signés de la source en UNKNOWN_PEER.
-        if not source_member.public_key or source_member.public_key != node.public_key:
-            raise BootstrapError(
-                f"export refusé : le membre source {node.node_id!r} n'a pas de "
-                "public_key cohérente avec node.json — un peer importé ne "
-                "pourrait pas authentifier la source (UNKNOWN_PEER)"
-            )
-        membership_epoch = membership.epoch if membership is not None else 0
-        pointer = await store.get_bank_version_pointer()
-        bank_version = pointer.bank_version if pointer is not None else -1
-        commit_id = pointer.commit_id if pointer is not None else ""
-
-        # Valider l'état Hivemind SOURCE avant de produire le snapshot : un
-        # fichier checksum-valide mais sémantiquement corrompu (ex. term.json
-        # malformé) serait sinon copié tel quel dans le manifest et
-        # n'endommagerait la cible qu'après écriture (la laissant UNSAFE et
-        # non-vierge). On échoue donc à l'export, pas chez le peer importeur.
-        try:
-            await _validate_full_hivemind_state(store, self._storage, space_id)
-        except CorruptedStateError as exc:
-            raise BootstrapError(
-                f"export refusé : état Hivemind source invalide ({exc})"
-            ) from exc
-
-        # Cohérence pointeur<->commit côté SOURCE : un pointeur vers une
-        # bank_version sans commit matérialisé (ou un commit_id divergent, ex.
-        # après restore S3 partiel) passe load_snapshot (qui ne désérialise que
-        # les objets existants) mais produirait un snapshot que l'importeur ne
-        # pourrait pas valider — il écrirait la cible puis échouerait la vérif
-        # finale, la laissant UNSAFE. On échoue donc à l'export, pas chez le peer.
-        if bank_version >= 0:
-            src_commit = await store.get_commit(bank_version)
-            if src_commit is None or src_commit.commit_id != commit_id:
-                raise BootstrapError(
-                    "export refusé : pointeur bank_version source incohérent — "
-                    f"commit {bank_version} absent ou commit_id divergent"
-                )
-
-        files: dict[str, str] = {}
-        entries: list[BootstrapManifestEntry] = []
-        prefix = f"{space_id}/"
-        objects = await self._storage.list_objects(prefix)
-        for obj in objects:
-            key = obj["Key"]
-            rel = key[len(prefix):]
-            if not self._is_shared_export_path(rel):
-                continue
-            content = await self._storage.get(key)
-            if content is None:
-                continue
-            if rel == "_meta.json":
-                content = self._project_meta(content)
-            elif rel == "_hivemind/members.json":
-                # Strip source-local per-incarnation tags before export: only the
-                # source force-evicts, so the target never needs Member.incarnation.
-                # Omitting it keeps the exported members.json shape identical to a
-                # pre-P10-3 reader (no unknown field under extra='forbid') and is
-                # convergence-neutral (candidate_view_digest excludes incarnation).
-                content = self._project_members(content)
-            files[rel] = content
-            raw = content.encode("utf-8")
-            entries.append(
-                BootstrapManifestEntry(
-                    path=rel, sha256=_sha256_bytes(raw), size=len(raw)
-                )
-            )
-
-        entries.sort(key=lambda e: e.path)
-        manifest = BootstrapManifest(
-            source_node_id=node.node_id,
-            membership_epoch=membership_epoch,
-            bank_version=bank_version,
-            commit_id=commit_id,
-            entries=entries,
+        membership_epoch = membership.epoch
+        files, _entries = await self._collect_shared_export_files(
+            space_id, max_objects=max_objects, max_bytes=max_bytes
         )
-        manifest.manifest_sha256 = manifest_content_hash(manifest)
 
         # NB : l'audit d'export/import bootstrap est NODE-LOCAL et n'est PAS
         # écrit dans le journal partagé `events/`. Un event ajouté côté source
@@ -1804,7 +2194,13 @@ class BootstrapService:
         # jamais vu par l'autre noeud et ferait diverger en permanence l'état
         # d'audit/dedup partagé. La traçabilité du bootstrap passe par
         # node_status + le BankVersionPointer + l'ImportResult.
-        return BootstrapSnapshot(manifest=manifest, files=files)
+        return self._snapshot_from_files(
+            files,
+            source_node_id=node.node_id,
+            membership_epoch=membership_epoch,
+            bank_version=bank_version,
+            commit_id=commit_id,
+        )
 
     @staticmethod
     def _is_shared_export_path(rel: str) -> bool:
@@ -1915,7 +2311,7 @@ class BootstrapService:
         manifest = snapshot.manifest
         if manifest.protocol_version != layout.PROTOCOL_VERSION:
             raise BootstrapError(
-                f"protocol_version incompatible : manifest "
+                f"incompatible protocol_version: manifest "
                 f"{manifest.protocol_version} != {layout.PROTOCOL_VERSION}"
             )
 
@@ -1934,8 +2330,8 @@ class BootstrapService:
         for entry in manifest.entries:
             if not self._is_shared_export_path(entry.path):
                 raise BootstrapError(
-                    f"import refusé : chemin non partageable dans le snapshot "
-                    f"{entry.path!r} (un peer ne sème jamais d'état node-local)"
+                    f"import refused: non-shareable path in snapshot "
+                    f"{entry.path!r} (a peer never seeds node-local state)"
                 )
 
         store = HivemindStateStore(storage=self._storage, space_id=target_space_id)
@@ -1982,18 +2378,18 @@ class BootstrapService:
         ]
         if any(not m.public_key for m in active_imported):
             raise BootstrapError(
-                "import refusé : un membre ACTIVE importé n'a pas de public_key"
+                "import refused: imported ACTIVE member has no public_key"
             )
         active_node_ids = [m.node_id for m in active_imported]
         active_pubkeys = [m.public_key for m in active_imported]
         if len(set(active_node_ids)) != len(active_node_ids):
             raise BootstrapError(
-                "import refusé : node_id ACTIVE dupliqué dans la membership importée"
+                "import refused: duplicate ACTIVE node_id in imported membership"
             )
         if len(set(active_pubkeys)) != len(active_pubkeys):
             raise BootstrapError(
-                "import refusé : public_key ACTIVE dupliquée dans la membership "
-                "importée — une clé authentifierait plusieurs nodes"
+                "import refused: duplicate ACTIVE public_key in imported membership "
+                "— one key would authenticate multiple nodes"
             )
         # Cohérence membership <-> headers du manifest : le hash couvre les
         # headers, mais pas leur ACCORD avec le CONTENU de members.json. Un
@@ -2003,12 +2399,12 @@ class BootstrapService:
         # la source ni raisonner sur l'epoch attendu.
         if membership is None:
             raise BootstrapError(
-                "import refusé : membership absente après écriture du snapshot"
+                "import refused: membership absent after writing snapshot"
             )
         if membership.epoch != manifest.membership_epoch:
             raise BootstrapError(
-                f"import refusé : epoch importé {membership.epoch} != header "
-                f"manifest {manifest.membership_epoch}"
+                f"import refused: imported epoch {membership.epoch} != manifest "
+                f"header {manifest.membership_epoch}"
             )
         if not any(
             m.node_id == manifest.source_node_id
@@ -2016,9 +2412,9 @@ class BootstrapService:
             for m in membership.members
         ):
             raise BootstrapError(
-                "import refusé : le source_node_id du manifest "
-                f"{manifest.source_node_id!r} n'est pas un membre ACTIVE importé "
-                "— le peer ne pourrait pas authentifier la source du bootstrap"
+                "import refused: manifest source_node_id "
+                f"{manifest.source_node_id!r} is not an imported ACTIVE member "
+                "— the peer could not authenticate the bootstrap source"
             )
         # Miroir du refus d'export : un peer vierge ne doit JAMAIS hériter d'une
         # mutation en cours. Un snapshot d'un peer bogué/ancien pourrait porter
@@ -2029,8 +2425,8 @@ class BootstrapService:
             TokenState.RELEASING.value,
         ):
             raise BootstrapError(
-                f"import refusé : token importé {imported_token.state!r} — un peer "
-                "vierge ne doit pas hériter d'une mutation en cours (HELD/RELEASING)"
+                f"import refused: imported token {imported_token.state!r} — an empty "
+                "peer must not inherit a mutation in progress (HELD/RELEASING)"
             )
         matches = []
         if membership is not None and local_public_key:
@@ -2046,16 +2442,15 @@ class BootstrapService:
         # un node_id dépendant de l'ordre. Dans les deux cas, refus fail-closed.
         if len(matches) != 1:
             raise BootstrapError(
-                "import refusé : la clé publique locale doit correspondre à "
-                f"EXACTEMENT un membre ACTIVE de la MembershipView importée "
-                f"({len(matches)} correspondance(s)) — peer non provisionné ou "
-                "snapshot ambigu"
+                "import refused: local public key must match EXACTLY one ACTIVE "
+                f"member in imported MembershipView ({len(matches)} match(es)) "
+                "— peer not provisioned or snapshot ambiguous"
             )
         match = matches[0]
         if match.node_id == manifest.source_node_id:
             raise BootstrapError(
-                "import refusé : l'identité locale coïncide avec le node source "
-                "(un peer vierge ne réutilise jamais l'identité de la source)"
+                "import refused: local identity matches the source node "
+                "(an empty peer never reuses the source identity)"
             )
         local_node_id = match.node_id
         await store.set_node_identity(
@@ -2069,15 +2464,15 @@ class BootstrapService:
         if observed_bv != manifest.bank_version:
             # Laisse UNSAFE — ne flip jamais HEALTHY.
             raise BootstrapError(
-                "bank_version importée incohérente avec le manifest : "
+                "imported bank_version is inconsistent with manifest: "
                 f"{observed_bv} != {manifest.bank_version}"
             )
         if manifest.bank_version >= 0:
             commit = await store.get_commit(manifest.bank_version)
             if commit is None or commit.commit_id != manifest.commit_id:
                 raise BootstrapError(
-                    "commit de bank_version absent ou commit_id divergent "
-                    f"pour bank_version={manifest.bank_version}"
+                    "bank_version commit is absent or commit_id diverges "
+                    f"for bank_version={manifest.bank_version}"
                 )
 
         # 7b. Valider TOUT l'état Hivemind importé avant de passer HEALTHY. Un
@@ -2091,8 +2486,8 @@ class BootstrapService:
             await _validate_full_hivemind_state(store, self._storage, target_space_id)
         except CorruptedStateError as exc:
             raise BootstrapError(
-                f"import refusé : état Hivemind importé invalide ({exc}) — "
-                "laissé UNSAFE"
+                f"import refused: invalid imported Hivemind state ({exc}) — "
+                "left UNSAFE"
             ) from exc
 
         # 8. node_status HEALTHY = DERNIER write durable : tout échec antérieur
@@ -2104,7 +2499,7 @@ class BootstrapService:
         membership = await store.get_membership()
         epoch = membership.epoch if membership is not None else 0
         await store.set_node_status(
-            NodeHealth(status=HiveNodeStatus.HEALTHY, reason="bootstrap importé")
+            NodeHealth(status=HiveNodeStatus.HEALTHY, reason="bootstrap imported")
         )
         return ImportResult(
             target_space_id=target_space_id,
@@ -2143,7 +2538,7 @@ class BootstrapService:
         manifest = snapshot.manifest
         if manifest.protocol_version != layout.PROTOCOL_VERSION:
             raise BootstrapError(
-                f"protocol_version incompatible : manifest "
+                f"incompatible protocol_version: manifest "
                 f"{manifest.protocol_version} != {layout.PROTOCOL_VERSION}"
             )
 
@@ -2153,8 +2548,8 @@ class BootstrapService:
         for entry in manifest.entries:
             if not self._is_shared_export_path(entry.path):
                 raise BootstrapError(
-                    f"import refusé : chemin non partageable dans le snapshot "
-                    f"{entry.path!r} (un peer ne sème jamais d'état node-local)"
+                    f"import refused: non-shareable path in snapshot "
+                    f"{entry.path!r} (a peer never seeds node-local state)"
                 )
 
         store = HivemindStateStore(storage=self._storage, space_id=target_space_id)
@@ -2179,7 +2574,7 @@ class BootstrapService:
         membership = await store.get_membership()
         if membership is None:
             raise BootstrapError(
-                "import refusé : membership absente après écriture du snapshot"
+                "import refused: membership absent after writing snapshot"
             )
         roster = [
             m
@@ -2189,25 +2584,25 @@ class BootstrapService:
         ]
         if any(not m.public_key for m in roster):
             raise BootstrapError(
-                "import refusé : un membre ACTIVE/PENDING importé n'a pas de "
+                "import refused: imported ACTIVE/PENDING member has no "
                 "public_key"
             )
         roster_node_ids = [m.node_id for m in roster]
         roster_pubkeys = [m.public_key for m in roster]
         if len(set(roster_node_ids)) != len(roster_node_ids):
             raise BootstrapError(
-                "import refusé : node_id dupliqué dans la membership importée "
+                "import refused: duplicate node_id in imported membership "
                 "(ACTIVE ∪ PENDING)"
             )
         if len(set(roster_pubkeys)) != len(roster_pubkeys):
             raise BootstrapError(
-                "import refusé : public_key dupliquée dans la membership importée "
-                "(ACTIVE ∪ PENDING) — une clé authentifierait plusieurs nodes"
+                "import refused: duplicate public_key in imported membership "
+                "(ACTIVE ∪ PENDING) — one key would authenticate multiple nodes"
             )
         if membership.epoch != manifest.membership_epoch:
             raise BootstrapError(
-                f"import refusé : epoch importé {membership.epoch} != header "
-                f"manifest {manifest.membership_epoch}"
+                f"import refused: imported epoch {membership.epoch} != manifest "
+                f"header {manifest.membership_epoch}"
             )
         if not any(
             m.node_id == manifest.source_node_id
@@ -2215,8 +2610,8 @@ class BootstrapService:
             for m in membership.members
         ):
             raise BootstrapError(
-                "import refusé : le source_node_id du manifest "
-                f"{manifest.source_node_id!r} n'est pas un membre ACTIVE importé"
+                "import refused: manifest source_node_id "
+                f"{manifest.source_node_id!r} is not an imported ACTIVE member"
             )
         imported_token = await store.get_token()
         if imported_token is not None and imported_token.state in (
@@ -2224,8 +2619,8 @@ class BootstrapService:
             TokenState.RELEASING.value,
         ):
             raise BootstrapError(
-                f"import refusé : token importé {imported_token.state!r} — un peer "
-                "vierge ne doit pas hériter d'une mutation en cours"
+                f"import refused: imported token {imported_token.state!r} — an empty "
+                "peer must not inherit a mutation in progress"
             )
         # Anti-usurpation : la clé locale ne doit JAMAIS coïncider avec un membre
         # ACTIVE (la cible ne peut adopter une identité active), et doit
@@ -2237,8 +2632,8 @@ class BootstrapService:
             for m in membership.members
         ):
             raise BootstrapError(
-                "import refusé : la clé locale coïncide avec un membre ACTIVE "
-                "(une cible PENDING n'adopte jamais une identité active)"
+                "import refused: local public key matches an ACTIVE member "
+                "(a PENDING target never adopts an active identity)"
             )
         matches = []
         if local_public_key:
@@ -2250,15 +2645,14 @@ class BootstrapService:
             ]
         if len(matches) != 1:
             raise BootstrapError(
-                "import refusé : la clé publique locale doit correspondre à "
-                f"EXACTEMENT un membre PENDING de la MembershipView importée "
-                f"({len(matches)} correspondance(s)) — peer non provisionné ou "
-                "snapshot ambigu"
+                "import refused: local public key must match EXACTLY one PENDING "
+                f"member in imported MembershipView ({len(matches)} match(es)) "
+                "— peer not provisioned or snapshot ambiguous"
             )
         match = matches[0]
         if match.node_id == manifest.source_node_id:
             raise BootstrapError(
-                "import refusé : l'identité locale coïncide avec le node source"
+                "import refused: local identity matches the source node"
             )
         local_node_id = match.node_id
         await store.set_node_identity(
@@ -2271,15 +2665,15 @@ class BootstrapService:
         observed_commit = pointer.commit_id if pointer is not None else ""
         if observed_bv != manifest.bank_version:
             raise BootstrapError(
-                "bank_version importée incohérente avec le manifest : "
+                "imported bank_version is inconsistent with manifest: "
                 f"{observed_bv} != {manifest.bank_version}"
             )
         if manifest.bank_version >= 0:
             commit = await store.get_commit(manifest.bank_version)
             if commit is None or commit.commit_id != manifest.commit_id:
                 raise BootstrapError(
-                    "commit de bank_version absent ou commit_id divergent "
-                    f"pour bank_version={manifest.bank_version}"
+                    "bank_version commit is absent or commit_id diverges "
+                    f"for bank_version={manifest.bank_version}"
                 )
 
         # 7b. Valider tout l'état importé (laisse UNSAFE sur invalidité).
@@ -2287,8 +2681,8 @@ class BootstrapService:
             await _validate_full_hivemind_state(store, self._storage, target_space_id)
         except CorruptedStateError as exc:
             raise BootstrapError(
-                f"import refusé : état Hivemind importé invalide ({exc}) — "
-                "laissé UNSAFE"
+                f"import refused: invalid imported Hivemind state ({exc}) — "
+                "left UNSAFE"
             ) from exc
 
         # 8. PAS de flip HEALTHY : la cible reste UNSAFE (route REFUSE) jusqu'à la
@@ -2315,7 +2709,10 @@ class BootstrapService:
         un cluster ne doit pas être réimporté — anti cross-cluster merge).
         """
         prefix = f"{target_space_id}/"
-        objects = await self._storage.list_objects(prefix)
+        # Five placeholder keys (including an optional S3 directory marker) are
+        # allowed; the sixth necessarily proves non-blank. Never slurp an
+        # attacker-sized prefix.
+        objects = await self._storage.list_objects(prefix, max_keys=6)
         offending: list[str] = []
         for obj in objects:
             rel = obj["Key"][len(prefix):]
@@ -2325,8 +2722,8 @@ class BootstrapService:
             offending.append(rel)
         if offending:
             raise BootstrapError(
-                f"import refusé : la cible {target_space_id!r} n'est pas vierge "
-                f"(objets non-placeholder : {sorted(offending)[:10]})"
+                f"import refused: target {target_space_id!r} is not empty "
+                f"(non-placeholder objects: {sorted(offending)[:10]})"
             )
 
     @staticmethod
@@ -2337,18 +2734,18 @@ class BootstrapService:
         recomputed = manifest_content_hash(manifest)
         if recomputed != manifest.manifest_sha256:
             raise BootstrapError(
-                "manifest_sha256 invalide : le manifest a été altéré ou tronqué"
+                "invalid manifest_sha256: manifest was modified or truncated"
             )
         for entry in manifest.entries:
             if entry.path not in snapshot.files:
                 raise BootstrapError(
-                    f"fichier manquant dans le snapshot : {entry.path!r}"
+                    f"missing file in snapshot: {entry.path!r}"
                 )
             raw = snapshot.files[entry.path].encode("utf-8")
             digest = _sha256_bytes(raw)
             if digest != entry.sha256:
                 raise BootstrapError(
-                    f"checksum invalide pour {entry.path!r} : "
+                    f"invalid checksum for {entry.path!r}: "
                     f"{digest} != {entry.sha256}"
                 )
         # Refuser un fichier en trop non couvert par le manifest (intégrité
@@ -2357,7 +2754,7 @@ class BootstrapService:
         extra = set(snapshot.files) - manifest_paths
         if extra:
             raise BootstrapError(
-                f"fichiers hors manifest dans le snapshot : {sorted(extra)[:10]}"
+                f"files outside manifest in snapshot: {sorted(extra)[:10]}"
             )
 
 

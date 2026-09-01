@@ -60,8 +60,27 @@ class MeshAdminMiddleware:
         action = str(scope.get("path", ""))[len(_PREFIX):]
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
         try:
+            if method == "GET" and action == "availability":
+                # Deliberately lightweight capability probe for the admin
+                # shell.  Process-lock ownership and admin permission were
+                # already checked above; unlike /status this performs no
+                # storage scan or source-readiness classification.
+                await self._json(send, {"status": "ok"})
+                return
             if method == "GET" and action == "status":
                 await self._json(send, await self._status())
+                return
+            if method == "GET" and action.startswith("source-readiness/"):
+                space_id = action[len("source-readiness/"):]
+                if not _SPACE_ID_RE.fullmatch(space_id):
+                    await self._json(
+                        send,
+                        {"status": "error", "message": "invalid space id"},
+                        status=400,
+                    )
+                    return
+                source = await self._service.inspect_source_eligibility(space_id)
+                await self._json(send, {"status": "ok", "source": source})
                 return
             if method == "GET" and action.startswith("members/"):
                 space_id = action[len("members/"):]
@@ -87,13 +106,33 @@ class MeshAdminMiddleware:
             result = await self._dispatch(action, data)
             await self._json(send, {"status": "ok", **result})
         except MeshPairingServiceError as exc:
-            await self._json(send, {"status": "error", "code": exc.code, "message": exc.safe_message}, status=400)
+            if exc.code == "source_state_changed":
+                status = 409
+            elif exc.code in {
+                "mesh_status_inventory_unavailable",
+                "mesh_status_inventory_too_large",
+            }:
+                status = 503
+            else:
+                status = 400
+            await self._json(
+                send,
+                {"status": "error", "code": exc.code, "message": exc.safe_message},
+                status=status,
+            )
         except (KeyError, ValueError, TypeError):
             await self._json(send, {"status": "error", "message": "invalid request"}, status=400)
         except Exception as exc:  # pragma: no cover - defensive
             await self._json(send, safe_error(exc, "mesh_admin"), status=500)
 
     async def _dispatch(self, action: str, data: dict) -> dict:
+        if action == "prepare-source":
+            space_id, expected_state_token = _prepare_source_fields(data)
+            return await self._service.prepare_source(
+                space_id,
+                expected_state_token=expected_state_token,
+                quiesced=True,
+            )
         if action == "invitation":
             out = await self._service.create_invitation(
                 _req_str(data, "space_id"), requested_scopes=_scopes(data)
@@ -108,13 +147,21 @@ class MeshAdminMiddleware:
                 "source_fingerprint": out["source_fingerprint"],
             }
         if action == "accept":
-            invitation_bytes = base64.urlsafe_b64decode(_req_str(data, "invitation").encode("ascii"))
+            (
+                invitation,
+                target_space_id,
+                secret,
+                source_endpoint,
+                scopes,
+            ) = _accept_fields(data)
+            invitation_bytes = base64.urlsafe_b64decode(invitation.encode("ascii"))
             return await self._service.accept_invitation(
                 invitation_bytes,
-                _req_str(data, "target_space_id"),
-                secret=_req_str(data, "secret"),
-                source_endpoint=_req_str(data, "source_endpoint"),
-                requested_scopes=_scopes(data),
+                target_space_id,
+                secret=secret,
+                source_endpoint=source_endpoint,
+                requested_scopes=scopes,
+                quiesced=True,
             )
         if action == "approve":
             return await self._service.approve(_req_str(data, "pair_id"))
@@ -126,6 +173,15 @@ class MeshAdminMiddleware:
             # Corrupt-import recovery (target side): teardown-to-blank + re-import
             # + re-drive to active, consuming the signed blocked-recovery evidence.
             return await self._service.resync(_req_str(data, "pair_id"))
+        if action == "recover-orphaned-reservation":
+            # Compatibility recovery for the old reserve-only crash prefix.
+            # It is deliberately explicit/operator-gated rather than allowing
+            # accept() to infer identity from unbound caller input.
+            return await self._service.recover_orphaned_target_reservation(
+                _req_str(data, "pair_id"),
+                space_id=_req_str(data, "space_id"),
+                operator=_req_str(data, "operator"),
+            )
         if action == "abandon":
             # Target-side give-up: after the source has evicted/cancelled this
             # pairing, release the target's OWN reservation + teardown + cancel.
@@ -149,7 +205,37 @@ class MeshAdminMiddleware:
         raise MeshPairingServiceError("unknown_action", "unknown admin mesh action")
 
     async def _status(self) -> dict:
-        sessions = await self._service.store.list_sessions()
+        sessions, pairings_truncated = (
+            await self._service.store.list_sessions_diagnostic(
+                max_sessions=self._service.STATUS_MAX_SESSIONS
+            )
+        )
+        source_readiness_unavailable = False
+        source_readiness_truncated = False
+        source_readiness_unavailable_reason = ""
+        try:
+            source_readiness = await self._service.list_source_eligibility()
+        except MeshPairingServiceError as exc:
+            if exc.code not in {
+                "mesh_status_inventory_unavailable",
+                "mesh_status_inventory_too_large",
+            }:
+                raise
+            # Source readiness is an enrichment of the established admin status
+            # surface. Inventory failure must not hide pairing lifecycle or
+            # recovery controls; return no partial eligibility projection and an
+            # explicit non-authoritative diagnostic instead.
+            source_readiness = []
+            source_readiness_unavailable = True
+            source_readiness_truncated = (
+                exc.code == "mesh_status_inventory_too_large"
+            )
+            source_readiness_unavailable_reason = exc.code
+        eligible_spaces = [
+            source["space_id"]
+            for source in source_readiness
+            if source.get("can_create_invitation") is True
+        ]
         pairings = []
         for s in sessions:
             entry = {
@@ -192,6 +278,16 @@ class MeshAdminMiddleware:
             "public_url": config.public_url,
             "fingerprint": config.fingerprint,  # public identifier only
             "pairings": pairings,
+            "pairings_truncated": pairings_truncated,
+            # One server-owned predicate feeds both fields. ``eligible_spaces``
+            # is only an id projection, never an independently drifting check.
+            "source_readiness": source_readiness,
+            "eligible_spaces": eligible_spaces,
+            "source_readiness_unavailable": source_readiness_unavailable,
+            "source_readiness_truncated": source_readiness_truncated,
+            "source_readiness_unavailable_reason": (
+                source_readiness_unavailable_reason
+            ),
         }
 
     async def _blocked_recovery_hint(self, pair_id: str) -> tuple[Optional[str], Optional[str]]:
@@ -210,7 +306,11 @@ class MeshAdminMiddleware:
 
     async def _members(self, space_id: str) -> dict:
         status = await hive_status(self._service._storage_factory(), space_id)
-        sessions = await self._service.store.list_sessions()
+        sessions, sessions_truncated = (
+            await self._service.store.list_sessions_diagnostic(
+                max_sessions=self._service.STATUS_MAX_SESSIONS
+            )
+        )
         peer_info: dict[str, dict[str, Any]] = {}
         for s in sessions:
             for fingerprint, endpoint, scopes in (
@@ -244,6 +344,7 @@ class MeshAdminMiddleware:
             "space_id": space_id,
             "membership_epoch": status.get("membership_epoch"),
             "members": members,
+            "pairing_metadata_truncated": sessions_truncated,
         }
 
     async def _read_body(self, receive: Any) -> bytes:
@@ -280,6 +381,63 @@ def _req_str(data: dict, key: str) -> str:
     if type(value) is not str or not value:
         raise MeshPairingServiceError("invalid_field", f"missing or invalid {key!r}")
     return value
+
+
+def _prepare_source_fields(data: dict) -> tuple[str, str]:
+    """Validate the closed, purpose-specific prepare-source request shape."""
+
+    expected_fields = {
+        "space_id",
+        "confirm",
+        "quiesced",
+        "expected_state_token",
+    }
+    if set(data) != expected_fields:
+        raise MeshPairingServiceError(
+            "invalid_field", "invalid source preparation request"
+        )
+    if data.get("confirm") is not True:
+        raise MeshPairingServiceError(
+            "confirmation_required", "explicit confirmation required"
+        )
+    if data.get("quiesced") is not True:
+        raise MeshPairingServiceError(
+            "quiescence_required", "writers-quiesced confirmation is required"
+        )
+    return _req_str(data, "space_id"), _req_str(data, "expected_state_token")
+
+
+def _accept_fields(data: dict) -> tuple[str, str, str, str, tuple[str, ...]]:
+    """Validate the closed, purpose-specific target-acceptance request shape."""
+
+    expected_fields = {
+        "confirm",
+        "invitation",
+        "quiesced",
+        "scopes",
+        "secret",
+        "source_endpoint",
+        "target_space_id",
+    }
+    if set(data) != expected_fields:
+        raise MeshPairingServiceError(
+            "invalid_field", "invalid target acceptance request"
+        )
+    if data.get("confirm") is not True:
+        raise MeshPairingServiceError(
+            "confirmation_required", "explicit confirmation required"
+        )
+    if data.get("quiesced") is not True:
+        raise MeshPairingServiceError(
+            "quiescence_required", "writers-quiesced confirmation is required"
+        )
+    return (
+        _req_str(data, "invitation"),
+        _req_str(data, "target_space_id"),
+        _req_str(data, "secret"),
+        _req_str(data, "source_endpoint"),
+        _scopes(data),
+    )
 
 
 def _scopes(data: dict) -> tuple[str, ...]:

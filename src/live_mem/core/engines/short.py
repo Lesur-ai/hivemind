@@ -4,20 +4,17 @@ ShortEngine — thin DI adapter over :class:`live_mem.core.live.LiveService`
 (P3-6, EPIC-P3 / ADR-0006).
 
 ShortEngine is the *short-memory* engine port: append-only, conflict-free live
-notes. It WRAPS — never rewrites — the imported ``LiveService`` with ZERO
-behavior change. It is a facade that delegates verbatim; it does not parse,
-re-order, validate, or re-serialize anything.
+notes. It remains a facade that delegates verbatim; it does not parse,
+re-order, validate, or re-serialize anything. ``LiveService`` owns the final
+durable mutation guard, including the #413 stale-route recheck.
 
 Wave-2 contract (ADR-0006 "wrap, don't rewrite" + EPIC-P3 In/Out of scope):
 
-- NEW FILE ONLY. ``core/live.py`` is NOT edited by this child.
 - The engine accepts an INJECTED :class:`~live_mem.core.write_sink.WriteSink`
   via the constructor, defaulting to
   :class:`~live_mem.core.write_sink.DirectLocalWriteSink`. In Wave-2 the sink is
   HELD but NOT CONSUMED: ``write_note`` still flows through ``LiveService``'s own
-  ``storage.put`` (see ``WRITE_SINK_MUTATION_CALL_SITES`` below). Routing the
-  durable PUT through the injected sink is #8/#9; the per-space routing FLIP
-  (DirectLocal vs Staged) is P3-7.
+  guarded ``storage.put`` (see ``WRITE_SINK_MUTATION_CALL_SITES`` below).
 - Default behavior is byte-for-byte identical to today, because the default
   ``DirectLocalWriteSink`` delegates verbatim to ``StorageService`` and (this
   wave) is not yet on the write path at all.
@@ -72,9 +69,8 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
 class ShortEngine:
     """Short-memory engine port: append-only live notes over ``LiveService``.
 
-    Thin DI facade. Wraps ``LiveService`` with ZERO behavior change — every
-    method delegates verbatim and returns the wrapped result unchanged. The
-    injected ``WriteSink`` is HELD for #8/#9 but NOT consumed in Wave-2:
+    Thin DI facade. Every method delegates verbatim and returns the wrapped
+    result unchanged. The injected ``WriteSink`` is HELD but NOT consumed:
     ``write_note`` still routes through ``LiveService.write_note``'s own
     ``storage.put`` (the single ``{space_id}/live/{filename}.md`` PUT — see
     :data:`WRITE_SINK_MUTATION_CALL_SITES`). Reads never touch the sink.
@@ -120,9 +116,10 @@ class ShortEngine:
     ) -> dict:
         """Delegate verbatim to ``LiveService.write_note`` (append-only, no lock).
 
-        Wave-2: the durable ``{space_id}/live/{filename}.md`` PUT stays inside
-        ``LiveService`` (``WRITE_SINK_MUTATION_CALL_SITES[0]``); the injected sink
-        is held but not consumed here. Do NOT edit live.py.
+        The durable ``{space_id}/live/{filename}.md`` PUT and its final route
+        recheck stay inside ``LiveService``
+        (``WRITE_SINK_MUTATION_CALL_SITES[0]``); the injected sink is held but
+        not consumed here.
         """
         return await self._live.write_note(space_id, category, content, tags)
 

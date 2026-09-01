@@ -53,9 +53,9 @@ SEQ_PAD: int = 20
 def _ensure_space_id(space_id: str) -> str:
     """Garde-fou minimal : un space_id vide casse les clés silencieusement."""
     if not space_id:
-        raise ValueError("space_id ne peut pas être vide")
+        raise ValueError("space_id cannot be empty")
     if "/" in space_id:
-        raise ValueError(f"space_id ne doit pas contenir '/': {space_id!r}")
+        raise ValueError(f"space_id must not contain '/': {space_id!r}")
     return space_id
 
 
@@ -115,7 +115,7 @@ def queue_entry_key(space_id: str, sequence: int, event_id: str) -> str:
     l'ordre FIFO via le tri lexicographique LIST natif de S3.
     """
     if sequence < 0:
-        raise ValueError(f"sequence doit être >= 0, reçu {sequence}")
+        raise ValueError(f"sequence must be >= 0, received {sequence}")
     return f"{queue_prefix(space_id)}{sequence:0{SEQ_PAD}d}_{event_id}.json"
 
 
@@ -146,7 +146,7 @@ def commit_prefix(space_id: str) -> str:
 
 def commit_key(space_id: str, bank_version: int) -> str:
     if bank_version < 0:
-        raise ValueError(f"bank_version doit être >= 0, reçu {bank_version}")
+        raise ValueError(f"bank_version must be >= 0, received {bank_version}")
     return f"{commit_prefix(space_id)}{bank_version:0{SEQ_PAD}d}.json"
 
 
@@ -172,7 +172,7 @@ def staging_prefix(space_id: str) -> str:
 
 def staging_commit_prefix(space_id: str, commit_id: str) -> str:
     if not commit_id or "/" in commit_id:
-        raise ValueError(f"commit_id invalide: {commit_id!r}")
+        raise ValueError(f"Invalid commit_id: {commit_id!r}")
     return f"{staging_prefix(space_id)}{commit_id}/"
 
 
@@ -197,7 +197,7 @@ def staging_bank_key(space_id: str, commit_id: str, rel_path: str) -> str:
     toute évasion hors du sous-arbre de staging.
     """
     if not rel_path or rel_path.startswith("/") or ".." in rel_path.split("/"):
-        raise ValueError(f"staging rel_path invalide: {rel_path!r}")
+        raise ValueError(f"Invalid staging rel_path: {rel_path!r}")
     return f"{staging_commit_prefix(space_id, commit_id)}bank/{rel_path}"
 
 
@@ -212,7 +212,7 @@ def tombstone_prefix(space_id: str) -> str:
 
 def tombstone_key(space_id: str, note_id: str) -> str:
     if not note_id or "/" in note_id:
-        raise ValueError(f"note_id invalide: {note_id!r}")
+        raise ValueError(f"Invalid note_id: {note_id!r}")
     return f"{tombstone_prefix(space_id)}{note_id}.json"
 
 
@@ -237,7 +237,7 @@ def origin_key(space_id: str, note_id: str) -> str:
     ``tombstone_key`` : un ``note_id`` vide ou contenant ``/`` est rejeté (le
     ``/`` évaderait le préfixe ``_origin/`` et casserait l'identité)."""
     if not note_id or "/" in note_id:
-        raise ValueError(f"note_id invalide: {note_id!r}")
+        raise ValueError(f"Invalid note_id: {note_id!r}")
     return f"{origin_prefix(space_id)}{note_id}.json"
 
 
@@ -252,7 +252,7 @@ def watermark_prefix(space_id: str) -> str:
 
 def watermark_key(space_id: str, node_id: str) -> str:
     if not node_id or "/" in node_id:
-        raise ValueError(f"node_id invalide: {node_id!r}")
+        raise ValueError(f"Invalid node_id: {node_id!r}")
     return f"{watermark_prefix(space_id)}{node_id}.json"
 
 

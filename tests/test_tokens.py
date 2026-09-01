@@ -156,7 +156,7 @@ async def test_create_token_rejects_empty_agent_identity_before_store_access():
     with patch.object(svc, "_load_store", new=AsyncMock()) as load_store:
         result = await svc.create_token(name="", permissions="read,write")
 
-    assert result == {"status": "error", "message": "Nom du token requis"}
+    assert result == {"status": "error", "message": "Token name is required"}
     load_store.assert_not_awaited()
 
 
@@ -177,7 +177,7 @@ async def test_create_token_empty_space_ids_warns_for_non_admin():
     assert "warning_no_access" in result, (
         "Un token non-admin sans space_ids doit déclencher warning_no_access"
     )
-    assert "aucun espace" in result["warning_no_access"].lower()
+    assert "cannot access any existing space" in result["warning_no_access"].lower()
 
 
 @pytest.mark.asyncio
@@ -601,7 +601,7 @@ def test_validate_update_mutex_replace_vs_delta_message():
     """
     err = TokenService._validate_update_mutex("a", "b", "")
     assert err is not None
-    assert "incompatibles" in err["message"].lower()
+    assert "incompatible" in err["message"].lower()
 
 
 def test_validate_update_mutex_star_message_mentions_label():
@@ -739,7 +739,7 @@ async def test_update_token_delta_with_replacement_rejected():
         )
 
     assert result["status"] == "error"
-    assert "incompatibles" in result["message"].lower()
+    assert "incompatible" in result["message"].lower()
     # Aucune modification ne doit avoir été persistée
     save_mock.assert_not_called()
     assert existing.space_ids == ["a"]
@@ -810,7 +810,7 @@ async def test_update_token_delta_invalid_permissions_no_save():
         )
 
     assert result["status"] == "error"
-    assert "permissions invalides" in result["message"].lower()
+    assert "invalid permissions" in result["message"].lower()
     save_mock.assert_not_called()
     # Le space_ids_add NE doit PAS avoir été appliqué malgré l'échec perms
     assert existing.space_ids == ["s1"]
@@ -988,7 +988,7 @@ async def test_bulk_update_requires_filter():
         result = await svc.bulk_update_tokens(space_ids_add="x")
 
     assert result["status"] == "error"
-    assert "filtre" in result["message"].lower()
+    assert "filter" in result["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -1000,7 +1000,7 @@ async def test_bulk_update_requires_operation():
         result = await svc.bulk_update_tokens(names="a,b")
 
     assert result["status"] == "error"
-    assert "opération" in result["message"].lower()
+    assert "operation" in result["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -1454,7 +1454,7 @@ async def test_bulk_update_only_revoked_matched_returns_skipped_zero_updated():
     assert result["tokens"] == []
     assert len(result["skipped_revoked"]) == 2
     # Message d'info utile pour l'opérateur
-    assert "révoqué" in result["message"].lower()
+    assert "revoked" in result["message"].lower()
     assert "include_revoked" in result["message"].lower()
     # Aucune écriture (rien à persister)
     save_mock.assert_not_called()

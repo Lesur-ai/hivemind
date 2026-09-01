@@ -62,7 +62,7 @@ const filterState = {
     visibleEdgeTypes: new Set(),     // ex: {"DEFINES", "OBLIGATES", "MENTIONS"}
     visibleDocuments: new Set(),     // ex: {"doc_id_1", "doc_id_2"}
 
-    // Mode isolation (pour ASK "Isoler le sujet")
+    // Isolation mode (for ASK "Isolate topic")
     // null = pas d'isolation (graphe complet filtré), Set = seuls ces nœuds sont montrés
     isolatedNodes: null,
 
@@ -140,7 +140,7 @@ function applyFilters() {
         });
     }
 
-    // Étape 3 : Mode isolation (ASK "Isoler le sujet")
+    // Step 3: isolation mode (ASK "Isolate topic")
     if (filterState.isolatedNodes !== null) {
         filteredNodes = filteredNodes.filter(n => filterState.isolatedNodes.has(n.id));
     }

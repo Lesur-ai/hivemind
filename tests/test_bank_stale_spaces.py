@@ -93,7 +93,7 @@ async def test_stale_spaces_requires_auth():
     finally:
         current_token_info.reset(tok)
     assert result["status"] == "error"
-    assert "Authentification" in result["message"]
+    assert "Authentication" in result["message"]
 
 
 @pytest.mark.asyncio
