@@ -33,7 +33,7 @@ qdrant-client==1.18.0
 boto3==1.43.52
 
 # === OpenAI-compatible client (pour LLMaaS) ===
-openai==2.46.0
+openai==3.5.0
 
 # === Configuration ===
 pydantic==2.13.4
