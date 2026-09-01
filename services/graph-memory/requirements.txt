@@ -27,7 +27,7 @@ httpx==0.28.1
 neo4j==6.2.0
 
 # === Qdrant Vector DB ===
-qdrant-client==1.18.0
+qdrant-client==1.19.0
 
 # === S3 Client (AWS SDK) ===
 boto3==1.43.52
