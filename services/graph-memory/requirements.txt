@@ -36,7 +36,7 @@ boto3==1.43.52
 openai==2.46.0
 
 # === Configuration ===
-pydantic==2.13.4
+pydantic==2.13.5
 pydantic-settings==2.14.2
 python-dotenv==1.2.2
 
