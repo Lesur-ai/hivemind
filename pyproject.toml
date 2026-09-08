@@ -47,7 +47,7 @@ dev = [
     "pytest>=9.0",
     "pytest-asyncio>=1.3",
     "pyyaml>=6.0,<7",
-    "qdrant-client==1.18.0",
+    "qdrant-client==1.19.0",
     "pypdf==6.16.1",  # Exercise the same PDF parser as the embedded runtime.
 ]
 
