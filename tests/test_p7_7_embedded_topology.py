@@ -18,7 +18,7 @@ only the *net-new* P7-7-owned facts that no single existing test nails:
 Pure stdlib; reuses the compose parser from ``test_release_rebrand_lint.py``
 (no re-implementation — a copy would be flagged).
 
-Hardening (Codex committed-diff review, fix-round 1): the topology guards are
+The topology guards are
 STRUCTURED, not bare substring greps, and each hardened guard carries an inline
 RED-proof test that mutates a COPY of the real compose/.env.example text (the
 real files are never touched):

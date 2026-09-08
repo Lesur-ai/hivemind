@@ -4075,7 +4075,7 @@ async def test_concurrent_approvals_admit_exactly_one(monkeypatch):
 
 
 async def test_second_pairing_refused_while_first_candidate_pending(monkeypatch):
-    """Single-in-flight gate (self-review #2): once one pairing has admitted a
+    """Single-in-flight gate: once one pairing has admitted a
     PENDING candidate, approving a SECOND pairing on the same source is refused —
     so two pairings can never both go in-flight and mutually fence each other's
     activation/give-up (a liveness wedge). The first pairing still converges, and
@@ -4729,7 +4729,7 @@ async def _build_admin_instances(a_seed, b_seed):
 
 
 async def test_activation_fence_blocks_rescope_between_promotion_and_delivery(monkeypatch):
-    """Post-promotion delivery window (the round-14 finding): a concurrent operator
+    """Post-promotion delivery window: a concurrent operator
     rescope INJECTED after the atomic e+1 -> e+2 promotion and BEFORE the target
     confirms activation must be REFUSED by the pairing-activation fence, so the
     source cannot advance to e+3 while the target self-promotes to the pre-computed
@@ -4797,7 +4797,7 @@ async def test_activation_fence_blocks_rescope_between_promotion_and_delivery(mo
 
 
 async def test_activation_fence_blocks_external_admit_between_promotion_and_delivery(monkeypatch):
-    """Caller-bound proof (Codex round-15): an EXTERNAL admit_pending_candidate for
+    """Caller-bound proof: an EXTERNAL admit_pending_candidate for
     ANOTHER node, injected after promotion and before delivery, must be REFUSED —
     otherwise it advances the source to e+3 while the target self-promotes to the
     precomputed e+2. The pairing's OWN promote (which passes its pair_id) still
@@ -4853,7 +4853,7 @@ async def test_activation_fence_blocks_external_admit_between_promotion_and_deli
 
 
 async def test_activation_fence_blocks_external_evict_between_promotion_and_delivery(monkeypatch):
-    """Caller-bound proof (Codex round-15): a DIRECT evict_member of the target,
+    """Caller-bound proof: a DIRECT evict_member of the target,
     injected after promotion and before delivery, must be REFUSED — otherwise the
     source drops the target at e+3 while the stale e+2 activation self-promotes it.
     An external caller passes no pairing bypass, so it is fenced."""

@@ -560,8 +560,8 @@ def test_mcp_server_name_default_is_hivemind():
     Regression: the Pydantic `Settings` default for `mcp_server_name`
     must be `"Hivemind"` (ADR-0018). The `.env.example` default flip is
     not enough on its own — a non-Docker / no-`.env` start would still
-    pick up the in-code default. Codex review (PR #110, finding #2)
-    caught the prior `"Live Memory"` default.
+    pick up the in-code default, which must not retain the prior
+    `"Live Memory"` display name.
     """
 
     # Import path: the package is `live_mem`. Make `src/` importable.
@@ -736,8 +736,7 @@ def test_release_smoke_proves_embedded_long_end_to_end():
     )
     # Type-safe numeric predicates (jq -e): a malformed non-numeric field must
     # FAIL the gate — shell `[ ... -lt 1 ]` on a non-numeric value prints an
-    # error but does NOT fail the script inside an `if` under `set -e`
-    # (Codex round-1 MEDIUM).
+    # error but does NOT fail the script inside an `if` under `set -e`.
     assert re.search(
         r"jq -e '\(\.pushed \| type == \"number\"\) and \(\.pushed >= 1\)'",
         text,
@@ -782,8 +781,7 @@ def test_release_smoke_proves_embedded_long_end_to_end():
 def test_release_smoke_space_create_sends_required_description():
     """
     `space_create` requires a `description` argument (tools/space.py).
-    Without it the smoke fails before ever reaching the long tier —
-    a pre-P7 gap flagged by the P7-5 plan review.
+    Without it the request is rejected before the smoke reaches the long tier.
     """
 
     text = _smoke_text()
@@ -799,8 +797,7 @@ def test_release_smoke_space_create_accepts_real_service_statuses():
     The REAL `SpaceService.create()` contract (core/space.py) returns
     `created` for a new space and `already_exists` for reuse — never
     `ok`/`exists`. Accepting the wrong statuses makes the release gate
-    fail on a nominal stack before the long tier is even reached
-    (Codex round-1 BLOCKING).
+    fail on a nominal stack before the long tier is even reached.
     """
 
     text = _smoke_text()

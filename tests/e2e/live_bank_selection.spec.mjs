@@ -19,7 +19,7 @@
  *    then the FIRST alpha request resolves after the SECOND one. Space and
  *    filename are identical for both alpha requests, so this is the one
  *    ordering that requires the request-generation guard specifically, not
- *    just the space/filename identity checks (Terra PR #257 review finding).
+ *    just the space/filename identity checks.
  */
 
 import { test, expect } from '@playwright/test';
@@ -224,8 +224,7 @@ for (const viewport of VIEWPORTS) {
         // --- Ordering 3 (ABA): alpha selected, beta selected and resolved,
         // alpha RE-selected, then the FIRST alpha request resolves after the
         // SECOND one. Space and filename are identical for both alpha
-        // requests — only the request-generation guard can tell them apart
-        // (Terra PR #257 review finding).
+        // requests — only the request-generation guard can tell them apart.
         await page.locator('.bank-tab', { hasText: 'alpha.md' }).click(); // alpha request #1 (stale-to-be)
         await page.locator('.bank-tab', { hasText: 'beta.md' }).click();
         await fulfillOldest(state, 'beta.md', { status: 'ok', filename: 'beta.md', content: '# Beta\n\nABA intermediate selection.' });

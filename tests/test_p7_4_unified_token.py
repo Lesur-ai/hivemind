@@ -1,23 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-P7-4 (#120) — Unified token authority (Model B) RED→GREEN spec.
+Unified token authority (Model B) regression specification.
 
 Hivemind is the single token authority: the embedded Graph Memory validates the
 SAME tokens as Hivemind by reading `_system/tokens.json` from the shared S3
 bucket — there is NO separate GM token store on the live auth path. This module
-locks the nine resolved gate-review NO-GOs as executable tests.
+locks the authorization and corruption-handling contracts as executable tests.
 
 Test strategy (the Hivemind test venv has boto3 but NOT neo4j/qdrant):
 - The validator (`mcp_memory.auth.s3_token_validator`) is import-light and takes
   an injected `read_tokens_json` async reader + `clock`, so its behaviour is
-  unit-tested with NO real S3 / Neo4j (NO-GO #5,#6,#8,#9, revoked/expired).
+  unit-tested with NO real S3 / Neo4j, including revoked and expired tokens.
 - `mcp_memory.auth.context` is import-light → imported directly to lock the
-  fail-closed `auth is None → deny` flip (NO-GO #4a).
+  fail-closed `auth is None → deny` contract.
 - `mcp_memory.auth.middleware` pulls neo4j → asserted via SOURCE inspection only
-  (NO-GO #4b bypass default / #4c CORS, #7 Neo4j REPLACE, #9 contextvar reset).
+  (bypass default, CORS, token-authority replacement, contextvar reset).
 
-These tests are RED until P7-4 lands `s3_token_validator.py`, flips the context
-checks, and patches the middleware.
+These tests protect `s3_token_validator.py`, the context checks, and middleware.
 """
 
 from __future__ import annotations
@@ -100,7 +99,7 @@ def _validate(validator, raw_token):
 
 
 # --------------------------------------------------------------------------- #
-# NO-GO #6 — reads Hivemind schema (space_ids), sha256: prefix, manage→write   #
+# Reads Hivemind schema (space_ids), sha256: prefix, manage→write             #
 # --------------------------------------------------------------------------- #
 
 def test_validates_hivemind_token_with_sha256_prefix():
@@ -194,7 +193,7 @@ def test_corrupt_non_target_entry_invalidates_entire_store(case):
 
 
 # --------------------------------------------------------------------------- #
-# NO-GO #8 — mono-tenant: presented credential always carries memory_ids=[]    #
+# Mono-tenant: presented credential always carries memory_ids=[]             #
 # --------------------------------------------------------------------------- #
 
 def test_returned_memory_ids_always_empty():
@@ -256,7 +255,7 @@ def test_non_current_token_store_version_fails_closed(version_payload):
 
 
 # --------------------------------------------------------------------------- #
-# NO-GO #5 — S3 signature mode mirrors Hivemind (default 'dual', not sigv4)    #
+# S3 signature mode mirrors Hivemind (default 'dual', not sigv4)              #
 # --------------------------------------------------------------------------- #
 
 def test_signature_mode_defaults_to_dual(monkeypatch):
@@ -275,7 +274,7 @@ def test_signature_mode_sigv4_opt_in_respected():
 
 
 def test_signature_mode_mirrors_hivemind_env(monkeypatch):
-    # Codex finding #3: the validator must MIRROR Hivemind's S3_SIGNATURE_MODE
+    # The validator must MIRROR Hivemind's S3_SIGNATURE_MODE
     # env (single source of truth), NOT a separate GM-only knob — else an
     # operator on MinIO/AWS (sigv4) gets a SigV2 GET and auth bricks.
     monkeypatch.setenv("S3_SIGNATURE_MODE", "sigv4")
@@ -285,7 +284,7 @@ def test_signature_mode_mirrors_hivemind_env(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# NO-GO #9 — cache is fail-closed: positive-only, re-checks expiry on hit      #
+# Cache is fail-closed: positive-only, re-checks expiry on hit                #
 # --------------------------------------------------------------------------- #
 
 def test_negative_lookups_are_not_cached():
@@ -300,7 +299,7 @@ def test_negative_lookups_are_not_cached():
 
 
 def test_expiry_rechecked_every_call():
-    # Codex finding #1: the validator re-reads + re-validates the store on every
+    # The validator re-reads + re-validates the store on every
     # call (no positive cache that could grant on stale data). A token that
     # expires between calls is rejected on the next call.
     raw = "lm_soon_expiring"
@@ -314,7 +313,7 @@ def test_expiry_rechecked_every_call():
 
 
 def test_no_grant_after_store_becomes_unreadable():
-    # Codex finding #1: a previously-valid token must be DENIED once the store is
+    # A previously-valid token must be DENIED once the store is
     # unreadable/empty — never served from a cache.
     raw = "lm_live_then_gone"
     reader = _Reader(_store(_token_entry(raw)))
@@ -325,7 +324,7 @@ def test_no_grant_after_store_becomes_unreadable():
 
 
 def test_revocation_takes_effect_immediately():
-    # Codex finding #1: revoking in the store denies on the very next call.
+    # Revoking in the store denies on the very next call.
     raw = "lm_revoke_live"
     reader = _Reader(_store(_token_entry(raw)))
     v = _make_validator(reader, cache_ttl_seconds=86400)
@@ -335,7 +334,7 @@ def test_revocation_takes_effect_immediately():
 
 
 def test_deleted_token_denied_immediately():
-    # Codex finding #1: a token removed from the store stops working at once.
+    # A token removed from the store stops working at once.
     raw = "lm_removed_live"
     reader = _Reader(_store(_token_entry(raw)))
     v = _make_validator(reader, cache_ttl_seconds=86400)
@@ -345,7 +344,7 @@ def test_deleted_token_denied_immediately():
 
 
 def test_malformed_expires_at_fails_closed():
-    # Codex finding #4: a present-but-unparseable expires_at must DENY, not be
+    # A present-but-unparseable expires_at must DENY, not be
     # treated as "no expiry".
     raw = "lm_bad_exp"
     reader = _Reader(_store(_token_entry(raw, expires_at="not-a-date")))
@@ -353,7 +352,7 @@ def test_malformed_expires_at_fails_closed():
 
 
 def test_nonboolean_revoked_fails_closed():
-    # Codex finding #4: a non-boolean (corrupt) revoked value must DENY.
+    # A non-boolean (corrupt) revoked value must DENY.
     raw = "lm_bad_revoked"
     entry = _token_entry(raw)
     entry["revoked"] = "yes"  # non-boolean truthy
@@ -362,7 +361,7 @@ def test_nonboolean_revoked_fails_closed():
 
 
 # --------------------------------------------------------------------------- #
-# NO-GO #4a — context fails CLOSED: auth is None must DENY (was allow)         #
+# Context fails CLOSED: auth is None must DENY (was allow)                   #
 # --------------------------------------------------------------------------- #
 
 def test_context_checks_deny_when_auth_is_none():
@@ -378,7 +377,7 @@ def test_context_checks_deny_when_auth_is_none():
 
 
 def test_get_allowed_memory_ids_denies_on_no_auth():
-    # Codex finding #2: the list helper must NOT conflate no-auth with admin —
+    # The list helper must NOT conflate no-auth with admin —
     # memory_list / backup_list deny instead of listing everything.
     from mcp_memory.auth import context
 
@@ -399,7 +398,7 @@ def test_get_allowed_memory_ids_denies_on_no_auth():
 
 
 # --------------------------------------------------------------------------- #
-# NO-GO #4b/#4c, #7, #9 — middleware patches (source assertions; neo4j-heavy)  #
+# Middleware contracts (source assertions; neo4j-heavy)                      #
 # --------------------------------------------------------------------------- #
 
 def _middleware_source() -> str:
@@ -409,7 +408,7 @@ def _middleware_source() -> str:
 def test_localhost_bypass_defaults_to_false_in_code():
     src = _middleware_source()
     assert 'os.getenv("LOCALHOST_AUTH_BYPASS", "true")' not in src, (
-        "LOCALHOST_AUTH_BYPASS must NOT default to 'true' (NO-GO #4b)"
+        "LOCALHOST_AUTH_BYPASS must NOT default to 'true'"
     )
     assert 'os.getenv("LOCALHOST_AUTH_BYPASS", "false")' in src, (
         "LOCALHOST_AUTH_BYPASS must default to 'false' (fail-closed)"
@@ -419,22 +418,22 @@ def test_localhost_bypass_defaults_to_false_in_code():
 def test_no_wildcard_cors_header():
     src = _middleware_source()
     assert '(b"access-control-allow-origin", b"*")' not in src, (
-        "wildcard CORS 'access-control-allow-origin: *' must be removed (NO-GO #4c)"
+        "wildcard CORS 'access-control-allow-origin: *' must be removed"
     )
 
 
 def test_live_auth_path_uses_s3_validator_not_neo4j_token_manager():
     src = _middleware_source()
     assert "s3_token_validator" in src or "S3TokenValidator" in src, (
-        "middleware must call the S3 token validator (Model B / NO-GO #7)"
+        "middleware must call the S3 token validator"
     )
     assert "self.token_manager.validate_token" not in src, (
-        "Neo4j token_manager.validate_token must be REMOVED from the live auth path (NO-GO #7)"
+        "Neo4j token_manager.validate_token must be REMOVED from the live auth path"
     )
 
 
 def test_contextvar_is_reset_after_request():
     src = _middleware_source()
     assert "current_auth.reset" in src, (
-        "current_auth must be reset() after the request to avoid cross-session bleed (NO-GO #9)"
+        "current_auth must be reset() after the request to avoid cross-session bleed"
     )

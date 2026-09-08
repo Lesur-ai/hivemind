@@ -4,6 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hivemind"
+authors = [{name = "Christophe Lesur"}]
 dynamic = ["version"]
 requires-python = ">=3.11"
 # LM2-26 fix : bornes basses remontées pour exclure les versions vulnérables
@@ -47,6 +48,7 @@ dev = [
     "pytest-asyncio>=1.3",
     "pyyaml>=6.0,<7",
     "qdrant-client==1.18.0",
+    "pypdf==6.16.1",  # Exercise the same PDF parser as the embedded runtime.
 ]
 
 [tool.setuptools.packages.find]

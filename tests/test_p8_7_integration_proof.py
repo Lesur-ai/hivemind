@@ -284,7 +284,7 @@ def _is_env_key_expr(node: ast.AST) -> bool:
     """True iff ``node`` is EXACTLY ``os.environ.get(BOOTSTRAP_KEY_ENV|<literal>, …)``,
     optionally wrapped in a single trailing ``.strip()`` — NOT merely containing
     it. A nested read like ``("hard-coded", os.environ.get(...))[0]`` returns the
-    hard-coded value at runtime and must therefore be rejected (Terra R9)."""
+    hard-coded value at runtime and must therefore be rejected."""
     # Unwrap a single trailing .strip(): os.environ.get(...).strip().
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
             and node.func.attr == "strip" and not node.args:
@@ -353,7 +353,7 @@ def test_proof_harness_pins_agreed_viewports_and_views() -> None:
     # unrelated os.environ.get) or an argv source fails.
     # Collect the RHS of EVERY assignment to `key` — plain (`key = …`) AND
     # annotated (`key: str = …`), so an annotated reassignment like
-    # `key: str = sys.argv[1]` cannot slip past the guard (Terra R10).
+    # `key: str = sys.argv[1]` cannot slip past the guard.
     key_values: list[ast.AST] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(

@@ -14,7 +14,7 @@ console (P8-1 shell + P8-2..P8-6 views) with programmatic assertions and
 screenshots.
 
 --------------------------------------------------------------------------------
-Data-safety contract (Terra adversarial review, PR #170)
+Data-safety contract
 --------------------------------------------------------------------------------
 
 The harness NEVER touches an operator's existing data:
@@ -157,7 +157,7 @@ def _slug(route: str) -> str:
 
 # ===========================================================================
 # Pure data-honesty predicates (factored out so --self-test can prove they
-# discriminate — Terra finding 3: the cross-checks must go RED on bad input).
+# discriminate; the cross-checks must go RED on bad input).
 # ===========================================================================
 
 
@@ -176,7 +176,7 @@ def read_ok(res) -> bool:
     """An authoritative tool read counts only if it explicitly succeeded. A
     transport/HTTP error maps to ``{status: error}`` (never an empty result), so
     absence-of-data from a FAILED read must never be treated as a real empty
-    set (Terra R2 findings 1 & 3)."""
+    set."""
     return isinstance(res, dict) and res.get("status") in _OK
 
 
@@ -208,7 +208,7 @@ def crosscheck_ok(authoritative_read_ok: bool, rendered_count, authoritative_cou
 def teardown_is_confirmed(list_reads_ok: bool, remaining_run_resources) -> bool:
     """Cleanup is confirmed only when the confirming reads SUCCEEDED and no
     resource this run created still exists. A failed confirming read is never
-    'nothing remains' (Terra R2 finding 1)."""
+    'nothing remains'."""
     return bool(list_reads_ok) and not list(remaining_run_resources)
 
 
@@ -270,7 +270,7 @@ def _self_test() -> int:
     if b.events:
         failures.append("Budget must prune events older than 60s")
     # Budget.reserve: a burst reserved near the cap must not be able to overshoot
-    # (Terra R4 scenario: 59 events + a 4-request Dashboard entry).
+    # (Example: 59 events + a 4-request Dashboard entry).
     b2 = Budget(60)
     b2.events = [time.monotonic()] * 59
     if b2.has_room(4):
@@ -284,7 +284,7 @@ def _self_test() -> int:
 
     # Fault injection (offline): the collision preflight must fail closed, and
     # teardown must NOT delete a pre-existing namespaced resource under an
-    # unproven preflight (Terra R6).
+    # unproven preflight.
     import types
     _orig_api = globals()["_api_tool"]
     try:
@@ -408,7 +408,7 @@ class Budget:
         so an in-view batch (e.g. the Dashboard's concurrent /api/tool calls)
         cannot push the trailing-60s count past ``per_min`` after it fires. The
         listener notes each actual request; this only reserves headroom BEFORE a
-        navigation, closing the count-after-dispatch gap (Terra R4)."""
+        navigation, closing the count-after-dispatch gap."""
         n = max(1, min(n, self.per_min))
         now = time.monotonic()
         self._prune(now)
@@ -518,7 +518,7 @@ class RunState:
         self.created_spaces: list[str] = []
         self.created_token_hash: str | None = None
         # Backups persist under a separate _backups/<space>/ prefix and SURVIVE
-        # space deletion, so they must be deleted explicitly (Terra R9).
+        # space deletion, so they must be deleted explicitly.
         self.created_backups: list[str] = []
         # Set True only when the collision preflight POSITIVELY proved (via
         # status-checked reads) that this run's namespace was free at start.
@@ -536,9 +536,9 @@ def collision_check(base_url: str, key: str, state: RunState) -> None:
     space and token reads must explicitly succeed (a failed read is never an
     empty result); on any read failure or a real collision we raise and never
     seed. Only a clean, positively-verified preflight sets ``preflight_clean``,
-    which is what later authorises teardown to sweep by namespace (Terra R6:
-    without this, an ambiguous read could let the sweep delete a pre-existing
-    operator resource that merely shares the namespace)."""
+    which is what later authorises teardown to sweep by namespace. Without this,
+    an ambiguous read could let the sweep delete a pre-existing operator resource
+    that merely shares the namespace."""
     ok_s, sids = _list_spaces_strict(base_url, key)
     ok_t, toks = _list_tokens_strict(base_url, key)
     if not (ok_s and ok_t):
@@ -557,7 +557,7 @@ def seed(base_url: str, key: str, profile: str, state: RunState, report: Report)
     """Seed honest data via real tool calls (§6). Every seed here is synchronous
     and produces state teardown can positively delete and confirm. Asynchronous
     side effects the harness cannot quiesce (bank_consolidate's worker,
-    graph_push's graph-side data) are deliberately NOT seeded (Terra R9/R10) —
+    graph_push's graph-side data) are deliberately NOT seeded —
     otherwise a worker could write bank files / _meta.json after teardown's final
     confirm and leave orphaned proof state."""
     log: dict = {"profile": profile, "calls": []}
@@ -605,12 +605,12 @@ def seed(base_url: str, key: str, profile: str, state: RunState, report: Report)
     # consolidation lock independent of space_delete's lifecycle lock, so a
     # worker that already read its inputs could write bank files / _meta.json
     # AFTER teardown's final confirm — leaving orphaned proof state despite a
-    # green run (Terra R10). The harness cannot deterministically quiesce that
+    # green run. The harness cannot deterministically quiesce that
     # worker, so it does not trigger one. The Consolidation view still renders
     # its honest lane state (idle / no recent job) from bank_consolidation_queues.
 
     # S6 — backup row (required; S3 storage, not LLM). Record the backup_id so
-    # teardown can delete it (backups survive space deletion — Terra R9).
+    # teardown can delete it (backups survive space deletion).
     s6 = required("S6", "backup_create", {"space_id": PROOF_SPACE,
                   "description": "P8-7 proof backup"})
     bid = s6.get("backup_id")
@@ -619,7 +619,7 @@ def seed(base_url: str, key: str, profile: str, state: RunState, report: Report)
 
     # No graph_push: the long tier is derived and a graph_push under a real long
     # runtime would leave graph-side artifacts that this harness cannot delete
-    # and verify fail-closed (Terra R9). The Space Detail long panel still proves
+    # and verify fail-closed. The Space Detail long panel still proves
     # its honest state (unbound / derived / attention) from graph_status without
     # a push — omitting the write keeps teardown provably clean.
 
@@ -628,7 +628,7 @@ def seed(base_url: str, key: str, profile: str, state: RunState, report: Report)
 
 def verify_fixtures(base_url: str, key: str, report: Report) -> None:
     """Before crawling, PROVE the seeded fixtures are actually present, so an
-    empty/broken stack cannot yield a green proof (Terra finding 3)."""
+    empty/broken stack cannot yield a green proof."""
     fx: dict = {}
     space_ids = _spaces_of(_api_tool(base_url, key, "space_list", {}))
     fx["proof_space_listed"] = PROOF_SPACE in space_ids
@@ -701,7 +701,7 @@ def teardown(base_url: str, key: str, keep: bool, state: RunState, report: Repor
     makes this return False (which fails the whole run). The throwaway token is
     always destroyed (secret hygiene), even with --keep or after a crash.
 
-    Discovering by namespace closes the orphan window (Terra R2 finding 2): the
+    Discovering by namespace closes the orphan window: the
     id/name is unpredictable, so ONLY this run could have created a match, even
     if the create response was lost before its id reached ``state``."""
     result: dict = {"keep": keep, "actions": [], "confirmed": False}
@@ -718,7 +718,7 @@ def teardown(base_url: str, key: str, keep: bool, state: RunState, report: Repor
             action_errors.append(f"{tool}({label})={status}")
 
     # The discover-by-namespace sweep is SAFE only when the collision preflight
-    # positively proved the namespace was free at start (Terra R6). Without that
+    # positively proved the namespace was free at start. Without that
     # proof, delete solely the exact ids/hashes this run recorded creating, so an
     # ambiguous preflight can never delete a pre-existing operator resource that
     # merely shares the namespace.
@@ -747,7 +747,7 @@ def teardown(base_url: str, key: str, keep: bool, state: RunState, report: Repor
     # Backups: always the recorded ids; add backups in this run's namespace (by
     # the backup_id's <space_id> prefix) ONLY under a proven-clean preflight.
     # Backups persist under _backups/<space>/ and survive space deletion, so
-    # they must be deleted explicitly (Terra R9). Kept with --keep, like spaces.
+    # they must be deleted explicitly. Kept with --keep, like spaces.
     ok_b, backup_ids = _list_backups_strict(base_url, key)
     if not keep:
         target_backups = set(state.created_backups)
@@ -955,7 +955,7 @@ def crawl(page, context, base_url: str, key: str, out_dir: Path, report: Report)
 def _cross_check_data_honesty(page, report: Report, base_url: str, key: str) -> None:
     """A-5: rendered counters must EQUAL authoritative reads (no tautologies).
     Each check FAILS if the authoritative read did not explicitly succeed — a
-    failed read is never accepted as an honest empty set (Terra R2 finding 3)."""
+    failed read is never accepted as an honest empty set."""
     sl_ok, space_ids = _list_spaces_strict(base_url, key)
 
     # Dashboard Spaces tile count == authoritative space_list length.
@@ -1028,7 +1028,7 @@ def interaction_proofs(page, base_url: str, key: str, out_dir: Path, state: RunS
         page.wait_for_selector("#ctSecret", timeout=10000)
         # Record the created token hash from the modal's #ctTokenHash node
         # IMMEDIATELY — before any redaction, capture, or API lookup — so a later
-        # failure can never orphan it (Terra R2 finding 2). #ctTokenHash carries
+        # failure can never orphan it. #ctTokenHash carries
         # the response's full sha256 hash (the identifier admin_revoke/delete
         # take); it is not the secret. Teardown's namespace sweep by the unique
         # token name is the fail-closed backstop if this node is absent.
@@ -1146,7 +1146,7 @@ def main(argv: list[str]) -> int:
 
     # ONE outer try/finally covering seeding, fixture verification, AND the
     # browser work, so teardown ALWAYS runs — including on a KeyboardInterrupt
-    # during the sleep or fixture verification (Terra R2/R3 medium finding).
+    # during the sleep or fixture verification.
     # Only SeedError is caught for a clean message; every other exception
     # (incl. the interrupt) runs teardown in `finally`, then propagates.
     exit_code = 1
@@ -1166,7 +1166,7 @@ def main(argv: list[str]) -> int:
             context = browser.new_context(device_scale_factor=2)  # tracing/video OFF
             page = context.new_page()
             # Count the browser's in-view /api fetches against the shared budget
-            # so pacing before the next navigation accounts for them (Terra R3).
+            # so pacing before the next navigation accounts for them.
             page.on("request", lambda r: BUDGET.note() if "/api/" in r.url else None)
             page.on("console", lambda m: (report.console_errors.append(f"{m.location}: {m.text}")
                                           if m.type == "error" else None))

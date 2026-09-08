@@ -62,7 +62,10 @@ CHAT_REQUIRED_VARIABLES: tuple[str, ...] = (
     "INFERENCE_CHAT_CONTEXT_WINDOW",
     "INFERENCE_CHAT_MAX_OUTPUT_TOKENS",
 )
-CHAT_OPTIONAL_VARIABLES: tuple[str, ...] = ("INFERENCE_CHAT_TEMPERATURE",)
+CHAT_OPTIONAL_VARIABLES: tuple[str, ...] = (
+    "INFERENCE_CHAT_TEMPERATURE",
+    "INFERENCE_CHAT_EFFORT",
+)
 EMBEDDING_REQUIRED_VARIABLES: tuple[str, ...] = (
     "INFERENCE_EMBEDDING_PROVIDER",
     "INFERENCE_EMBEDDING_API_URL",
@@ -86,6 +89,7 @@ LEGACY_KNOWN_VARIABLES: tuple[str, ...] = (
     "LLMAAS_CONTEXT_WINDOW",
     "LLMAAS_MAX_TOKENS",
     "LLMAAS_TEMPERATURE",
+    "LLMAAS_EFFORT",
     "LLMAAS_EMBEDDING_MODEL",
     "LLMAAS_EMBEDDING_DIMENSIONS",
 )
@@ -186,6 +190,11 @@ def _normalized_presence(environ: Mapping[str, str]) -> dict[str, str]:
     return normalized
 
 
+SUPPORTED_REASONING_EFFORT_PROVIDERS: frozenset[str] = frozenset(
+    {"openai", "openai-compatible"}
+)
+
+
 def _case_variant_collisions(environ: Mapping[str, str]) -> list[str]:
     """Canonical inference/legacy names present under more than one spelling.
 
@@ -204,7 +213,10 @@ def _case_variant_collisions(environ: Mapping[str, str]) -> list[str]:
         if not isinstance(key, str):
             continue
         upper = key.upper()
-        if not upper.startswith((_INFERENCE_PREFIX, _LEGACY_PREFIX)):
+        if (
+            not upper.startswith((_INFERENCE_PREFIX, _LEGACY_PREFIX))
+            and upper != "LLM_MODEL_EFFORT"
+        ):
             continue
         spellings.setdefault(upper, set()).add(key)
     return sorted(name for name, seen in spellings.items() if len(seen) > 1)
@@ -241,6 +253,14 @@ def _parse_positive_int(
         errors.append(f"{name} must be a positive base-10 integer")
         return None
     return int(stripped)
+
+
+def _parse_effort(name: str, raw: str, errors: list[str]) -> str | None:
+    stripped = raw.strip().lower()
+    if stripped not in ("low", "medium", "high"):
+        errors.append(f"{name} must be one of: 'low', 'medium', 'high'")
+        return None
+    return stripped
 
 
 def _parse_temperature(
@@ -372,6 +392,31 @@ def _resolve_new_role(
             )
             if temperature is None:
                 return None
+        effort: str | None = None
+        if "INFERENCE_CHAT_EFFORT" in family:
+            raw_effort = family["INFERENCE_CHAT_EFFORT"]
+            if raw_effort == "":
+                errors.append("INFERENCE_CHAT_EFFORT must not be blank")
+                return None
+            effort = _parse_effort("INFERENCE_CHAT_EFFORT", raw_effort, errors)
+            if effort is None:
+                return None
+        elif "LLM_MODEL_EFFORT" in present:
+            raw_effort = present["LLM_MODEL_EFFORT"]
+            if raw_effort == "":
+                errors.append("LLM_MODEL_EFFORT must not be blank")
+                return None
+            effort = _parse_effort("LLM_MODEL_EFFORT", raw_effort, errors)
+            if effort is None:
+                return None
+
+        if effort is not None and provider_id not in SUPPORTED_REASONING_EFFORT_PROVIDERS:
+            errors.append(
+                f"provider '{provider_id}' does not support reasoning effort "
+                f"(supported providers: {', '.join(sorted(SUPPORTED_REASONING_EFFORT_PROVIDERS))})"
+            )
+            return None
+
         if context_window is None or max_output is None or not url_ok:
             return None
         if max_output > MAX_CHAT_GENERATION_TOKENS:
@@ -396,6 +441,7 @@ def _resolve_new_role(
             context_window=context_window,
             max_output_tokens=max_output,
             temperature=temperature,
+            reasoning_effort=effort,
             source="inference",
         )
 
@@ -469,6 +515,12 @@ def _resolve_legacy(
             adapter_id="openai-compatible",
             errors=errors,
         )
+    effort: str | None = None
+    if "LLMAAS_EFFORT" in present:
+        effort = _parse_effort("LLMAAS_EFFORT", present["LLMAAS_EFFORT"], errors)
+    elif "LLM_MODEL_EFFORT" in present:
+        effort = _parse_effort("LLM_MODEL_EFFORT", present["LLM_MODEL_EFFORT"], errors)
+
     dimensions: int | None = LEGACY_DEFAULT_EMBEDDING_DIMENSIONS
     if "LLMAAS_EMBEDDING_DIMENSIONS" in present:
         dimensions = _parse_positive_int(
@@ -483,6 +535,7 @@ def _resolve_legacy(
         or max_tokens is None
         or temperature is None
         or dimensions is None
+        or (effort is None and ("LLMAAS_EFFORT" in present or "LLM_MODEL_EFFORT" in present))
     ):
         return None, None, False
     if max_tokens > MAX_CHAT_GENERATION_TOKENS:
@@ -510,6 +563,7 @@ def _resolve_legacy(
         context_window=context_window,
         max_output_tokens=max_tokens,
         temperature=temperature,
+        reasoning_effort=effort,
         source="llmaas-legacy",
     )
     embedding = ResolvedEmbeddingProfile(

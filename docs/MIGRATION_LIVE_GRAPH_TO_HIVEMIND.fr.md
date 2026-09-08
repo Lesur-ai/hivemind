@@ -36,12 +36,28 @@ Suivez le [guide de déploiement](DEPLOYMENT.md). La stack Compose par défaut
 inclut WAF, Hivemind, le runtime Graph Memory embarqué, Neo4j et Qdrant. Les
 agents se connectent uniquement à Hivemind.
 
-```bash
-install -m 600 .env.example .env
-# Configurer S3, LLM, ADMIN_BOOTSTRAP_KEY, NEO4J_PASSWORD, TLS et secrets.
-# Project Mesh est actif par défaut : fournir son identité, ou définir
-# HIVEMIND_MESH_ENABLED=false pour un déploiement volontairement non-Mesh.
+Créez le fichier de configuration depuis le modèle uniquement pour une nouvelle
+installation. Si `.env` existe déjà, arrêtez-vous et relisez-le sur place ;
+conservez les emplacements de stockage, secrets et réglages d'inférence
+complets plutôt que de les remplacer pendant la migration.
 
+```bash
+(
+if [ -e .env ] || [ -L .env ]; then
+  printf '%s\n' 'Refus de remplacer .env ; relire la configuration existante.' >&2
+  exit 1
+fi
+install -m 600 .env.example .env
+)
+```
+
+Après une initialisation réussie, configurez S3, LLM, ADMIN_BOOTSTRAP_KEY,
+NEO4J_PASSWORD, TLS et les secrets avant les commandes suivantes. Project Mesh
+est actif par défaut : fournissez son identité, ou définissez
+`HIVEMIND_MESH_ENABLED=false` pour un déploiement volontairement non-Mesh.
+Un refus arrête l'initialisation sans fermer votre shell appelant.
+
+```bash
 docker compose up --build -d --wait
 docker compose ps
 ```
@@ -146,8 +162,15 @@ long_query(space_id="<space-id>", query="<requête de validation>")
 Le premier `long_push` lie automatiquement le space au runtime embarqué.
 Vérifiez zéro erreur et que `activeContext.md`/`progress.md` sont listés dans
 `skipped_volatile` s'ils existent. Ce push est une exception de bootstrap, pas
-une synchronisation de fin de session. Le mode `apply` de `long_ingest` est
-différé en V1 : un plan `dry-run` ou `check-remote` ne prouve aucune écriture.
+une synchronisation de fin de session. Pour les documents canoniques stables,
+utilisez ensuite
+[`long_ingest_async`](MCP_TOOLS_SPEC.md#long_ingest_async---net-new-async-ingest-tool)
+avec des source paths stables, un contenu encodé en Base64 et son checksum
+vérifié, puis contrôlez l'état terminal de chaque job. Le mode `apply` de
+l'outil de planification distinct `long_ingest` reste différé : un plan
+`dry-run` ou `check-remote` ne prouve aucune écriture. Un simple changement
+d'ontologie ne force pas une nouvelle extraction des documents inchangés ;
+consultez les limites documentées de gestion des doublons.
 
 Un fait présent uniquement dans l'ancien graphe n'est pas transféré
 automatiquement. Conservez le Graph legacy et récupérez son document source ;

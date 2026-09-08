@@ -159,11 +159,11 @@ work, not a mandate to consolidate on every occurrence:
 3. **Never invent metrics** — update counts, coverage, versions, dates, or
    status figures only from an explicit source note, command, or report; retain
    the previous value as unverified or use `unknown` when no measurement exists
-4. **Synthesize, don't copy** — group similar notes into coherent, readable paragraphs
+4. **Synthesize, don't copy** — group similar notes into coherent, readable entries: one line per fact, dated with the note's date when it has one (an undated note yields an undated line, never an invented date), that keeps every identifier, never a copied paragraph
 5. **Maintain chronology in progress.md** — group by version/milestone with dates
 6. **projectbrief.md is quasi-immutable** — only modify if a note fundamentally changes the project's vision
-7. **Clean activeContext.md** — move completed items to progress.md to keep the current focus lightweight
+7. **Clean activeContext.md** — retire what a note completes or supersedes: the outcome takes one line in progress.md, dated with the note's date when it has one (undated otherwise, never an invented date); the superseded state (an old status, value or transient state) is deleted, not archived; what no note touches stays
 8. **Update, don't duplicate** — if a section already exists on the same topic, REPLACE it with updated content. Never create duplicate sections.
 9. **Respect the hierarchy** — information must live in the appropriate file per the defined hierarchy
-10. **Clean up obsolete content** — remove completed items from backlogs ("What Remains to Be Built"), update metrics when they change, delete sections superseded by newer versions
+10. **Clean up obsolete content** — remove completed items from backlogs ("What Remains to Be Built"), update metrics when they change, delete sections superseded by newer versions once their durable facts are recorded in progress.md
 11. **Keep files concise** — activeContext.md < 8 KB, other files < 15 KB. Beyond that, synthesize or archive to progress.md

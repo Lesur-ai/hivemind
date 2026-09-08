@@ -57,7 +57,7 @@
     }
 
     // Render a required numeric metric: a real number (incl. 0) shows as-is; an
-    // ABSENT field shows "—" — never a fabricated 0 (Codex LOW / data honesty).
+    // ABSENT field shows "—" — never a fabricated 0.
     function numOr(v, dash) { return (typeof v === 'number') ? String(v) : (dash || '—'); }
 
     // Modal-instance token (see views-consolidation.js): a slow/out-of-order

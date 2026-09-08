@@ -16,7 +16,7 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.4.1-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.5.0-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#requirements)
@@ -258,15 +258,60 @@ explicit authorization or confirmation gates:
 | `long_push` (`graph_push`) | `include_volatile=True` is opt-in and requires `manage` |
 | `long_status` (`graph_status`) | `include_graph` is opt-in |
 
-`bank_compact` reports every historical size field in persisted UTF-8 bytes.
-`COMPACT_THRESHOLD` is a finite aggregate context-pressure ratio in `(0, 1]`;
-`BANK_FILE_MAX_SIZE` is a positive hard per-file byte limit. A manual apply is
+In v1.5.0, `CONSOLIDATION_TRANSIENT_RETRIES=0..3` (default `3`) controls
+normal consolidation retries for chat timeout, rate-limit and temporary
+unavailability failures before batch writes, after 60, 120 and 300 seconds.
+Logs show cause, wait and resumption; the job stays `running` in
+`batch_retry_wait`. The shared budget permits four main-generation requests,
+or five including the single model correction. This reduces manual restarts,
+but each batch can incur extra paid calls and up to **2 h 38 min** of main-call
+and retry-wait time at the default 1800-second timeout, before auxiliary work.
+The same-space lock remains held; other jobs for that space wait, and manual
+compaction or GC may refuse while it is busy. Other spaces have separate lanes.
+See the [MCP tool reference](docs/MCP_TOOLS_SPEC.md) for the complete budget.
+
+A successful job accounts for every processed note as integrated or explicitly
+discarded with a reason; unprocessed notes remain available. This verifies
+disposition and persisted bytes, not the completeness or accuracy of the
+model's summary. Review important bank changes and keep authoritative source
+records separately. A storage failure can leave earlier writes in the same
+batch applied: normal consolidation has no batch-wide rollback, and retains
+the failed batch's source notes for diagnosis.
+
+The [`.env.example`](.env.example) selects the recipe profile
+`Qwen/Qwen3.8-27B-FP8`, `LLMAAS_EFFORT=low`, context `500000`, output `200000`,
+temperature `0.6` and batches of `2`. These explicit values differ from some
+internal defaults (including batch size `3`); upgrading does not overwrite an
+existing `.env`. Keep one complete inference configuration family. Split
+profiles use `INFERENCE_CHAT_EFFORT` with `openai` or `openai-compatible`.
+`COMPACT_THRESHOLD` and `CONSOLIDATION_LEGACY_FRENCH_PROMPTS` are removed; stale
+values are ignored.
+
+**Language change for existing spaces:** newly generated bank prose and the
+residual synthesis are now requested in English, even when your notes, rules
+or existing bank are French. Required headings, exact terms, identifiers,
+URLs and quotations are preserved; untouched content is not translated just
+to change its language. An existing French bank can therefore become bilingual
+as it is updated. The removed French-prompt setting cannot restore French
+generation. Back up and review a representative copy before upgrading a
+language-sensitive workflow.
+
+Compaction is a human decision: a consolidation never compacts the bank, it only
+reports the files above `BANK_FILE_MAX_SIZE` as a `bank_size_advisory` (WARNING
+log and job result). `bank_compact` is the only compaction path and reports every
+historical size field in persisted UTF-8 bytes. `BANK_FILE_MAX_SIZE` is a positive
+per-file byte value: the advisory threshold, and the candidate threshold and
+target given to the model by the manual compaction, not a hard cap on what is
+persisted.
+A result must be strictly smaller than its source and must retain at least 5% of
+it, but it may still exceed the target; successive passes converge. A manual apply is
 available only on a DirectLocal route. A shared Project Mesh route refuses
 before the provider, preimage, or bank write rather than falling back to a
 local write. Oversized or context-incompatible documents fail closed instead
-of being split; multipart compaction and crash-durable recovery are deferred to
-v1.5.0. See the [MCP tool specification](docs/MCP_TOOLS_SPEC.md)
-for the recovery result contract.
+of being split. Multipart compaction and crash-durable recovery are not
+provided by this compaction path. Recovery of unusable manual-compaction
+responses is planned for v1.5.1; the existing manual tool remains available.
+See the [MCP tool specification](docs/MCP_TOOLS_SPEC.md) for its recovery contract.
 
 ## Security and boundaries
 
@@ -284,7 +329,7 @@ trusted network.
 ## What Hivemind does not claim
 
 <!-- non-claims -->
-Hivemind 1.4 does not claim:
+This release does not claim:
 
 - quorum consensus; Project Mesh V1 uses full-mesh all-ACK;
 - a hub topology, permanent master, or leader runtime;
@@ -339,7 +384,9 @@ The public architecture summary is in
 Apache License 2.0. See [LICENSE](LICENSE) and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Hivemind builds on engines originally developed by **Christophe Lesur**.
+Hivemind and its original memory engines were created by **Christophe Lesur**.
+Public releases must retain that code authorship; third-party components
+retain their own attribution and licenses in the notices above.
 
 ---
 

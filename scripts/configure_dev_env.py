@@ -27,10 +27,10 @@ def _neo4j_password() -> str:
 
 def _updates() -> dict[str, str]:
     return {
-        "ADMIN_BOOTSTRAP_KEY": secrets.token_urlsafe(48),
+        "ADMIN_BOOTSTRAP_KEY": f"hm_{secrets.token_urlsafe(48)}",
         "S3_ENDPOINT_URL": "http://minio:9000",
         "S3_ACCESS_KEY_ID": "hivemind-dev",
-        "S3_SECRET_ACCESS_KEY": secrets.token_urlsafe(32),
+        "S3_SECRET_ACCESS_KEY": f"s3_{secrets.token_urlsafe(32)}",
         "S3_BUCKET_NAME": "hivemind",
         "S3_REGION_NAME": "us-east-1",
         "S3_SIGNATURE_MODE": "sigv4",

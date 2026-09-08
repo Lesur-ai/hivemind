@@ -776,53 +776,6 @@ async def test_error_result_marks_job_failed_with_terminal_failed_phase():
     assert status["result"]["failed_batch"] == 1
 
 
-@pytest.mark.asyncio
-async def test_job_status_projects_the_closed_compaction_failure_tuple():
-    marker = "QUEUE_RAW_COMPLETION_SECRET_4f27"
-    requested_heading = "## queue requested heading"
-    consolidator = _OutcomeConsolidator(
-        result={
-            "status": "error",
-            "message": "Consolidation stopped safely.",
-            "failure_reason": "compaction_prepare_failed",
-            "compaction_failures": [
-                {
-                    "filename": "facts.md",
-                    "error": "ambiguous_or_missing_compaction_target",
-                    "operation_index": 0,
-                    "target_resolution": "missing",
-                    "target_match_count": 0,
-                    "target_heading_sha256": hashlib.sha256(
-                        requested_heading.encode("utf-8")
-                    ).hexdigest(),
-                    "heading": marker,
-                    "completion": marker,
-                }
-            ],
-        }
-    )
-    queue = ConsolidationQueueService()
-
-    with patch(
-        "live_mem.core.consolidation_queue.get_consolidator",
-        return_value=consolidator,
-    ):
-        accepted = await queue.enqueue("project", "agent-a", "agent-a")
-        status = await _terminal_status(queue, accepted["job_id"], "failed")
-
-    assert status["result"]["compaction_failures"] == [
-        {
-            "filename": "facts.md",
-            "error": "ambiguous_or_missing_compaction_target",
-            "operation_index": 0,
-            "target_resolution": "missing",
-            "target_match_count": 0,
-            "target_heading_sha256": hashlib.sha256(
-                requested_heading.encode("utf-8")
-            ).hexdigest(),
-        }
-    ]
-    assert marker not in json.dumps(status)
 
 
 @pytest.mark.asyncio
@@ -869,7 +822,7 @@ async def test_worker_crash_marks_job_failed_with_terminal_failed_phase():
     assert status["status"] == "failed"
     assert status["progress"]["phase"] == "failed"
     assert status["result"]["status"] == "error"
-    # P12-1 (Codex review): raw exception text stays server-side. The client
+    # Raw exception text stays server-side. The client
     # payload carries only a generic message and a stable failure reason.
     import json as _json
 
@@ -881,16 +834,9 @@ async def test_worker_crash_marks_job_failed_with_terminal_failed_phase():
 
 @pytest.mark.asyncio
 async def test_job_cancellation_marks_job_terminal_and_runs_queued_sibling():
+    # No compaction runs inside a consolidation, so a job-level
+    # cancellation carries no rollback diagnostics to relay.
     cancelled = asyncio.CancelledError()
-    cancelled.compaction_rollback_failures = (
-        {
-            "filename": "facts.md",
-            "error": "compaction_rollback_ownership_unverified",
-        },
-    )
-    cancelled.compaction_preimage_id = (
-        "project/2026-08-16T06-00-00-" + "a" * 32
-    )
 
     class CancelThenSucceedConsolidator:
         def __init__(self):
@@ -933,14 +879,6 @@ async def test_job_cancellation_marks_job_terminal_and_runs_queued_sibling():
             "Check the server logs before retrying."
         ),
         "failure_reason": "consolidation_cancelled",
-        "compaction_failures": [
-            {
-                "filename": "facts.md",
-                "error": "compaction_rollback_ownership_unverified",
-            }
-        ],
-        "recovery_required": True,
-        "preimage_id": "project/2026-08-16T06-00-00-" + "a" * 32,
     }
     assert sibling_status["status"] == "succeeded"
     assert consolidator.calls == ["agent-a", "agent-b"]
@@ -971,3 +909,68 @@ async def test_worker_task_cancellation_propagates_and_drains_queued_sibling():
     assert status["result"]["failure_reason"] == "consolidation_cancelled"
     assert sibling_status["status"] == "succeeded"
     assert len(consolidator.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_progress_keeps_notes_total_when_nothing_was_processed():
+    """A run stopped at its first batch processed 0 notes out of N.
+
+    The queue must not overwrite ``notes_total`` with ``notes_processed``,
+    otherwise the console would read "0/0" and show "nothing to consolidate"
+    for a failure that left every note waiting.
+    """
+    consolidator = _OutcomeConsolidator(
+        result={
+            "status": "error",
+            "message": "Consolidation stopped at batch 1/2 (batch_llm_failed)",
+            "failure_reason": "batch_llm_failed",
+            "failed_batch": 1,
+            "notes_total": 4,
+            "notes_processed": 0,
+            "notes_discarded_count": 0,
+            "notes_deleted": 0,
+            "notes_remaining": 4,
+            "batch_size": 2,
+            "batches_total": 2,
+            "batches_completed": 0,
+        }
+    )
+    queue = ConsolidationQueueService()
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("project", "agent-a", "agent-a")
+        status = await _terminal_status(queue, accepted["job_id"], "failed")
+    assert status["progress"]["notes_total"] == 4
+    assert status["progress"]["notes_done"] == 0
+    assert status["result"]["notes_total"] == 4
+    assert status["result"]["notes_remaining"] == 4
+
+
+@pytest.mark.asyncio
+async def test_job_status_projects_the_bank_size_advisory_as_is():
+    """A consolidation result carries no compaction envelope any more;
+    the queue relays the server-owned size advisory untouched."""
+    consolidator = _OutcomeConsolidator(
+        result={
+            "status": "ok",
+            "notes_total": 2,
+            "notes_processed": 2,
+            "bank_size_advisory": [
+                {"filename": "progress.md", "utf8_bytes": 42553, "max_size": 35000}
+            ],
+        }
+    )
+    queue = ConsolidationQueueService()
+    with patch(
+        "live_mem.core.consolidation_queue.get_consolidator",
+        return_value=consolidator,
+    ):
+        accepted = await queue.enqueue("space-a", "alice", "alice")
+        status = await _terminal_status(queue, accepted["job_id"], "succeeded")
+    assert status["result"]["bank_size_advisory"] == [
+        {"filename": "progress.md", "utf8_bytes": 42553, "max_size": 35000}
+    ]
+    for banned in ("compaction_failures", "compaction_advisory", "preimage_id", "recovery_required"):
+        assert banned not in status["result"], banned

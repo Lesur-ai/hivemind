@@ -404,6 +404,78 @@
       "space_scope_argument": "space_id"
     },
     {
+      "canonical_name": "ontology_list",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "ontology_get",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "ontology_validate",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_ingest_async",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_ingest_status",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_ingest_list",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_ingest_cancel",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "write",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_document_list",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
+      "canonical_name": "long_document_get",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "read",
+      "operation": "read",
+      "space_scope_argument": "space_id"
+    },
+    {
       "canonical_name": "inference_self_test",
       "aliases": [],
       "audience": "operator",

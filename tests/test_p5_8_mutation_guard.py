@@ -1050,7 +1050,7 @@ async def test_eviction_blocks_until_commit_flips_pointer_mutation_proof() -> No
     MembershipService.evict_member() must NOT be able to complete — it blocks on
     the same _membership_lock until commit() flips the pointer and releases.
 
-    This is the gap Codex flagged on the first variant: a weaker mutant that locked
+    This guards against a weaker mutant that locked
     ONLY the 6b re-check and released BEFORE stage_commit would still pass the
     "evict-before-commit" interleaving. Here the eviction is launched FROM WITHIN
     the staging window (a spy on stage_commit), so such a mutant would let the
@@ -1138,7 +1138,7 @@ async def test_concurrent_commit_loser_leaves_no_orphan_staging() -> None:
     until sink_a finishes, so sink_a lands and sink_b is refused at its prefilter
     (token now FREE) with no staging.
 
-    This is the concurrent-commit interleaving coverage Codex asked for. NOTE: the
+    This covers concurrent-commit interleavings. NOTE: the
     pre-existing 6b membership re-check (``_assert_local_membership_current``)
     already re-reads the token and refuses before staging, so this interleaving
     never left an orphan even WITHOUT the whole-body serialization (the loser was

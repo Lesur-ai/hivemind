@@ -156,6 +156,7 @@ class ResolvedChatProfile:
     context_window: int
     max_output_tokens: int
     temperature: float | None = None
+    reasoning_effort: str | None = None
     source: str = "inference"
 
     role: str = field(default="chat", init=False)
@@ -200,6 +201,15 @@ class ResolvedChatProfile:
                 raise ValueError(
                     "profile temperature is outside the adapter's supported range"
                 )
+        if self.reasoning_effort is not None:
+            if self.provider_id not in ("openai", "openai-compatible"):
+                raise ValueError(
+                    f"provider '{self.provider_id}' does not support reasoning effort"
+                )
+            if self.reasoning_effort not in ("low", "medium", "high"):
+                raise ValueError(
+                    "profile reasoning_effort must be one of: 'low', 'medium', 'high'"
+                )
 
     @property
     def endpoint_sha256(self) -> str:
@@ -215,7 +225,9 @@ class ResolvedChatProfile:
             "context_window": self.context_window,
             "max_output_tokens": self.max_output_tokens,
             "temperature": self.temperature,
+            "reasoning_effort": self.reasoning_effort,
             "source": self.source,
+            "endpoint_sha256": self.endpoint_sha256,
         }
 
 

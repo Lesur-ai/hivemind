@@ -92,6 +92,7 @@ _DEFAULT_RESPONSES: dict[str, Response] = {
         "document_count": 0,
         "entity_count": 0,
         "relation_count": 0,
+        "entity_types": {},
         "top_entities": [],
     },
     "document_list": {"status": "ok", "documents": []},

@@ -595,7 +595,7 @@ async def test_import_refuses_held_token_in_snapshot(storage: FakeStorage) -> No
 
 
 # =============================================================================
-# Re-review Codex : durcissement export/import
+# Durcissement export/import
 # =============================================================================
 
 
@@ -890,7 +890,7 @@ async def test_export_works_for_space_initialized_via_initialize(
 ) -> None:
     """[re-review P1] Un space créé par le helper public initialize(NodeIdentity)
     doit pouvoir être exporté : initialize seede désormais la public_key du
-    self-member (sinon le check d'export round-11 le rejetterait à tort)."""
+    self-member (sinon le check d'export le rejetterait à tort)."""
     keys = generate_peer_keypair()
     peer_keys = generate_peer_keypair()
     store = HivemindStateStore(storage=storage, space_id=SOURCE)  # type: ignore[arg-type]
@@ -917,7 +917,7 @@ async def test_export_works_for_space_initialized_via_initialize(
     await storage.put(f"{SOURCE}/live/.keep", "")
     service = BootstrapService(storage)  # type: ignore[arg-type]
 
-    # Ne doit PAS lever (le check round-11 passe car le self-member a une clé).
+    # Ne doit PAS lever (le check d'export passe car le self-member a une clé).
     snapshot = await service.export_snapshot(SOURCE)
     assert snapshot.manifest.source_node_id == SOURCE_NODE_ID
 

@@ -77,7 +77,7 @@ def _registered_hooks(factory: ast.AST) -> dict[str, list[str]]:
     Rendered with ``ast.unparse`` rather than reduced to bare names: the
     ownership contract this pins is *how* each hook is registered — guarded or
     not, and in which position — so a check that only collected names would
-    pass on an unguarded rewrite (R7-F1).
+    pass on an unguarded rewrite.
     """
     hooks = next(
         node
@@ -447,7 +447,7 @@ class TestHealthContract:
     async def test_unavailable_runtime_keeps_the_historical_error_envelope(
         self, monkeypatch, failure, expected_category
     ):
-        """PR #303 round 1 (Codex Sol, low): health is total by contract AND
+        """Health is total by contract AND
         byte-compatible.
 
         An environment that startup would refuse — or a service already shutting
@@ -583,7 +583,7 @@ class TestStartupAndShutdownWiring:
     async def test_shutdown_cannot_be_undone_by_a_late_background_worker(
         self, monkeypatch, module_path
     ):
-        """PR #303 round 1 (Codex Sol, high): the resurrection leak.
+        """A late worker must not resurrect a shut-down runtime.
 
         Both services run untracked ``asyncio`` workers (consolidation queue,
         ingestion queue) that reach inference, and neither lifespan awaits them
@@ -623,13 +623,10 @@ class TestStartupAndShutdownWiring:
 
     # -- the close-failed / cancelled / wedged rows of the lifecycle matrix -- #
     #
-    # PR #303 rounds 1-3 produced FOUR findings of one class: who owns the
-    # runtime slot, and when may it be cleared or adopted. The systemic audit
-    # that followed showed why each point fix held: no test ever drove a close
-    # that did not return normally, so a mutant swallowing the failure and
-    # clearing the slot anyway survived the entire suite. These rows are that
-    # missing column, parametrised over both services because the two holders
-    # were byte-identical and every earlier repair landed in only one of them.
+    # Runtime-slot ownership must survive closes that fail, cancel or wedge.
+    # A suite covering only successful closes would miss a mutant swallowing
+    # a failure and clearing the slot anyway. Exercise both service holders
+    # so equivalent wiring cannot silently diverge.
 
     @staticmethod
     def _with_lifecycle_adapter(module, mode="ok"):
@@ -981,7 +978,7 @@ class TestStartupAndShutdownWiring:
             core_runtime.reset_inference_runtime_for_tests()
 
     def test_the_core_inference_lifecycle_is_not_bound_to_the_mcp_session(self):
-        """PR #303 round 3 sweep (L1-F1): the runtime lifecycle must NOT live in
+        """The runtime lifecycle must NOT live in
         ``_lifespan``.
 
         That hook is the low-level MCP server's, and
@@ -1007,7 +1004,7 @@ class TestStartupAndShutdownWiring:
         """The replacement must actually carry the lifecycle, and be the
         OUTERMOST layer so a real uvicorn shutdown always reaches it.
 
-        Since #306 the replacement is the SHARED ``LifespanGuard``, not a
+        The replacement is the SHARED ``LifespanGuard``, not a
         Core-local wrapper. The structural invariant is unchanged and is
         asserted the same way: the inference startup check and the inference
         transport release must both be registered as hooks, and no other
@@ -1140,7 +1137,7 @@ class TestStartupAndShutdownWiring:
 # --------------------------------------------------------------------------- #
 #
 # What used to live here was a per-service ASGI wrapper and its finalisation
-# rules. #306 replaced both wrappers with one shared `LifespanGuard`, so the
+# rules. One shared `LifespanGuard` replaces both wrappers, so the
 # GENERIC properties — one terminal verdict per phase, a duplicate never
 # improving it, silence counting as failure, a cancellation announced before it
 # is re-raised, every finaliser attempted — are asserted against that guard by
@@ -1154,18 +1151,17 @@ class TestStartupAndShutdownWiring:
 # refused instead of silently unvalidated, and that the transport release
 # cannot be skipped by the sibling closer failing.
 #
-# PR #303 round 4 established the method these tests keep: drive
-# `uvicorn.lifespan.on.LifespanOn`, never the wrapper. A test that drives the
+# Drive `uvicorn.lifespan.on.LifespanOn`, not only the wrapper. A test that drives the
 # wrapper only observes the messages its author chose to look for, and uvicorn
 # — the component whose interpretation decides whether the process stops —
-# disagreed twice.
+# can interpret those messages differently.
 
 
 class _RecordingInnerApp:
     """ASGI stand-in for the wrapped application.
 
     It records the lifespan messages it RECEIVES and completes its own cycle,
-    which is the property R3-F1 destroyed: an inner app that is never told to
+    which is essential: an inner app that is never told to
     shut down never tears its own resources down either.
     """
 
@@ -1198,7 +1194,7 @@ def _core_app(monkeypatch, inner):
 
 
 class TestInferenceLifecycleThroughTheGuard:
-    """PR #303 round 3-6 findings, re-anchored on the shared guard (#306)."""
+    """Consumer lifecycle contracts exercised through the shared guard."""
 
     @staticmethod
     async def _uvicorn_startup(app):
@@ -1266,11 +1262,11 @@ class TestInferenceLifecycleThroughTheGuard:
     async def test_a_lifespan_less_deployment_is_refused_not_unvalidated(
         self, monkeypatch
     ):
-        """R5-F1, answered by the guard instead of by a second gate.
+        """Missing lifespan is rejected by the guard, not by a second gate.
 
         ``--lifespan off`` is a standard uvicorn option and dispatches no
-        lifespan scope. #303 answered it by validating a second time inside
-        ``create_app()``, which resolves and publishes a runtime in a process
+        lifespan scope. Validating a second time inside
+        ``create_app()`` resolves and publishes a runtime in a process
         that may never open a window able to release it. Declaring lifecycle
         hooks answers it without acquiring anything: the guard refuses every
         request, including health and metrics, and the validation never runs.
@@ -1301,7 +1297,7 @@ class TestInferenceLifecycleThroughTheGuard:
     async def test_the_transport_release_survives_a_failing_sibling_closer(
         self, monkeypatch
     ):
-        """The round-3 class sweep, expressed against the sibling-hook shape.
+        """Finalizer failure coverage expressed against the sibling-hook shape.
 
         Cleanup used to be a flat sequence of awaits with the step owning the
         provider transports written LAST, so any earlier failure skipped it and
@@ -1616,7 +1612,7 @@ class TestProcessWindowContract:
 
 
 class TestOneServingWindowPerProcess:
-    """R7-F1: `LifespanGuard` gates PER INSTANCE, the resources are GLOBAL.
+    """`LifespanGuard` gates PER INSTANCE, the resources are GLOBAL.
 
     Every `create_app()` builds its own guard with its own startup gate, but the
     consolidator singleton, the Graph Memory extractor/embedder registries and
@@ -1679,8 +1675,7 @@ class TestOneServingWindowPerProcess:
 
         Parametrised over both services because the defect was a property of
         the wiring pattern, not of either service — pinning it once would leave
-        the other free to regress, which is exactly how the four earlier
-        ownership findings each survived in the copy they did not name.
+        the other free to regress independently.
         """
         closes: list[str] = []
         build = (self._core if request.param == "core" else self._graph)(
@@ -1736,7 +1731,7 @@ class TestOneServingWindowPerProcess:
         factory,
         monkeypatch,
     ):
-        """R8-F1 through the real Core/Graph factory and Uvicorn driver."""
+        """Process-window ownership through the real factory and Uvicorn driver."""
         import queue
         import threading
 
@@ -1938,7 +1933,7 @@ class TestDeploymentPurity:
         ["docs/DEPLOYMENT.md", "README.md", "README.fr.md"],
     )
     def test_operator_docs_scope_the_two_endpoint_requirement(self, relative):
-        """PR #303 round 2 (Codex Sol, medium): the operator docs claimed
+        """The operator docs claimed
         unconditionally that "the provider" must expose both
         ``/chat/completions`` and ``/embeddings``.
 

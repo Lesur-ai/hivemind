@@ -184,7 +184,7 @@ async def test_reordered_messages_converge_to_same_state() -> None:
 @pytest.mark.asyncio
 async def test_deliver_all_preserves_pending_when_handler_raises() -> None:
     """
-    RÉGRESSION (Codex P2 #2) : ``deliver_all`` livre INCRÉMENTALEMENT. Si un
+    RÉGRESSION : ``deliver_all`` livre INCRÉMENTALEMENT. Si un
     receiver rejette un message (ici epoch erroné -> ``PeerChannelError``),
     l'exception se propage SANS jeter les messages encore en file. L'ancien
     code snapshotait+vidait la file avant d'itérer, perdant silencieusement le
@@ -285,7 +285,7 @@ async def test_dropped_ack_blocks_progress() -> None:
 @pytest.mark.asyncio
 async def test_undelivered_peer_cannot_ack_blocks_grant() -> None:
     """
-    RÉGRESSION (Codex P2 #1) : un ACK n'est légitime QUE si le pair a persisté
+    RÉGRESSION : un ACK n'est légitime QUE si le pair a persisté
     l'event en local (HIVEMIND.md §6.1 : ACK après écriture durable du journal).
 
     Ici nodeC ne reçoit JAMAIS le claim (``deliver=False``, jamais livré). Même
@@ -574,7 +574,7 @@ async def test_concurrent_queue_requests_serialize() -> None:
 @pytest.mark.asyncio
 async def test_out_of_order_grant_rejected() -> None:
     """
-    RÉGRESSION (Codex P2 #2) : un grant doit viser le HEAD déterministe
+    RÉGRESSION : un grant doit viser le HEAD déterministe
     ``(sequence, event_id)`` de la queue. Deux claims FIFO sur le MÊME store ;
     accorder le second (sequence 1) avant le head (sequence 0) est rejeté AVANT
     tout bump de term / écriture de token.
@@ -621,7 +621,7 @@ async def test_out_of_order_grant_rejected() -> None:
 @pytest.mark.asyncio
 async def test_double_grant_same_entry_rejected() -> None:
     """
-    RÉGRESSION (Codex P2 #2) : une entrée de queue accordée est CONSOMMÉE
+    RÉGRESSION : une entrée de queue accordée est CONSOMMÉE
     (GRANTED). Un second grant du même event_id est rejeté AVANT tout effet de
     bord (pas de double bump de term, pas d'écrasement de token).
     """
@@ -658,7 +658,7 @@ async def test_double_grant_same_entry_rejected() -> None:
 @pytest.mark.asyncio
 async def test_distributed_out_of_order_grant_rejected() -> None:
     """
-    RÉGRESSION (Codex P3 finding 1) : la garde head-of-queue doit s'appuyer sur
+    RÉGRESSION : la garde head-of-queue doit s'appuyer sur
     la queue RÉPLIQUÉE (HIVEMIND.md §5.3 : « all peers derive the same queue
     order from the same events »), pas seulement sur la queue locale du
     requester.
@@ -786,7 +786,7 @@ async def test_concurrent_token_acquire_single_holder() -> None:
 @pytest.mark.asyncio
 async def test_grant_blocked_while_lease_held_then_allowed_after_release() -> None:
     """
-    RÉGRESSION (Codex P2 finding) : ``grant`` doit refuser un second détenteur
+    RÉGRESSION : ``grant`` doit refuser un second détenteur
     tant qu'un autre nœud tient une lease HELD/RELEASING NON expirée
     (HIVEMIND.md §5.3/§6.2 : exclusion mutuelle V1). La garde s'applique AVANT
     tout bump de term / écriture de token. Le grant suivant ne progresse
@@ -893,7 +893,7 @@ async def test_grant_blocked_while_lease_held_then_allowed_after_expiry() -> Non
 @pytest.mark.asyncio
 async def test_holder_cannot_be_granted_second_entry_while_holding() -> None:
     """
-    RÉGRESSION (Codex round-6 P2) : l'exclusion mutuelle V1 doit INCLURE la
+    RÉGRESSION : l'exclusion mutuelle V1 doit INCLURE la
     lease du requérant lui-même. Le cycle est strictement claim → grant →
     commit → release. Si le HOLDER COURANT soumet une SECONDE entrée queue
     (différente) AVANT de relâcher sa première lease, ``grant`` ne doit PAS la
@@ -1025,7 +1025,7 @@ async def test_divergent_commit_same_bank_version_conflicts() -> None:
 @pytest.mark.asyncio
 async def test_gapped_commit_chain_violates_bank_version_invariant() -> None:
     """
-    RÉGRESSION (Codex P4 finding 3) : la chaîne de commits de bank doit être
+    RÉGRESSION : la chaîne de commits de bank doit être
     CONTIGUË (``[0, 1, 2, …]``, sans trou). Une chaîne ``[0, 2]`` (trou à 1)
     passait l'ancien check (qui ne vérifiait que le tri croissant) — false
     negative. On injecte directement un historique troué dans un store et on
@@ -1078,7 +1078,7 @@ async def test_gapped_commit_chain_violates_bank_version_invariant() -> None:
 @pytest.mark.asyncio
 async def test_wrong_parent_bank_version_violates_invariant() -> None:
     """
-    RÉGRESSION (Codex P4 finding 3) : chaque commit doit chaîner sur
+    RÉGRESSION : chaque commit doit chaîner sur
     ``parent_bank_version == bank_version - 1``. Une chaîne CONTIGUË mais
     mal-parentée (commit 1 pointant son parent vers -1 au lieu de 0) passait
     l'ancien check. On injecte ce commit et on vérifie que l'invariant échoue.
@@ -1259,7 +1259,7 @@ async def test_membership_epoch_mismatch_fails_closed() -> None:
 @pytest.mark.asyncio
 async def test_partition_is_bidirectional() -> None:
     """
-    RÉGRESSION (Codex P2 #4) : une partition coupe le trafic dans LES DEUX
+    RÉGRESSION : une partition coupe le trafic dans LES DEUX
     sens. Un nœud isolé ne peut ni recevoir DU cluster, ni livrer AU cluster
     (pas de coupure à sens unique). On vérifie les deux directions.
     """
@@ -1328,7 +1328,7 @@ async def test_partition_is_bidirectional() -> None:
 @pytest.mark.asyncio
 async def test_partition_isolates_component_not_individuals() -> None:
     """
-    RÉGRESSION (Codex round-6 P3) : ``partition(node_set)`` modélise un SPLIT
+    RÉGRESSION : ``partition(node_set)`` modélise un SPLIT
     de composant, pas l'isolation d'individus. La coupure suit la FRONTIÈRE
     entre ``node_set`` et le reste du cluster : seul le trafic croisant la
     frontière est coupé (dans les deux sens) ; le trafic INTRA-composant (deux
@@ -1448,7 +1448,7 @@ async def test_peer_eviction_changes_all_ack_set() -> None:
 @pytest.mark.asyncio
 async def test_all_acked_uses_holder_membership_when_views_diverge() -> None:
     """
-    RÉGRESSION (Codex P4 finding 2) : ``all_acked(on_node=holder)`` doit valider
+    RÉGRESSION : ``all_acked(on_node=holder)`` doit valider
     les ACK reçus par le holder contre la membership VUE PAR LE HOLDER, pas
     contre la vue d'un autre nœud. En resync / éviction partielle les vues
     divergent intentionnellement ; valider les ACK du holder contre l'ensemble
@@ -1553,7 +1553,7 @@ async def test_resync_marker_on_future_epoch_or_missed_bank_version() -> None:
 @pytest.mark.asyncio
 async def test_resync_marker_on_missed_bank_version_same_epoch() -> None:
     """
-    RÉGRESSION (Codex P2 #3) : RESYNC_REQUIRED doit aussi se déclencher sur un
+    RÉGRESSION : RESYNC_REQUIRED doit aussi se déclencher sur un
     retard de bank_version committé, PAS seulement sur l'epoch. Un nœud à
     l'epoch courant mais dont le pointeur committé est en arrière du cluster
     NE DOIT PAS lire HEALTHY.

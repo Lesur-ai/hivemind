@@ -566,6 +566,16 @@ class OpenAICompatibleChatProvider(_OpenAICompatibleBase):
         }
         if profile.temperature is not None:
             body["temperature"] = profile.temperature
+        if request.reasoning_effort is not None and profile.provider_id not in ("openai", "openai-compatible"):
+            raise self._direct_error(
+                "invalid_request",
+                diagnostic=f"provider '{profile.provider_id}' does not support reasoning effort",
+                role="chat",
+                correlation_id=request.correlation_id,
+            )
+        effective_effort = request.reasoning_effort or profile.reasoning_effort
+        if effective_effort is not None and profile.provider_id in ("openai", "openai-compatible"):
+            body["reasoning_effort"] = effective_effort
         if not chat_response_is_serviceable(effective_max):
             raise self._direct_error(
                 "invalid_request",
@@ -730,8 +740,8 @@ class OpenAICompatibleChatProvider(_OpenAICompatibleBase):
 class OpenAICompatibleEmbeddingProvider(_OpenAICompatibleBase):
     """``EmbeddingProvider`` over a RAW ``POST {endpoint}/embeddings``.
 
-    This role deliberately does NOT use the OpenAI SDK's ``embeddings.create``
-    (P13-1B, review round 3). Three requirements are jointly unsatisfiable
+    This role deliberately does NOT use the OpenAI SDK's ``embeddings.create``.
+    Three requirements are jointly unsatisfiable
     while the SDK owns request construction:
 
     1. components must be validated from the RAW wire JSON, because the SDK's
@@ -906,7 +916,7 @@ class OpenAICompatibleEmbeddingProvider(_OpenAICompatibleBase):
                 ):
                     raise _invalid()
                 # _is_finite_number is the package's single TOTAL finite-number
-                # primitive (P13-1A): it absorbs the OverflowError that plain
+                # primitive: it absorbs the OverflowError that plain
                 # ``float()``/``math.isfinite()`` raise on an out-of-range JSON
                 # integer such as 10**400, so a hostile numeric component fails
                 # closed as invalid_response instead of escaping the envelope.

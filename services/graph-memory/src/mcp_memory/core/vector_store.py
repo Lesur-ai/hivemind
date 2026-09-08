@@ -713,23 +713,24 @@ class VectorStoreService:
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
         conditions: list[qmodels.FieldCondition] = []
-        if doc_ids:
+        if doc_ids is not None:
             if type(doc_ids) is not list or any(
                 type(doc_id) is not str or not doc_id for doc_id in doc_ids
             ):
                 raise ValueError("doc_ids must be a list of non-empty strings")
-            conditions.append(
-                qmodels.FieldCondition(
-                    key="doc_id",
-                    match=qmodels.MatchAny(any=doc_ids),
+            if doc_ids:
+                conditions.append(
+                    qmodels.FieldCondition(
+                        key="doc_id",
+                        match=qmodels.MatchAny(any=doc_ids),
+                    )
                 )
-            )
         with self._memory_lock(memory_id):
             resolved = self._resolve_collection(
                 memory_id,
                 result=embedding_result,
             )
-            if resolved is None:
+            if resolved is None or (doc_ids is not None and not doc_ids):
                 return []
             try:
                 response = self._client.query_points(

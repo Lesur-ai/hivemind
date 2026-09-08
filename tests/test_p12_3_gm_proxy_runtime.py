@@ -701,7 +701,7 @@ class TestHealthRedaction:
     async def test_system_health_recovered_s3_client_error_is_redacted(
         self, monkeypatch
     ):
-        """R7 (Codex round 7): ``storage.test_connection()`` RECOVERS
+        """``storage.test_connection()`` RECOVERS
         ClientError into its returned health payload (never re-raised, so the
         method decorator cannot rewrite it) and ``system_health`` copies that
         payload verbatim — the real recovered path must be redacted."""
@@ -767,7 +767,7 @@ def _assert_r8_clean(surface):
 
 
 class TestInferenceErrorRedaction:
-    """R8 (Codex round 8): ordinary extraction/embedding failures log the
+    """Ordinary extraction/embedding failures log the
     provider error and re-raise it into the ingestion/server error handlers —
     both the stderr log and the escaping exception text must be free of
     secrets.

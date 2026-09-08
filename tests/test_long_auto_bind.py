@@ -5,7 +5,7 @@ P7-3 — auto-bind interne du runtime long embarqué (ADR-0019).
 Drive le VRAI GraphBridgeService via le seam client (FakeGraphTransport) sur un
 FakeStorage in-memory. Aucun réseau / S3 / Neo4j / Qdrant / LLM.
 
-Couvre les résolutions Codex (3 rounds) :
+Couvre les invariants suivants :
 - provision UNIQUEMENT au 1er long_push (status reste read-only, ne mute rien) ;
 - token embarqué VIVANT jamais persisté (sentinel at-rest → backups bruts sûrs) ;
 - binding EXPLICITE (embedded|explicit), jamais inféré depuis url/token ;
@@ -546,7 +546,7 @@ async def test_internal_token_registered_scoped_readwrite() -> None:
 
 
 async def test_provision_registers_token_before_any_gm_call() -> None:
-    # Ordering (Codex R1) : l'enregistrement du token PRÉCÈDE tout appel GM
+    # Ordre : l'enregistrement du token PRÉCÈDE tout appel GM
     # authentifié. Preuve : si register échoue, AUCUN client GM n'est construit
     # et AUCUN bloc "bound" n'est persisté (fail-closed avant contact GM).
     storage = FakeStorage(bank={"projectbrief.md": "hello"})

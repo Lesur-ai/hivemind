@@ -64,7 +64,7 @@ if [ ! -f "docker-compose.yml" ] && [ ! -f "compose.yml" ]; then
   fail "no docker-compose.yml or compose.yml at repo root ($REPO_ROOT)"
 fi
 
-# --- Token fail-closed (Codex P6-8 review #2) ------------------------------
+# --- Token fail-closed ----------------------------------------------------
 #
 # The bootstrap token is environment-dependent (HIVEMIND_BOOTSTRAP_TOKEN env
 # var or the value injected by the compose dev profile). The operator MUST
@@ -149,7 +149,7 @@ log "round-trip short_* (short_note)"
 short_response=$(mcp_call "short_note" "{\"space_id\":\"$SMOKE_SPACE_ID\",\"category\":\"observation\",\"content\":\"smoke note\"}")
 # Real note-creation contract (core/live.py): a successful short_note/live_note
 # returns "created" (never "ok") — anything else is a failure. Same
-# contract-exactness rule as the space_create check above (P7-5 Codex R1).
+# contract-exactness rule as the space_create check above.
 short_status=$(printf '%s' "$short_response" | jq -r '.status // "missing"')
 if [ "$short_status" != "created" ]; then
   fail "short_note returned status='$short_status' (response: $short_response)"

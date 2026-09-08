@@ -77,6 +77,7 @@ class IngestJob:
     requested_by: str = ""
     replace_existing: bool = False
     batch_id: Optional[str] = None
+    ontology: Optional[str] = None
     status: str = "queued"
     current_step: str = "queued"
     progress_percent: int = 0
@@ -84,6 +85,8 @@ class IngestJob:
     created_relations: int = 0
     document_id: Optional[str] = None
     error: Optional[str] = None
+    purge_status: Optional[str] = None
+    purge_errors: list[str] = field(default_factory=list)
     guarantee: str = QUEUE_GUARANTEE
     created_at: str = field(default_factory=_now)
     started_at: Optional[str] = None
@@ -129,6 +132,7 @@ class IngestQueueService:
         requested_by: str = "",
         job_id: Optional[str] = None,
         batch_id: Optional[str] = None,
+        ontology: Optional[str] = None,
     ) -> dict:
         """
         Résout l'idempotence puis met le job en file si nécessaire.
@@ -214,6 +218,7 @@ class IngestQueueService:
                 requested_by=requested_by,
                 replace_existing=replace_existing,
                 batch_id=batch_id,
+                ontology=ontology,
                 _content=content,
                 _metadata=metadata,
                 _source_modified_at=source_modified_at,
@@ -265,7 +270,14 @@ class IngestQueueService:
         status: Optional[str] = None,
         source_path: Optional[str] = None,
         batch_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> dict:
+        if type(limit) is not int or limit < 1 or limit > 100:
+            return {"status": "error", "message": "limit must be an integer between 1 and 100"}
+        if type(offset) is not int or offset < 0:
+            return {"status": "error", "message": "offset must be a non-negative integer"}
+
         async with self._state_lock:
             jobs = [j for j in self._jobs.values() if j.memory_id == memory_id]
             if status:
@@ -277,12 +289,17 @@ class IngestQueueService:
             if batch_id:
                 jobs = [j for j in jobs if j.batch_id == batch_id]
             jobs.sort(key=lambda j: j.created_at, reverse=True)
+            total = len(jobs)
+            paginated = jobs[offset : offset + limit] if limit > 0 else jobs[offset:]
             return {
                 "status": "ok",
                 "memory_id": memory_id,
-                "count": len(jobs),
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "count": len(paginated),
                 "guarantee": QUEUE_GUARANTEE,
-                "jobs": [self._job_payload(j) for j in jobs],
+                "jobs": [self._job_payload(j) for j in paginated],
             }
 
     async def is_idle_for_memory(self, memory_id: str) -> bool:
@@ -436,6 +453,7 @@ class IngestQueueService:
                     source_modified_at=source_modified_at,
                     last_ingest_job_id=job.job_id,
                     replace_doc_id=replace_doc_id,
+                    ontology=job.ontology,
                     progress_cb=progress_cb,
                     cancel_check=cancel_check,
                 )
@@ -463,6 +481,10 @@ class IngestQueueService:
             job.document_id = result.get("document_id")
             job.created_entities = result.get("entities_created", 0)
             job.created_relations = result.get("relations_created", 0)
+            if result.get("purge_status"):
+                job.purge_status = result["purge_status"]
+            if result.get("purge_errors"):
+                job.purge_errors = list(result["purge_errors"])
         elif status == "cancelled":
             job.status = "cancelled"
             job.current_step = "cancelled"
@@ -563,6 +585,10 @@ class IngestQueueService:
         }
         if job.error:
             payload["error"] = job.error
+        if job.purge_status:
+            payload["purge_status"] = job.purge_status
+        if job.purge_errors:
+            payload["purge_errors"] = job.purge_errors
         if job.status in ("queued", "running"):
             payload["message"] = (
                 f"Ingestion job {job.status} for '{job.memory_id}'. Do not wait for "

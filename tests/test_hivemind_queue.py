@@ -585,7 +585,7 @@ async def test_submit_scans_all_same_event_id_returns_canonical_earliest() -> No
 
 
 async def test_submit_detects_later_divergent_same_event_id_duplicate() -> None:
-    """Le PIÈGE exact du finding Codex : une PREMIÈRE entrée à seq bas dont
+    """Cas critique : une PREMIÈRE entrée à seq bas dont
     l'identité est FIDÈLE à l'incoming, et une SECONDE entrée à seq plus haut
     dont l'identité DIVERGE. ``submit`` doit scanner TOUTES les entrées et
     LEVER ``QueueReplayConflictError`` — pas s'arrêter au 1ᵉ match fidèle et
@@ -654,7 +654,7 @@ async def test_submit_raises_on_two_divergent_preexisting_same_event_id() -> Non
 #   (a) ``queue_anomalies`` le SURFACE (DuplicateEventId), jamais coalescé ;
 #   (b) ``select_head`` ne laisse PAS le duplicata non-canonique devenir un
 #       head indépendant après grant/cancel du canonique.
-# C'est le finding BLOCKING Codex (pr97) : faithful same-event_id duplicates
+# Régression : faithful same-event_id duplicates
 # at different sequences remain independent PENDING entries.
 # =============================================================================
 
@@ -735,10 +735,10 @@ async def test_non_canonical_duplicate_never_becomes_independent_head() -> None:
     )
 
     # L'anomalie reste surfacée pour recovery (#10) APRÈS le grant du canonique.
-    # C'est le finding BLOCKING Codex (pr97, head cd9ff95) : un duplicata durable
+    # Régression : un duplicata durable
     # non-canonique ne doit pas devenir INVISIBLE à l'observabilité dès que le
     # canonique quitte PENDING — sinon recovery perd l'état résiduel exactement
-    # après la transition que la PR est censée protéger.
+    # après la transition que cette garde protège.
     #
     # RED-without : avant le fix, ``detect_event_id_duplicates`` ne groupait que
     # les entrées PENDING. Après grant de seq 3, seul seq 7 reste PENDING ->
@@ -789,7 +789,7 @@ class _YieldOnFirstQueueListStorage(FakeStorage):
     """``FakeStorage`` qui SUSPEND (``await asyncio.sleep(0)``) au tout premier
     ``list_objects`` sur le préfixe queue, APRÈS avoir capturé le snapshot.
 
-    But : rendre DÉTERMINISTE l'interleaving async décrit par Codex. Avec un
+    But : rendre DÉTERMINISTE l'interleaving async concurrent. Avec un
     ``FakeStorage`` pur (aucune coroutine ne suspend réellement), deux
     ``submit`` lancés via ``asyncio.gather`` s'exécutent l'un APRÈS l'autre
     (le 1ᵉ va jusqu'au bout avant que le 2ᵉ ne démarre) — le bug de course ne

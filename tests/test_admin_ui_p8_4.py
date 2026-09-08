@@ -132,10 +132,30 @@ class TestRealToolBinding:
             assert "graph_status" not in src, f"{name} calls graph_status"
 
     def test_no_polling(self, consol, oper):
-        # D8: no automatic polling / timer-based coordination anywhere.
+        # D8: no automatic polling / timer-based coordination anywhere — with the
+        # one bounded exception of §5.5.1: the
+        # Consolidation view may re-read while a job is running or queued, from
+        # exactly two functions, each carrying its bounding guards.
         for src, name in ((consol, "consolidation"), (oper, "operator")):
             assert "setInterval" not in src, f"{name} uses setInterval (polling banned)"
-            assert "setTimeout" not in src, f"{name} uses setTimeout (D8 / §3.3.2 r5)"
+        assert "setTimeout" not in oper, "operator uses setTimeout (D8 / §3.3.2 r5)"
+        lanes = _extract_fn(consol, "function scheduleLive(epoch, data)")
+        inspector = _extract_fn(consol, "function scheduleJobLive(jobId, op, epoch, data)")
+        assert consol.count("setTimeout(") == 2, "the live refresh is the only setTimeout allowed (§5.5.1)"
+        assert lanes.count("setTimeout(") == 1 and inspector.count("setTimeout(") == 1, (
+            "setTimeout must live only inside scheduleLive and scheduleJobLive"
+        )
+        assert "60000" in consol.split("LIVE_REFRESH_MS = ", 1)[1].split(";", 1)[0], "period is one minute"
+        # Bounding guards of the lanes loop: idle gate, route epoch, session, hidden tab.
+        assert "if (!anyLaneActive(data)) return;" in lanes
+        assert "AdminRouter.epoch !== epoch" in lanes and "sessionActive()" in lanes
+        assert "document.hidden" in lanes
+        # Bounding guards of the inspector loop: running/queued only, same modal
+        # instance still open, route epoch, session, hidden tab.
+        assert "if (st !== 'running' && st !== 'queued') return;" in inspector
+        assert "modalOpCurrent(op)" in inspector and "modalOpen()" in inspector
+        assert "AdminRouter.epoch !== epoch" in inspector and "document.hidden" in inspector
+        # Dashboard / Space Detail keep D8 untouched (pinned by their own tests).
 
 
 # ─────────────────────────── scope-widening guard (§4.5 E4) ───────────────────────────
@@ -181,20 +201,19 @@ class TestConsolidateScope:
     def test_result_modals_are_not_auto_closed(self, consol):
         # A confirm-modal onConfirm that REPLACES the shared modal with a result
         # or error must return false — returning true lets the shell's confirm
-        # wrapper closeModal() the just-shown modal (regression guard for the
-        # pre-commit MAJOR findings).
+        # wrapper closeModal() the just-shown modal.
         assert "await submitAllStale(captured, epoch, confirmOp); return false;" in consol
         hr = _extract_fn(consol, "function handleEnqueueResult(")
         assert "return false" in hr, "handleEnqueueResult must keep the refusal modal open"
 
     def test_stale_epoch_guards_return_false_not_true(self, consol):
-        # Codex MEDIUM (round 2): a stale continuation must NOT return true, or the
-        # shell's confirm wrapper closeModal()s a newer route's modal.
+        # A stale continuation must NOT return true: the shell's confirm
+        # wrapper would closeModal() a newer route's modal.
         assert "AdminRouter.epoch !== epoch) return true" not in consol
 
     def test_all_stale_scans_before_confirmation(self, consol):
-        # Codex MEDIUM (round 2) / §4.8 K5: re-scan first, confirm the exact
-        # captured set, then submit only that set (never re-scan after confirm).
+        # Re-scan first, confirm the exact captured set, then submit only that
+        # set (never re-scan after confirm).
         body = _extract_fn(consol, "async function startConsolidateAllStale(")
         assert "bank_stale_spaces" in body, "all-stale does not re-scan before confirming"
         assert "captured" in body
@@ -211,8 +230,8 @@ class TestConsolidateScope:
         assert "scope_label" in body
 
     def test_job_inspector_renders_full_payload(self, consol):
-        # Codex MEDIUM (round 2) / §5.5: the inspector surfaces provenance,
-        # guarantee, and lifecycle timestamps, not just space/scope/progress.
+        # The inspector surfaces provenance, guarantee, and lifecycle
+        # timestamps, not just space/scope/progress.
         body = _extract_fn(consol, "function renderJob(")
         for field in ("requested_by", "guarantee", "requested_at", "started_at", "finished_at"):
             assert field in body, f"job inspector omits {field}"
@@ -296,7 +315,7 @@ class TestPurgeCrossLink:
 class TestGcConstraints:
     def test_gc_never_global(self, oper):
         # Every GC call uses a positively captured target — never an empty/global
-        # literal. The delete call uses captured.spaceId from the reviewed proof.
+        # literal. The delete call uses captured.spaceId from that captured target.
         calls = []
         for m in re.finditer(r"callTool\('admin_gc_notes'", oper):
             calls.append(oper[m.end() : m.end() + 260])
@@ -459,14 +478,21 @@ class TestCompactionDiagnostics:
         assert "safeCompactionFailureRows(failures)" in paint
         assert "Target resolution" in paint
 
-    def test_automatic_job_inspector_shows_safe_compaction_diagnostics(self, consol):
-        detail = _extract_fn(consol, "function safeCompactionTargetDetail(")
-        render = _extract_fn(consol, "function renderSafeCompactionFailures(")
+    def test_job_inspector_reports_the_bank_size_advisory_and_no_compaction_envelope(self, consol, oper):
+        """Compaction is a human decision: a consolidation never runs
+        it, so no job result carries a compaction envelope any more; oversized
+        bank files are only reported, as an advisory, on succeeded AND failed jobs."""
+        render = _extract_fn(consol, "function renderBankSizeAdvisory(")
         job = _extract_fn(consol, "function renderJob(")
-        assert "failure.heading" not in detail
-        assert "failure.reason" not in detail
-        assert "compaction_failures" in render
-        assert "renderSafeCompactionFailures(job.result)" in job
+        assert "result.bank_size_advisory" in render
+        assert "Number.isSafeInteger(item.utf8_bytes)" in render and "Number.isSafeInteger(item.max_size)" in render
+        assert "esc(item.filename)" in render and "esc(String(item.utf8_bytes))" in render
+        assert "compaction is a human decision" in render
+        assert job.count("renderBankSizeAdvisory(job.result)") == 2
+        for banned in ("renderCompactionAdvisory", "renderSafeCompactionFailures", "compaction_advisory", "compaction_failures"):
+            assert banned not in consol, banned
+        # the operator GC banner has no compaction branch either
+        assert "compaction_advisory" not in oper and "gcAdvisoryAgents" not in oper
         assert "bank_consolidation_status" in consol
 
     def test_verified_apply_evidence_survives_the_mandatory_rescan(self, oper):
@@ -510,8 +536,8 @@ class TestDryRunDefaults:
         assert "confirmRepairApply" in oper
 
     def test_apply_bound_to_a_prior_dry_run_target(self, oper):
-        # Codex MEDIUM (round 2) / §5.8.2: Apply requires a successful dry run for
-        # the current space and targets that CAPTURED space, not the mutable picker.
+        # Apply requires a successful dry run for the current space and targets
+        # that CAPTURED space, not the mutable picker.
         for fn, flag in (("function confirmCompactApply(", "state.compactDry"),
                          ("function confirmRepairApply(", "state.repairDry")):
             body = _extract_fn(oper, fn)
@@ -544,7 +570,7 @@ class TestEscapingDiscipline:
             assert "encodeURIComponent(sid)" in src or "encodeURIComponent(spaceId)" in src
 
 
-# ─────────────────────────── round-3 review fixes ───────────────────────────
+# ───────────────────── modal ownership and staleness ─────────────────────
 
 
 class TestRoundThreeFixes:
@@ -574,15 +600,15 @@ class TestRoundThreeFixes:
             assert metric in oper, f"missing {metric} — a required metric may fabricate 0"
 
     def test_same_route_modal_instance_token_present(self, consol, oper):
-        # Codex MEDIUM: a slow/out-of-order continuation must not close/overwrite
+        # A slow/out-of-order continuation must not close/overwrite
         # a newer same-route modal — guarded by a modal-instance token.
         for src in (consol, oper):
             assert "beginModalOp()" in src
             assert "modalOpCurrent(op)" in src
 
     def test_maintenance_dry_runs_have_target_guard(self, oper):
-        # Codex MEDIUM (round 3): a dry run resolving after the picker moved must
-        # not repaint under the new target — compact, repair, AND GC.
+        # A dry run resolving after the picker moved must not repaint under
+        # the new target — compact, repair, AND GC.
         for fn in ("function runCompact(", "function runRepair("):
             body = _extract_fn(oper, fn)
             assert "maintSpace() !== sid" in body, f"{fn} lacks the dry-run target guard"
@@ -590,30 +616,30 @@ class TestRoundThreeFixes:
         assert "maintSpace() === captured.spaceId" in gc_guard
 
     def test_session_ownership_guards_and_batch_abort(self, consol, oper):
-        # Codex HIGH (round 6): logout/401 wipes the shell but doesn't bump the
-        # epoch, so continuations must verify the session is still active, and the
-        # sequential batch must ABORT on session loss (no cross-session mutation).
+        # Logout/401 wipes the shell but doesn't bump the epoch, so
+        # continuations must verify the session is still active. The sequential
+        # batch must ABORT on session loss (no cross-session mutation).
         for src in (consol, oper):
             assert "function sessionActive(" in src
             assert "sessionActive()" in src
         assert "sessionActive()" in _extract_fn(consol, "async function submitAllStale(")
 
     def test_all_stale_rescan_branches_on_status(self, consol):
-        # Codex MEDIUM (round 6): an error/sentinel re-scan is never a false
-        # "No stale banks" — only status:ok + empty spaces[] is empty.
+        # An error/sentinel re-scan is never a false "No stale banks" —
+        # only status:ok + empty spaces[] is empty.
         body = _extract_fn(consol, "async function startConsolidateAllStale(")
         assert "rate_limited" in body and "truncated" in body
         assert "scan.status !== 'ok'" in body
 
     def test_apply_uses_separate_generation_lane(self, oper):
-        # Codex MEDIUM (round 6): a manual dry run must not invalidate a pending
+        # A manual dry run must not invalidate a pending
         # Apply mutation — Apply has its own request-generation lane.
         assert "compactApply" in oper and "repairApply" in oper
         assert "gcConsolidate" in oper and "gcDelete" in oper
 
     def test_maintenance_ops_have_per_request_generation(self, oper):
-        # Codex MEDIUM (round 5): same-space, different-input reordering (e.g. GC
-        # max-age 7 then 0) needs a per-op request token, not just a target guard.
+        # Same-space, different-input reordering (e.g. GC max-age 7 then 0)
+        # needs a per-op request token, not just a target guard.
         assert "_maintReq" in oper
         # a lane per op (reads + separate apply lanes); compact/repair use the
         # per-lane bracket access, GC uses its own.
@@ -637,14 +663,14 @@ class TestRoundThreeFixes:
         assert "runRepair(true, sid)" in _extract_fn(oper, "function runRepair(")
 
     def test_stale_scan_drops_out_of_order_responses(self, consol):
-        # Codex MEDIUM (round 3): two scans on the same route must not let the
+        # Two scans on the same route must not let the
         # earlier response overwrite the newer result / state.staleData.
         assert "_staleGen" in consol
         body = _extract_fn(consol, "async function scanStale(")
         assert "++_staleGen" in body and "_staleGen" in body
 
     def test_all_stale_and_create_backup_have_modal_token(self, consol, oper):
-        # Codex MEDIUM (round 3): the all-stale flow and create/all-spaces backup
+        # The all-stale flow and create/all-spaces backup
         # also carry the modal-instance token (not just restore/delete).
         assert "beginModalOp()" in _extract_fn(consol, "async function startConsolidateAllStale(")
         assert "beginModalOp()" in _extract_fn(oper, "function openCreateBackup(")
@@ -653,8 +679,8 @@ class TestRoundThreeFixes:
 
 class TestRoundSevenFixes:
     def test_all_spaces_backup_forwards_optional_description(self, oper):
-        # Codex MEDIUM (round 7 / §4.6 B3): the fleet-backup modal must expose the
-        # optional description and forward it only when non-empty.
+        # The fleet-backup modal must expose the optional description and
+        # forward it only when non-empty.
         body = _extract_fn(oper, "function backupAll(")
         assert "opBackupAllDesc" in body
         assert "args.description = desc" in body
@@ -662,14 +688,14 @@ class TestRoundSevenFixes:
         assert "if (desc)" in body
 
     def test_stale_mode_scans_on_activation(self, consol):
-        # Codex MEDIUM (round 7 / §5.5): entering stale mode runs an initial scan
+        # Entering stale mode runs an initial scan
         # and never flashes a prior activation's cached rows.
         body = _extract_fn(consol, "registerAction('consol-stale-toggle'")
         assert "scanStale()" in body
         assert "state.staleData = null" in body
 
     def test_dry_run_revokes_prior_apply_authorization(self, oper):
-        # Codex MEDIUM (round 7): a NEW dry run must clear the prior Apply
+        # A NEW dry run must clear the prior Apply
         # authorization immediately (re-granted only on this dry run's success),
         # so a stale/failed newer preview can never leave Apply enabled.
         c = _extract_fn(oper, "function runCompact(")
@@ -678,9 +704,9 @@ class TestRoundSevenFixes:
         assert "if (dryRun) state.repairDry = null" in r
 
     def test_stale_cache_marker_is_unique_hash_and_fails_closed(self, consol):
-        # Codex HIGH (round 7 + re-review, confidentiality): the owner marker must
-        # be the UNIQUE token_hash only — never the non-unique client_name — and
-        # must FAIL CLOSED (drop the cache) whenever the hash is absent, so two
+        # The owner marker must be the UNIQUE token_hash only — never the
+        # non-unique client_name — and must FAIL CLOSED (drop the cache)
+        # whenever the hash is absent, so two
         # same-named sessions can never be equated and repaint prior stale rows.
         body = _extract_fn(consol, "function render(")
         assert "identity.token_hash" in body
@@ -696,8 +722,8 @@ class TestRoundSevenFixes:
         assert "state.staleMode = false" in body
 
     def test_duplicate_enqueue_not_fabricated(self, consol):
-        # Codex LOW (round 7, ratified 2026-07-13): the coalesced-duplicate payload
-        # is byte-identical to a fresh enqueue, so the console renders its TRUE
+        # The coalesced-duplicate payload is byte-identical to a fresh enqueue,
+        # so the console renders its TRUE
         # running/queued state and must NOT fabricate an "already queued" label.
         assert "already queued" not in consol.lower()
 
@@ -718,3 +744,19 @@ class TestForbiddenVocabulary:
         low = banners.lower()
         for tok in _FORBIDDEN_TOKENS:
             assert tok not in low, f"CSS P8-4 banner contains forbidden token {tok!r}"
+
+
+# ---------------------------------------------------------------------------
+# Un run peut désormais RÉUSSIR alors que sa compaction a été refusée.
+# Le rendu de succès doit donc porter l'aveu, sinon l'unique atténuation du
+# risque résiduel de croissance non bornée ne fonctionne pas : l'opérateur
+# verrait un succès propre.
+# ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+# L'aveu consultatif doit atteindre TOUS les consommateurs, pas
+# seulement la vue Consolidation. Un correctif partiel laisse un run consultatif
+# passer pour un succès propre partout ailleurs.
+# ---------------------------------------------------------------------------

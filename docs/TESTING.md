@@ -1,195 +1,141 @@
 # Testing Hivemind
 
-Hivemind keeps one nominal pytest suite and separate first-class runners for
-browser and manual end-to-end checks. The categories below are selection and
-evidence tools, not a target for the number of tests.
+This guide covers the tests shipped in a public Hivemind source snapshot and
+the checks run by [Public CI](../.github/workflows/ci.yml). Use an isolated
+development environment; the nominal Python suite needs no production
+credentials or live provider account.
+
+## Install and run the public checks
+
+Python 3.11 or newer, `uv`, and Node.js 24 are required for the complete
+nominal suite, including its dependency-free browser-script harnesses.
+
+```bash
+uv sync --locked --dev
+uv run --no-sync pytest tests/ -q --strict-markers --durations=50
+uv run python scripts/check_doc_links.py
+git diff --check
+```
+
+Public CI runs the complete Python suite and documentation checks on Python
+3.11 and native Python 3.14.6 arm64. It does not build container images, run
+paid provider certification, or publish packages. Release image validation is
+a separate maintainer step; container publication uses the tag-gated
+[release workflow](../.github/workflows/release.yml).
+
+Passing a focused selection is useful evidence for a change, not a substitute
+for the complete applicable checks. Report the exact command, runtime, result,
+and any skips when contributing.
 
 ## Pytest taxonomy
 
 Every collected Python test receives exactly one primary marker from its
-repository path. The ordered rules live in `tests/test_quality_policy.py` and
-the marker declarations live in `pyproject.toml`.
+repository path. The ordered rules live in
+[`tests/test_quality_policy.py`](../tests/test_quality_policy.py) and the marker
+declarations live in [`pyproject.toml`](../pyproject.toml).
 
 | Marker | Meaning | Example command |
 | --- | --- | --- |
 | `unit` | Isolated behavior without a dedicated runtime dependency | `uv run pytest -m unit -q` |
 | `integration` | Cross-component, subprocess, runtime, Docker, or smoke behavior | `uv run pytest -m integration -q` |
-| `contract` | Documentation, ADR, policy, workflow, public-surface, and release contracts | `uv run pytest -m contract -q` |
-| `security_protocol` | Protocol, authorization, recovery, routing, and fail-closed safety | `uv run pytest -m security_protocol -q` |
+| `contract` | Documentation, policy, workflow, and public-surface contracts | `uv run pytest -m contract -q` |
+| `security_protocol` | Authorization, recovery, routing, and fail-closed protocol safety | `uv run pytest -m security_protocol -q` |
 | `e2e` | Collected Python end-to-end scenarios | `uv run pytest -m e2e -q` |
 
 The orthogonal `slow` and `optional` markers do not replace a primary marker:
 
-- `slow` is exhaustive opt-in exploration. Run the current property suite with
-  `HIVEMIND_PROPERTY_SLOW=1 uv run pytest -m slow -q`.
-- `optional` identifies an explicit external binary or service proof that may
-  skip on an unsupported local host. Run discovery with
-  `uv run pytest -m optional --collect-only -q`, then provide the environment
-  named by each skip reason. The current optional proofs use
-  `HIVEMIND_TEST_CADDY_BIN` and `HIVEMIND_QDRANT_TEST_URL`.
+- `slow` selects exhaustive opt-in exploration. Run the current property suite
+  with `HIVEMIND_PROPERTY_SLOW=1 uv run pytest -m slow -q`.
+- `optional` identifies a proof requiring an external binary or service.
+  Discover it with `uv run pytest -m optional --collect-only -q`, then inspect
+  each test's prerequisites before executing it. Current optional proofs use
+  `HIVEMIND_TEST_CADDY_BIN` and `HIVEMIND_QDRANT_TEST_URL`; point them only at
+  resources dedicated to testing.
 
 The default `uv run pytest tests/` remains the complete nominal Python suite.
-Platform-specific shipped behavior is not called optional merely because it
-skips on another platform.
+An environment-dependent skip is a recorded limitation, not evidence that the
+skipped behavior passed.
 
 ## Dedicated and manual runners
 
-Dedicated suites are explicit in `DEDICATED_SUITES` inside
-`tests/test_quality_policy.py`:
+These suites are separate from nominal pytest discovery. Their entry points
+are listed in `DEDICATED_SUITES` inside
+[`tests/test_quality_policy.py`](../tests/test_quality_policy.py).
 
-| Category | Distribution | Discovery | Execution |
-| --- | --- | --- | --- |
-| Playwright E2E | Private and public | `cd tests/e2e && npx playwright test --list` | `cd tests/e2e && npm ci && npx playwright test` |
-| Reviewer-tooling unit suite | Private only | `rg --files scripts -g '*.test.js'` | Run each discovered file with `node`; Private CI pins all four commands explicitly |
-| Embedded-credential Docker integration | Private and public | `scripts/verify_embedded_secret_docker.sh` plus its container helper | `bash scripts/verify_embedded_secret_docker.sh`; the dedicated Private CI job is required by the image build |
-| Manual recipe | Private and public | `uv run python scripts/test_recette.py --list` | `uv run python scripts/test_recette.py --suite <name>` after the documented stack setup |
+| Suite | What it verifies | How to start |
+| --- | --- | --- |
+| Playwright E2E | The shipped admin UI with controlled API responses | Install and run as shown below |
+| Embedded-credential Docker integration | Credential-volume handling in real containers | `bash scripts/verify_embedded_secret_docker.sh` |
+| Manual server recipe | Selected operations against an explicitly configured test stack | `uv run python scripts/test_recette.py --list` |
+| Async-ingestion demonstrator | A live example, with limitations described in the [CLI guide](../scripts/README.md#async-ingestion-demonstrator--test_async_ingest_e2epy) | `uv run python scripts/test_async_ingest_e2e.py --help` |
 
-Each manifest entry declares its `private`/`public` distribution scope. The
-private contract verifies every private path and CI command; the copied public
-contract verifies only runners actually shipped in the sanitized tree. A
-private-only suite is never required to leak into the public export merely to
-satisfy the shared policy test.
+Playwright uses Chromium and serves the real static bundle with controlled
+network responses; it does not need a running Hivemind deployment:
+
+```bash
+cd tests/e2e
+npm ci
+npx playwright install chromium
+npx playwright test --list
+npx playwright test
+```
+
+On Linux, Chromium may also require operating-system packages. Install the
+browser's prerequisites in your disposable test environment. Keep the browser
+sandbox enabled for ordinary local runs.
+
+The Docker proof needs Docker and builds isolated test images/containers. The
+manual server scripts can write or delete test data and spend provider budget:
+read the [CLI and manual-test guide](../scripts/README.md), use a disposable
+stack and dedicated credentials, and select the intended suite explicitly.
+Never run them against an existing customer space. The async demonstrator's
+success banner is not proof of rollback, cleanup, or complete data integrity.
 
 `pyproject.toml` restricts pytest discovery to `tests/`. A new
-`scripts/test_*.py` file must be added either to the manual-suite manifest or
-to the repository-quality tooling allowlist; otherwise the taxonomy contract
-fails. A manual or dedicated runner must never be wrapped by a collected pytest
-test.
-
-The protected provider-certification workflow is an operator-authorized paid
-proof, not a nominal test suite. Its manual dispatch contract, fixed cost
-ceiling, and redacted artifact path remain governed by
-`.github/workflows/provider-certification.yml`; TQ-7 does not make it a PR
-dependency.
+`scripts/test_*.py` file must be registered in the dedicated/manual suite
+manifest or tooling allowlist; otherwise the taxonomy contract fails. Do not
+wrap an entire manual or dedicated runner inside a collected pytest test.
 
 ## One active runner per process tree
 
-The first runner exports `HIVEMIND_ACTIVE_TEST_RUNNER` to child processes.
-Complete nested pytest selection, an unrelated Playwright process, the
-embedded-secret Docker proof, and the manual recipe refuse to start when that
-variable already names an active runner. Playwright recognizes only the owner
-process that claimed its runner and the direct workers it created. A focused
-nested pytest file or node ID remains available for process-isolation proofs.
+The nominal suite and guarded dedicated runners use
+`HIVEMIND_ACTIVE_TEST_RUNNER` to prevent accidentally launching complete
+nested suites. Full nested pytest selection, unrelated Playwright processes,
+the embedded-credential Docker proof, and the manual server recipe refuse
+nested execution. Playwright admits only its owning process and direct workers.
+A focused nested pytest file or node ID remains available for process-isolation
+tests.
 
-Examples:
+- Refused below a guarded runner: `pytest`, `pytest tests/`,
+  `npx playwright test`, `bash scripts/verify_embedded_secret_docker.sh`,
+  and `python scripts/test_recette.py`.
+- Permitted for a focused process-isolation proof: `pytest tests/test_config.py`
+  or one `file.py::nodeid`.
 
-- refused below pytest: `pytest`, `pytest tests/`, `npx playwright test`,
-  `bash scripts/verify_embedded_secret_docker.sh`, and
-  `python scripts/test_recette.py`;
-- allowed below pytest: `pytest tests/test_config.py` or one `file.py::nodeid`.
+The async-ingestion demonstrator does not currently enforce this runner guard.
+Do not launch it from another test runner. A process-tree guard does not
+coordinate independent shells or protect a live service from test traffic.
 
-This guard prevents a nominal pytest case from silently launching an entire
-second suite. It does not merge distinct CI jobs: the Python 3.11, native
-Python 3.14.6 arm64, Playwright, Docker, and public-stage jobs remain separate
-because they prove different environments or deliverables.
+## Regression and mutation evidence
 
-## CI timing and runtime policy
+For a behavior change, add a focused regression that fails without the fix and
+passes with it. Where feasible, prove a safety guard by removing or weakening
+the guarded input or branch and showing that the test fails. Do not delete
+cases, lower expectations, or count skipped cases as successful proofs.
 
-The primary private x64 job runs pytest exactly once under branch coverage via
-the TQ-7 quality runner. It publishes to the job log and GitHub step summary:
+For example, the shipped alias-registration guard exercises missing sources,
+existing canonical names, collisions, and missing callables:
 
-- collected cases, authored functions, parameter expansions, and outcomes;
-- cases/functions/expansions per primary marker;
-- cases/functions/expansions and outcomes for `slow` and `optional` markers;
-- wall-clock duration, runtime by file, and the 50 slowest cases;
-- targeted branch coverage and its floor per critical surface; and
-- collected case counts for the required mutation families.
+```bash
+uv run pytest tests/test_mcp_tool_surface.py::test_alias_registration_fails_closed -q
+```
 
-The CI invocation uses pytest's quiet progress output rather than one line per
-case. JUnit still carries every stable case identity and duration, while the
-analyzer prints the 50 slowest cases and the complete policy report at the end.
-This keeps the report and runtime annotation below the GitHub step-log limit as
-the suite grows.
+A new parameter row should exercise a distinct branch, protocol state, input
+class, platform contract, failure message, or mutation. Give rows stable,
+descriptive IDs. Avoid multiplying examples that reach the same branch and
+assertion.
 
-Other nominal Python jobs use `--durations=50 --strict-markers` so architecture
-or public-runner variance stays visible without applying a foreign hard budget.
-
-The canonical private policy is derived from the reviewed TQ-0 #284 baseline:
-136.053 seconds at 3,590 collected cases. The effective reference never drops
-below that value; when the executed suite grows, it scales by
-`collected_cases / 3590` before the variance multiplier is applied. This
-keeps the historical reference immutable without enforcing an arm64 absolute
-time against a larger x64 workload. The heterogeneous private x64 fleet uses
-an explicit alert-only profile:
-
-- above the workload-adjusted reference by 50%: visible alert, job remains
-  green and emits a GitHub Actions warning annotation.
-
-For the 5,321-case integration head, the effective reference is 201.654
-seconds and the alert is 302.481 seconds. The report publishes the historical
-reference, case scale, effective reference, threshold, and enforcement mode so
-recalibration cannot be silent. Test failures, targeted coverage floors, and
-mutation evidence remain hard failures independently of runtime alerts.
-
-The alert is an investigation trigger, not authorization to delete tests. A
-sustained alert is resolved by interleaved same-host measurements, as TQ-4 did,
-or by a reviewed profile recalibration with recorded evidence. Never raise or
-remove a threshold merely to make a run green. Two same-workload candidate
-runs on different self-hosted x64 groups measured 308.981 and 455.831 seconds,
-a 47.5% spread; a single-run wall clock is therefore evidence to alert on, not
-a sound cross-runner hard-failure oracle.
-
-## Targeted coverage expectations
-
-Coverage is branch-aware and enforced per critical surface. There is no
-misleading repository-wide floor.
-
-| Surface | Minimum |
-| --- | ---: |
-| Protected certification budget | 76.0% |
-| Hivemind state | 92.0% |
-| Mesh | 83.0% |
-| Permissions | 78.0% |
-| Protected certification manifest and provenance | 77.0% |
-| Recovery | 76.0% |
-| MCP surface | 63.0% |
-| Release audit | 83.0% |
-
-These floors are rounded down from the TQ-0 measurements and must not be
-lowered by hand. A legitimate authority or file-group change requires a new
-clean measurement, rationale, focused tests, and review.
-
-The two P13-4 groups were added from the exact 2026-08-03 full-suite
-branch-aware measurement: 76.02% for the certification ledger and 77.46% for
-the manifest/provenance reader, rounded down independently to 76% and 77%.
-
-## Mutation evidence
-
-The nominal JUnit report must contain every case in three fail-closed mutation
-families consolidated by the Test Quality EPIC, and every required case must
-pass rather than skip:
-
-| Guard family | Required cases | Focused local command |
-| --- | ---: | --- |
-| Alias registration: missing source, existing canonical, collision, missing callable | 4 | `uv run pytest tests/test_mcp_tool_surface.py::test_alias_registration_fails_closed -q` |
-| ADR registry: missing/duplicate/illegal/drift mutations | 7 | `uv run pytest tests/test_adr_registry.py::test_registry_validation_mutations_fail_closed -q` |
-| Accepted architecture critical-clause weakening | 9 | `uv run pytest tests/test_architecture_contracts.py::test_critical_contract_mutations_are_detected -q` |
-
-Each family changes the guarded input or branch and asserts the validator goes
-RED. Merely retaining a test name is insufficient: CI binds file, function,
-and minimum parameterized case count.
-
-## Parameter matrices
-
-A new parameter row is justified only when it exercises at least one distinct
-branch, protocol state, input class, platform contract, failure message, or
-mutation. Give rows stable descriptive IDs and state the unique behavior in
-the test or nearby table. Do not multiply examples that reach the same branch
-and assertion.
-
-Before expanding a large matrix:
-
-1. compare the authored-function and parameter-expansion counts;
-2. prove the new row goes RED when its unique guard is removed or weakened;
-3. check the file and suite duration evidence; and
-4. use a dedicated optional/manual suite instead of making unsupported hosts
-   emulate an external platform.
-
-## Reproducible full baseline
-
-Maintainers retain a private TQ-0 measurement procedure that performs
-collection, one nominal timing run, and a separate coverage run for reviewable
-before/after evidence. It is intentionally heavier than the one-pass CI runner
-and is used only at test-quality checkpoints, never inside a collected test.
-Public contributors can reproduce the relevant suite or marker category with
-the commands above and should include the observed duration in their PR.
+Use `--durations=50` and repeat comparable runs in the same environment when
+investigating regressions. Timings from different machines or provider-backed
+runs are not interchangeable, and this snapshot makes no portable runtime or
+coverage-percentage promise.

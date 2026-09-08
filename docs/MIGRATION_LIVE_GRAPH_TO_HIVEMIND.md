@@ -64,14 +64,28 @@ Follow the canonical [deployment guide](DEPLOYMENT.md). The default Compose
 stack includes the WAF, Hivemind, the embedded Graph Memory runtime, Neo4j, and
 Qdrant. Graph Memory is internal-only; agents connect only to Hivemind.
 
-At minimum:
+For a new installation only, create a protected configuration from the template.
+If `.env` already exists, stop and review it in place; retain existing storage
+locations, credentials and complete inference settings rather than replacing
+them during migration.
 
 ```bash
+(
+if [ -e .env ] || [ -L .env ]; then
+  printf '%s\n' 'Refusing to overwrite .env; review the existing configuration.' >&2
+  exit 1
+fi
 install -m 600 .env.example .env
-# Configure S3, LLM, ADMIN_BOOTSTRAP_KEY, NEO4J_PASSWORD, TLS, and secrets.
-# Project Mesh is enabled by default. Supply its identity settings, or set
-# HIVEMIND_MESH_ENABLED=false for an intentional non-Mesh deployment.
+)
+```
 
+After successful setup, configure S3, LLM, ADMIN_BOOTSTRAP_KEY, NEO4J_PASSWORD,
+TLS and secrets before running the commands below. Project Mesh is enabled by
+default: supply its identity settings, or set `HIVEMIND_MESH_ENABLED=false`
+for an intentional non-Mesh deployment. A refusal stops setup without closing
+your calling shell.
+
+```bash
 docker compose up --build -d --wait
 docker compose ps
 curl -sS https://hivemind.example.com/health
@@ -322,9 +336,14 @@ the migration partial rather than bypassing validation. See the
 a stabilized bank. It is not a session-end synchronization channel. After
 cutover, ingest stable canonical repository documents through an approved,
 source-path-keyed ingestion workflow; never ingest raw mid-memory summaries or
-volatile context files. The current `long_ingest` `apply` mode is deferred in
-V1, so a `dry-run` or `check-remote` plan does not claim that documents were
-written.
+volatile context files. Use the shipped
+[`long_ingest_async` batch interface](MCP_TOOLS_SPEC.md#long_ingest_async---net-new-async-ingest-tool)
+with stable source paths, Base64-encoded content and verified checksums, then
+check each job's terminal result. The separate `long_ingest` planning helper's
+`apply` mode remains deferred, so a `dry-run` or `check-remote` plan does not
+claim that documents were written. Changing only an ontology does not force
+unchanged documents to be extracted again; follow the async tool's documented
+duplicate-handling limits.
 
 There is no automatic transfer for graph-only content. If canonical source
 documents cannot yet be ingested into the embedded runtime, keep the old graph

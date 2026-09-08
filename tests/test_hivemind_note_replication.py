@@ -229,7 +229,7 @@ def test_P3_advance_event_cursor_monotone_and_carries_bank_version() -> None:
 
 
 def test_P3_advance_event_cursor_carries_term_and_epoch_forward_monotone() -> None:
-    """MONOTONIE term/epoch (Codex BLOCKING #1) : ``advance_event_cursor`` PORTE
+    """MONOTONIE term/epoch : ``advance_event_cursor`` PORTE
     ``term``/``membership_epoch`` EN AVANT via ``max(existing, incoming)`` — il ne
     peut JAMAIS les faire décroître, même quand l'apply de réplication passe les
     défauts ``0``. RED sans le ``max`` : le curseur écrirait ``term=0``/
@@ -475,7 +475,7 @@ async def test_N6_cursor_advances_and_carries_bank_version() -> None:
 
 @pytest.mark.asyncio
 async def test_N6_cursor_does_not_roll_back_term_or_epoch() -> None:
-    """Codex BLOCKING #1 (rollback term/epoch) : un watermark posé par le
+    """Rollback term/epoch : un watermark posé par le
     commit_runtime porte ``term``/``membership_epoch`` > 0. Un note RÉPLIQUÉ pour
     cette même origine NE DOIT PAS les rembobiner à 0. RED sans le report ``max``
     dans ``advance_event_cursor`` : ``replicate_inbound`` réécrirait ``term=0``/
@@ -505,7 +505,7 @@ async def test_N6_cursor_does_not_roll_back_term_or_epoch() -> None:
 
 @pytest.mark.asyncio
 async def test_N6_stale_prepared_cursor_cannot_roll_back_position() -> None:
-    """Codex BLOCKING #2 (write de curseur préparé « stale » sous concurrence) :
+    """Write de curseur préparé « stale » sous concurrence :
     deux applies entrelacés pour la même origine. L'apply A prépare son curseur
     (snapshot pris à l'instant T) PUIS un apply B concurrent avance durablement le
     curseur AVANT que A ne commit. Comme ``replicate_inbound`` RELIT et RE-DÉRIVE
@@ -989,7 +989,7 @@ async def test_N7_non_hivemind_space_has_no_provenance_key() -> None:
 
 @pytest.mark.asyncio
 async def test_N7b_non_hivemind_read_notes_preserves_origin_prefixed_object() -> None:
-    """RÉGRESSION byte-for-byte (Codex BLOCKING) : sur un space NON-Hivemind, un
+    """RÉGRESSION byte-for-byte : sur un space NON-Hivemind, un
     objet legacy stocké sous ``live/_origin/...`` est une VRAIE note et doit être
     retourné tel quel. ``read_notes`` ne doit PAS le sauter : le skip du sidecar
     ``_origin/`` n'est légitime QUE sur un space Hivemind confirmé.
@@ -1025,7 +1025,7 @@ async def test_N7b_non_hivemind_read_notes_preserves_origin_prefixed_object() ->
 
 @pytest.mark.asyncio
 async def test_N7c_non_hivemind_search_notes_preserves_origin_prefixed_object() -> None:
-    """RÉGRESSION byte-for-byte (Codex BLOCKING), miroir de N7b côté
+    """RÉGRESSION byte-for-byte, miroir de N7b côté
     ``search_notes`` : un objet legacy sous ``live/_origin/`` doit matcher la
     recherche sur un space NON-Hivemind. RED sans le fix (skip inconditionnel)."""
     storage = LiveFakeStorage()
@@ -1139,14 +1139,19 @@ def test_note_origin_schema_is_provenance_only() -> None:
 
 
 class _ConsolidatorHiveFakeStorage(LiveFakeStorage):
-    """``LiveFakeStorage`` (state-store reads + ``list_and_get``) + ``delete_many``
+    """``LiveFakeStorage`` (state-store reads + ``list_and_get``) + suppression
     — le contrat complet que ``ConsolidatorService.consolidate`` exige
-    (``_collect_inputs`` lit via ``list_and_get`` ; la purge des notes consommées
-    passe par ``delete_many``)."""
+    (``_collect_inputs`` lit via ``list_and_get`` ; la purge des
+    notes consommées passe par un ``delete`` par clé, enregistré ici comme un
+    lot d'une clé pour conserver la preuve du delete final)."""
 
     def __init__(self) -> None:
         super().__init__()
         self.deleted_batches: list[list[str]] = []
+
+    async def delete(self, key: str) -> None:
+        self.deleted_batches.append([key])
+        self.objects.pop(key, None)
 
     async def delete_many(self, keys: list[str]) -> int:
         self.deleted_batches.append(list(keys))
@@ -1197,10 +1202,9 @@ def _make_stubbed_consolidator():
             "default_rules_file": "",
             "consolidation_timeout": 600,
             "consolidation_max_notes": 500,
-            "consolidation_batch_size": 5,
+            "consolidation_batch_size": 3,
             "consolidation_cooldown_seconds": 60,
             "consolidation_validation_enabled": False,
-            "compact_threshold": 0.6,
             "bank_file_max_size": 15360,
             "response_max_bytes": 512 * 1024,
             "proxy_url": None,
@@ -1226,8 +1230,10 @@ def _make_stubbed_consolidator():
                         "action": "create",
                         "content": "# Active Context\n\n## Focus\n\n- seeded\n",
                         "reason": "Record the replicated legacy note.",
+                        "notes": [1],
                     }
                 ],
+                "discarded_notes": [],
                 "synthesis": "Consolidated the replicated note.",
             },
             "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
@@ -1289,8 +1295,10 @@ async def test_P5_7_consolidation_skips_and_preserves_origin_sidecar() -> None:
                         "action": "create",
                         "content": "# Active Context\n\n## Focus\n\n- consolidated\n",
                         "reason": "Record the selected real live note.",
+                        "notes": [1],
                     }
                 ],
+                "discarded_notes": [],
                 "synthesis": "Consolidated note.",
             },
             bank_files=inputs["bank_files"],

@@ -1,6 +1,6 @@
 /* ==========================================================================
    Hivemind Admin Console — design tokens, shell layout, shared components
-   Design authority: DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §2
+   Shared design tokens and responsive shell components.
    Proof viewports: 1440x900 (desktop), 768x1024 (narrow)
    ========================================================================== */
 
@@ -1364,7 +1364,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--hm-cyan); widt
 }
 .access-banner svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--hm-text-muted); }
 
-/* Timer-free recovery affordance for an indefinitely pending create (Terra-R3).
+/* Timer-free recovery affordance for an indefinitely pending create.
    Hidden until the request is in flight; lets the operator stop waiting on a
    stalled request without a full reload. */
 .pending-escape {

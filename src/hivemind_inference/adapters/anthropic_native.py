@@ -232,6 +232,11 @@ class AnthropicChatProvider(_AnthropicBase):
                     "invalid_request", correlation_id=request.correlation_id
                 )
             effective_max = request.max_output_tokens
+        if request.reasoning_effort is not None:
+            raise self._direct_error(
+                "invalid_request",
+                correlation_id=request.correlation_id,
+            )
         if not chat_response_is_serviceable(effective_max):
             raise self._direct_error(
                 "invalid_request", correlation_id=request.correlation_id

@@ -1,7 +1,7 @@
 # 🖥️ CLI, shell et tests Hivemind
 
 > CLI scriptable, shell interactif et scripts de test opérationnels pour
-> Hivemind `1.4.1`.
+> Hivemind `1.5.0`.
 
 🇬🇧 [English version](README.md)
 
@@ -141,7 +141,7 @@ uv run python scripts/mcp_cli.py backup delete <backup_id> --confirm        # Pe
 ### Délégation de tokens et cycle de vie admin (8 opérations)
 
 ```bash
-uv run python scripts/mcp_cli.py token create agent-cline -p read,write --email cline@team.io
+uv run python scripts/mcp_cli.py token create agent-cline -p read,write --email cline@example.com
 uv run python scripts/mcp_cli.py token list                                 # Liste les tokens (filtrable)
 uv run python scripts/mcp_cli.py token update <hash> --add-spaces my-proj   # Mise à jour delta (add/remove spaces, perms, email)
 uv run python scripts/mcp_cli.py token bulk-update --name-contains agent --add-spaces my-proj --confirm   # Mise à jour de masse
@@ -273,12 +273,64 @@ uv run python scripts/test_recette.py --suite graph \
 
 ---
 
+---
+
+### Démonstrateur d'ingestion asynchrone — `test_async_ingest_e2e.py`
+
+Il s'agit d'un exemple live expérimental d'appels de soumission, suivi,
+listing, remplacement et annulation, **pas d'un gate de validation de release**.
+Consultez ses options sans contacter de service :
+
+```bash
+uv run python scripts/test_async_ingest_e2e.py --help
+```
+
+L'exécution peut déclencher des appels d'inférence facturés et modifier le
+space choisi. Utilisez uniquement une stack Docker Compose jetable avec le
+profil `dev`, des credentials de test dédiés et un nouvel identifiant de space
+inutilisé. Ne ciblez jamais un space client existant. Définissez délibérément
+`MCP_URL` et `MCP_TOKEN` : sans token explicite, le script peut utiliser la clé
+bootstrap locale.
+
+Contrôles et limites des preuves :
+
+- `long_ingest_async` retourne un accusé de lot ; les identifiants de jobs
+  sont dans `items`. Une soumission ne prouve pas l'ingestion de chaque document.
+- Le script vérifie le succès terminal de la première ingestion et du
+  remplacement, mais ne prouve pas indépendamment l'atomicité entre datastores,
+  le contenu conservé ou l'absence d'objets orphelins.
+- La création doit retourner `created` pour l'identifiant exact demandé. Le
+  script refuse les espaces existants déjà committés et les créations ambiguës ;
+  il ne supprime aucun espace au préalable. Le backend peut reprendre un
+  préfixe de bootstrap non committé s'il correspond exactement à la demande et
+  satisfait ses contrôles de cycle de vie. `created` ne prouve donc pas que le
+  préfixe de stockage était vide. Utilisez un nouvel identifiant de test. Le
+  token d'accès reste masqué.
+- Le listing doit contenir le premier job. L'annulation doit aboutir à
+  `cancelled` ; une course avec la terminaison reste inconclusive. Le suivi est
+  borné par une horloge monotone, appels inclus (`--max-wait`, 90 s par job).
+- Le nettoyage suit uniquement les contrôles réussis, avec `confirm=True` et
+  une réponse `deleted` correspondant au space. Échec ou ambiguïté = espace conservé
+  (ou suppression incertaine) ; inspectez jobs et données avant une suppression
+  opérateur explicite, après l'arrêt des writers. `--no-cleanup` conserve le space.
+  Le script ne demande jamais `recover_access_grants` et accepte uniquement
+  `deleted` : une réponse inattendue `grants_cleaned` reste donc inconclusive
+  par prudence et requiert une inspection opérateur, même si les droits ont
+  été nettoyés avec succès.
+
+Ces contrôles ne prouvent ni la pagination exhaustive ni l'état des datastores.
+Les tests ciblés dans `tests/test_long_ingest_async.py` et le
+[contrat MCP](../docs/MCP_TOOLS_SPEC.md) décrivent le comportement pris en charge.
+
+---
+
 ## Architecture
 
 ```
 scripts/
 ├── mcp_cli.py                # Point d'entrée CLI Click + Shell interactif
 ├── test_recette.py           # 🧪 Recette globale (4 suites, ~44 tests)
+├── test_async_ingest_e2e.py  # 🚀 Démonstrateur expérimental d'ingestion asynchrone
 ├── configure_dev_env.py      # Générateur local sûr de .env (refuse l'écrasement)
 ├── README.md                 # Documentation (Anglais)
 ├── README.fr.md              # Documentation (Français) ← Vous êtes ici
@@ -292,4 +344,4 @@ scripts/
 
 ---
 
-*CLI Hivemind — 1.4.1*
+*CLI Hivemind — 1.5.0*

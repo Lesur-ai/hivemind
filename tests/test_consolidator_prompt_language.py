@@ -1,4 +1,12 @@
-"""Language-selection contract for every server-owned consolidator prompt."""
+"""Language contract for every server-owned consolidator prompt: English only.
+
+The French compatibility bridge (``CONSOLIDATION_LEGACY_FRENCH_PROMPTS``)
+is no longer supported. Every prompt the service owns
+— main consolidation, corrective completion, duplicate-section merge, compaction —
+is English, so a conversation can never switch language between the first
+completion and the corrective one.
+Operator-owned inputs (rules, notes, bank text) are still relayed verbatim.
+"""
 
 from __future__ import annotations
 
@@ -9,11 +17,12 @@ from types import SimpleNamespace
 import pytest
 
 from hivemind_inference.records import ChatResult
+from live_mem.core import consolidator as consolidator_module
 from live_mem.core.consolidator import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_ENGLISH,
-    SYSTEM_PROMPT_FRENCH,
     ConsolidatorService,
+    _corrective_messages,
 )
 
 
@@ -40,9 +49,8 @@ class RecordingCompletion:
         )
 
 
-def _service(*, legacy_french: bool) -> ConsolidatorService:
+def _service() -> ConsolidatorService:
     service = object.__new__(ConsolidatorService)
-    service._legacy_french_prompts = legacy_french
     service._max_tokens = 4096
     service._context_window = 131_072
     service._timeout = 1
@@ -50,9 +58,8 @@ def _service(*, legacy_french: bool) -> ConsolidatorService:
     return service
 
 
-def _main_messages(*, legacy_french: bool) -> list[dict]:
-    service = _service(legacy_french=legacy_french)
-    return service._build_prompt(
+def _main_messages() -> list[dict]:
+    return _service()._build_prompt(
         space_id="language-contract",
         rules="# Règles exactes\n\n- Keep `memory_id` unchanged.",
         synthesis="Synthèse historique exacte.",
@@ -74,21 +81,21 @@ def _main_messages(*, legacy_french: bool) -> list[dict]:
     )
 
 
-@pytest.mark.parametrize("legacy_french", [False, True])
-def test_service_snapshots_the_configured_compatibility_mode(
-    legacy_french: bool,
+def test_french_bridge_is_gone_from_the_service_and_its_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from live_mem.core import consolidator as consolidator_module
+    """The bridge is removed, not merely defaulted: no French prompt constant,
+    no snapshotted flag, and a stale settings attribute changes nothing."""
     from live_mem.core import inference_runtime
 
+    assert not hasattr(consolidator_module, "SYSTEM_PROMPT_FRENCH")
     settings = SimpleNamespace(
         consolidation_timeout=600,
+        consolidation_transient_retries=3,
         consolidation_max_notes=200,
-        consolidation_batch_size=5,
-        consolidation_legacy_french_prompts=legacy_french,
+        consolidation_batch_size=3,
+        consolidation_legacy_french_prompts=True,  # stale operator value: ignored
         consolidation_cooldown_seconds=60,
-        compact_threshold=0.6,
         bank_file_max_size=15360,
         consolidation_validation_enabled=False,
         consolidation_validation_max_examples=20,
@@ -97,7 +104,9 @@ def test_service_snapshots_the_configured_compatibility_mode(
     monkeypatch.setattr(consolidator_module, "get_settings", lambda: settings)
     monkeypatch.setattr(inference_runtime, "get_inference_runtime", lambda: runtime)
 
-    assert ConsolidatorService()._legacy_french_prompts is legacy_french
+    service = ConsolidatorService()
+
+    assert not hasattr(service, "_legacy_french_prompts")
 
 
 @pytest.mark.parametrize(
@@ -112,16 +121,14 @@ def test_context_window_diagnostic_tracks_resolved_profile_family(
     expected_setting: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from live_mem.core import consolidator as consolidator_module
     from live_mem.core import inference_runtime
 
     settings = SimpleNamespace(
         consolidation_timeout=600,
+        consolidation_transient_retries=3,
         consolidation_max_notes=200,
-        consolidation_batch_size=5,
-        consolidation_legacy_french_prompts=False,
+        consolidation_batch_size=3,
         consolidation_cooldown_seconds=60,
-        compact_threshold=0.6,
         bank_file_max_size=15360,
         consolidation_validation_enabled=False,
         consolidation_validation_max_examples=20,
@@ -152,8 +159,8 @@ def test_english_system_prompt_is_the_public_default_alias() -> None:
     assert "[inferred]" in SYSTEM_PROMPT_ENGLISH
 
 
-def test_english_default_main_prompt_preserves_source_material_verbatim() -> None:
-    messages = _main_messages(legacy_french=False)
+def test_main_prompt_is_english_and_preserves_source_material_verbatim() -> None:
+    messages = _main_messages()
     system_prompt, user_prompt = [message["content"] for message in messages]
 
     assert system_prompt == SYSTEM_PROMPT_ENGLISH
@@ -161,66 +168,36 @@ def test_english_default_main_prompt_preserves_source_material_verbatim() -> Non
     assert '=== RULES FOR SPACE "language-contract" ===' in user_prompt
     assert "=== PREVIOUS SYNTHESIS ===" in user_prompt
     assert "=== LIVE NOTES TO INTEGRATE (1 notes) ===" in user_prompt
-    assert "[agent=agent-a, category=decision]" in user_prompt
+    # The day written and the measured size travel with the inputs.
+    assert "[agent=agent-a, category=decision, date=2026-08-01]" in user_prompt
+    assert "--- File: activeContext.md (" in user_prompt
+    assert " bytes) ---\n" in user_prompt
+    assert "--- End file: activeContext.md ---" in user_prompt
     assert "SYNTHÈSE PRÉCÉDENTE" not in user_prompt
     assert "catégorie=decision" not in user_prompt
+    assert "--- Fichier:" not in user_prompt
     assert '"content": "New section content..."' in user_prompt
     assert "The residual synthesis must summarize the processed notes in English" in (
         user_prompt
     )
+    # Two dispositions per note, closed discard reasons, no invented edit.
     assert (
-        "file_edits MUST contain at least one valid, note-supported edit; "
-        "NEVER invent an edit solely to satisfy this rule"
+        'declared in "discarded_notes" with one of the reasons already_in_bank, '
+        "superseded, obsolete, no_bank_value — never both"
     ) in user_prompt
+    assert "when in doubt, integrate" in user_prompt
+    assert "NEVER invent an edit" in user_prompt
+    assert '"discarded_notes": [' in user_prompt
 
-    # Prompt language changes; operator-owned inputs do not.
+    # Prompt language is the service's; operator-owned inputs stay verbatim.
     assert "# Règles exactes" in user_prompt
     assert "Synthèse historique exacte." in user_prompt
     assert "Décision source exacte avec `memory_id`." in user_prompt
     assert "## Focus Actuel" in user_prompt
 
 
-def test_legacy_flag_preserves_the_historical_french_main_prompts() -> None:
-    messages = _main_messages(legacy_french=True)
-    system_prompt, user_prompt = [message["content"] for message in messages]
-
-    assert system_prompt == SYSTEM_PROMPT_FRENCH
-    assert SYSTEM_PROMPT_FRENCH.startswith("Tu es un assistant spécialisé")
-    assert "[inféré]" in SYSTEM_PROMPT_FRENCH
-    assert '=== RULES DE L\'ESPACE "language-contract" ===' in user_prompt
-    assert "=== RULES FOR SPACE" not in user_prompt
-    assert "=== SYNTHÈSE PRÉCÉDENTE ===" in user_prompt
-    assert "[agent=agent-a, catégorie=decision]" in user_prompt
-    assert '"content": "Nouveau contenu de la section..."' in user_prompt
-    assert "La synthèse résiduelle doit résumer les notes traitées" in user_prompt
-    assert (
-        "file_edits DOIT contenir au moins une édition valide fondée sur les notes ; "
-        "n'invente JAMAIS une édition uniquement pour satisfaire cette règle"
-    ) in user_prompt
-
-
-@pytest.mark.parametrize(
-    ("legacy_french", "required", "forbidden"),
-    [
-        (
-            False,
-            "No bank files — this is the first consolidation.",
-            "Aucun fichier bank — première consolidation.",
-        ),
-        (
-            True,
-            "Aucun fichier bank — première consolidation.",
-            "No bank files — this is the first consolidation.",
-        ),
-    ],
-)
-def test_first_consolidation_uses_the_selected_prompt_language(
-    legacy_french: bool,
-    required: str,
-    forbidden: str,
-) -> None:
-    service = _service(legacy_french=legacy_french)
-    messages = service._build_prompt(
+def test_first_consolidation_prompt_is_english() -> None:
+    messages = _service()._build_prompt(
         space_id="language-contract",
         rules="# Exact rules",
         synthesis="",
@@ -236,61 +213,45 @@ def test_first_consolidation_uses_the_selected_prompt_language(
         bank_files=[],
     )
     user_prompt = messages[1]["content"]
-    assert required in user_prompt
-    assert forbidden not in user_prompt
+    assert "No bank files — this is the first consolidation." in user_prompt
+    assert "Aucun fichier bank — première consolidation." not in user_prompt
 
 
-@pytest.mark.parametrize(
-    ("legacy_french", "required", "forbidden"),
-    [
-        (
-            False,
-            "Merge these versions into ONE coherent version.",
-            "Fusionne ces versions en UNE SEULE version cohérente.",
-        ),
-        (
-            True,
-            "Fusionne ces versions en UNE SEULE version cohérente.",
-            "Merge these versions into ONE coherent version.",
-        ),
-    ],
-)
-async def test_duplicate_section_merge_uses_the_selected_prompt_language(
-    legacy_french: bool,
-    required: str,
-    forbidden: str,
-) -> None:
-    service = _service(legacy_french=legacy_french)
+def test_corrective_completion_turns_share_the_conversation_language() -> None:
+    """The corrective turn must be in the same
+    language as the first completion. With a single English prompt set this
+    holds by construction; pin it so a future prompt cannot reintroduce a split."""
+    messages = _main_messages()
+    form_fault_turn = _corrective_messages(
+        messages,
+        {"file_edits": [], "discarded_notes": [], "synthesis": "x"},
+        [{"reason": "normal_notes_unclassified", "missing_notes": [1]}],
+    )[-1]["content"]
+    completion_fault_turn = _corrective_messages(
+        messages, None, [], completion_fault="invalid_normal_consolidation_json"
+    )[-1]["content"]
+
+    assert form_fault_turn.startswith("Your previous plan was refused")
+    assert "Notes without disposition: 1." in form_fault_turn
+    assert completion_fault_turn.startswith("Your previous answer could not be used")
+    for turn in (form_fault_turn, completion_fault_turn):
+        assert "replaces the previous plan entirely" in turn or "nothing else" in turn
+        assert "Votre" not in turn and "précédent" not in turn
+
+
+async def test_duplicate_section_merge_prompt_is_english() -> None:
+    service = _service()
 
     assert await service._merge_sections_via_llm("## Status", ["old", "new"]) == (
         "merged"
     )
     prompt = service._complete_chat.calls[0]["messages"][0]["content"]
-    assert required in prompt
-    assert forbidden not in prompt
+    assert "Merge these versions into ONE coherent version." in prompt
+    assert "Fusionne ces versions en UNE SEULE version cohérente." not in prompt
 
 
-@pytest.mark.parametrize(
-    ("legacy_french", "required", "forbidden"),
-    [
-        (
-            False,
-            "Merge redundant information",
-            "Fusionne les informations redondantes",
-        ),
-        (
-            True,
-            "Fusionne les informations redondantes",
-            "Merge redundant information",
-        ),
-    ],
-)
-async def test_compaction_uses_the_selected_prompt_language(
-    legacy_french: bool,
-    required: str,
-    forbidden: str,
-) -> None:
-    service = _service(legacy_french=legacy_french)
+async def test_compaction_prompt_is_english() -> None:
+    service = _service()
     source = "# Bank\n\n## Details\n" + "verbose detail " * 30
     service._complete_chat.text = json.dumps(
         {
@@ -318,6 +279,6 @@ async def test_compaction_uses_the_selected_prompt_language(
         message["content"]
         for message in service._complete_chat.calls[0]["messages"]
     )
-    assert required in prompt
-    assert forbidden not in prompt
+    assert "Merge redundant information" in prompt
+    assert "Fusionne les informations redondantes" not in prompt
     assert service._complete_chat.calls[0]["retry_policy"] == "none"

@@ -283,9 +283,47 @@ cycle global admin/bootstrap passe par `admin_create_token` ou
 ### Comment fonctionne la consolidation ?
 
 1. Le LLM lit les **rules**, la **bank actuelle**, la **synthèse précédente** et les **notes live**
-2. Il produit des fichiers bank mis à jour (Markdown pur)
-3. Les notes consolidées sont **supprimées** de `live/`
+2. Il propose des modifications Markdown et une disposition pour chaque note : intégrée ou explicitement écartée avec un motif admis
+3. Hivemind valide le lot avant les écritures, vérifie les résultats persistés puis supprime de `live/` les notes traitées avec succès
 4. Une synthèse résiduelle est sauvegardée
+
+Une réponse inutilisable peut recevoir un appel correctif ; les pannes chat
+transitoires ont un budget de retries borné, partagé entre génération et
+correction. Ces contrôles améliorent l'aboutissement et la traçabilité, pas
+l'exactitude sémantique du résumé. Une panne de stockage peut laisser des
+écritures précédentes appliquées : la consolidation normale n'a pas de rollback
+global du lot et conserve les notes sources du lot en échec. Examinez un
+résultat `partial` avant de décider d'une nouvelle exécution.
+
+### Ma bank restera-t-elle en français après la mise à jour en v1.5.0 ?
+
+Pas nécessairement. Le modèle reçoit la consigne de rédiger la nouvelle prose
+de la bank et la synthèse résiduelle en anglais, même avec des règles ou des
+notes françaises. Les titres requis, termes exacts, identifiants, URL et
+citations sont conservés ; le contenu non modifié n'est pas traduit uniquement
+pour changer sa langue. Une bank française peut devenir bilingue au fil des
+mises à jour. `CONSOLIDATION_LEGACY_FRENCH_PROMPTS` a été retiré et une valeur
+résiduelle est ignorée. Sauvegardez et testez une copie représentative avant de
+mettre à jour un usage sensible à la langue.
+
+### Pourquoi un job de consolidation peut-il durer longtemps ?
+
+Le timeout par défaut de 1800 secondes s'applique à chaque appel du modèle,
+pas au job entier. Chaque lot peut effectuer jusqu'à cinq appels principaux ou
+correctifs, dont trois retries transitoires avec des attentes de 60, 120 et
+300 secondes. Le budget autorise donc jusqu'à **2 h 38 min par lot**, avant le
+travail auxiliaire ; c'est une borne de pire cas, pas une promesse de latence.
+Les appels supplémentaires peuvent être facturés et les requêtes expirées
+peuvent ne pas retourner leur consommation de tokens.
+`CONSOLIDATION_TRANSIENT_RETRIES=0` désactive les retries transitoires, pas
+l'unique appel correctif pour une réponse inutilisable.
+
+Pendant l'attente, le job reste `running` avec `phase="batch_retry_wait"`.
+Le verrou du space reste pris : les consolidations suivantes attendent, et
+une compaction manuelle ou le GC peuvent refuser d'intervenir. Les autres
+spaces ont leur propre file. Soumettez une seule fois et ne consultez le statut
+manuellement qu'en cas de besoin ; voir la
+[référence MCP](docs/MCP_TOOLS_SPEC.md) pour le suivi et le budget détaillé.
 
 ### Que se passe-t-il si 2 agents consolident en même temps ?
 
@@ -307,7 +345,14 @@ son niveau de permission.
 
 ### Que deviennent les notes après consolidation ?
 
-Elles sont **supprimées** de `live/`. Leur contenu est intégré dans les fichiers bank. C'est irréversible (d'où l'intérêt des backups).
+Les notes traitées avec succès sont **supprimées** de `live/` : le modèle les
+attribue à une modification de la bank ou les écarte explicitement comme déjà
+présentes, remplacées, obsolètes ou sans valeur pour la bank. Le résultat du
+job distingue les notes intégrées et écartées, avec les motifs d'abandon.
+Les notes sources d'un lot non traité ou dont les écritures sont incomplètes
+restent disponibles. Leur suppression ne prouve pas que chaque fait a survécu
+dans le résumé ; conservez des sauvegardes et les sources faisant autorité
+séparément.
 
 ### Le consolidateur peut-il inventer du contenu (halluciner) ?
 
@@ -329,7 +374,9 @@ uv run pytest tests/test_issue17_validation.py
 
 **Si vous observez du contenu non étayé**, signalez-le sur le
 [tracker d'issues Hivemind](https://github.com/Lesur-ai/hivemind/issues) avec
-les notes et la bank produite.
+une reproduction minimale expurgée. Ne publiez ni identifiants de connexion,
+ni notes privées, ni données clients ; privilégiez des notes et extraits de
+bank synthétiques.
 
 ### Comment identifier les banks qui ont besoin d'être consolidées sur plusieurs spaces ?
 
@@ -358,9 +405,14 @@ drift entre agents.
 
 ### Qu'est-ce que la compaction de bank (`bank_compact`) ?
 
-Quand les fichiers bank deviennent trop volumineux (> `BANK_FILE_MAX_SIZE`, 15 KB par défaut), ils peuvent causer des échecs de consolidation (dépassement du context window LLM) ou des performances dégradées.
+Quand les fichiers bank deviennent trop volumineux (> `BANK_FILE_MAX_SIZE`, 35 000 octets par défaut), une consolidation ne fait que les **signaler** : une ligne WARNING dans les logs et une liste `bank_size_advisory` dans le résultat du job (inspecteurs de job de la console, CLI). La compaction est une **décision humaine** : vous choisissez quand résumer davantage vos fichiers ; un avertissement de taille ne déclenche jamais de compaction automatique.
 
-`bank_compact` résume les fichiers surdimensionnés via un appel LLM dédié, en préservant les décisions clés et les jalons tout en supprimant les détails obsolètes.
+`bank_compact` demande au LLM de résumer les fichiers surdimensionnés tout en
+préservant les décisions clés et les jalons. Ce n'est pas une garantie de
+préservation sémantique : relisez le résultat. L'application est DirectLocal
+uniquement ; cette release ne fournit ni compaction multipart ni reprise
+automatique durable après crash. Consultez la
+[référence MCP](docs/MCP_TOOLS_SPEC.md) avant d'appliquer.
 
 ```bash
 # Scan seul (dry-run, par défaut)
@@ -370,7 +422,7 @@ uv run python scripts/mcp_cli.py bank compact mon-espace
 uv run python scripts/mcp_cli.py bank compact mon-espace --apply
 ```
 
-L'**auto-compaction** est également déclenchée automatiquement avant la consolidation si la bank dépasse `COMPACT_THRESHOLD` (60% par défaut) du budget de sortie du LLM.
+`bank_compact` est un outil MCP (droit manage) : tout client MCP — un agent sur instruction humaine, le bouton Compact de la console ou la CLI ci-dessus — peut l'appeler. Il n'y a plus de compaction automatique ; l'ancien réglage `COMPACT_THRESHOLD` a disparu et une valeur résiduelle est ignorée.
 
 ### Puis-je utiliser un proxy HTTP pour les connexions sortantes ?
 
@@ -586,12 +638,24 @@ uv run python scripts/mcp_cli.py token update sha256:xxx -s "space-a,space-b"
 
 ### La consolidation échoue avec « LLM returned invalid JSON »
 
-Cause probable : la bank est trop volumineuse. Le LLM a un context window limité et peut échouer sur les réponses JSON longues.
+Une réponse peut être mal formée ou tronquée à cause du comportement du modèle
+ou des limites de contexte et de sortie ; ce message seul ne prouve pas que
+la bank est trop volumineuse. La consolidation normale tente déjà une
+correction par le modèle.
 
-**Solutions** :
-1. Compacter la bank : `bank_compact mon-espace --apply`
-2. Vérifier les tailles : `bank_list mon-espace` — si un fichier dépasse 15 KB, c'est un candidat à la compaction
-3. Relancer la consolidation après compaction
+**Étapes suivantes** :
+
+1. Examinez `failure_reason`, `failed_batch` et les diagnostics filtrés du job, puis vérifiez les identifiants fournisseur, les limites contexte/sortie et le profil du modèle réellement utilisé.
+2. Vérifiez les tailles et `bank_size_advisory`. Si une compaction est pertinente, sauvegardez d'abord puis inspectez le dry-run avec `uv run python scripts/mcp_cli.py bank compact mon-espace` ; l'application est une décision humaine séparée, DirectLocal uniquement.
+3. Examinez tout résultat `partial` et les notes conservées avant de démarrer volontairement une nouvelle consolidation. Ne resoumettez pas le job en boucle et ne supposez pas qu'un timeout a annulé les écritures précédentes.
+
+### Pourquoi la compaction manuelle ne trouve-t-elle aucun fichier candidat ?
+
+`bank_compact` sélectionne les fichiers dépassant individuellement
+`BANK_FILE_MAX_SIZE` (35 000 octets UTF-8 par défaut), pas une bank dont la
+taille cumulée dépasse cette valeur. Examinez le dry-run et
+`bank_size_advisory` avant de décider d'appliquer. Un fichier sous le seuil
+n'est pas candidat, même si une autre opération a échoué.
 
 ### `mid_consolidate` retourne « queued »
 
@@ -601,9 +665,14 @@ Un autre agent (ou vous-même dans un autre terminal) consolide le même space. 
 
 ### Je ne retrouve plus mes notes après consolidation
 
-C'est normal ! Les notes sont **supprimées** de `live/` après consolidation. Leur contenu est intégré dans les fichiers bank. Utilisez `mid_read_all` pour retrouver le contenu consolidé.
-
-Si vous pensez que des notes ont été perdues, vérifiez la synthèse résiduelle : `space_summary mon-espace`.
+Consultez les compteurs de notes intégrées et écartées ainsi que les motifs
+d'abandon du job, puis inspectez la bank avec `mid_read_all` et la synthèse
+résiduelle avec `space_summary`. Les notes traitées avec succès sont retirées
+de `live/` ; toutes les notes retirées ne produisent pas nécessairement une
+modification de la bank. Ni un statut réussi ni la synthèse ne prouvent que
+chaque fait source a été conservé. Si un contenu important manque, comparez
+avec vos sources ou sauvegardes avant toute nouvelle modification et signalez
+une reproduction expurgée.
 
 ---
 

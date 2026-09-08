@@ -336,7 +336,7 @@ async def test_corrupted_members_propagates_never_disabled() -> None:
 
 
 async def test_malformed_lease_until_surfaces_as_corrupted_state() -> None:
-    """RÉGRESSION (Codex PR102, MINOR) : un ``lease_until`` malformé sur un token
+    """RÉGRESSION : un ``lease_until`` malformé sur un token
     NON ACTIF (FREE) est de l'état critique corrompu. ``lease_is_active`` retourne
     False AVANT tout parse (le state n'est pas HELD/RELEASING), donc le calcul de
     TTL d'observabilité atteignait ``_parse_iso`` et levait un ``ValueError`` NU,
@@ -640,7 +640,7 @@ async def test_request_resync_on_unsafe_space_is_protocol_blocked() -> None:
 
 
 async def test_request_resync_on_incomplete_resync_marker_is_protocol_blocked() -> None:
-    """RÉGRESSION (Codex PR102) : un ``node_status.json=RESYNC_REQUIRED``
+    """RÉGRESSION : un ``node_status.json=RESYNC_REQUIRED``
     SOLITAIRE — sans ``node.json`` ni membre ACTIVE — est STRUCTURELLEMENT
     INCOMPLET. ``resolve_hive_context`` le classe ``is_hive=True`` /
     ``node_status=RESYNC_REQUIRED`` (marqueur respecté tel quel), donc l'ancienne
@@ -667,7 +667,7 @@ async def test_request_resync_on_incomplete_resync_marker_is_protocol_blocked() 
 
 
 async def test_complete_resync_on_incomplete_resync_marker_is_protocol_blocked() -> None:
-    """RÉGRESSION (Codex PR102) : symétrique de ``request_resync`` —
+    """RÉGRESSION : symétrique de ``request_resync`` —
     ``complete_resync`` sur un ``node_status=RESYNC_REQUIRED`` solitaire
     (sans ``node.json`` ni membre ACTIVE) doit refuser PROTOCOL_BLOCKED
     fail-closed, ZÉRO écriture. Sans la garde de complétude,

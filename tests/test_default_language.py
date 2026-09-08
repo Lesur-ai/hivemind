@@ -10,7 +10,7 @@ import unicodedata
 
 import yaml
 
-from live_mem.core.consolidator import SYSTEM_PROMPT, SYSTEM_PROMPT_FRENCH
+from live_mem.core.consolidator import SYSTEM_PROMPT
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,9 +124,11 @@ CLI_RUNTIME_SURFACES = tuple(
     )
 )
 
-# These values are compatibility inputs, never defaults or emitted UI/MCP copy.
+# The only intentional French value left: the historical ``[inféré]`` marker
+# that the claim validator must still RECOGNISE in existing banks. It is parser
+# input, never emitted copy. The French prompt compatibility bridge is gone;
+# there is no French prompt constant any more.
 INTENTIONAL_FRENCH_COMPATIBILITY = {
-    "SYSTEM_PROMPT_FRENCH": SYSTEM_PROMPT_FRENCH,
     "historical_inferred_marker": "[inféré]",
 }
 PARSER_INPUT_VOCAB_ASSIGNMENTS = frozenset({"STOP_WORDS", "_STATUS_KEYWORDS"})
@@ -250,32 +252,18 @@ def _decorator_uses_default_tool_description(decorator: ast.expr) -> bool:
     return isinstance(decorator, ast.Attribute) and decorator.attr == "tool"
 
 
-def _legacy_french_condition(test: ast.expr) -> tuple[bool, bool]:
-    """Return whether the test is explicit legacy-French and whether negated."""
-
-    negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
-    inspected = test.operand if negated else test
-    identifiers = {
-        identifier.casefold()
-        for node in ast.walk(inspected)
-        for identifier in (
-            ([node.id] if isinstance(node, ast.Name) else [])
-            + ([node.attr] if isinstance(node, ast.Attribute) else [])
-        )
-    }
-    return (
-        any("legacy" in item and "french" in item for item in identifiers),
-        negated,
-    )
-
-
 def _mark_descendants(nodes: list[ast.AST], excluded: set[int]) -> None:
     for node in nodes:
         excluded.update(id(descendant) for descendant in ast.walk(node))
 
 
 def _runtime_literal_exclusions(tree: ast.Module) -> set[int]:
-    """Exclude only compatibility branches and parser-input vocabulary."""
+    """Exclude only non-tool docstrings, parser-input vocabulary and regexes.
+
+    The ``legacy_french`` branch exclusion is gone with the French
+    prompt bridge. Any French literal on a runtime path is now a defect, even
+    behind a compatibility-looking condition.
+    """
 
     excluded: set[int] = set()
     public_tool_docstrings: set[int] = set()
@@ -299,21 +287,8 @@ def _runtime_literal_exclusions(tree: ast.Module) -> set[int]:
 
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value:
             names = _assigned_names(node)
-            if "SYSTEM_PROMPT_FRENCH" in names:
-                _mark_descendants([node.value], excluded)
             if names & PARSER_INPUT_VOCAB_ASSIGNMENTS:
                 _mark_descendants([node.value], excluded)
-
-        if isinstance(node, ast.If):
-            is_legacy, negated = _legacy_french_condition(node.test)
-            if is_legacy:
-                _mark_descendants(node.orelse if negated else node.body, excluded)
-        elif isinstance(node, ast.IfExp):
-            is_legacy, negated = _legacy_french_condition(node.test)
-            if is_legacy:
-                _mark_descendants(
-                    [node.orelse if negated else node.body], excluded
-                )
 
         if (
             isinstance(node, ast.Call)
@@ -948,14 +923,13 @@ def test_consolidation_prompt_defaults_to_english() -> None:
     assert "Tu es un assistant" not in SYSTEM_PROMPT
 
 
-def test_french_compatibility_allowlist_is_explicit_and_non_default() -> None:
-    assert INTENTIONAL_FRENCH_COMPATIBILITY == {
-        "SYSTEM_PROMPT_FRENCH": SYSTEM_PROMPT_FRENCH,
-        "historical_inferred_marker": "[inféré]",
-    }
-    assert SYSTEM_PROMPT_FRENCH.startswith("Tu es un assistant")
-    assert SYSTEM_PROMPT is not SYSTEM_PROMPT_FRENCH
-    assert _looks_french(SYSTEM_PROMPT_FRENCH)
+def test_french_compatibility_allowlist_is_the_historical_marker_only() -> None:
+    """No French prompt survives; only the historical marker is
+    recognised as parser input."""
+    from live_mem.core import consolidator as consolidator_module
+
+    assert INTENTIONAL_FRENCH_COMPATIBILITY == {"historical_inferred_marker": "[inféré]"}
+    assert not hasattr(consolidator_module, "SYSTEM_PROMPT_FRENCH")
     assert _looks_french("[inféré]")
 
 
@@ -1201,7 +1175,10 @@ async def ingest(ctx, progress):
     assert all(match.line > 0 and match.column > 0 for match in matches)
 
 
-def test_runtime_inventory_keeps_only_structural_compatibility_exclusions() -> None:
+def test_runtime_inventory_keeps_only_structural_exclusions_and_flags_legacy_branches() -> None:
+    """A French prompt constant or a ``legacy_french`` branch is no
+    longer a structural exclusion — both are reported. Regexes, parser-input
+    vocabulary and non-tool docstrings stay excluded."""
     mutation = '''
 SYSTEM_PROMPT_FRENCH = "Tu es un assistant de maintenance."
 _INFERRED_MARKER_RE = re.compile(r"\\[(?:inferred|inféré)\\]")
@@ -1216,7 +1193,10 @@ def choose(legacy_french):
 def public_tool():
     """Retourne une opération."""
 '''
-    assert _scan_python_runtime_literals(mutation) == []
+    assert [match.value for match in _scan_python_runtime_literals(mutation)] == [
+        "Tu es un assistant de maintenance.",
+        "Opération héritée",
+    ]
 
 
 def test_runtime_inventory_does_not_allow_marker_on_an_output_path() -> None:

@@ -56,8 +56,7 @@ _BASE = {
     "default_rules_file": "",
     "consolidation_timeout": 600,
     "consolidation_max_notes": 500,
-    "consolidation_batch_size": 5,
-    "compact_threshold": 0.6,
+    "consolidation_batch_size": 3,
     "bank_file_max_size": 15360,
     "response_max_bytes": 512 * 1024,
     "proxy_url": None,
@@ -217,7 +216,7 @@ class TestConsolidatorServiceProxy:
 
 
 class TestStorageProxyLogRedaction:
-    """P12-3 R2 (#268, Codex round 2) — le log de démarrage du StorageService
+    """Le log de démarrage du StorageService
     cœur ne doit exposer que l'origine scheme://host:port du proxy, jamais le
     userinfo (le chemin d'initialisation S3 est aussi atteignable que celui du
     consolidateur)."""

@@ -640,19 +640,25 @@ def test_mid_engine_documents_writesink_mutation_call_sites() -> None:
     ]
     assert {s["method"] for s in unicode_deletes} == {normal_apply}
     assert "readback" in unicode_deletes[0]["description"].lower()
-    # Direct callers retain their compatible finalization; normal consolidate()
-    # defers its one delete_many until after the run-level metadata readback.
+    # Consumed notes are deleted one key at a time by a single
+    # helper reached from the direct application (not deferred) and from the
+    # deferred normal consolidate() finalization after the metadata readback.
     note_deletes = [
         s
         for s in consolidator_sites
-        if s["op"] == "delete_many" and "consumed notes" in s["key_pattern"]
+        if s["op"] == "delete" and "consumed notes" in s["key_pattern"]
     ]
-    assert {s["method"] for s in note_deletes} == {normal_apply, consolidate}
-    direct_note_delete = next(s for s in note_deletes if s["method"] == normal_apply)
-    deferred_note_delete = next(s for s in note_deletes if s["method"] == consolidate)
-    assert "defer_note_finalization" in direct_note_delete["description"]
-    assert "deferred" in deferred_note_delete["description"].lower()
-    assert "metadata write/readback" in deferred_note_delete["description"].lower()
+    delete_helper = "ConsolidatorService._delete_notes_reporting"
+    assert {s["method"] for s in note_deletes} == {delete_helper}
+    note_delete = note_deletes[0]
+    assert "defer_note_finalization" in note_delete["description"]
+    assert "deferred" in note_delete["description"].lower()
+    assert "metadata write/readback" in note_delete["description"].lower()
+    assert "after its own delete" in note_delete["description"].lower()
+    assert not any(
+        s["op"] == "delete_many" and "consumed notes" in s["key_pattern"]
+        for s in consolidator_sites
+    )
     # compact_bank bank PUT
     assert "ConsolidatorService.compact_bank" in methods
 
@@ -680,7 +686,7 @@ def test_mid_engine_documents_writesink_mutation_call_sites() -> None:
 def test_mid_engine_normal_writesink_line_hints_resolve_to_live_mutations() -> None:
     """Pin the normal-consolidation source anchors to their real storage calls.
 
-    These seven inventory entries are used as precise handoff pointers for the
+    These six inventory entries are used as precise handoff pointers for the
     normal batch's durable-write ordering.  A source delta must therefore
     update the corresponding ``line_hint`` rather than silently leaving the
     inventory stale.
@@ -690,6 +696,7 @@ def test_mid_engine_normal_writesink_line_hints_resolve_to_live_mutations() -> N
     ).splitlines()
     normal_apply = "ConsolidatorService._apply_prepared_normal_batch"
     consolidate = "ConsolidatorService.consolidate"
+    delete_helper = "ConsolidatorService._delete_notes_reporting"
     expected_calls = {
         (normal_apply, "delete", "{space_id}/bank/<unicode-dup>"):
             "await storage.delete(raw_key)",
@@ -699,12 +706,10 @@ def test_mid_engine_normal_writesink_line_hints_resolve_to_live_mutations() -> N
             'await storage.put(f"{space_id}/_synthesis.md", synthesis_md)',
         (normal_apply, "put_json", "{space_id}/_meta.json"):
             'await storage.put_json(f"{space_id}/_meta.json", meta)',
-        (normal_apply, "delete_many", "{space_id}/live/* (consumed notes)"):
-            "notes_deleted = await storage.delete_many(notes_keys)",
+        (delete_helper, "delete", "{space_id}/live/* (consumed notes)"):
+            "await storage.delete(key)",
         (consolidate, "put_json", "{space_id}/_meta.json"):
             'await storage.put_json(f"{space_id}/_meta.json", meta)',
-        (consolidate, "delete_many", "{space_id}/live/* (consumed notes)"):
-            "notes_deleted = await storage.delete_many(pending_note_keys)",
     }
     sites_by_identity = {
         (site["method"], site["op"], site["key_pattern"]): site
@@ -716,3 +721,25 @@ def test_mid_engine_normal_writesink_line_hints_resolve_to_live_mutations() -> N
     for identity, expected_call in expected_calls.items():
         line_hint = sites_by_identity[identity]["line_hint"]
         assert source_lines[line_hint - 1].strip() == expected_call
+
+
+def test_write_sink_inventory_names_only_live_consolidator_methods_and_no_automatic_compaction() -> None:
+    """The inventory is the FULL eventual mutation set,
+    so a dead entry is a false promise. Every consolidator method it names must
+    exist, and no automatic-compaction path may exist or be reachable from
+    ``consolidate()``."""
+    import inspect
+
+    from live_mem.core.consolidator import ConsolidatorService
+    from live_mem.core.engines.mid import WRITE_SINK_MUTATION_CALL_SITES
+
+    for entry in WRITE_SINK_MUTATION_CALL_SITES:
+        if entry.get("module") != "live_mem.core.consolidator":
+            continue
+        for qualified in str(entry["method"]).split("/"):
+            name = qualified.split(".")[-1]
+            assert hasattr(ConsolidatorService, name), f"dead inventory entry: {entry['method']}"
+    assert not hasattr(ConsolidatorService, "_compact_bank_if_needed")
+    source = inspect.getsource(ConsolidatorService.consolidate)
+    for banned in ("_plan_single_file_compaction", "compact_bank(", "_compact_single_file", "_capture_compaction_snapshot", "_apply_prepared_compaction"):
+        assert banned not in source, banned

@@ -536,26 +536,11 @@ async def test_every_graph_mutation_wrapper_gates_before_opening_neo4j(
     monkeypatch,
 ) -> None:
     # Neo4j is a service-runtime dependency, not a root Hivemind test
-    # dependency.  A minimal import shim keeps this an I/O-free wrapper test.
-    neo4j = types.ModuleType("neo4j")
-    neo4j.AsyncGraphDatabase = object
-    neo4j.AsyncDriver = object
-    neo4j.AsyncSession = object
+    # dependency.  The shared per-test shim keeps this an I/O-free wrapper test
+    # whatever test module imported the graph first.
+    from tests.fakes.neo4j_fakes import bind_fake_neo4j
 
-    class _FakeQuery(str):
-        def __new__(cls, text: str, *, timeout: float | None = None):
-            value = str.__new__(cls, text)
-            value.timeout = timeout
-            return value
-
-    neo4j.Query = _FakeQuery
-    neo4j_exceptions = types.ModuleType("neo4j.exceptions")
-    neo4j_exceptions.ServiceUnavailable = type("ServiceUnavailable", (Exception,), {})
-    neo4j_exceptions.AuthError = type("AuthError", (Exception,), {})
-    monkeypatch.setitem(sys.modules, "neo4j", neo4j)
-    monkeypatch.setitem(sys.modules, "neo4j.exceptions", neo4j_exceptions)
-
-    from mcp_memory.core.graph import GraphService
+    GraphService = bind_fake_neo4j(monkeypatch).GraphService
 
     effects: list[object] = []
     service = object.__new__(GraphService)
@@ -715,8 +700,20 @@ async def test_server_memory_tools_hold_the_outer_multi_backend_gate(
     monkeypatch.setattr(server, "check_write_permission", lambda: None)
 
     class Ontologies:
-        def get_ontology(self, name: str):
-            return {"name": name, "entity_types": []}
+        # #462 made memory_create resolve registered names only: the server now
+        # calls get_registered_ontology / get_ontology_label instead of get_ontology.
+        _registered = {"test"}
+
+        def is_registered_name(self, name):
+            return isinstance(name, str) and name.strip() in self._registered
+
+        def get_registered_ontology(self, name: str):
+            if not self.is_registered_name(name):
+                return None
+            return {"name": name.strip(), "entity_types": []}
+
+        def get_ontology_label(self, name_or_yaml):
+            return name_or_yaml.strip() if isinstance(name_or_yaml, str) else "none"
 
         def list_ontologies(self):
             return [{"name": "test"}]

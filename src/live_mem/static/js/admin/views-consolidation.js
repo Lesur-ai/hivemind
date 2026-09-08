@@ -4,9 +4,17 @@
  * Absorbs the inherited consolidation-lanes dashboard AND the Stale Banks view
  * (contract §4.8 K1–K6, §5.5). Real data only: every widget consumes exactly
  * the fields the real tools return (bank_consolidation_queues / _status /
- * bank_consolidate / bank_stale_spaces). No polling (D8): the only refresh
- * triggers are load, manual Refresh, and after-action. Progress bars are
- * snapshots labeled "as of last refresh".
+ * bank_consolidate / bank_stale_spaces). Refresh triggers are load, manual
+ * Refresh, after-action, and — the one bounded exception to D8 (§5.5.1) —
+ * a live refresh every LIVE_REFRESH_MS while a
+ * lane shows a running or queued job (lanes table) or while the open job
+ * inspector shows a running/queued job. It stops by itself when no job is
+ * active, when the route epoch or the session changes, when the modal is
+ * closed, and it skips network calls while the tab is hidden. The live tick
+ * re-reads only the lanes painted by the last full load (explicit space_ids:
+ * an in-memory registry read, never the storage-backed space scan of the
+ * full load); a space created or deleted meanwhile appears at the next full
+ * load. Progress bars stay snapshots labeled "as of last refresh".
  *
  * Escaping (contract §7.3.3 R1–R6): every dynamic value passes through the
  * shell esc() at its interpolation site; dataset values re-escaped when reused
@@ -25,7 +33,50 @@
         staleData: null,        // last bank_stale_spaces payload while in stale mode
         identity: {},           // cached ctx.identity (never a fresh probe)
         owner: null,            // unique session marker (token_hash); null = unproven → cache never retained
+        liveTimer: null,        // pending lanes live-refresh timer (§5.5.1); one at a time
     };
+
+    // §5.5.1 — live refresh period while a job is running or queued.
+    // Period fixed at one minute by the owner (arbitration 2026-09-05, PR #489).
+    const LIVE_REFRESH_MS = 60000;
+
+    function laneActive(lane) {
+        return !!(lane && (lane.running_job || (typeof lane.queued_count === 'number' && lane.queued_count > 0)));
+    }
+
+    function anyLaneActive(data) {
+        return !!(data && Array.isArray(data.lanes) && data.lanes.some(laneActive));
+    }
+
+    // Space ids painted by the last full load: the live tick re-reads exactly
+    // these lanes by explicit space_ids, which the server answers from the
+    // token's access rules and the in-memory queue registry (§5.5.1: no space
+    // scan; authentication's own token-registry read applies as to any request).
+    function laneIds(data) {
+        const lanes = data && Array.isArray(data.lanes) ? data.lanes : [];
+        return lanes.map(l => l && l.space_id).filter(Boolean);
+    }
+
+    function clearLive() {
+        if (state.liveTimer !== null) {
+            clearTimeout(state.liveTimer);
+            state.liveTimer = null;
+        }
+    }
+
+    // Schedule ONE lanes reload while a job is active. The tick re-checks the
+    // route epoch and the session (§3.1.4), and only re-arms — without a
+    // network call — while the tab is hidden.
+    function scheduleLive(epoch, data) {
+        clearLive();
+        if (!anyLaneActive(data)) return;
+        state.liveTimer = setTimeout(() => {
+            state.liveTimer = null;
+            if (AdminRouter.epoch !== epoch || !sessionActive()) return;
+            if (document.hidden) { scheduleLive(epoch, data); return; }
+            loadLanes(epoch, laneIds(data));
+        }, LIVE_REFRESH_MS);
+    }
 
     function hasManage() {
         const perms = state.identity && Array.isArray(state.identity.permissions)
@@ -35,7 +86,7 @@
 
     // Modal-instance token: bumped each time this view opens a modal, so a slow
     // or out-of-order continuation drops instead of overwriting or closing a
-    // NEWER modal opened on the same route (Codex same-route race). Checked
+    // NEWER modal opened on the same route. Checked
     // alongside the navigation epoch before any modal/close effect.
     let _modalOp = 0;
     function beginModalOp() { return ++_modalOp; }
@@ -79,7 +130,9 @@
             ? `<span class="pill pill-neutral consol-guarantee" title="Job state lives in server memory: it does not survive a restart and history is trimmed.">${esc(String(guarantee))}</span>` : '';
         const batch = data && data.service_config && typeof data.service_config.batch_size === 'number'
             ? `<span class="mono micro-label consol-batch">batch size ${esc(String(data.service_config.batch_size))}</span>` : '';
-        return `<p class="consol-subtitle body-small">One worker per space · lanes are isolated per space. ${model}${guaranteeBadge}${batch}</p>`;
+        const live = anyLaneActive(data)
+            ? `<span class="micro-label consol-live">live · refreshes every ${esc(String(LIVE_REFRESH_MS / 1000))} s while a job runs</span>` : '';
+        return `<p class="consol-subtitle body-small">One worker per space · lanes are isolated per space. ${model}${guaranteeBadge}${batch}${live}</p>`;
     }
 
     // ───────────────────────── render entry ─────────────────────────
@@ -108,6 +161,7 @@
         if (owner !== state.owner) state.staleMode = false;
         state.owner = owner;
         state.identity = identity;
+        clearLive();
         const epoch = ctx ? ctx.epoch : AdminRouter.epoch;
         contentEl.innerHTML = `<div class="page">
             ${pageHeader('Consolidation', headerActions())}
@@ -121,10 +175,14 @@
 
     // ───────────────────────── lanes ─────────────────────────
 
-    async function loadLanes(epoch) {
+    // Full load (liveIds absent — load, manual Refresh, after-action): space_ids
+    // "" lets the server resolve the visible spaces (storage-backed scan).
+    // Live tick (liveIds present): the painted ids only — in-memory read.
+    async function loadLanes(epoch, liveIds) {
+        const spaceIds = Array.isArray(liveIds) ? liveIds.join(',') : '';
         let data;
         try {
-            data = await callTool('bank_consolidation_queues', { space_ids: '' });
+            data = await callTool('bank_consolidation_queues', { space_ids: spaceIds });
         } catch (e) {
             if (AdminRouter.epoch !== epoch) return;
             paintLanesError({ status: 'error', message: '' });
@@ -140,6 +198,7 @@
             return;
         }
         paintLanes(data);
+        scheduleLive(epoch, data);
     }
 
     function paintLanesError(data) {
@@ -316,44 +375,36 @@
 
     // ───────────────────────── job inspector ─────────────────────────
 
-    function safeCompactionTargetDetail(failure) {
-        if (!failure || typeof failure !== 'object'
-            || failure.error !== 'ambiguous_or_missing_compaction_target') return '';
-        const index = failure.operation_index;
-        const resolution = failure.target_resolution;
-        const count = failure.target_match_count;
-        const sha256 = failure.target_heading_sha256;
-        if (!Number.isSafeInteger(index) || index < 0
-            || (resolution !== 'missing' && resolution !== 'ambiguous')
-            || !Number.isSafeInteger(count) || count < 0
-            || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)
-            || (resolution === 'missing' && count !== 0)
-            || (resolution === 'ambiguous' && count < 2)) return '';
-        return `operation_index=${index}; target_resolution=${resolution}; target_match_count=${count}; target_heading_sha256=${sha256}`;
-    }
-
-    function renderSafeCompactionFailures(result) {
-        const failures = result && Array.isArray(result.compaction_failures)
-            ? result.compaction_failures : [];
-        const rows = failures.map(failure => {
-            if (!failure || typeof failure !== 'object'
-                || typeof failure.filename !== 'string' || typeof failure.error !== 'string') return '';
-            const detail = safeCompactionTargetDetail(failure);
-            return `<tr><td class="mono-data">${esc(failure.filename)}</td><td class="mono-data">${esc(failure.error)}</td><td class="mono-data">${esc(detail || '—')}</td></tr>`;
+    // Compaction is a human decision (bank_compact): a consolidation
+    // never runs it. Oversized bank files are only REPORTED, as an advisory.
+    function renderBankSizeAdvisory(result) {
+        const items = result && Array.isArray(result.bank_size_advisory) ? result.bank_size_advisory : [];
+        const rows = items.map(item => {
+            if (!item || typeof item !== 'object' || typeof item.filename !== 'string'
+                || !Number.isSafeInteger(item.utf8_bytes) || !Number.isSafeInteger(item.max_size)) return '';
+            return `<tr><td class="mono-data">${esc(item.filename)}</td><td class="num mono-data">${esc(String(item.utf8_bytes))}</td><td class="num mono-data">${esc(String(item.max_size))}</td></tr>`;
         }).join('');
         return rows
-            ? `<div class="consol-compaction-failures"><h4>Compaction failures</h4>${dataTable(['File', 'Safe failure', 'Target resolution'], rows)}</div>`
+            ? `<div class="consol-size-advisory">${statusDot('warn', 'Bank size advisory — compaction is a human decision: bank_compact (MCP tool, manage) from any client')}${dataTable(['File', 'UTF-8 bytes', 'Advisory threshold'], rows)}</div>`
             : '';
     }
 
     function renderResultMetrics(result) {
         if (!result || typeof result !== 'object') return '';
-        // Zero-notes short form: only status/notes_processed/message.
-        if (Number(result.notes_processed) === 0 && result.message) {
+        // Zero-notes short form: only when the run had zero notes.
+        // A stop at the first batch leaves notes_processed at 0 with notes_total > 0
+        // and must render its counters, never "nothing to do".
+        if (Number(result.notes_total) === 0 && result.message) {
             return `<div class="consol-nothing"><span class="micro-label">NOTHING TO DO</span>${serverMessage(result.message)}</div>`;
         }
         const rows = [
+            ['Notes total', result.notes_total],
             ['Notes processed', result.notes_processed],
+            ['Notes declared useless', result.notes_discarded_count],
+            ['Notes deleted', result.notes_deleted],
+            ['Notes remaining', result.notes_remaining],
+            ['Failed batch', result.failed_batch],
+            ['Failure reason', result.failure_reason],
             ['Bank files updated', result.bank_files_updated],
             ['Bank files created', result.bank_files_created],
             ['Bank files unchanged', result.bank_files_unchanged],
@@ -395,8 +446,8 @@
         if (qp === 1) posLine = statusDot('warn', 'Running');
         else if (qp >= 2) posLine = statusDot('warn', `Position ${qp} in queue`);
         let statusBlock = '';
-        if (job.status === 'succeeded') statusBlock = renderResultMetrics(job.result);
-        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">FAILED</div>${serverMessage(job.error)}</div></div>${renderSafeCompactionFailures(job.result)}`;
+        if (job.status === 'succeeded') statusBlock = renderResultMetrics(job.result) + renderBankSizeAdvisory(job.result);
+        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">FAILED</div>${serverMessage(job.error)}</div></div>${renderResultMetrics(job.result)}${renderBankSizeAdvisory(job.result)}`;
         else if (job.message) statusBlock = serverMessage(job.message);
         return `<div class="consol-jobinspect">
             ${progressBar(job.progress)}
@@ -426,6 +477,46 @@
             return;
         }
         showModal('Consolidation job', renderJob(data));
+        scheduleJobLive(jobId, op, epoch, data);
+    }
+
+    function modalOpen() {
+        const m = document.getElementById('adminModal');
+        return !!(m && m.style && m.style.display === 'flex');
+    }
+
+    // §5.5.1 — while the inspected job is running or queued, re-read its status
+    // every LIVE_REFRESH_MS and repaint the SAME modal instance (no loading
+    // flash). Stops on a terminal job, a closed or replaced modal, a route or
+    // session change; skips the network call while the tab is hidden.
+    function scheduleJobLive(jobId, op, epoch, data) {
+        const st = data && data.status;
+        if (st !== 'running' && st !== 'queued') return;
+        setTimeout(async () => {
+            if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive() || !modalOpen()) return;
+            if (document.hidden) { scheduleJobLive(jobId, op, epoch, data); return; }
+            let next;
+            try {
+                next = await callTool('bank_consolidation_status', { job_id: jobId });
+            } catch (e) {
+                // Transport failure: keep the last snapshot on screen and re-arm.
+                if (AdminRouter.epoch === epoch && modalOpCurrent(op) && sessionActive() && modalOpen()) scheduleJobLive(jobId, op, epoch, data);
+                return;
+            }
+            if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive() || !modalOpen()) return;
+            const nextStatus = next && next.status;
+            // §5.0 sentinels end the loop without repainting. Any other non-job
+            // payload (typed `error`, unknown shape) keeps the last good snapshot
+            // and re-arms: a running job must never be replaced on screen by an
+            // error state because one status read failed.
+            if (nextStatus === 'truncated' || nextStatus === 'rate_limited' || nextStatus === 'read_only') return;
+            if (!['running', 'queued', 'succeeded', 'failed', 'not_found'].includes(nextStatus)) {
+                scheduleJobLive(jobId, op, epoch, data);
+                return;
+            }
+            showModal('Consolidation job', renderJob(next));
+            scheduleJobLive(jobId, op, epoch, next);
+        }, LIVE_REFRESH_MS);
     }
 
     // ───────────────────────── enqueue ─────────────────────────

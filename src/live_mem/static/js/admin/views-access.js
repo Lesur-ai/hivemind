@@ -1,8 +1,8 @@
 /**
  * Access view (P8-5, issue #143) — token & space-access management.
  *
- * Contract: DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §4.4, §5.0, §5.7, §6.4,
- * §6.5, §7.1, §7.4, §8. Replaces the current Tokens page while preserving the
+ * Access management, session isolation and one-time credential delivery.
+ * Replaces the current Tokens page while preserving the
  * REAL Hivemind token model: `permissions` (read/write/manage/admin, inclusive)
  * plus a `space_ids` ALLOWLIST — never per-tier rights, never tenancy.
  *
@@ -53,7 +53,7 @@
     var READ_ONLY_NOTE =
         'Read-only tokens cannot use the admin console; use the /live viewer for read-only access.';
 
-    // ─────────────── modal generation & staleness (Codex R2 finding 3) ───────────────
+    // ─────────────── modal generation & staleness ───────────────
     // The console has a SINGLE shared #adminModal. A stale async continuation
     // that resolves after the operator dismissed its modal and opened a
     // different one must not manipulate (close/replace) that newer modal. Route
@@ -92,7 +92,7 @@
     // or expiry). wipeSession() changes neither route epoch nor modal generation,
     // so this is the ONLY signal that a session wipe happened while a request was
     // in flight — every post-wipe modal/toast/refresh effect must be dropped so no
-    // privileged state survives the wipe (§3.1.4, Codex R4).
+    // privileged state survives the wipe.
     function _sessionEnded(sessionAtCall) {
         var overlay = document.getElementById('loginOverlay');
         if (overlay && !overlay.classList.contains('hidden')) return true;
@@ -110,7 +110,7 @@
             || _sessionEnded(sessionAtCall);
     }
 
-    // Session-aware copy for the ONE-TIME SECRET (Codex R5 f2 + Terra-R1 f1).
+    // Session-aware copy for the ONE-TIME SECRET.
     // The shell _copyText() is fire-and-forget: its async Clipboard `.then`/
     // `.catch` would fire a "Copied" toast — or build the plaintext fallback
     // textarea — even after the operator dismissed the secret, navigated, opened
@@ -152,7 +152,7 @@
 
     // Lock/unlock the shell modal's dismissal controls (× and Cancel). Making
     // the Create flow EXCLUSIVE and non-dismissible while the request is in
-    // flight (Terra-R1 f2) is what lets `created` safely surface the one-time
+    // flight is what lets `created` safely surface the one-time
     // secret without ever replacing newer UI: the confirm button is already
     // disabled by the shell, the modal overlay blocks clicks on the content
     // behind it, and with dismissal disabled the operator cannot close this
@@ -168,7 +168,7 @@
         }
     }
 
-    // Navigation lock for the exclusive create/secret flow (Terra-R2 f2).
+    // Navigation lock for the exclusive create/secret flow.
     // Disabling the modal's ×/Cancel does NOT stop browser Back/Forward or
     // address-bar hash edits — the router would dispatch those, then a late
     // `created` would open the plaintext secret over the new route. While a lock
@@ -176,9 +176,9 @@
     // secret is always delivered in the context that requested it (never over a
     // new route, never orphaned). The lock is an OWNERSHIP TOKEN: only its
     // holder releases it, so a stale cross-session continuation can never
-    // release a newer request's lock (companion to the Terra-R2 f1 ordering).
+    // release a newer request's lock.
     //
-    // Terra-R3: the lock also captures the SESSION that owns it. The frozen
+    // The lock also captures the SESSION that owns it. The frozen
     // shell's wipeSession() removes the create/secret modal WITHOUT running its
     // teardown, so the owning continuation may never release this view-local
     // lock (e.g. a 401 expiry mid-secret). Keying the revert on the captured
@@ -459,7 +459,7 @@
         // the session was wiped (§3.1.4 — rendering the prior session's list
         // behind the login overlay). Do NOT drop on a modal opening: the token
         // table is content that a modal merely overlays, so opening a modal while
-        // the list loads must not permanently discard it (Codex R5) — the modal
+        // the list loads must not permanently discard it — the modal
         // generation is deliberately NOT part of this content-load guard.
         if (AdminRouter.epoch !== epochAtRender || _sessionEnded(sessionAtRender) ||
             !hasGlobalAdmin(_sessionIdentity())) {
@@ -672,7 +672,7 @@
             '<input class="form-input" id="ctEmail" type="email" autocomplete="off" placeholder="optional" value="' +
             esc(initialEmail) + '">' +
             '</div>' +
-            // Timer-free recovery for an indefinitely pending request (Terra-R3):
+            // Timer-free recovery for an indefinitely pending request:
             // callTool has no abort/timeout and timer-based coordination is
             // banned (§3.3.2 r5), so a stalled create could otherwise pin this modal and
             // navigation until a full reload. This escape is hidden until the
@@ -799,12 +799,12 @@
         // path uses full staleness (epoch+gen+session) to stay in-context.
         var epochAtCall = AdminRouter.epoch;
 
-        // Terra-R1 f2: make the create modal an EXCLUSIVE, non-dismissible
+        // Make the create modal an EXCLUSIVE, non-dismissible
         // pending flow while the request is in flight. With dismissal disabled
         // (and the shell already disabling the confirm button + the overlay
         // blocking content clicks) no newer modal can be opened before the
         // response, so a `created` response can never replace newer UI.
-        // Terra-R2 f2: disabling the modal's ×/Cancel does NOT stop Back/Forward
+        // Disabling the modal's ×/Cancel does NOT stop Back/Forward
         // or address-bar hash edits, which the shell router WOULD dispatch — so
         // also take the navigation lock, pinning the route until the handoff
         // completes. The lock is an ownership TOKEN so a stale cross-session
@@ -812,7 +812,7 @@
         var navLock = _navLockAcquire();
         _setModalDismissible(false);
 
-        // Terra-R3: bound recovery for an indefinitely pending request. callTool
+        // Bound recovery for an indefinitely pending request. callTool
         // cannot be aborted and timer-based coordination is banned (§3.3.2 r5), so
         // without this a stalled create pins the modal + navigation until reload.
         // The "Stop waiting" escape (revealed only now, while in flight) releases
@@ -854,7 +854,7 @@
             res = { status: 'error' };
         }
 
-        // Codex R1/R2/R3 finding 1 (HIGH): a returned credential must NEVER be
+        // A returned credential must NEVER be
         // orphaned across NAVIGATION (the server already persisted the token and
         // returned its one-time plaintext), but it must ALSO NOT repaint
         // privileged DOM once the SESSION has ended OR CHANGED. Two orderings:
@@ -870,7 +870,7 @@
             if (abandoned) {
                 // Locks were released and the modal is dismissible again, so
                 // deliver the secret ONLY while the create dialog is still open
-                // in-context. Terra-R4: a ×/Cancel dismissal only HIDES the modal
+                // in-context. A ×/Cancel dismissal only HIDES the modal
                 // (closeModal sets display:none) — it changes neither epoch nor
                 // _modalGen — so the staleness gate alone would let a late
                 // credential response REOPEN the secret after the operator explicitly
@@ -894,8 +894,8 @@
         }
 
         // Non-created (error / validation). If the operator stopped waiting they
-        // already have the recovery notice — drop silently. Otherwise Terra-R2
-        // f1: check OWNERSHIP before mutating the modal — a stale cross-session
+        // already have the recovery notice — drop silently. Otherwise
+        // check OWNERSHIP before mutating the modal — a stale cross-session
         // continuation must never re-enable a NEWER session's still-locked modal.
         // Under the modal + nav locks the only way we can lose the modal is a
         // session change: gen is held (no new modal can open while dismissal is
@@ -925,10 +925,9 @@
     // object below — never a data-* attribute, browser storage, or a log. It is
     // destroyed — the DOM node emptied AND the closure value zeroed so the Copy
     // button can no longer recover it — on EVERY exit path (acknowledge, Cancel,
-    // the × close), which closes the teardown gaps of Codex R1 finding 2 and is
-    // stronger than the §7.1.6/B3.7 accepted-residual floor (no shell change).
+    // the × close), so no later copy operation can recover the plaintext.
     function showTokenSecret(res) {
-        // The secret display takes its OWN nav lock (Terra-R2 f2 / R3): while the
+        // The secret display takes its OWN nav lock: while the
         // one-time plaintext is on screen, Back/Forward and hash edits are pinned
         // to this route so the secret can never be left rendered over a route the
         // operator navigated to. It is a fresh lock (not the create's), so the
@@ -989,7 +988,7 @@
             extra;
 
         // Zero the plaintext everywhere the UI could recover it from, and
-        // release the navigation lock (Terra-R2 f2): the one-time-secret handoff
+        // release the navigation lock: the one-time-secret handoff
         // is complete, so the route is free again. Runs on EVERY exit path
         // (acknowledge, Cancel, ×), so navigation is never left pinned. The
         // release is owner-scoped, so if a newer flow has since taken the lock
@@ -1037,11 +1036,11 @@
                 if (!holder.value) { showToast('warn', 'Token already cleared — create a new one'); return; }
                 // Session-aware copy: async Clipboard API first, then a
                 // synchronously-removed hidden-textarea execCommand fallback for
-                // non-secure / LAN contexts (§2.4.7, Codex R1 finding 4). Every
+                // non-secure / LAN contexts. Every
                 // completion effect is gated on the live holder value AND the
                 // route/modal/session captured now, so a post-dismissal,
                 // post-navigation, post-modal-swap, or post-wipe fulfilment
-                // cannot toast or rebuild the plaintext (Codex R5 f2 + Terra f1).
+                // cannot toast or rebuild the plaintext.
                 _copySecret(holder, AdminRouter.epoch, _modalGen, _sessionIdentity());
             });
         }
@@ -1360,7 +1359,7 @@
             var sessionAtCall = _sessionIdentity();
             var listRes;
             try { listRes = await callTool('space_list', {}); } catch (e) { listRes = null; }
-            // Codex R3 finding 2 + R4 finding 1: this await precedes opening the
+            // This await precedes opening the
             // edit modal, so drop it if the operator navigated away, opened another
             // modal, OR the session was wiped (wipeSession changes neither epoch
             // nor generation) — never pop a stale edit modal, least of all one
@@ -1484,7 +1483,7 @@
         try { res = await callTool('admin_update_token', args); } catch (e) { res = { status: 'error' }; }
         // Stale continuation (route changed, a newer modal replaced this one, OR
         // the session was wiped): drop without closing a newer modal or repainting
-        // a dead session's state (R2 finding 3 + R4 finding 1).
+        // a dead session's state.
         if (_isStale(epochAtCall, genAtCall, sessionAtCall)) return false;
 
         if (res && res.status === 'ok') {
@@ -1562,8 +1561,8 @@
         try { res = await callTool(tool, { token_hash: hash }); } catch (e) { res = { status: 'error' }; }
         // Stale (route changed, a newer modal replaced this one, OR the session
         // was wiped): drop WITHOUT closeModal()/toast/refresh, which would hide a
-        // newer modal or repaint a dead session's message (R2 finding 3 + R4
-        // finding 1). The mutation still committed server-side; the list reloads
+        // newer modal or repaint a dead session's message. The mutation still
+        // committed server-side; the list reloads
         // fresh on the next Access visit.
         if (_isStale(epochAtCall, genAtCall, sessionAtCall)) return;
 
@@ -1635,7 +1634,7 @@
         var res;
         try { res = await callTool('admin_purge_tokens', args); } catch (e) { res = { status: 'error' }; }
         // Stale continuation (route/modal change OR session wipe): drop without
-        // closing a newer modal or repainting a dead session (R2 f3 + R4 f1).
+        // closing a newer modal or repainting a dead session.
         if (_isStale(epochAtCall, genAtCall, sessionAtCall)) return false;
 
         if (res && res.status === 'ok') {

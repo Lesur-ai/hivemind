@@ -166,7 +166,7 @@ class TestGmProxyUrlSettings:
             _gm_settings(monkeypatch, "proxy.example.com:3128")
 
     def test_invalid_scheme_error_never_echoes_credentials(self, monkeypatch):
-        """R2/R3/R5 (Codex rounds 2-5): a credential-bearing INVALID value —
+        """A credential-bearing INVALID value —
         including a password containing raw '@' characters — must not leak
         its userinfo NOR its query/fragment (access_token=...) into the
         startup error message, on any pydantic echo surface — same rule as
@@ -453,7 +453,7 @@ class TestProxyRedaction:
         assert "fr4g" not in str(excinfo.value)
 
     def test_check_documents_recovered_proxy_error_is_redacted(self, monkeypatch):
-        """R1 fix (Codex #270 round 1): ``check_documents`` RECOVERS every S3
+        """``check_documents`` RECOVERS every S3
         failure into its returned payload instead of re-raising, so the
         method-level decorator never sees it — the recovered
         ``ProxyConnectionError`` text (raw credential-bearing proxy URL) must
@@ -486,7 +486,7 @@ class TestProxyRedaction:
     def test_raised_client_error_redacts_log_and_message(
         self, monkeypatch, capsys
     ):
-        """R6 (Codex round 6): the ``except ClientError`` blocks log ``{e}``
+        """The ``except ClientError`` blocks log ``{e}``
         BEFORE the decorator can rewrite the exception — both the stderr log
         emitted inside ``upload_document`` and the re-raised ``str()`` (the
         ingestion/MCP-facing text) must be free of userinfo, query, and

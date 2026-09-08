@@ -29,8 +29,8 @@ itself (attempt counting, deadline wall, cancellation) is proven independently
 of any adapter in ``tests/test_p13_inference_retry.py`` (P13-1A, #274) and is
 not re-tested here.
 
-Reuse note: adapted from the draft PR #273 slice (materially authored by
-``claude-fable-5``, Anthropic) on branch ``claude/p13-1-implementation-425762``.
+The shared HTTP emulator keeps these adapter checks independent of provider
+availability and implementation internals.
 """
 
 from __future__ import annotations
@@ -88,6 +88,7 @@ def openai_chat_profile(
     endpoint: str,
     *,
     temperature=None,
+    reasoning_effort=None,
     provider="openai-compatible",
     context_window=8192,
     max_output_tokens=128,
@@ -101,6 +102,7 @@ def openai_chat_profile(
         context_window=context_window,
         max_output_tokens=max_output_tokens,
         temperature=temperature,
+        reasoning_effort=reasoning_effort,
     )
     if provider in _DOCUMENTED_ENDPOINTS:
         object.__setattr__(profile, "endpoint", endpoint)
@@ -150,7 +152,13 @@ def embedding_profile(endpoint: str, *, dimensions=4, provider="openai-compatibl
     return profile
 
 
-def chat_request(*, timeout=5.0, max_output_tokens=None, retry_policy="bounded"):
+def chat_request(
+    *,
+    timeout=5.0,
+    max_output_tokens=None,
+    reasoning_effort=None,
+    retry_policy="bounded",
+):
     return ChatRequest(
         messages=(
             ChatMessage(role="system", content="You are terse."),
@@ -158,6 +166,7 @@ def chat_request(*, timeout=5.0, max_output_tokens=None, retry_policy="bounded")
         ),
         timeout_seconds=timeout,
         max_output_tokens=max_output_tokens,
+        reasoning_effort=reasoning_effort,
         retry_policy=retry_policy,
     )
 
@@ -2228,12 +2237,11 @@ class TestAnthropicJsonTotality:
 
 
 class TestOversizedUsageDegradesInsteadOfEscaping:
-    """Class-wide sibling sweep of the oversized-numeric finding: the same
-    provider-controlled magnitude problem exists in `usage` token counts, not
-    only in embedding components. An out-of-range count must degrade to absent
-    metadata (ADR-0027 keeps missing usage explicitly absent) rather than reach
-    the record constructor and escape the safe envelope as a raw ValueError —
-    and it must never discard an otherwise usable completion."""
+    """The provider-controlled magnitude problem also exists in `usage` token
+    counts, not only in embedding components. An out-of-range count must degrade
+    to absent metadata (ADR-0027 keeps missing usage explicitly absent) rather
+    than reach the record constructor and escape the safe envelope as a raw
+    ValueError — and it must never discard an otherwise usable completion."""
 
     HUGE = 10**400
 
@@ -2591,3 +2599,67 @@ class TestProxyContract:
         assert proxy.requests[0]["url"].startswith(
             "http://llm.p13-hivemind.invalid/v1/models"
         )
+
+
+class TestReasoningEffortWireShape:
+    """Wire payload tests for reasoning_effort."""
+
+    async def test_reasoning_effort_omitted_by_default(self):
+        async with InferenceEmulator() as origin:
+            profile = openai_chat_profile(origin.v1_url)
+            assert profile.reasoning_effort is None
+            provider = build_chat_provider(profile)
+            try:
+                await provider.complete(chat_request())
+            finally:
+                await provider.aclose()
+            body = origin.requests[0]["json"]
+            assert "reasoning_effort" not in body
+
+    async def test_reasoning_effort_included_when_configured_for_openai(self):
+        async with InferenceEmulator() as origin:
+            profile = openai_chat_profile(
+                origin.v1_url, provider="openai", reasoning_effort="high"
+            )
+            provider = build_chat_provider(profile)
+            try:
+                await provider.complete(chat_request())
+            finally:
+                await provider.aclose()
+            body = origin.requests[0]["json"]
+            assert body.get("reasoning_effort") == "high"
+
+    async def test_reasoning_effort_rejected_at_profile_construction_for_unsupported_provider(self):
+        with pytest.raises(ValueError, match="does not support reasoning effort"):
+            ResolvedChatProfile(
+                provider_id="cloud-temple",
+                adapter_id="openai-compatible",
+                endpoint="https://api.ai.cloud-temple.com/v1",
+                api_key="sk-test",
+                configured_model="Qwen/Qwen3.6-27B-FP8",
+                context_window=131072,
+                max_output_tokens=16384,
+                reasoning_effort="high",
+            )
+
+    async def test_reasoning_effort_request_override_rejected_for_unsupported_provider(self):
+        async with InferenceEmulator() as origin:
+            profile = openai_chat_profile(origin.v1_url, provider="cloud-temple")
+            provider = build_chat_provider(profile)
+            try:
+                with pytest.raises(InferenceError) as exc_info:
+                    await provider.complete(chat_request(reasoning_effort="high"))
+                assert exc_info.value.category == "invalid_request"
+            finally:
+                await provider.aclose()
+
+    async def test_reasoning_effort_request_override_rejected_for_anthropic(self):
+        async with InferenceEmulator() as origin:
+            profile = anthropic_chat_profile(origin.url)
+            provider = build_chat_provider(profile)
+            try:
+                with pytest.raises(InferenceError) as exc_info:
+                    await provider.complete(chat_request(reasoning_effort="high"))
+                assert exc_info.value.category == "invalid_request"
+            finally:
+                await provider.aclose()

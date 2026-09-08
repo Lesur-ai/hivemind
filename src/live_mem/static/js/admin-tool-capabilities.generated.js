@@ -338,6 +338,69 @@ const HIVEMIND_TOOL_CAPABILITIES = Object.freeze({
     "operation": "mutation",
     "space_scope_argument": "space_id"
   },
+  "ontology_list": {
+    "canonical": "ontology_list",
+    "audience": "operator",
+    "minimum_permission": "read",
+    "operation": "read",
+    "space_scope_argument": "space_id"
+  },
+  "ontology_get": {
+    "canonical": "ontology_get",
+    "audience": "operator",
+    "minimum_permission": "read",
+    "operation": "read",
+    "space_scope_argument": "space_id"
+  },
+  "ontology_validate": {
+    "canonical": "ontology_validate",
+    "audience": "operator",
+    "minimum_permission": "read",
+    "operation": "read",
+    "space_scope_argument": "space_id"
+  },
+  "long_ingest_async": {
+    "canonical": "long_ingest_async",
+    "audience": "operator",
+    "minimum_permission": "manage",
+    "operation": "mutation",
+    "space_scope_argument": "space_id"
+  },
+  "long_ingest_status": {
+    "canonical": "long_ingest_status",
+    "audience": "operator",
+    "minimum_permission": "read",
+    "operation": "read",
+    "space_scope_argument": "space_id"
+  },
+  "long_ingest_list": {
+    "canonical": "long_ingest_list",
+    "audience": "operator",
+    "minimum_permission": "read",
+    "operation": "read",
+    "space_scope_argument": "space_id"
+  },
+  "long_ingest_cancel": {
+    "canonical": "long_ingest_cancel",
+    "audience": "operator",
+    "minimum_permission": "write",
+    "operation": "mutation",
+    "space_scope_argument": "space_id"
+  },
+  "long_document_list": {
+    "canonical": "long_document_list",
+    "audience": "operator",
+    "minimum_permission": "read",
+    "operation": "read",
+    "space_scope_argument": "space_id"
+  },
+  "long_document_get": {
+    "canonical": "long_document_get",
+    "audience": "operator",
+    "minimum_permission": "read",
+    "operation": "read",
+    "space_scope_argument": "space_id"
+  },
   "inference_self_test": {
     "canonical": "inference_self_test",
     "audience": "operator",

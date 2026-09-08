@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""P6-8 release-gate smoke-script lint (Codex P6-8 review #2).
+"""Release-gate smoke-script lint.
 
 The earlier ``scripts/release_smoke.sh`` shipped with three blocking bugs
 that this lint guards against in CI:
@@ -127,7 +127,7 @@ def test_script_is_executable() -> None:
 def test_script_fails_closed_when_bootstrap_token_unset() -> None:
     """The script MUST exit non-zero when HIVEMIND_BOOTSTRAP_TOKEN is unset.
 
-    Codex P6-8 review #2: the earlier code path logged a warning and
+    The earlier code path logged a warning and
     exited 0, producing a false-green. We assert the textual pattern of
     the fail-closed block — the script must:
       - test ``-z "${HIVEMIND_BOOTSTRAP_TOKEN:-}"`` (or equivalent)
@@ -143,7 +143,7 @@ def test_script_fails_closed_when_bootstrap_token_unset() -> None:
     ), (
         "scripts/release_smoke.sh must contain a fail-closed guard of the "
         "form `if [ -z \"${HIVEMIND_BOOTSTRAP_TOKEN:-}\" ]; then ... exit "
-        "1; fi`. Codex P6-8 review #2: the earlier `exit 0` path produced "
+        "1; fi`. The earlier `exit 0` path produced "
         "a false-green."
     )
 
@@ -166,7 +166,7 @@ def test_script_fails_closed_when_bootstrap_token_unset() -> None:
     )
 
     # And the failure message must point operators at a REAL remediation
-    # path. P7-5 round-1 Codex review: the previously referenced
+    # path. The previously referenced
     # `scripts/bootstrap_admin_token.sh` helper does not exist in the repo;
     # the real mechanisms are the compose-injected ADMIN_BOOTSTRAP_KEY and
     # the admin_create_token MCP tool.
@@ -178,7 +178,7 @@ def test_script_fails_closed_when_bootstrap_token_unset() -> None:
     )
     assert not re.search(r"bootstrap[_-]admin[_-]token", body, re.IGNORECASE), (
         "fail-closed guard must not reference the nonexistent "
-        "scripts/bootstrap_admin_token.sh helper (P7-5 round-1 finding)."
+        "scripts/bootstrap_admin_token.sh helper."
     )
 
 
@@ -217,7 +217,7 @@ def test_script_calls_only_registered_tools() -> None:
 def test_short_note_call_uses_required_arguments() -> None:
     """`short_note` must pass `space_id`, `category`, and `content`.
 
-    Codex P6-8 review #2: the earlier call used `{"text":"smoke note"}`
+    The earlier call used `{"text":"smoke note"}`
     which mismatches the live ``live_note`` signature (``space_id`` +
     ``category`` + ``content``).
     """
@@ -248,10 +248,9 @@ def test_short_note_asserts_real_created_contract() -> None:
     """`short_note` success is `status == "created"`, never `"ok"` (P7-9).
 
     The real note-creation contract (``src/live_mem/core/live.py``) returns
-    ``"created"``. The P7-5 script asserted ``!= "ok"`` and therefore failed
-    against a healthy stack — same defect class as the ``space_create``
-    contract finding from the P7-5 Codex round 1, missed on ``short_note``
-    and never re-proven because the smoke is operator-run, not CI-run.
+    ``"created"``. Asserting ``!= "ok"`` would fail against a healthy
+    stack, just as using incorrect ``space_create`` success statuses would.
+    The smoke is operator-run; offline checks guard this contract as well.
     This anchor makes a regression to the wrong contract RED at lint time.
     """
     import re as _re
@@ -272,7 +271,7 @@ def test_short_note_asserts_real_created_contract() -> None:
 
 
 def test_long_tier_call_is_a_registered_long_tool() -> None:
-    """Codex P6-8 review #2: `long_search` does not exist.
+    """`long_search` does not exist.
 
     The script must call one of the registered long-tier tools — typically
     ``long_status`` (lightweight, accepts the disabled-state shape per
@@ -289,7 +288,7 @@ def test_long_tier_call_is_a_registered_long_tool() -> None:
     for tool in long_tools_called:
         assert tool in surface, (
             f"release_smoke.sh calls long-tier tool {tool!r} which is NOT "
-            f"in tests/fixtures/tool_surface.json. Codex P6-8 review #2: "
+            f"in tests/fixtures/tool_surface.json. "
             f"`long_search` is the historical example; pick one of "
             f"{sorted(t for t in surface if t.startswith('long_'))}"
         )

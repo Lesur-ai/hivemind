@@ -275,9 +275,43 @@ admin/bootstrap lifecycle must use `admin_create_token` or `admin_update_token`.
 ### How does consolidation work?
 
 1. The LLM reads the **rules**, the **current bank**, the **previous synthesis**, and the **live notes**
-2. It produces updated bank files (pure Markdown)
-3. Consolidated notes are **deleted** from `live/`
+2. It proposes Markdown edits and a disposition for every note: integrated or explicitly discarded with a supported reason
+3. Hivemind validates the batch before writes, checks persisted results and then deletes the successfully processed notes from `live/`
 4. A residual synthesis is saved
+
+Malformed replies can receive one corrective model call; transient chat
+failures have a separate, bounded retry budget shared across generation and
+correction. These checks improve completion and traceability, not the semantic
+accuracy of a summary. A storage failure can leave earlier writes applied:
+normal consolidation has no batch-wide rollback, and the failed batch's source
+notes are retained. Inspect a `partial` result before deciding on another run.
+
+### Will my French bank stay in French after upgrading to v1.5.0?
+
+Not necessarily. The model is instructed to write generated bank prose and the
+residual synthesis in English, even with French rules or notes. Required
+headings, exact terminology, identifiers, URLs and quotations are preserved;
+untouched content is not translated solely to change its language. An existing
+French bank can become bilingual as it is updated.
+`CONSOLIDATION_LEGACY_FRENCH_PROMPTS` was removed and any remaining value is
+ignored. Back up and test a representative copy before upgrading a
+language-sensitive workflow.
+
+### Why can a consolidation job take so long?
+
+The 1800-second default timeout applies to each model call, not the entire job.
+Each batch can make up to five main/correction calls, including three transient
+retries with waits of 60, 120 and 300 seconds. That permits up to **2 h 38 min
+per batch** before auxiliary work; it is a worst-case budget, not a latency
+promise. Extra calls may be billed, and timed-out requests may have no reported
+token usage. `CONSOLIDATION_TRANSIENT_RETRIES=0` disables transient retries,
+not the single corrective call for an unusable response.
+
+During a retry wait the job stays `running` with `phase="batch_retry_wait"`.
+The same-space lock remains held: later consolidations queue, and manual
+compaction or GC may refuse work while it is busy. Other spaces have separate
+lanes. Submit once and use a manual status check only when needed; see the
+[MCP reference](docs/MCP_TOOLS_SPEC.md) for progress fields and the full budget.
 
 ### What happens if 2 agents consolidate at the same time?
 
@@ -299,7 +333,13 @@ permission level.
 
 ### What happens to notes after consolidation?
 
-They are **deleted** from `live/`. Their content is integrated into bank files. This is irreversible (hence the value of backups).
+Successfully processed notes are **deleted** from `live/`: the model either
+attributes them to a bank edit or explicitly discards them as already present,
+superseded, obsolete, or without bank value. Job results distinguish integrated
+and discarded notes and include discard reasons. Source notes of an unprocessed
+or incompletely written batch are retained. Deletion is not a semantic proof
+that every fact survived in the summary; keep backups and authoritative source
+records separately.
 
 ### Can the consolidator invent content (hallucinate)?
 
@@ -319,8 +359,9 @@ uv run pytest tests/test_issue17_validation.py
 ```
 
 **If you see unsupported content**, report it on the
-[Hivemind issue tracker](https://github.com/Lesur-ai/hivemind/issues) with the
-notes and bank output.
+[Hivemind issue tracker](https://github.com/Lesur-ai/hivemind/issues) with a
+minimal, redacted reproduction. Do not post credentials, private notes or
+customer data; use synthetic notes and bank excerpts where possible.
 
 ### How do I find which banks need consolidation across many spaces?
 
@@ -348,9 +389,13 @@ result is deterministic and independent of clock drift between agents.
 
 ### What is bank compaction (`bank_compact`)?
 
-When bank files grow too large (> `BANK_FILE_MAX_SIZE`, default 15 KB), they may cause consolidation failures (LLM context window overflow) or slow performance.
+When bank files grow too large (> `BANK_FILE_MAX_SIZE`, default 35 000 bytes), a consolidation only **reports** them: one WARNING log line and a `bank_size_advisory` list in the job result (console job inspectors, CLI). Compaction is a **human decision**: you choose when to summarize your files further; a size warning never triggers compaction automatically.
 
-`bank_compact` summarizes oversized files via a dedicated LLM call, preserving key decisions and milestones while removing obsolete details.
+`bank_compact` asks the LLM to summarize oversized files while preserving key
+decisions and milestones. This is not a guarantee of semantic preservation:
+review the result. Apply is DirectLocal-only, and this release provides neither
+multipart compaction nor crash-durable automatic recovery. See the
+[MCP reference](docs/MCP_TOOLS_SPEC.md) before applying.
 
 ```bash
 # Scan only (dry-run, default)
@@ -360,7 +405,7 @@ uv run python scripts/mcp_cli.py bank compact my-space
 uv run python scripts/mcp_cli.py bank compact my-space --apply
 ```
 
-**Auto-compaction** is also triggered automatically before consolidation if the bank exceeds `COMPACT_THRESHOLD` (default 60%) of the LLM's output budget.
+`bank_compact` is an MCP tool (manage permission): any MCP client — an agent acting on a human instruction, the console's Compact button or the CLI above — can run it. There is no automatic compaction any more; the former `COMPACT_THRESHOLD` setting is gone and a leftover value is ignored.
 
 ### Can I use an HTTP proxy for outbound connections?
 
@@ -573,12 +618,22 @@ uv run python scripts/mcp_cli.py token update sha256:xxx -s "space-a,space-b"
 
 ### Consolidation fails with "LLM returned invalid JSON"
 
-Probable cause: the bank is too large. The LLM has a limited context window and may fail on long JSON responses.
+A response can be malformed or truncated because of model behavior or context
+and output limits; this message alone does not prove the bank is too large.
+Normal consolidation already attempts one model correction.
 
-**Solutions**:
-1. Compact the bank: `bank_compact my-space --apply`
-2. Check sizes: `bank_list my-space` — if a file exceeds 15 KB, it's a compaction candidate
-3. Retry consolidation after compaction
+**Next steps**:
+
+1. Inspect the job's `failure_reason`, `failed_batch` and safe diagnostics, then verify provider credentials, context/output limits and the effective model profile.
+2. Check bank sizes and `bank_size_advisory`. If compaction is appropriate, back up first and inspect a dry-run with `uv run python scripts/mcp_cli.py bank compact my-space`; apply is a separate human decision and is DirectLocal-only.
+3. Inspect any `partial` result and retained notes before deliberately starting another consolidation. Do not repeatedly resubmit a failed job or assume a timeout rolled back earlier work.
+
+### Why does manual compaction find no candidate files?
+
+`bank_compact` selects individual files above `BANK_FILE_MAX_SIZE` (35 000
+UTF-8 bytes by default), not a bank whose aggregate size exceeds that value.
+Inspect the dry-run and `bank_size_advisory` before deciding on an apply. A
+file below the threshold is not a candidate, even if another operation failed.
 
 ### `mid_consolidate` returns "queued"
 
@@ -588,9 +643,13 @@ Another agent (or yourself in another terminal) is consolidating the same space.
 
 ### I can't find my notes after consolidation
 
-That's normal! Notes are **deleted** from `live/` after consolidation. Their content is integrated into bank files. Use `mid_read_all` to find the consolidated content.
-
-If you think notes were lost, check the residual synthesis: `space_summary my-space`.
+Check the job's integrated/discarded counts and discard reasons, then use
+`mid_read_all` to inspect the bank and `space_summary` for the residual
+synthesis. Successfully processed notes are removed from `live/`; not every
+removed note necessarily produced a bank edit. Neither a success status nor
+the synthesis proves that every source fact was preserved. If important
+content is missing, compare with your source records or backups before making
+further changes, and report a redacted reproduction.
 
 ---
 

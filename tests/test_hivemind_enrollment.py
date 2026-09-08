@@ -813,7 +813,7 @@ def test_private_key_never_in_enrollment_models() -> None:
 
 
 # =============================================================================
-# 22-24 — Scopes ENFORCÉS sur le peer channel (Finding 1, ADR-0016)
+# 22-24 — Scopes ENFORCÉS sur le peer channel (ADR-0016)
 # =============================================================================
 
 
@@ -990,7 +990,7 @@ def test_required_scope_mapping_floor_is_read() -> None:
 
 
 # =============================================================================
-# 25-26 — Reconcile ATOMIQUE / fail-closed (Finding 2, ADR-0008)
+# 25-26 — Reconcile ATOMIQUE / fail-closed (ADR-0008)
 # =============================================================================
 
 
@@ -1389,7 +1389,7 @@ async def test_reconcile_detects_stale_plan_and_fails_closed(seeded) -> None:
 
 
 async def test_reconcile_replaces_sole_active_member_succeeds(seeded) -> None:
-    """MINOR (Codex) : remplacer le SEUL membre actif (revoke nodeA + add nodeB
+    """Remplacer le SEUL membre actif (revoke nodeA + add nodeB
     avec une clé DIFFÉRENTE) réussit désormais — l'application atomique pose la
     vue cible {nodeB ACTIVE, nodeA EVICTED} en une fois, sans jamais traverser
     un état « zéro actif » qui déclencherait la garde dernier-actif."""

@@ -9,9 +9,9 @@ unsourced-claim detector produces the expected verdict.
 Convention: ``test_FIXNAME_blocks_ATTACK`` when the test proves that a
 fake claim is correctly detected (proof by contraposition).
 
-Note: French and English test strings are intentional — consolidation can
-produce either language across the v1.4.0 compatibility boundary, so the
-validator must recognize both without changing its conservative scope.
+Note: French and English test strings are intentional — existing banks may
+contain French prose and the historical ``[inféré]`` marker, so the validator
+must recognize both without changing its conservative scope.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import pytest
 from live_mem.core.consolidator import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_ENGLISH,
-    SYSTEM_PROMPT_FRENCH,
     _validate_unattributed_claims,
     _extract_claim_tokens,
     _has_strong_status_claim,
@@ -356,10 +355,6 @@ class TestSystemPromptRule8:
         # This protects against prompt regressions that would strip the
         # examples (crucial for smaller models).
         assert "Migration complete [inferred]" in SYSTEM_PROMPT
-
-    def test_legacy_french_rule_8_remains_available(self):
-        assert "INFÉRENCE TRANSITIVE" in SYSTEM_PROMPT_FRENCH
-        assert "Migration terminée [inféré]" in SYSTEM_PROMPT_FRENCH
 
 
 # =============================================================================

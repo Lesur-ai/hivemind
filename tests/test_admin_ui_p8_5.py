@@ -1,32 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-P8-5 (#143) — Access view contract pins.
+Access view contract pins.
 
 MOST tests here are static source-inspection (import-light, per tests/conftest.py
-venv constraints and contract §7.2.1): they read the shipped frontend source and
+environment constraints): they read the shipped frontend source and
 assert the data-honesty, security, destructive-UX, and copy invariants of the
-Access view WITHOUT a browser. Convention (like ADM-01): each test tries to
+Access view WITHOUT a browser. Each test tries to
 break an invariant, not validate a happy path.
 
 Those static pins fix the *shape* of the one-time-secret create/secret
-async-lifecycle guards (statement ordering, which signal each branch reads). The
-Terra R2–R4 adversarial reviews flagged that they cannot fix the *behaviour* —
-that the deferred `admin_create_token` promise, resolving at a hostile moment,
-actually does or doesn't surface the secret / re-enable the modal / revert the
+async-lifecycle guards (statement ordering, which signal each branch reads).
+They cannot prove the *behaviour* — that the deferred `admin_create_token`
+promise, resolving at a hostile moment, actually does or doesn't surface the
+secret / re-enable the modal / revert the
 route. TestP85AsyncLifecycleRuntime closes that residual with an EXECUTABLE
-deferred-promise regression harness: scenarios A–G (browser-proofed but never
-committed in commits 27d559e / 0a2fc0b / 140d054 on the P8-5 branch), plus H
-(a `created` response resolving after a session boundary must suppress the prior
-session's one-time token — covers the create-branch `_sessionEnded` guard) and I
-(async-queued hashchange fidelity — the queued nav-lock revert pins the route
-while a create is pending). H and I were added per the Terra PR #167 review.
+deferred-promise regression harness: scenarios A–G cover modal and navigation
+ownership. Scenario H checks that a `created` response resolving after a session
+boundary suppresses the prior session's one-time token through `_sessionEnded`.
+Scenario I checks queued hashchange fidelity: the queued navigation-lock revert
+pins the route while a create is pending.
 
 DECISION — pytest via a subprocess `node` runner, NOT a separate JS test target.
 The repo has no package.json / npm test surface; the `pytest tests` CI job runs
 with Node 24 on PATH (actions/setup-node@v6). A dependency-free `node:vm` harness
 (tests/js/admin_access_lifecycle_runtime.mjs, no jsdom) loads the REAL
 views-access.js with faithful shell-global stubs and drives the async lifecycle;
-this wrapper only shells out, so the import-light §7.2.1 constraint is preserved.
+this wrapper only shells out, so it remains import-light.
 This mirrors the two sibling harnesses already wired the same way
 (tests/js/admin_session_generation_runtime.mjs via test_admin_session_generation,
 tests/js/admin_audit_state_runtime.mjs via test_admin_ui_p8_6).
@@ -34,11 +33,7 @@ tests/js/admin_audit_state_runtime.mjs via test_admin_ui_p8_6).
 A node:vm harness stubs the shell, so it cannot prove behaviours the real shell
 owns (e.g. single in-flight create — the shell disables the confirm button before
 awaiting onConfirm). That real-shell layer is proved directly by the dedicated
-Playwright CI job through tests/e2e/admin_access_create.spec.mjs, added per the
-Terra PR #167 review.
-
-Contract: DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §3.1.4, §3.3.2, §4.4, §5.0,
-§5.7, §6.4, §6.5, §7.1, §7.4, §8.
+Playwright suite through tests/e2e/admin_access_create.spec.mjs.
 """
 
 import re
@@ -389,13 +384,13 @@ class TestOneTimeSecret:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Codex R1 (PR #158) findings — regression pins for the fixes
+# Secret delivery, session isolation, and stale-continuation regression guards
 # ═══════════════════════════════════════════════════════════════
 
 
-class TestCodexR1Fixes:
+class TestSecretDeliveryAndSessionIsolation:
     def test_created_response_never_dropped_on_navigation(self):
-        """Finding 1 (HIGH): a successful `admin_create_token` response must
+        """A successful `admin_create_token` response must
         surface the one-time secret UNCONDITIONALLY — the epoch stale-drop must
         never run before the `created` check, or navigating away mid-request
         would orphan the only plaintext of the credential (§7.1.6, never-orphan).
@@ -406,21 +401,21 @@ class TestCodexR1Fixes:
         created_idx = body.index("status === 'created'")
         secret_idx = body.index("showTokenSecret(res)")
         # The error path's ownership bail guards only the non-created branch. It
-        # no longer keys on epoch (Terra-R2 f1 — see TestTerraR2Fixes), but the
+        # excludes epoch (see TestCreateFlowOwnership), but the
         # ORDERING invariant is unchanged: created-handling comes first, so a
         # created response is never dropped for a route change (never-orphan).
         stale_drop_idx = body.index("_modalGen !== genAtCall")
         assert created_idx < stale_drop_idx, (
             "onCreateConfirm drops the response as stale before checking "
-            "status === 'created' — a created token could be orphaned (finding 1)."
+            "status === 'created' — a created token could be orphaned."
         )
         assert secret_idx < stale_drop_idx, (
             "showTokenSecret must be reachable for a created response regardless "
-            "of the stale-drop guard (finding 1)."
+            "of the stale-drop guard."
         )
 
     def test_created_secret_guarded_against_session_end_or_change(self):
-        """Codex R2+R3 finding 1 (HIGH): a `created` response must not repaint the
+        """A `created` response must not repaint the
         secret if the session ended (logout, overlay visible) OR changed
         (logout+re-login, identity reference changed). The created branch drops
         via _sessionEnded, before showTokenSecret; route changes still show it."""
@@ -456,7 +451,7 @@ class TestCodexR1Fixes:
         )
 
     def test_all_awaiting_continuations_are_session_aware(self):
-        """Codex R4 finding 1 (HIGH): EVERY awaiting modal/mutation continuation
+        """EVERY awaiting modal/mutation continuation
         must be session-bound (capture a live identity and route it through the
         session-aware _isStale / _sessionEnded), so a response that resolves
         while logged out cannot resurrect a modal, toast, or table from the dead
@@ -482,7 +477,7 @@ class TestCodexR1Fixes:
             )
 
     def test_edit_space_list_await_guarded_by_generation(self):
-        """Codex R3 finding 2 (MEDIUM): openEditModal awaits space_list BEFORE
+        """openEditModal awaits space_list BEFORE
         opening its modal; the post-await guard must check modal generation (via
         _isStale), not only route epoch, or a pending space_list can pop a stale
         edit modal over a newer same-view modal."""
@@ -495,11 +490,11 @@ class TestCodexR1Fixes:
         assert m, "no guard found after the space_list await."
         assert "_isStale(" in m.group(1), (
             "the space_list guard must use _isStale (route epoch AND modal "
-            "generation), not a bare epoch check (finding 2 R3)."
+            "generation), not a bare epoch check."
         )
 
     def test_secret_destroyed_on_every_exit_path(self):
-        """Finding 2 (HIGH): the plaintext must be zeroed on acknowledge, Cancel,
+        """The plaintext must be zeroed on acknowledge, Cancel,
         and the × close — DOM node emptied AND the closure value neutralized so
         the Copy button can no longer recover it."""
         src = _access()
@@ -519,11 +514,11 @@ class TestCodexR1Fixes:
         # Cancel/× close controls are wired to destroySecret.
         assert 'querySelectorAll(\'[data-action="close-modal"]\')' in body
         assert "addEventListener('click', destroySecret)" in body, (
-            "the Cancel and × controls must run destroySecret on dismissal (finding 2)."
+            "the Cancel and × controls must run destroySecret on dismissal."
         )
 
     def test_secret_copy_gated_on_liveness_and_full_staleness(self):
-        """Codex R1 f4 + R5 f2 + Terra-R1 f1: the one-time-secret Copy must have a
+        """The one-time-secret Copy must have a
         non-secure-context execCommand fallback (§2.4.7) AND gate every completion
         effect (toast, fallback textarea) on BOTH the secret still being live
         (holder.value non-empty — destroySecret zeroes it on dismiss) AND full
@@ -543,19 +538,19 @@ class TestCodexR1Fixes:
         # The completion gate checks liveness AND full staleness.
         assert "!holder.value || _isStale(epochAtCopy, genAtCopy, sessionAtCopy)" in body, (
             "every completion effect must drop if the secret was destroyed OR the "
-            "route/modal/session changed (Terra-R1 f1)."
+            "route/modal/session changed."
         )
         # The gate (stale()) runs before the fallback textarea is built.
         assert body.index("function stale()") < body.index("createElement('textarea')")
         assert "if (stale()) return;" in body
 
     def test_pending_create_is_exclusive_non_dismissible(self):
-        """Terra-R1 f2: while an admin_create_token request is in flight, the
+        """While an admin_create_token request is in flight, the
         Create modal is locked non-dismissible (×/Cancel disabled) so no newer
         modal can open before the response — a `created` response can never
         replace newer UI, while never-orphan is preserved (the secret is shown,
         never dropped). Dismissal is restored on the error path for retry, and on
-        the Terra-R3 operator "Stop waiting" escape — but NEVER inside the created
+        the operator "Stop waiting" escape — but NEVER inside the created
         branch, which transitions straight to the secret step."""
         src = _access()
         assert "function _setModalDismissible(on)" in src
@@ -626,7 +621,7 @@ class TestGatingAndEpoch:
         assert "loadTokens" not in manager.group(1)
 
     def test_every_awaiting_continuation_is_guarded(self):
-        """§3.3.2 rule 3 + Codex R2 finding 3: every function that awaits a tool
+        """Every function that awaits a tool
         call must, before touching the DOM/modal, drop stale continuations —
         either an inline route-epoch check, the combined _isStale() guard (route
         epoch OR modal generation), or, for the create success path, the
@@ -658,7 +653,7 @@ class TestGatingAndEpoch:
             )
 
     def test_isstale_checks_both_epoch_and_generation(self):
-        """Codex R2 finding 3: route epoch alone cannot detect a same-view modal
+        """Route epoch alone cannot detect a same-view modal
         swap. _isStale must also compare the modal generation, and every modal
         this view opens must bump it (via the _openModal/_openDestructive
         wrappers), so a stale continuation can only ever close its own modal."""
@@ -670,7 +665,7 @@ class TestGatingAndEpoch:
             "_isStale must compare BOTH the route epoch and the modal generation."
         )
         assert "_sessionEnded(sessionAtCall)" in body, (
-            "_isStale must ALSO include the session signal (Codex R4) — wipeSession "
+            "_isStale must ALSO include the session signal — wipeSession "
             "changes neither epoch nor generation."
         )
         # No modal is opened by the view except through the generation wrappers,
@@ -687,7 +682,7 @@ class TestGatingAndEpoch:
         )
 
     def test_stale_mutation_does_not_close_a_newer_modal(self):
-        """Codex R2 finding 3: the stale branches must NOT call closeModal() or
+        """The stale branches must NOT call closeModal() or
         return true (which makes the shell close the — possibly newer — modal)."""
         src = _access()
         # runMutation's stale branch drops without closeModal().
@@ -702,9 +697,9 @@ class TestGatingAndEpoch:
             assert re.search(r"if \(_isStale\([^)]*\)\) return false;", body), (
                 f"{fn} must return false (not true) on a stale continuation."
             )
-        # onCreateConfirm's guard is the gen+session OWNERSHIP bail (Terra-R2 f1:
-        # epoch is deliberately excluded because the nav-lock's hash-revert churns
-        # it). It must also return false — never true, never closeModal — so a
+        # onCreateConfirm's guard is the gen+session OWNERSHIP bail.
+        # Epoch is deliberately excluded because the nav-lock's hash-revert churns
+        # it. The guard must return false — never true, never closeModal — so a
         # stale cross-session continuation cannot close a newer session's modal.
         cc = _fn_body(src, "onCreateConfirm")
         assert re.search(
@@ -768,32 +763,32 @@ class TestEscaping:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Terra-R2 async-lifecycle fixes (create flow owns modal AND navigation)
+# Async lifecycle: the create flow owns modal AND navigation
 # ═══════════════════════════════════════════════════════════════
 
 
-class TestTerraR2Fixes:
-    """Terra (gpt-5.6-terra, high) round 2 — the exclusive create flow owns the
-    modal AND navigation. f1: the error path runs the ownership check BEFORE
+class TestCreateFlowOwnership:
+    """The exclusive create flow owns the modal AND navigation.
+    The error path runs the ownership check BEFORE
     re-enabling dismissal (else a stale cross-session failure re-enables a newer
-    session's locked modal). f2: browser Back/Forward and address-bar hash edits
+    session's locked modal). Browser Back/Forward and address-bar hash edits
     bypassed the modal lock, so a late `created` could surface the secret over a
     different route — a per-request navigation lock pins the route instead."""
 
     def test_error_path_checks_ownership_before_re_enabling_dismissal(self):
-        """f1: the non-created (error) path runs the gen+session ownership check
+        """The non-created (error) path runs the gen+session ownership check
         BEFORE any modal mutation — a stale cross-session continuation must never
         re-enable a newer session's still-locked modal (×/Cancel)."""
         src = _access()
         body = _fn_body(src, "onCreateConfirm")
         bail_idx = body.index("_modalGen !== genAtCall || _sessionEnded(sessionAtCall)")
         # The ERROR-path re-enable is the LAST _setModalDismissible(true); the
-        # earlier one is the Terra-R3 "Stop waiting" escape handler, not the
+        # earlier one is the "Stop waiting" escape handler, not the
         # error path, so compare against the last occurrence.
         unlock_idx = body.rindex("_setModalDismissible(true)")
         assert bail_idx < unlock_idx, (
             "the gen+session ownership bail must run BEFORE the error-path "
-            "_setModalDismissible(true) (f1)."
+            "_setModalDismissible(true)."
         )
         assert re.search(
             r"if \(_modalGen !== genAtCall \|\| _sessionEnded\(sessionAtCall\)\) "
@@ -802,26 +797,26 @@ class TestTerraR2Fixes:
         ), "the ownership bail must release the nav lock and return false without unlocking."
 
     def test_error_path_ownership_check_excludes_epoch(self):
-        """f1 corollary: the ERROR path's ownership check must NOT key on route
+        """The ERROR path's ownership check must NOT key on route
         epoch — the nav-lock hash-revert churns epoch (Back → dispatch → revert →
         dispatch) while the modal remains ours, so keying on epoch would strand a
         still-owned modal. (The abandoned-created path DOES use full staleness,
         but only after the escape releases the nav lock so the route can genuinely
-        change there — see TestTerraR3Fixes.)"""
+        change there — see TestSessionBoundNavigationRecovery.)"""
         src = _access()
         body = _fn_body(src, "onCreateConfirm")
         err_region = body[body.index("// Non-created"):]
         assert "_isStale(" not in err_region, (
-            "the error path must not use _isStale (epoch) — gen+session only (f1)."
+            "the error path must not use _isStale (epoch) — gen+session only."
         )
         assert "AdminRouter.epoch" not in err_region, (
             "the error path must not read route epoch — the nav-lock revert churns it."
         )
 
     def test_nav_lock_is_an_ownership_token(self):
-        """f2: the navigation lock is a per-request OWNERSHIP token, so a stale
+        """The navigation lock is a per-request OWNERSHIP token, so a stale
         cross-session continuation can only ever release its OWN lock — never a
-        newer request's lock (the companion invariant to the f1 ordering fix)."""
+        newer request's lock, complementing the error-path ownership check."""
         src = _access()
         assert "var _navLock = null;" in src, "module-level nav-lock state missing."
         acquire = _fn_body(src, "_navLockAcquire")
@@ -836,7 +831,7 @@ class TestTerraR2Fixes:
         )
 
     def test_hashchange_reverts_locked_route(self):
-        """f2: while the lock is held and its owning session is current, an
+        """While the lock is held and its owning session is current, an
         off-route hash change is reverted to the locked route, pinning the flow's
         context so a late secret cannot surface over a navigated-to route."""
         src = _access()
@@ -854,7 +849,7 @@ class TestTerraR2Fixes:
         )
 
     def test_create_acquires_nav_lock_before_await(self):
-        """f2: the lock must be taken BEFORE the create request is awaited (in the
+        """The lock must be taken BEFORE the create request is awaited (in the
         same synchronous run as disabling dismissal), so no navigation can slip in
         between the request starting and the response arriving."""
         src = _access()
@@ -868,12 +863,12 @@ class TestTerraR2Fixes:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Terra-R3 async-lifecycle fixes (lock cannot outlive its session or a hung req)
+# Async lifecycle: locks cannot outlive their session or a stalled request
 # ═══════════════════════════════════════════════════════════════
 
 
-class TestTerraR3Fixes:
-    """Terra round 3 — the navigation lock must not survive a session boundary or
+class TestSessionBoundNavigationRecovery:
+    """The navigation lock must not survive a session boundary or
     an indefinitely-pending request and trap a later session on the old route.
     (1) The lock is bound to its owning session and self-heals across any wipe.
     (2) A timer-free operator escape recovers a stalled create without orphaning
@@ -945,8 +940,8 @@ class TestTerraR3Fixes:
         """The escape must NOT orphan a still-deliverable secret: while abandoned,
         a `created` response is still delivered if the operator is still in the
         exact create context (full staleness clean), and only dropped — pre-warned
-        — if they navigated or opened another modal (which would be a Terra-R2 f2
-        out-of-context pop)."""
+        — if they navigated or opened another modal, avoiding an out-of-context
+        secret popup."""
         src = _access()
         body = _fn_body(src, "onCreateConfirm")
         created = re.search(
@@ -961,7 +956,7 @@ class TestTerraR3Fixes:
         assert created.index("if (abandoned)") < created.index("showTokenSecret(res)")
 
     def test_abandoned_created_dropped_after_dialog_dismissed(self):
-        """Terra-R4: after 'Stop waiting' re-enables ×/Cancel, a dialog dismissal
+        """After 'Stop waiting' re-enables ×/Cancel, a dialog dismissal
         only HIDES the modal (closeModal → display:none) without changing epoch or
         _modalGen, so the staleness gate alone would let a late `created` REOPEN
         the secret after explicit dismissal. The abandoned-created path must also
@@ -1013,23 +1008,21 @@ class TestTerraR3Fixes:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Executable async-lifecycle regression harness (P8-7 integration proof)
+# Executable async-lifecycle regression harness
 # ═══════════════════════════════════════════════════════════════
 
 
 class TestP85AsyncLifecycleRuntime:
-    """The static pins above fix the SHAPE of the create/secret async guards; the
-    Terra R2–R4 reviews GO'd the PR but flagged that no COMMITTED test drives the
-    deferred `admin_create_token` promise to a hostile resolution and asserts the
-    resulting behaviour. tests/js/admin_access_lifecycle_runtime.mjs is that
-    test: a dependency-free node:vm harness that loads the real views-access.js
-    with faithful shell-global stubs and exercises the browser-proof scenarios
-    A–G (commits 27d559e / 0a2fc0b / 140d054, branch
-    claude/p8-5-implementation-3cb723, PR #158) plus H (cross-session created-token
-    suppression) and I (async-queued hashchange fidelity), both added per the
-    Terra PR #167 review — every assertion black-box, each proven RED when its
-    guard in views-access.js is reverted, the fake DOM renders only the IDs the
-    modal body actually declares (no phantom nodes), and hashchange is modeled as
+    """The static pins above inspect the SHAPE of the create/secret async guards.
+    tests/js/admin_access_lifecycle_runtime.mjs drives the deferred
+    `admin_create_token` promise to hostile resolutions and asserts the resulting
+    behaviour: a dependency-free node:vm harness loads the real views-access.js
+    with faithful shell-global stubs. Scenarios A–G cover modal/navigation
+    ownership, H covers cross-session created-token suppression, and I covers
+    async-queued hashchange fidelity. Every assertion is black-box and each is
+    proven RED when its guard in views-access.js is reverted.
+    The fake DOM renders only the IDs the modal body actually declares
+    (no phantom nodes), and hashchange is modeled as
     a queued browser task.
 
     See the module docstring for the pytest-vs-JS-target decision and rationale.

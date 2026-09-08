@@ -317,6 +317,7 @@ async def run_ingest_pipeline(
     source_modified_at: Optional[str] = None,
     last_ingest_job_id: Optional[str] = None,
     replace_doc_id: Optional[str] = None,
+    ontology: Optional[str] = None,
     progress_cb: Optional[ProgressCallback] = None,
     cancel_check: Optional[CancelCheck] = None,
 ) -> Dict[str, Any]:
@@ -327,12 +328,17 @@ async def run_ingest_pipeline(
     d'accès/écriture, décodage base64, contrôle de taille, résolution
     d'idempotence (skip/conflict gérés en amont).
 
-    Étapes : [remplacement éventuel] → S3 → texte → LLM → Neo4j doc(running)
-    → entités/relations → chunking → embeddings → Qdrant → finalize(succeeded).
+    Étapes : S3 candidate → texte → LLM → chunking → embeddings →
+    Neo4j candidate doc(running) → entités/relations → Qdrant vectors →
+    [commutation atomique si remplacement : promote_candidate_document + purge post-activation] →
+    finalize(succeeded).
 
     Args:
-        replace_doc_id: si fourni, l'ancien document est supprimé proprement
-                        (Neo4j+Qdrant+S3) AVANT la nouvelle ingestion.
+        replace_doc_id: si fourni, l'ingestion s'exécute en double-buffering : la version
+                        candidate est préparée et vectorisée sans toucher à l'ancien document.
+                        La commutation atomique s'effectue en fin de pipeline et l'ancien
+                        document est purgé en post-activation traçable.
+        ontology: nom d'ontologie ou YAML optionnel pour surcharger l'ontologie par défaut de la mémoire.
         progress_cb: async (current_step, progress_percent, extra) — observabilité.
         cancel_check: callable() -> bool — testé aux frontières de phase.
 
@@ -362,41 +368,26 @@ async def run_ingest_pipeline(
     s3_uploaded_uri: Optional[str] = None
     doc_id: Optional[str] = None
     vector_write_attempted = False
+    is_promoted = False
 
     try:
         # Vérifier la mémoire + ontologie (nécessaire pour l'extraction)
         memory = await _graph().get_memory(memory_id)
         if not memory:
             return {"status": "error", "message": f"Memory '{memory_id}' not found"}
-        if not memory.ontology:
+        ontology_to_use = ontology or memory.ontology
+        if not ontology_to_use:
             return {
                 "status": "error",
                 "message": f"Memory '{memory_id}' has no ontology.",
             }
 
-        # Remplacement : supprimer proprement l'ancien document d'abord.
-        # Si la suppression est INCOMPLÈTE (ex. Qdrant en erreur), on ABANDONNE
-        # avant de créer une nouvelle version — sinon on laisserait des vecteurs
-        # orphelins de l'ancien doc en marquant le nouveau 'succeeded'.
+        # Remplacement transactionnel (Double-Buffering / Safe-Replace) :
+        # L'ancien document n'est PAS supprimé avant l'ingestion de la nouvelle version.
+        # Il reste actif jusqu'à la commutation finale réussie, évitant toute perte de données en cas d'erreur.
         if replace_doc_id:
             _check_cancel("before_replace")
-            await _report("replace", 8, f"🔄 Replacing: deleting {replace_doc_id}")
-            del_res = await delete_document_everywhere(memory_id, replace_doc_id)
-            if del_res.get("errors"):
-                # Si l'ancien nœud Neo4j a survécu, le marquer pour re-traitement
-                if not del_res.get("neo4j_deleted"):
-                    try:
-                        await _graph().update_document_ingestion(
-                            memory_id=memory_id, doc_id=replace_doc_id,
-                            ingestion_status="cleanup_pending",
-                        )
-                    except Exception:
-                        pass
-                return {
-                    "status": "error",
-                    "message": f"Replacement abandoned: deletion of the old document was incomplete: {del_res['errors']}",
-                    "steps": _steps_log,
-                }
+            await _report("replace", 8, f"🔄 Safe replace: preparing candidate version to replace {replace_doc_id}")
 
         # --- S3 ---
         _check_cancel("before_s3")
@@ -442,53 +433,30 @@ async def run_ingest_pipeline(
                     chunk=chunk, chunks_total=total,
                 )
 
-        await _report("llm_extract", 15, f"🔍 Starting LLM extraction (ontology: {memory.ontology})...")
+        from .ontology import get_ontology_manager
+        ontology_label = get_ontology_manager().get_ontology_label(ontology_to_use)
+        await _report("llm_extract", 15, f"🔍 Starting LLM extraction (ontology: {ontology_label})...")
         extraction = await _extractor().extract_with_ontology_chunked(
-            text, memory.ontology, progress_callback=_extraction_progress
+            text, ontology_to_use, progress_callback=_extraction_progress
         )
         await _report(
             "llm_extract", 60,
             f"✅ Extraction: {len(extraction.entities)} entities, {len(extraction.relations)} relations",
         )
 
-        # --- Neo4j : document (running) + entités/relations ---
-        # À partir d'ici on n'interrompt plus en plein milieu : on laisse finir
-        # puis on rollback si annulation (delete_document_everywhere).
-        _check_cancel("before_graph")
-        await _report("graph_write", 65, "📊 Storing data in the Neo4j graph...")
+        # --- RAG : chunking + embeddings en mémoire (avant toute mutation graphe/vecteur) ---
         doc_id = str(uuid.uuid4())
-        await _graph().add_document(
-            memory_id=memory_id,
-            doc_id=doc_id,
-            uri=s3_result["uri"],
-            filename=filename,
-            doc_hash=doc_hash,
-            metadata=metadata,
-            source_path=source_path,
-            source_modified_at=source_modified_at,
-            size_bytes=content_size,
-            text_length=len(text),
-            content_type=file_ext,
-            ingestion_status="running",
-            last_ingest_job_id=last_ingest_job_id,
-        )
-        graph_result = await _graph().add_entities_and_relations(
-            memory_id=memory_id, doc_id=doc_id, extraction=extraction
-        )
-        await _report("graph_write", 70, "✅ Neo4j graph updated")
-        # Annulation après écriture graphe : on supprime proprement le document
-        # qu'on vient de créer (rollback dans le except IngestCancelled).
-        _check_cancel("after_graph")
-
-        # --- RAG : chunking + embeddings + Qdrant (couplage strict) ---
         chunks_stored = 0
         EMBED_BATCH_SIZE = 5
+        chunks = []
+        embedding_result = None
+
         try:
-            await _report("chunking", 72, "🧩 Semantic chunking...")
+            await _report("chunking", 65, "🧩 Semantic chunking...")
             import asyncio
             loop = asyncio.get_event_loop()
             chunks = await loop.run_in_executor(None, _chunker().chunk_document, text, filename)
-            await _report("chunking", 75, f"🧩 Created {len(chunks)} chunks")
+            await _report("chunking", 70, f"🧩 Created {len(chunks)} chunks")
 
             if chunks:
                 for chunk in chunks:
@@ -501,12 +469,11 @@ async def run_ingest_pipeline(
                 total_batches = (total_chunks + EMBED_BATCH_SIZE - 1) // EMBED_BATCH_SIZE
 
                 for batch_start in range(0, total_chunks, EMBED_BATCH_SIZE):
-                    # Frontière de phase sûre : annulation possible entre deux batches
                     _check_cancel("during_embedding")
                     batch_end = min(batch_start + EMBED_BATCH_SIZE, total_chunks)
                     batch_num = batch_start // EMBED_BATCH_SIZE + 1
                     batch_texts = chunk_texts[batch_start:batch_end]
-                    pct = 75 + int(20 * batch_num / max(1, total_batches))  # 75 → 95
+                    pct = 70 + int(20 * batch_num / max(1, total_batches))  # 70 → 90
                     await _report("embedding", pct, f"🔢 Embedding batch {batch_num}/{total_batches}")
                     batch_result = await _embedder().embed_texts_result(batch_texts)
                     if len(batch_result.vectors) != len(batch_texts):
@@ -516,32 +483,89 @@ async def run_ingest_pipeline(
                     batch_results.append(batch_result)
 
                 embedding_result = _merge_embedding_results(batch_results)
-                await _report("vector_store", 96, f"📦 Storing {len(embedding_result.vectors)} vectors in Qdrant...")
-                vector_store = _vector_store()
-                # Dès que le store est invoqué, sa livraison peut être partielle.
-                # Avant ce point, le rollback ne doit pas créer à lui seul un
-                # chemin de mutation Qdrant.
-                vector_write_attempted = True
-                chunks_stored = await vector_store.store_chunks(
-                    memory_id=memory_id, doc_id=doc_id, filename=filename,
-                    chunks=chunks, embedding_result=embedding_result,
-                )
-                await _report("vector_store", 98, f"✅ RAG: vectorized {chunks_stored} chunks")
         except IngestCancelled:
-            raise  # laisser remonter pour le rollback (ne pas masquer en RuntimeError)
+            raise
         except Exception as e:
-            print(f"❌ [Ingest] Vector RAG error: {e}", file=sys.stderr)
-            raise RuntimeError(f"Qdrant vectorization failed (strict coupling): {e}")
+            print(f"❌ [Ingest] Embedding preparation error: {e}", file=sys.stderr)
+            raise RuntimeError(f"Embedding preparation failed: {e}")
 
-        # Dernière frontière avant de marquer le document comme succeeded
-        _check_cancel("before_finalize")
+        # Dernière frontière avant la mutation atomique du graphe et des vecteurs
+        _check_cancel("before_graph")
 
-        # --- Finalisation : marqueur durable succeeded (APRÈS Qdrant) ---
-        await _graph().update_document_ingestion(
-            memory_id=memory_id, doc_id=doc_id,
-            ingestion_status="succeeded", chunk_count=chunks_stored,
+        # --- Neo4j : création du document candidat et enrichissement des entités/relations ---
+        # Si un remplacement est demandé, le candidat est créé sans réclamer immédiatement le source_path canonique
+        # pour respecter la contrainte d'unicité (memory_id, source_path) et garder l'ancienne version active.
+        candidate_source_path = None if replace_doc_id else source_path
+        await _report("graph_write", 90, "📊 Storing candidate data in the Neo4j graph...")
+        await _graph().add_document(
+            memory_id=memory_id,
+            doc_id=doc_id,
+            uri=s3_result["uri"],
+            filename=filename,
+            doc_hash=doc_hash,
+            metadata=metadata,
+            source_path=candidate_source_path,
+            source_modified_at=source_modified_at,
+            size_bytes=content_size,
+            text_length=len(text),
+            content_type=file_ext,
+            ingestion_status="running",
             last_ingest_job_id=last_ingest_job_id,
         )
+        graph_result = await _graph().add_entities_and_relations(
+            memory_id=memory_id, doc_id=doc_id, extraction=extraction
+        )
+
+        # --- Qdrant : stockage des vecteurs précalculés de la version candidate ---
+        if chunks and embedding_result:
+            await _report("vector_store", 94, f"📦 Storing {len(embedding_result.vectors)} vectors in Qdrant...")
+            vector_store = _vector_store()
+            vector_write_attempted = True
+            chunks_stored = await vector_store.store_chunks(
+                memory_id=memory_id, doc_id=doc_id, filename=filename,
+                chunks=chunks, embedding_result=embedding_result,
+            )
+
+        # --- Commutation / Activation atomique ---
+        purge_errors = []
+        purge_status = None
+        if replace_doc_id:
+            _check_cancel("before_promote")
+            await _report("promote", 97, f"🔄 Atomic activation: promoting candidate version to replace {replace_doc_id}")
+            promoted = await _graph().promote_candidate_document(
+                memory_id=memory_id,
+                old_doc_id=replace_doc_id,
+                new_doc_id=doc_id,
+                canonical_source_path=source_path,
+                chunk_count=chunks_stored,
+                last_ingest_job_id=last_ingest_job_id,
+            )
+            if not promoted:
+                raise RuntimeError(f"Atomic document promotion failed for candidate {doc_id}")
+            is_promoted = True
+
+            # Post-activation purge (best-effort) : le nouveau document est déjà actif et garanti
+            await _report("purge_old", 98, f"🗑️ Purging previous document version {replace_doc_id}")
+            try:
+                del_res = await delete_document_everywhere(memory_id, replace_doc_id)
+                if del_res.get("errors"):
+                    purge_errors = del_res["errors"]
+                    purge_status = "cleanup_pending"
+                    print(f"⚠️ [Ingest] Purge warnings for {replace_doc_id}: {purge_errors}", file=sys.stderr)
+                else:
+                    purge_status = "purged"
+            except Exception as e:
+                purge_errors.append(str(e))
+                purge_status = "cleanup_pending"
+                print(f"⚠️ [Ingest] Purge error for {replace_doc_id}: {e}", file=sys.stderr)
+        else:
+            # Nouveau document ordinaire : finalisation directe
+            await _graph().update_document_ingestion(
+                memory_id=memory_id, doc_id=doc_id,
+                ingestion_status="succeeded", chunk_count=chunks_stored,
+                last_ingest_job_id=last_ingest_job_id,
+            )
+            is_promoted = True
 
         from collections import Counter
         relation_types = Counter(r.type for r in extraction.relations)
@@ -549,7 +573,7 @@ async def run_ingest_pipeline(
         _elapsed = round(_time.monotonic() - _t0, 1)
         await _report("done", 100, f"🏁 Ingestion completed in {_elapsed}s")
 
-        return {
+        res_payload = {
             "status": "ok",
             "document_id": doc_id,
             "filename": filename,
@@ -570,9 +594,19 @@ async def run_ingest_pipeline(
             "steps": _steps_log,
             "elapsed_seconds": _elapsed,
         }
+        if purge_status:
+            res_payload["purge_status"] = purge_status
+        if purge_errors:
+            res_payload["purge_errors"] = purge_errors
+
+        return res_payload
 
     except IngestCancelled as c:
-        # Annulation propre : nettoyer ce qui a pu être écrit
+        if is_promoted:
+            # Document déjà promu et actif : ne pas détruire le nouveau document actif
+            print(f"⚠️ [Ingest] Cancel requested after promotion for {doc_id} (active document preserved)", file=sys.stderr)
+            return {"status": "ok", "document_id": doc_id, "warning": f"Cancelled after promotion ({c})", "steps": _steps_log}
+        # Annulation propre avant promotion : nettoyer le candidat
         cleanup = await _rollback(
             memory_id,
             doc_id,
@@ -584,6 +618,36 @@ async def run_ingest_pipeline(
             out["cleanup"] = cleanup
         return out
     except Exception as e:
+        if is_promoted:
+            # Document déjà promu et actif : ne pas détruire le nouveau document actif
+            print(f"⚠️ [Ingest] Post-promotion error for active doc {doc_id}: {e}", file=sys.stderr)
+            return {
+                "status": "ok",
+                "document_id": doc_id,
+                "filename": filename,
+                "purge_status": "cleanup_pending",
+                "purge_errors": [str(e)],
+                "steps": _steps_log,
+            }
+
+        # Réconciliation en cas d'issue ambiguë lors de la promotion :
+        # Vérifier l'état effectif dans Neo4j avant de tenter un rollback destructif
+        if source_path:
+            try:
+                active_doc = await _graph().get_document_by_source_path(memory_id, source_path)
+                if active_doc and active_doc.get("id") == doc_id and active_doc.get("ingestion_status") == "succeeded":
+                    print(f"⚠️ [Ingest] Ambiguous promotion exception for {doc_id}, but document is active in Neo4j (preserving active doc)", file=sys.stderr)
+                    return {
+                        "status": "ok",
+                        "document_id": doc_id,
+                        "filename": filename,
+                        "purge_status": "cleanup_pending",
+                        "purge_errors": [str(e)],
+                        "steps": _steps_log,
+                    }
+            except Exception as check_err:
+                print(f"⚠️ [Ingest] Could not verify active doc after exception: {check_err}", file=sys.stderr)
+
         cleanup = await _rollback(
             memory_id,
             doc_id,

@@ -233,7 +233,7 @@ def assert_active_token_term_consistent(
     """
     Garde fail-closed de cohérence TERM d'un token ACTIF (HELD/RELEASING) contre le
     ``term.json`` vivant, partagée par ``renew`` / ``release`` /
-    ``reconcile_stale_holder`` (Codex BLOCKING head 20e2e5b). Jumelle de
+    ``reconcile_stale_holder``. Jumelle de
     ``assert_active_lease_structural`` pour la dimension term.
 
     Un token actif IMPLIQUE qu'un grant a eu lieu, et ``acquire`` bumpe TOUJOURS le
@@ -421,8 +421,8 @@ def evaluate_commit_authorization(
     #     (``token.term > term.term``) (``assert_active_token_term_consistent``).
     # Faire ces gardes AVANT le BLOCKED de l'étape 0b garantit qu'un actif sans
     # term.json remonte comme CORRUPTION (cohérent avec acquire/renew/release/
-    # reconcile), et non comme un BLOCKED « état absent » ordinaire (Codex MEDIUM
-    # head a0c51c2). Sans ces checks en TÊTE, un HELD corrompu tenu par nodeB face
+    # reconcile), et non comme un BLOCKED « état absent » ordinaire. Sans ces
+    # checks en TÊTE, un HELD corrompu tenu par nodeB face
     # à un intent de nodeA tomberait en NOT_HOLDER (étape 1) ou en BLOCKED, masquant
     # la corruption. No-op sur un token FREE ou un actif sain ; l'expiration (lease
     # saine mais élapsée) reste classée FENCED à l'étape 3 — ces checks ne JETTENT
@@ -533,7 +533,7 @@ def evaluate_commit_authorization(
 # single-HELD. Exemples : (a) deux ``acquire`` accordent un SECOND holder
 # (split-brain G3) ; (b) un ``renew`` qui rend une lease vivante pendant qu'un
 # ``acquire`` lit le snapshot PÉRIMÉ d'avant-renew, passe G3 et s'auto-accorde
-# par-dessus la lease renouvelée (Codex HIGH head fb6f112). On sérialise donc le
+# par-dessus la lease renouvelée. On sérialise donc le
 # read-modify-write COMPLET de CHACUNE de ces méthodes sous un MÊME verrou
 # par-space, à l'image de ``MembershipService._space_lock`` (lifecycle.py). C'est
 # précisément cette sérialisation qui rend valide l'hypothèse d'``_acquire_locked``
@@ -718,7 +718,7 @@ class LeaseRuntime:
         now = self._clock()
 
         # --- Corruption-first : tout token ACTIF corrompu fail-closed AVANT tout ---
-        # (Codex MEDIUM head 2a9fc3d.) UNIQUE point de garde de corruption de token
+        # UNIQUE point de garde de corruption de token
         # actif d'``acquire``. Un token ACTIF (HELD/RELEASING) corrompu — structure
         # de lease (lease_until None/malformé OU holder manquant) OU cohérence term
         # (term.json absent sous un actif OU token au futur token.term > term.json) —
@@ -737,7 +737,7 @@ class LeaseRuntime:
             assert_active_token_term_consistent(held, term_state)
 
         # --- Fast-path : reprise idempotente d'un grant à moitié appliqué ---
-        # (issue #13, recouvrabilité durable — Codex BLOCKING head 62e71dbc.)
+        # (Recouvrabilité durable.)
         # Si un acquire ANTÉRIEUR pour CE event_id par CE holder a déjà écrit son
         # token HELD (bump_term + set_token réussis) mais a échoué/crashé AVANT la
         # consommation de la head (mark_granted, désormais le DERNIER effet), le
@@ -771,8 +771,7 @@ class LeaseRuntime:
             if held.term == current_term:
                 # Finalisation du grant à moitié appliqué — sur PREUVE POSITIVE de
                 # l'état de NOTRE propre entrée de queue, jamais sur une inférence
-                # depuis l'identité de la head (Codex BLOCKING heads f1345a6 /
-                # f371e05 / fb5e486 / 5225303). On ne retourne un acquire « réussi »
+                # depuis l'identité de la head. On ne retourne un acquire « réussi »
                 # ET on ne consomme une head QUE si l'ensemble PENDING du même
                 # event_id est SANS AMBIGUÏTÉ ; toute autre forme FAIL-CLOSED.
                 #
@@ -899,8 +898,8 @@ class LeaseRuntime:
             )
 
         # --- Effets (toutes les gardes ont passé) ---
-        # Ordre IMPÉRATIF (never-drop/never-orphan — Codex BLOCKING head
-        # 62e71dbc) : la consommation IRRÉVERSIBLE de la head (mark_granted) est
+        # Ordre IMPÉRATIF (never-drop/never-orphan) : la consommation IRRÉVERSIBLE
+        # de la head (mark_granted) est
         # le DERNIER effet. Les trois écritures durables ne sont PAS
         # transactionnelles ; une panne entre elles ne doit JAMAIS consommer la
         # requête sans établir de holder (orphelin). En ordonnant bump_term ->
@@ -944,8 +943,8 @@ class LeaseRuntime:
 
         Gardes (lèvent, aucun write en cas d'échec) :
         - token HELD ET ``holder_node_id == holder`` -> sinon ``NOT_HOLDER`` ;
-        - term du token == ``term.json`` vivant -> sinon ``STALE_TERM`` (Codex
-          BLOCKING head 5225303) : un holder SUPERSEDED (``token.term < term.term``,
+        - term du token == ``term.json`` vivant -> sinon ``STALE_TERM`` : un
+          holder SUPERSEDED (``token.term < term.term``,
           un grant plus récent a bumpé le term) ne doit PAS prolonger sa lease
           obsolète. Sans ce garde, sa lease resterait « vivante » et l'exclusion
           mutuelle G3 d'``acquire`` la verrait active indéfiniment -> blocage de la
@@ -963,7 +962,7 @@ class LeaseRuntime:
         (term/fencing/holder/granted_at inchangés) avec un ``lease_until`` frais.
         ``set_token`` ré-écrit byte-stable.
 
-        Fail-closed AVANT la dénégation holder (Codex MINOR head 62e71dbc) : un
+        Fail-closed AVANT la dénégation holder : un
         token ACTIF (HELD/RELEASING) corrompu (``lease_until`` None/malformé OU
         ``holder_node_id`` manquant) tenu par un AUTRE nœud doit remonter en
         ``CorruptedStateError``, JAMAIS être masqué en ``NOT_HOLDER`` — même
@@ -971,8 +970,8 @@ class LeaseRuntime:
         ``release`` / ``reconcile_stale_holder``. No-op sur un FREE, un actif sain,
         ou un token absent.
 
-        Sous le verrou de mutation par-space (``_token_lock``, Codex HIGH head
-        fb6f112) : le read-modify-write de renew est sérialisé avec acquire /
+        Sous le verrou de mutation par-space (``_token_lock``) : le
+        read-modify-write de renew est sérialisé avec acquire /
         release / reconcile, sinon un acquire concurrent verrait un snapshot
         périmé pendant le renew (split-brain).
         """
@@ -1010,7 +1009,7 @@ class LeaseRuntime:
             )
         # STALE_TERM : le holder doit être au term VIVANT. Un holder superseded
         # (token.term < term.json) ne peut pas prolonger sa lease obsolète — sinon
-        # G3 la verrait active et bloquerait la convergence (Codex BLOCKING 5225303).
+        # G3 la verrait active et bloquerait la convergence.
         # La garde de cohérence term ci-dessus a déjà fait remonter term.json absent
         # et token.term > term.json (corruption) ; ici term_state est non None et
         # current.term <= term_state.term, donc seul le cas superseded (<) reste.
@@ -1061,8 +1060,8 @@ class LeaseRuntime:
         corrompu. ``assert_active_lease_structural`` (même validité de lease que
         les gates acquire/assert) lève ``CorruptedStateError`` avant tout write.
 
-        Sous le verrou de mutation par-space (``_token_lock``, Codex HIGH head
-        fb6f112) : sérialisé avec acquire / renew / reconcile.
+        Sous le verrou de mutation par-space (``_token_lock``) : sérialisé avec
+        acquire / renew / reconcile.
         """
         async with _token_lock(self._space_id):
             await self._assert_mesh_mutation_allowed()
@@ -1137,8 +1136,8 @@ class LeaseRuntime:
         garde/démotion. La réconciliation ne répare jamais une corruption
         critique.
 
-        Sous le verrou de mutation par-space (``_token_lock``, Codex HIGH head
-        fb6f112) : sérialisé avec acquire / renew / release.
+        Sous le verrou de mutation par-space (``_token_lock``) : sérialisé avec
+        acquire / renew / release.
         """
         async with _token_lock(self._space_id):
             await self._assert_mesh_mutation_allowed()
@@ -1160,7 +1159,7 @@ class LeaseRuntime:
         # effacé silencieusement en FREE. Deux dimensions : structure de lease ET
         # cohérence term — un ``term.json`` absent ou un token AU FUTUR
         # (``token.term > term.json``) est impossible/corrompu et n'est NI un holder
-        # courant à préserver NI un superseded à démoter (Codex BLOCKING 20e2e5b).
+        # courant à préserver NI un superseded à démoter.
         assert_active_lease_structural(token, now)
         term_state = await self._store.get_term()
         assert_active_token_term_consistent(token, term_state)
@@ -1204,8 +1203,8 @@ class LeaseRuntime:
         MÊME fonction pure. Un commit auto-autorisé chez l'émetteur à son ancien
         term est rejeté ``STALE_TERM`` car le term vivant du pair est supérieur.
         """
-        # Snapshot LINÉARISABLE avec les mutations de token (Codex BLOCKING heads
-        # a26cd28 + 4dc7855). ``assert_commit_allowed`` lit token/term/pointer EN
+        # Snapshot LINÉARISABLE avec les mutations de token.
+        # ``assert_commit_allowed`` lit token/term/pointer EN
         # SÉQUENCE ; sans verrou, un ``release()`` concurrent (qui écrit FREE en
         # PRÉSERVANT term/fencing) peut s'intercaler ENTRE la lecture du token (HELD)
         # et celle du pointeur -> le prédicat autoriserait sur un snapshot HELD DÉJÀ

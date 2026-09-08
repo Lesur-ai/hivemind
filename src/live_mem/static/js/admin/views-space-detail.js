@@ -19,34 +19,17 @@
         return esc(String(value ?? ''));
     }
 
-    function safeCompactionTargetDetail(failure) {
-        if (!failure || typeof failure !== 'object'
-            || failure.error !== 'ambiguous_or_missing_compaction_target') return '';
-        const index = failure.operation_index;
-        const resolution = failure.target_resolution;
-        const count = failure.target_match_count;
-        const sha256 = failure.target_heading_sha256;
-        if (!Number.isSafeInteger(index) || index < 0
-            || (resolution !== 'missing' && resolution !== 'ambiguous')
-            || !Number.isSafeInteger(count) || count < 0
-            || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)
-            || (resolution === 'missing' && count !== 0)
-            || (resolution === 'ambiguous' && count < 2)) return '';
-        return `operation_index=${index}; target_resolution=${resolution}; target_match_count=${count}; target_heading_sha256=${sha256}`;
-    }
-
-    function renderSafeCompactionFailures(result) {
-        const failures = result && Array.isArray(result.compaction_failures)
-            ? result.compaction_failures : [];
-        const rows = failures.map(failure => {
-            if (!failure || typeof failure !== 'object'
-                || typeof failure.filename !== 'string' || typeof failure.error !== 'string') return '';
-            const detail = safeCompactionTargetDetail(failure);
-            return `<tr><td class="mono-data">${safe(failure.filename)}</td><td class="mono-data">${safe(failure.error)}</td><td class="mono-data">${safe(detail || '—')}</td></tr>`;
-        }).join('');
-        return rows
-            ? `<div class="sd-job-result"><h4>Compaction failures</h4>${dataTable(['File', 'Safe failure', 'Target resolution'], rows)}</div>`
-            : '';
+    // Compaction is a human decision: a consolidation never runs it;
+    // oversized bank files are only reported as an advisory.
+    function renderBankSizeAdvisory(result) {
+        const items = result && Array.isArray(result.bank_size_advisory) ? result.bank_size_advisory : [];
+        const valid = items.filter(item => item && typeof item === 'object' && typeof item.filename === 'string'
+            && Number.isSafeInteger(item.utf8_bytes) && Number.isSafeInteger(item.max_size));
+        if (!valid.length) return '';
+        const rows = valid.map(item =>
+            `<div class="kv"><span class="kv-key mono-data">${safe(item.filename)}</span><span class="kv-value">${safe(item.utf8_bytes)} UTF-8 bytes (advisory threshold ${safe(item.max_size)})</span></div>`
+        ).join('');
+        return `<div class="sd-size-advisory"><h4>Bank size advisory — compaction is a human decision: bank_compact (MCP tool, manage)</h4><div class="kv-grid">${rows}</div></div>`;
     }
 
     function guaranteeBadge(value) {
@@ -613,11 +596,20 @@
     function renderJobResult(job) {
         const result = job.result && typeof job.result === 'object' ? job.result : null;
         if (!result) return '';
-        if (result.notes_processed === 0) {
+        // "Nothing to consolidate" only when the run had zero notes.
+        // A run that processed zero notes because it stopped at its first batch
+        // is a failure with counters, never "nothing to do".
+        if (Number(result.notes_total) === 0) {
             return `<div class="sd-job-result"><h4>Nothing to consolidate</h4>${keyValue('notes processed', 0)}${result.message ? serverMessage(result.message) : ''}</div>`;
         }
         const metrics = [
+            ['notes total', result.notes_total],
             ['notes processed', result.notes_processed],
+            ['notes declared useless', result.notes_discarded_count],
+            ['notes deleted', result.notes_deleted],
+            ['notes remaining', result.notes_remaining],
+            ...(result.failed_batch === undefined ? [] : [['failed batch', result.failed_batch]]),
+            ...(result.failure_reason === undefined ? [] : [['failure reason', result.failure_reason]]),
             ['bank files updated', result.bank_files_updated],
             ['bank files created', result.bank_files_created],
             ['bank files unchanged', result.bank_files_unchanged],
@@ -652,7 +644,7 @@
         }
         const failure = job.status === 'failed'
             ? stateError({ title: 'Consolidation failed', message: job.error || '' }) : '';
-        const compactionFailures = renderSafeCompactionFailures(job.result);
+        const sizeAdvisory = renderBankSizeAdvisory(job.result);
         const message = job.message ? serverMessage(job.message) : '';
         return `<div class="item-card sd-job-inspector">
             <div class="panel-header"><div><span class="micro-label">JOB INSPECTOR</span><h3>${safe(job.scope_label || 'Consolidation job')}</h3></div><div class="sd-inline">${statusDot(laneSeverity(job.status), job.status)} ${guaranteeBadge(job.guarantee)}</div></div>
@@ -667,7 +659,7 @@
                 ${keyValue('started', job.started_at, { timestamp: true })}
                 ${keyValue('finished', job.finished_at, { timestamp: true })}
             </div>
-            ${renderJobProgress(job)}${message}${failure}${compactionFailures}${job.status === 'succeeded' ? renderJobResult(job) : ''}
+            ${renderJobProgress(job)}${message}${failure}${sizeAdvisory}${['succeeded', 'failed'].includes(job.status) ? renderJobResult(job) : ''}
             <button type="button" class="btn btn-secondary" data-action="sd-load-job" data-job-id="${safe(view.jobId)}">Refresh job</button>
         </div>`;
     }

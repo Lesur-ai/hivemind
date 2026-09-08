@@ -35,12 +35,12 @@ _logger = logging.getLogger("live_mem.url_guard")
 
 _ALLOWED_GM_SCHEMES = ("http", "https")
 
-# HM-11 (revue) : borne la résolution DNS. validate_gm_url est synchrone et
+# Borne la résolution DNS. validate_gm_url est synchrone et
 # appelée depuis des contextes async ; un DNS lent (potentiellement contrôlé par
 # l'appelant via le hostname) ne doit pas geler l'event-loop indéfiniment. On
-# borne à 2s ; au-delà on retombe sur « accepté » (fallback, comme gaierror) et
-# la connexion réelle échouera de toute façon. NB : à terme, résoudre en amont
-# via loop.getaddrinfo côté appelant async serait plus propre (pas de stall).
+# borne à 2s ; un timeout ou une erreur DNS transitoire refuse une cible non
+# fiable. Seule une absence DNS déterministe reste acceptée, car aucune IP
+# n'est alors résolue. Les URLs opérateur de confiance suivent la voie dédiée.
 _DNS_RESOLVE_TIMEOUT_SECONDS = 2.0
 
 
@@ -91,7 +91,7 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
     qui sera renvoyé tel quel à l'appelant (pas de fuite d'info sensible
     — on dit juste ce qui est invalide).
 
-    ``allow_private_hosts=True`` : mode CONFIANCE (fix Codex #150, Finding 1).
+    ``allow_private_hosts=True`` : mode CONFIANCE.
     Réservé aux URLs de CONFIG OPÉRATEUR — au premier chef le runtime « long »
     embarqué interne (``LONG_EMBEDDED_URL``, défaut ``http://graph-memory:8002``),
     qui pointe LÉGITIMEMENT vers une IP privée du réseau Docker. Dans ce mode on
@@ -138,13 +138,13 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
         ip = None
 
     if ip is not None:
-        # Finding 1 (Codex #150) : en mode CONFIANCE, une IP privée littérale est
+        # En mode CONFIANCE, une IP privée littérale est
         # légitime (URL interne opérateur).
         if allow_private_hosts:
             return None
         return _blocked_ip_reason(ip, u.hostname)
 
-    # Finding 1 : mode CONFIANCE → l'URL interne opérateur (ex. graph-memory) est
+    # Mode CONFIANCE → l'URL interne opérateur (ex. graph-memory) est
     # un nom DNS qui résout vers une IP privée Docker BY DESIGN. On ne résout pas
     # et on ne bloque pas : sinon le runtime « long » embarqué P7 (ADR-0019) ne
     # démarre jamais. Le blocage SSRF ne concerne que les URLs NON fiables.
@@ -161,7 +161,7 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
             u.port or (443 if u.scheme == "https" else 80),
         )
     except concurrent.futures.TimeoutError:
-        # Finding 2 (Codex #150) : une résolution qui TIMEOUT est INDÉTERMINÉE et
+        # Une résolution qui TIMEOUT est INDÉTERMINÉE et
         # suspecte (DNS lent potentiellement contrôlé par l'appelant). Pour une
         # URL non fiable, on échoue FERMÉ — on ne peut pas vérifier que l'IP
         # cible est sûre, donc on refuse plutôt que de laisser la connexion se
@@ -176,7 +176,7 @@ def validate_gm_url(url: str, *, allow_private_hosts: bool = False) -> Optional[
             "rejected because the target IP could not be verified."
         )
     except socket.gaierror as e:
-        # Finding 3 (Codex #150, round 2) : ne fail-OPEN QUE sur une non-résolution
+        # Ne fail-OPEN QUE sur une non-résolution
         # DÉTERMINISTE (NXDOMAIN : EAI_NONAME / EAI_NODATA) — le nom n'a PAS d'IP,
         # ne peut donc atteindre aucune IP privée, et c'est le contrat « DNS =
         # blackbox » (test_accepts_public_dns_hostnames). Une erreur TRANSITOIRE /

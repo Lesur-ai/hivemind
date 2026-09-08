@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from click.testing import CliRunner
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,364 @@ def test_mcp_cli_entrypoint_delegates_to_click_cli():
 
     assert "from cli.commands import cli" in source
     assert "cli()" in source
+
+
+def _assert_async_demo_limitations(content: str, *, french: bool) -> None:
+    heading = (
+        "### Démonstrateur d'ingestion asynchrone — `test_async_ingest_e2e.py`"
+        if french else "### Async-ingestion demonstrator — `test_async_ingest_e2e.py`"
+    )
+    assert heading in content
+    content = content.split(heading, 1)[1].split("\n---", 1)[0]
+    content = " ".join(content.split())
+    assert "uv run python scripts/test_async_ingest_e2e.py --help" in content
+    assert "confirm=True" in content
+    assert "cancelled" in content
+    assert "MCP_TOKEN" in content
+    assert "recover_access_grants" in content
+    assert "grants_cleaned" in content
+    required = (
+        ("pas d'un gate de validation de release", "espace conservé", "space client existant",
+         "espaces existants déjà committés", "préfixe de bootstrap non committé")
+        if french else
+        ("not a release-validation gate", "space is retained", "existing customer space",
+         "committed existing spaces", "uncommitted bootstrap prefix")
+    )
+    for phrase in required:
+        assert phrase in content, f"missing demonstrator limitation: {phrase}"
+    assert "Validated scenarios:" not in content
+    assert "Scénarios validés :" not in content
+
+
+@pytest.mark.parametrize("french", (False, True))
+def test_public_async_demo_docs_disclose_evidence_limits(french):
+    name = "README.fr.md" if french else "README.md"
+    content = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+    _assert_async_demo_limitations(content, french=french)
+
+
+def test_async_demo_docs_guard_detects_deleted_warning():
+    content = (ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
+    mutant = content.replace("not a release-validation gate", "a release-validation gate")
+    with pytest.raises(AssertionError, match="missing demonstrator limitation"):
+        _assert_async_demo_limitations(mutant, french=False)
+
+
+@pytest.mark.parametrize("french", (False, True))
+def test_async_demo_docs_guard_detects_missing_bootstrap_qualification(french):
+    name = "README.fr.md" if french else "README.md"
+    content = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+    _assert_async_demo_limitations(content, french=french)
+    phrase = "préfixe de bootstrap non committé" if french else "uncommitted bootstrap prefix"
+    with pytest.raises(AssertionError, match="missing demonstrator limitation"):
+        _assert_async_demo_limitations(content.replace(phrase, "bootstrap"), french=french)
+
+
+def _assert_async_demo_changelog_qualification(content):
+    release = content.split("## [1.5.0]", 1)[1].split("\n## [", 1)[0]
+    entry = release.split("- **Safer local async-ingestion", 1)[1].split("\n\n", 1)[0]
+    entry = " ".join(entry.split())
+    for phrase in ("committed existing spaces", "uncommitted bootstrap prefix",
+                   "does not prove that the prefix was previously empty"):
+        assert phrase in entry, f"missing demonstrator qualification: {phrase}"
+
+
+def test_async_demo_current_changelogs_disclose_bootstrap_qualification():
+    paths = [ROOT / "CHANGELOG.md"]
+    overlay = ROOT / "release" / "public-overlay" / "CHANGELOG.md"
+    if overlay.exists():
+        paths.append(overlay)
+    for path in paths:
+        content = path.read_text(encoding="utf-8")
+        _assert_async_demo_changelog_qualification(content)
+        mutant = content.replace("uncommitted bootstrap prefix", "bootstrap")
+        with pytest.raises(AssertionError, match="missing demonstrator qualification"):
+            _assert_async_demo_changelog_qualification(mutant)
+
+
+class _AsyncDemoClient:
+    """MCP dictionaries follow the space service and ingestion queue contracts."""
+
+    def __init__(self, failure=None):
+        self.failure = failure
+        self.calls = []
+        self.submissions = 0
+        self.injections = []
+
+    def inject(self, name, arguments):
+        self.injections.append((name, self.submissions, arguments.get("job_id")))
+
+    async def call_tool(self, name, arguments):
+        self.calls.append((name, arguments))
+        if name == "system_health":
+            return {"status": "healthy", "services": {"s3": {"status": "ok"}}}
+        if name == "system_whoami":
+            return {"status": "ok", "permissions": ["manage", "write", "read"]}
+        if name == "space_create":
+            if self.failure in ("already_exists", "partial", "create_error"):
+                self.inject(name, arguments)
+                return {"status": self.failure, "space_id": arguments["space_id"]}
+            if self.failure == "create_exception":
+                self.inject(name, arguments)
+                raise RuntimeError("credential-bearing detail")
+            return {"status": "created", "space_id": arguments["space_id"]}
+        if name == "long_ingest_async":
+            self.submissions += 1
+            if self.failure == f"submit_{self.submissions}":
+                self.inject(name, arguments)
+                return {"status": "error", "items": []}
+            return {"status": "ok", "batch_id": "batch", "total": 1, "errors": [], "items": [
+                {"status": "queued", "job_id": f"job-{self.submissions}"}
+            ]}
+        if name == "long_ingest_status":
+            job_id = arguments["job_id"]
+            status = "cancelled" if job_id == "job-3" else "succeeded"
+            if self.failure == "cancellation_race" and job_id == "job-3":
+                self.inject(name, arguments)
+                status = "succeeded"
+            if self.failure == "cancel_timeout" and job_id == "job-3":
+                self.inject(name, arguments)
+                status = "running"
+            if self.failure == "job_failed" and job_id == "job-1":
+                self.inject(name, arguments)
+                status = "failed"
+            return {"job_id": job_id, "status": status, "progress_percent": 100}
+        if name == "long_ingest_list":
+            if self.failure == "listing_error":
+                self.inject(name, arguments)
+                return {"status": "error"}
+            if self.failure == "missing_job":
+                self.inject(name, arguments)
+            jobs = [] if self.failure == "missing_job" else [{"job_id": "job-1"}]
+            return {"status": "ok", "count": len(jobs), "jobs": jobs}
+        if name == "long_ingest_cancel":
+            if self.failure == "cancel_error":
+                self.inject(name, arguments)
+            return {"status": "error" if self.failure == "cancel_error" else "cancelling", "job_id": arguments["job_id"]}
+        if name == "space_delete":
+            if self.failure == "delete_partial":
+                self.inject(name, arguments)
+            return {"status": "partial" if self.failure == "delete_partial" else "deleted", "space_id": arguments["space_id"]}
+        raise AssertionError(f"unexpected tool {name}")
+
+
+def _assert_async_demo_failure_reached(client, tool, submissions, job_id):
+    """A False result is evidence only after the intended fault was delivered."""
+    assert client.injections, "targeted failure injection was not reached"
+    assert set(client.injections) == {(tool, submissions, job_id)}
+    assert client.submissions == submissions
+    submitted = [arguments for name, arguments in client.calls if name == "long_ingest_async"]
+    assert len(submitted) == submissions
+    assert [args["documents"][0]["source_path"] for args in submitted] == [
+        "docs/demo-architecture.md", "docs/demo-architecture.md", "docs/demo-draft.md",
+    ][:submissions]
+    assert [args["options"]["replace_existing"] for args in submitted] == [
+        False, True, False,
+    ][:submissions]
+    name, arguments = client.calls[-1]
+    assert name == tool, "failure did not stop at the targeted tool"
+    assert arguments.get("job_id") == job_id
+    if tool not in {"system_health", "system_whoami"}:
+        assert arguments["space_id"] == "unused-demo"
+    if job_id == "job-3" and tool == "long_ingest_status":
+        assert ("long_ingest_cancel", {"space_id": "unused-demo", "job_id": "job-3"}) in client.calls
+    if tool == "space_delete":
+        assert arguments == {"space_id": "unused-demo", "confirm": True}
+
+
+_ASYNC_DEMO_FAILURES = (
+    ("already_exists", "space_create", 0, None),
+    ("partial", "space_create", 0, None),
+    ("create_error", "space_create", 0, None),
+    ("create_exception", "space_create", 0, None),
+    ("submit_1", "long_ingest_async", 1, None),
+    ("submit_2", "long_ingest_async", 2, None),
+    ("submit_3", "long_ingest_async", 3, None),
+    ("job_failed", "long_ingest_status", 1, "job-1"),
+    ("listing_error", "long_ingest_list", 1, None),
+    ("missing_job", "long_ingest_list", 1, None),
+    ("cancel_error", "long_ingest_cancel", 3, "job-3"),
+    ("cancellation_race", "long_ingest_status", 3, "job-3"),
+    ("cancel_timeout", "long_ingest_status", 3, "job-3"),
+    ("delete_partial", "space_delete", 3, None),
+)
+
+_ASYNC_DEMO_SHAPE_FAILURES = (
+    ("health_shape", "system_health", 0, None),
+    ("whoami_error", "system_whoami", 0, None),
+    ("wrong_space", "space_create", 0, None),
+    ("wrong_job", "long_ingest_status", 1, "job-1"),
+    ("changed_skipped", "long_ingest_status", 1, "job-1"),
+    ("batch_errors", "long_ingest_async", 1, None),
+    ("bad_items", "long_ingest_async", 1, None),
+    ("missing_batch", "long_ingest_async", 1, None),
+    ("bad_item_status", "long_ingest_async", 1, None),
+    ("cancel_noop", "long_ingest_cancel", 3, "job-3"),
+    ("cancel_identity", "long_ingest_cancel", 3, "job-3"),
+    ("delete_identity", "space_delete", 3, None),
+    ("status_timeout", "long_ingest_status", 1, "job-1"),
+    ("transport_exception", "long_ingest_status", 1, "job-1"),
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup", (True, False))
+async def test_async_demo_uses_only_its_new_space_and_reports_bounded_evidence(monkeypatch, capsys, cleanup):
+    import test_async_ingest_e2e as demo
+
+    client = _AsyncDemoClient()
+    monkeypatch.setattr(demo, "MCPClient", lambda **kwargs: client)
+    monkeypatch.setattr(demo, "check_docker_containers", lambda: (True, []))
+    token = "private-demo-credential-do-not-print"
+    assert await demo.run_live_docker_demo("http://localhost:8080", token, "unused-demo", cleanup=cleanup)
+    deletions = [(i, args) for i, (name, args) in enumerate(client.calls) if name == "space_delete"]
+    assert len(deletions) == int(cleanup)
+    if cleanup:
+        assert deletions[0][1] == {"space_id": "unused-demo", "confirm": True}
+        assert deletions[0][0] > max(i for i, (name, _) in enumerate(client.calls) if name == "long_ingest_status")
+    create = next(args for name, args in client.calls if name == "space_create")
+    assert set(create) <= {"space_id", "description", "rules", "owner"}
+    output = capsys.readouterr().out
+    assert token[:8] not in output
+    assert "100%" not in output
+    assert "activation atomique validés" not in output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,tool,submissions,job_id", _ASYNC_DEMO_FAILURES)
+async def test_async_demo_never_turns_an_ambiguous_result_into_success(
+    monkeypatch, failure, tool, submissions, job_id,
+):
+    import test_async_ingest_e2e as demo
+
+    client = _AsyncDemoClient(failure)
+    monkeypatch.setattr(demo, "MCPClient", lambda **kwargs: client)
+    monkeypatch.setattr(demo, "check_docker_containers", lambda: (True, []))
+    assert not await demo.run_live_docker_demo(
+        "http://localhost:8080", "test-token", "unused-demo", poll_interval=0.001,
+        max_wait_seconds=0.05 if failure == "cancel_timeout" else 30.0,
+    )
+    _assert_async_demo_failure_reached(client, tool, submissions, job_id)
+    if failure != "delete_partial":
+        assert not any(name == "space_delete" for name, _ in client.calls)
+    if failure in ("already_exists", "partial", "create_error", "create_exception"):
+        assert not any(name == "long_ingest_async" for name, _ in client.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case,tool,submissions,job_id", _ASYNC_DEMO_SHAPE_FAILURES)
+async def test_async_demo_checks_identity_shape_and_call_deadlines(
+    monkeypatch, capsys, case, tool, submissions, job_id,
+):
+    import test_async_ingest_e2e as demo
+
+    class Client(_AsyncDemoClient):
+        async def call_tool(self, name, arguments):
+            result = await super().call_tool(name, arguments)
+            if case == "health_shape" and name == "system_health":
+                self.inject(name, arguments)
+                return []
+            if case == "whoami_error" and name == "system_whoami":
+                self.inject(name, arguments)
+                return {"status": "error", "permissions": ["admin"]}
+            if case == "wrong_space" and name == "space_create":
+                self.inject(name, arguments)
+                result["space_id"] = "someone-elses-space"
+            if name == "long_ingest_async":
+                if case == "batch_errors":
+                    self.inject(name, arguments)
+                    result["errors"] = [{"error": "credential-bearing detail"}]
+                if case == "bad_items":
+                    self.inject(name, arguments)
+                    result["items"] = [None]
+                if case == "missing_batch":
+                    self.inject(name, arguments)
+                    result.pop("batch_id")
+                if case == "bad_item_status":
+                    self.inject(name, arguments)
+                    result["items"][0]["status"] = "changed_skipped"
+            if name == "long_ingest_status":
+                if case == "wrong_job":
+                    self.inject(name, arguments)
+                    result["job_id"] = "other-job"
+                if case == "changed_skipped":
+                    self.inject(name, arguments)
+                    result["status"] = "changed_skipped"
+                if case == "status_timeout":
+                    self.inject(name, arguments)
+                    await asyncio.sleep(10)
+                if case == "transport_exception":
+                    self.inject(name, arguments)
+                    raise RuntimeError("credential-bearing detail")
+            if name == "long_ingest_cancel":
+                if case == "cancel_noop":
+                    self.inject(name, arguments)
+                    return {"status": "noop", "job_status": "succeeded"}
+                if case == "cancel_identity":
+                    self.inject(name, arguments)
+                    result["job_id"] = "other-job"
+            if case == "delete_identity" and name == "space_delete":
+                self.inject(name, arguments)
+                result["space_id"] = "other-space"
+            return result
+
+    client = Client()
+    monkeypatch.setattr(demo, "MCPClient", lambda **kwargs: client)
+    monkeypatch.setattr(demo, "check_docker_containers", lambda: (True, []))
+    # Wall-clock changes must not drive the polling deadline.
+    monkeypatch.setattr(demo.time, "time", lambda: pytest.fail("wall clock used"))
+    result = await asyncio.wait_for(demo.run_live_docker_demo(
+        "http://localhost:8080", "credential-bearing detail", "unused-demo",
+        max_wait_seconds=0.05 if case == "status_timeout" else 30.0, poll_interval=0.001,
+    ), timeout=2.0 if case == "status_timeout" else 60.0)
+    assert result is False
+    _assert_async_demo_failure_reached(client, tool, submissions, job_id)
+    if case != "delete_identity":
+        assert not any(name == "space_delete" for name, _ in client.calls)
+    assert "credential-bearing detail" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure,tool,submissions,job_id", _ASYNC_DEMO_FAILURES)
+async def test_async_demo_failure_tests_reject_premature_return(
+    monkeypatch, failure, tool, submissions, job_id,
+):
+    import test_async_ingest_e2e as demo
+
+    async def premature_failure(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(demo, "run_live_docker_demo", premature_failure)
+    with pytest.raises(AssertionError, match="targeted failure injection was not reached"):
+        await test_async_demo_never_turns_an_ambiguous_result_into_success(
+            monkeypatch, failure, tool, submissions, job_id,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case,tool,submissions,job_id", _ASYNC_DEMO_SHAPE_FAILURES)
+async def test_async_demo_shape_tests_reject_premature_return(
+    monkeypatch, capsys, case, tool, submissions, job_id,
+):
+    import test_async_ingest_e2e as demo
+
+    async def premature_failure(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(demo, "run_live_docker_demo", premature_failure)
+    with pytest.raises(AssertionError, match="targeted failure injection was not reached"):
+        await test_async_demo_checks_identity_shape_and_call_deadlines(
+            monkeypatch, capsys, case, tool, submissions, job_id,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seconds", (0, -1, float("inf"), float("nan")))
+async def test_async_demo_rejects_unbounded_deadlines_before_preflight(monkeypatch, seconds):
+    import test_async_ingest_e2e as demo
+
+    monkeypatch.setattr(demo, "check_docker_containers", lambda: pytest.fail("preflight reached"))
+    assert not await demo.run_live_docker_demo("http://localhost:8080", "token", "new", max_wait_seconds=seconds)
 
 
 def test_click_exposes_stale_spaces_with_admin_console_contract():
@@ -1329,7 +1688,9 @@ def test_bank_compact_failure_renderer_keeps_recovery_non_success_and_safe(
     assert "Bank Compact" not in output
 
 
-def test_consolidation_job_renderer_shows_only_safe_compaction_failures(monkeypatch):
+def test_consolidation_job_renderer_shows_the_bank_size_advisory_only(monkeypatch):
+    """A consolidation result carries no compaction envelope; the CLI
+    shows the server-owned size advisory (indicator only) and nothing else."""
     stream = io.StringIO()
     monkeypatch.setattr(
         display,
@@ -1346,15 +1707,12 @@ def test_consolidation_job_renderer_shows_only_safe_compaction_failures(monkeypa
             "queue_position": 0,
             "error": "Consolidation stopped safely.",
             "result": {
-                "compaction_failures": [
+                "bank_size_advisory": [
                     {
                         "filename": "facts.md",
-                        "error": "ambiguous_or_missing_compaction_target",
-                        "operation_index": 0,
-                        "target_resolution": "ambiguous",
-                        "target_match_count": 2,
-                        "target_heading_sha256": "b" * 64,
-                        "heading": "CLI_JOB_RAW_COMPLETION_SECRET_9a31",
+                        "utf8_bytes": 40000,
+                        "max_size": 35000,
+                        "content": "CLI_JOB_RAW_COMPLETION_SECRET_9a31",
                     }
                 ]
             },
@@ -1362,11 +1720,10 @@ def test_consolidation_job_renderer_shows_only_safe_compaction_failures(monkeypa
     )
 
     output = stream.getvalue()
-    assert "Compaction failures:" in output
-    assert "operation_index=0" in output
-    assert "target_resolution=ambiguous" in output
-    assert "target_match_count=2" in output
-    assert "target_heading_sha256=" + "b" * 64 in output
+    assert "Bank size advisory" in output
+    assert "facts.md" in output and "40000" in output and "35000" in output
+    assert "human decision" in output
+    assert "Compaction failures" not in output
     assert "CLI_JOB_RAW_COMPLETION_SECRET_9a31" not in output
 
 

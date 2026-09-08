@@ -42,10 +42,8 @@ lines are recorded verbatim and answered locally; ``CONNECT`` tunnels are
 recorded and refused, exactly like the P12-3 fake), so proxy-routing and
 direct-connection-trap proofs reuse it unchanged.
 
-Reuse note: this module is extracted and adapted from the draft PR #273 slice
-(materially authored by ``claude-fable-5``, Anthropic) on branch
-``claude/p13-1-implementation-425762``. It has no dependency on
-``hivemind_inference`` internals, so it ports unchanged.
+This HTTP test harness has no dependency on ``hivemind_inference`` internals,
+so adapter and transport tests can share it without coupling their implementations.
 """
 
 from __future__ import annotations
@@ -196,7 +194,7 @@ class InferenceEmulator:
         request field with a 400 — e.g. Scaleway, whose Embeddings API
         documents ``encoding_format`` as unsupported. Without this mode the
         emulator silently accepts any field, which is precisely how a
-        universally-pinned parameter passed review while being incompatible
+        universally-pinned parameter could appear valid while being incompatible
         with a frozen reference profile.
         """
         self.requests: list[dict] = []
