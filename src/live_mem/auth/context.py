@@ -604,9 +604,18 @@ class MonoTenantSpaceAllowlistProvider:
             "live_read",
             "live_search",
             # ---- long tools (no alias mapping) ----
+            "long_document_get",
+            "long_document_list",
             "long_ingest",
+            "long_ingest_async",
+            "long_ingest_status",
+            "long_ingest_list",
+            "long_ingest_cancel",
             "long_query",
             "long_reindex",
+            "ontology_list",
+            "ontology_get",
+            "ontology_validate",
             # ---- space tools ----
             "space_create",
             "space_delete",

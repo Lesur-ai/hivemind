@@ -169,6 +169,7 @@ class ChatRequest:
     messages: tuple[ChatMessage, ...] = field(repr=False)
     timeout_seconds: float
     max_output_tokens: int | None = None
+    reasoning_effort: str | None = None
     correlation_id: str = field(default_factory=_generate_correlation_id)
     retry_policy: str = "bounded"
 
@@ -195,6 +196,11 @@ class ChatRequest:
                 raise ValueError("max_output_tokens must be an integer")
             if not _is_bounded_int(self.max_output_tokens, minimum=1):
                 raise ValueError("max_output_tokens must be >= 1")
+        if self.reasoning_effort is not None:
+            if self.reasoning_effort not in ("low", "medium", "high"):
+                raise ValueError(
+                    "reasoning_effort must be one of: 'low', 'medium', 'high'"
+                )
         _validate_correlation_id(self.correlation_id)
         if self.retry_policy not in REQUEST_RETRY_POLICIES:
             raise ValueError(

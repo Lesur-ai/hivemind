@@ -207,7 +207,7 @@ def test_lease_is_active_states_and_expiry() -> None:
 
 
 def test_is_lease_expired_active_token_without_lease_until_is_corrupt() -> None:
-    """L2b (fail-closed sur état critique incomplet, Codex BLOCKING) — un token
+    """L2b (fail-closed sur état critique incomplet) — un token
     ACTIF (HELD/RELEASING) sans ``lease_until`` n'est PAS « jamais expiré » : il
     lève ``CorruptedStateError``. RED sans le fix : ``is_lease_expired`` retournait
     ``False`` (valide à vie) pour un HELD ``lease_until=None``, ouvrant un
@@ -236,7 +236,7 @@ def test_is_lease_expired_active_token_without_lease_until_is_corrupt() -> None:
 
 
 def test_is_lease_expired_malformed_lease_until_is_corrupt() -> None:
-    """L2c (MINOR Codex — taxonomie d'erreur critique) — un ``lease_until``
+    """L2c (taxonomie d'erreur critique) — un ``lease_until``
     malformé (chaîne non ISO-8601) sort en ``CorruptedStateError``, pas en
     ``ValueError``/``TypeError`` nu. RED sans le fix : ``_parse_iso`` laissait
     fuir un ``ValueError`` qu'un caller gérant la corruption Hivemind ne
@@ -792,8 +792,8 @@ async def test_assert_commit_denied_version_conflict() -> None:
 async def test_assert_commit_blocked_when_state_absent(missing: str) -> None:
     """L19 (ADR a, fail-closed) — état critique absent -> fail-closed, jamais
     default-allow. ``token`` / ``pointer`` absent -> BLOCKED (état non initialisé).
-    ``term`` absent SOUS un token ACTIF -> ``CorruptedStateError`` (Codex MEDIUM
-    head a0c51c2) : un token actif IMPLIQUE qu'un term a été bumpé, donc un term.json
+    ``term`` absent SOUS un token ACTIF -> ``CorruptedStateError`` : un token actif
+    IMPLIQUE qu'un term a été bumpé, donc un term.json
     absent est une CORRUPTION, pas un BLOCKED ordinaire — cohérent avec
     acquire/renew/release/reconcile. (Un ``pointer`` absent, lui, n'est PAS impliqué
     par un token actif : pas de commit encore -> BLOCKED légitime.)"""
@@ -844,7 +844,7 @@ async def test_assert_commit_corruption_propagates(target: str) -> None:
 
 
 async def test_assert_commit_denied_held_without_lease_until_fail_closed() -> None:
-    """L20b (Codex BLOCKING) — un token HELD au term/fencing/pointeur COURANTS,
+    """L20b — un token HELD au term/fencing/pointeur COURANTS,
     tenu par l'asserter, mais SANS ``lease_until`` (état critique incomplet) est
     REFUSÉ fail-closed par le point d'autorisation unique : ``CorruptedStateError``
     propage, jamais ``None`` (autorisé).
@@ -870,7 +870,7 @@ async def test_assert_commit_denied_held_without_lease_until_fail_closed() -> No
 
 
 async def test_assert_commit_denied_held_with_malformed_lease_until() -> None:
-    """L20c (MINOR Codex) — un HELD courant avec un ``lease_until`` malformé
+    """L20c — un HELD courant avec un ``lease_until`` malformé
     (non ISO-8601) est REFUSÉ fail-closed via ``CorruptedStateError`` au point
     d'autorisation unique, pas via un ``ValueError`` nu. RED sans le fix : le
     parse laissait fuir un ``ValueError`` hors de la taxonomie de corruption."""
@@ -891,7 +891,7 @@ async def test_assert_commit_denied_held_with_malformed_lease_until() -> None:
 
 
 def test_evaluate_corrupt_active_wrong_holder_surfaces_corruption_not_not_holder() -> None:
-    """L20d (Codex BLOCKING #1) — un token ACTIF CORROMPU (``lease_until=None``)
+    """L20d — un token ACTIF CORROMPU (``lease_until=None``)
     tenu par ``nodeB``, face à un intent de ``nodeA``, DOIT remonter en
     ``CorruptedStateError`` — JAMAIS être classé en refus ordinaire
     ``CommitNotAuthorized(NOT_HOLDER)``.
@@ -920,7 +920,7 @@ def test_evaluate_corrupt_active_wrong_holder_surfaces_corruption_not_not_holder
 
 
 async def test_assert_commit_corrupt_active_wrong_holder_not_masked_as_not_holder() -> None:
-    """L20e (Codex BLOCKING #1, bout-en-bout) — même trou au point d'autorisation
+    """L20e (bout-en-bout) — même trou au point d'autorisation
     unique : un ``token.json`` HELD corrompu (``lease_until=None``) tenu par
     ``nodeB`` face à un intent de ``nodeA`` propage ``CorruptedStateError``, pas
     un ``CommitNotAuthorized(NOT_HOLDER)``.
@@ -943,7 +943,7 @@ async def test_assert_commit_corrupt_active_wrong_holder_not_masked_as_not_holde
 
 
 def test_active_token_without_holder_fails_closed() -> None:
-    """L13f (Codex BLOCKING #2) — un token ACTIF (HELD) au ``lease_until`` VALIDE
+    """L13f — un token ACTIF (HELD) au ``lease_until`` VALIDE
     mais SANS ``holder_node_id`` (``None`` ou chaîne vide) est un état critique
     incomplet : la validation structurelle fail-closed lève
     ``CorruptedStateError``, jamais une lease vivante anonyme.
@@ -973,7 +973,7 @@ def test_active_token_without_holder_fails_closed() -> None:
 
 
 async def test_assert_commit_active_token_without_holder_fails_closed() -> None:
-    """L20f (Codex BLOCKING #2, bout-en-bout) — un HELD holderless (lease valide)
+    """L20f (bout-en-bout) — un HELD holderless (lease valide)
     au point d'autorisation unique propage ``CorruptedStateError``, jamais
     ``None`` (autorisé) ni un refus à code de raison.
 
@@ -1267,8 +1267,8 @@ async def test_acquire_is_atomic_under_concurrent_calls_single_holder() -> None:
 
 # =============================================================================
 # L25-L28 — recouvrabilité durable d'acquire (never-drop/never-orphan) +
-# reprise idempotente + renew structural-first (Codex BLOCKING+MINOR head
-# 62e71dbc : grant à trois écritures durables non transactionnelles).
+# reprise idempotente + renew structural-first (grant à trois écritures durables
+# non transactionnelles).
 # =============================================================================
 
 
@@ -1350,7 +1350,7 @@ class _FaultStorage:
 
 
 async def test_acquire_fault_after_bump_term_before_set_token_leaves_head_pending() -> None:
-    """L25 (Codex BLOCKING head 62e71dbc, never-orphan) — une panne durable APRÈS
+    """L25 (never-orphan) — une panne durable APRÈS
     ``bump_term`` mais AVANT ``set_token`` (write token.json) ne doit JAMAIS
     consommer la head.
 
@@ -1395,7 +1395,7 @@ async def test_acquire_fault_after_bump_term_before_set_token_leaves_head_pendin
 
 
 async def test_acquire_fault_on_bump_term_leaves_nothing_durable_head_pending() -> None:
-    """L25bis (Codex BLOCKING head 62e71dbc, never-orphan — le prefix le PLUS
+    """L25bis (never-orphan — le prefix le PLUS
     simple) — une panne durable sur la TOUTE PREMIÈRE écriture du grant
     (``bump_term`` -> term.json) ne laisse RIEN de durable et la head ENCORE
     PENDING.
@@ -1437,7 +1437,7 @@ async def test_acquire_fault_on_bump_term_leaves_nothing_durable_head_pending() 
 
 
 async def test_acquire_fault_after_set_token_before_mark_granted_resumes_idempotently() -> None:
-    """L26 (Codex BLOCKING head 62e71dbc, recouvrabilité) — une panne durable
+    """L26 (recouvrabilité) — une panne durable
     APRÈS ``set_token`` mais AVANT ``mark_granted`` laisse un token HELD durable
     pour CE ``event_id`` + une head ENCORE PENDING (recouvrable, jamais orphelin).
 
@@ -1545,7 +1545,7 @@ async def test_acquire_resume_rejects_other_holders_live_lease() -> None:
 
 
 async def test_renew_corrupt_active_other_holder_without_lease_until_fails_closed() -> None:
-    """L28 (Codex MINOR head 62e71dbc) — ``renew()`` sur un token ACTIF corrompu
+    """L28 — ``renew()`` sur un token ACTIF corrompu
     (HELD sans ``lease_until``) tenu par un AUTRE nœud doit remonter
     ``CorruptedStateError`` (fail-closed), JAMAIS être masqué en ``NOT_HOLDER``.
 
@@ -1584,16 +1584,16 @@ async def test_renew_corrupt_active_other_holder_malformed_lease_until_fails_clo
 
 
 async def test_acquire_resume_fails_closed_on_divergent_same_event_head() -> None:
-    """L27ter (Codex BLOCKING heads f1345a6 + f371e05) — sur une anomalie de queue
+    """L27ter — sur une anomalie de queue
     DIVERGENTE same-event_id (deux entrées ``event_id=evtX`` de requesters
     DISTINCTS), le fast-path de reprise FAIL-CLOSED (BLOCKED) : il NE consomme PAS
     l'entrée d'un autre requester (never-orphan) ET ne retourne PAS un acquire
     « réussi » silencieux par-dessus une queue divergente.
 
-    RED #1 (head f1345a6, sans le check requester) : la head canonique est l'entrée
+    RED #1 (sans le check requester) : la head canonique est l'entrée
     de nodeB (seq inférieur) ; le resume de nodeA la marquerait GRANTED -> on
     consommerait la requête de nodeB sans que nodeB ait jamais tenu le token.
-    RED #2 (head f371e05, check requester mais return inconditionnel) : on ne
+    RED #2 (check requester mais return inconditionnel) : on ne
     consomme plus nodeB, mais ``acquire`` retournait quand même le token de nodeA —
     le holder pouvait alors enchaîner ``assert_commit_allowed()`` (qui ne re-vérifie
     pas la head) et committer par-dessus la queue divergente.
@@ -1647,7 +1647,7 @@ async def test_acquire_resume_fails_closed_on_divergent_same_event_head() -> Non
 
 
 async def test_acquire_resume_fails_closed_when_own_entry_pending_but_not_head() -> None:
-    """L27quater (Codex BLOCKING head fb5e486) — grant à moitié appliqué de nodeA
+    """L27quater — grant à moitié appliqué de nodeA
     pour evt-a, mais une entrée d'ordre INFÉRIEUR (evt-b) est la head canonique
     pendant que evt-a reste PENDING (arrivée out-of-order côté queue répliquée).
     « head = un autre event » N'EST PAS une preuve que notre entrée a été consommée.
@@ -1721,7 +1721,7 @@ async def test_acquire_resume_idempotent_returns_when_own_entry_already_consumed
 
 
 async def test_acquire_resume_blocks_own_canonical_plus_divergent_duplicate() -> None:
-    """L27sexies (Codex BLOCKING head 5225303) — notre entrée EST la head canonique
+    """L27sexies — notre entrée EST la head canonique
     (nodeA/evtX seq0) MAIS un doublon divergent same-event reste PENDING
     (nodeB/evtX seq1). Finaliser notre entrée la consommerait et MASQUERAIT le
     doublon (detect_event_id_duplicates ne groupe que les PENDING : après grant de
@@ -1752,7 +1752,7 @@ async def test_acquire_resume_blocks_own_canonical_plus_divergent_duplicate() ->
 
 
 async def test_acquire_resume_blocks_own_duplicate_seqs() -> None:
-    """L27septies (Codex BLOCKING head 5225303, « same class ») — deux entrées
+    """L27septies — deux entrées
     PENDING du MÊME requester pour le même event_id à des seq distinctes
     (nodeA/evtX seq0 + nodeA/evtX seq1). L'ensemble PENDING same-event n'est pas
     réductible à UNE entrée canonique -> fail-closed BLOCKED (jamais consommer l'une
@@ -1774,7 +1774,7 @@ async def test_acquire_resume_blocks_own_duplicate_seqs() -> None:
 
 
 async def test_renew_stale_term_holder_is_superseded() -> None:
-    """L29 (Codex BLOCKING head 5225303) — un holder SUPERSEDED (token.term <
+    """L29 — un holder SUPERSEDED (token.term <
     term.json après un bump) ne peut pas prolonger sa lease obsolète via renew :
     STALE_TERM. RED sans le check term dans renew : la lease stale serait renouvelée
     et G3 la verrait active indéfiniment -> blocage de convergence (HIVEMIND.md
@@ -1796,7 +1796,7 @@ async def test_renew_stale_term_holder_is_superseded() -> None:
 
 # =============================================================================
 # L30 — cohérence TERM fail-closed des tokens actifs sur renew/release/reconcile
-# (Codex BLOCKING head 20e2e5b : term.json absent OU token au futur = corruption).
+# (term.json absent OU token au futur = corruption).
 # =============================================================================
 
 
@@ -1878,7 +1878,7 @@ async def test_reconcile_missing_term_active_token_fails_closed() -> None:
 
 # =============================================================================
 # L31 — cohérence TERM appliquée AUSSI au gate de commit et au resume d'acquire
-# (Codex BLOCKING head a8dcf65 : la garde doit être PARTOUT où un actif est
+# (la garde doit être PARTOUT où un actif est
 # accepté/autorisé/retourné en succès, pas seulement renew/release/reconcile).
 # =============================================================================
 
@@ -1898,7 +1898,7 @@ def test_evaluate_commit_future_term_active_token_is_corruption() -> None:
 
 
 async def test_acquire_resume_missing_term_active_token_fails_closed() -> None:
-    """L31b (Codex repro head a8dcf65) — resume d'un HELD vivant SANS term.json
+    """L31b — resume d'un HELD vivant SANS term.json
     (term absent) : fail-closed CorruptedStateError, jamais un succès silencieux
     défaltant term.json à 0 et marquant la head GRANTED. RED sans la garde :
     current_term=0, held.term==0 -> finalise -> 'returned held 0 None'."""
@@ -1934,9 +1934,9 @@ async def test_acquire_resume_future_term_active_token_fails_closed() -> None:
 
 
 # =============================================================================
-# L32 — G3 fail-closed sur token actif corrompu EXPIRÉ (Codex HIGH head a0c51c2 :
+# L32 — G3 fail-closed sur token actif corrompu EXPIRÉ :
 # lease_is_active ne voit QUE l'expiration -> un actif corrompu expiré serait
-# ÉCRASÉ par acquire au lieu de remonter en corruption).
+# ÉCRASÉ par acquire au lieu de remonter en corruption.
 # =============================================================================
 
 
@@ -1997,7 +1997,7 @@ async def test_acquire_g3_expired_missing_term_token_fails_closed() -> None:
 # =============================================================================
 # L33 — corruption-first en TÊTE d'acquire : un token actif corrompu remonte
 # CorruptedStateError AVANT tout BLOCKED ordinaire (G1 all-ACK / G2 head), même
-# expiré / ACK manquant (Codex MEDIUM head 2a9fc3d).
+# expiré / ACK manquant.
 # =============================================================================
 
 
@@ -2044,7 +2044,7 @@ async def test_acquire_corrupt_active_missing_term_fails_closed_before_g1() -> N
 
 
 async def test_renew_and_acquire_serialized_no_split_brain() -> None:
-    """L34 (Codex HIGH head fb6f112) — renew() et acquire() DOIVENT être sérialisés
+    """L34 — renew() et acquire() DOIVENT être sérialisés
     sous le MÊME verrou de mutation par-space. Sinon : A renouvelle la lease de nodeA
     (parqué avant set_token) ; l'horloge dépasse l'ANCIENNE expiration mais pas la
     NOUVELLE ; B (acquire nodeB) lit le snapshot PÉRIMÉ d'avant-renew, passe G3
@@ -2157,7 +2157,7 @@ class _GatedPointerRead:
 
 
 async def test_assert_commit_allowed_linearizable_with_concurrent_release() -> None:
-    """L35 (Codex BLOCKING head a26cd28) — ``assert_commit_allowed()`` lit
+    """L35 — ``assert_commit_allowed()`` lit
     token/term/pointer EN SÉQUENCE ; un ``release()`` concurrent qui libère le token
     (FREE, même term/fencing) ne doit PAS pouvoir s'intercaler ENTRE la lecture du
     token (HELD) et celle du pointeur — sinon le prédicat autorise sur un snapshot HELD
@@ -2203,7 +2203,7 @@ async def test_assert_commit_allowed_linearizable_with_concurrent_release() -> N
 
 
 async def test_assert_commit_allowed_evaluates_expiry_at_snapshot_not_pre_wait() -> None:
-    """L36 (Codex HIGH head 4dc7855) — assert_commit_allowed() doit évaluer l'expiry de
+    """L36 — assert_commit_allowed() doit évaluer l'expiry de
     la lease au POINT DE LINÉARISATION du snapshot (``now`` lu DANS le verrou, APRÈS les
     reads), pas à un ``now`` pré-attente périmé. Si l'appelant franchit ``lease_until``
     pendant qu'il attend le verrou / des reads lents, l'autorisation doit FENCER.

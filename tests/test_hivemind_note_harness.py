@@ -190,7 +190,7 @@ async def test_oracle_catches_tombstoned_non_md_live_object() -> None:
 
 # =============================================================================
 # H4 — l'oracle attrape un objet live tombstoné d'extension étrangère ``*.keep``
-# (skip ``.keep`` réduit à la sentinelle bootstrap exacte — Codex BLOCKING)
+# (skip ``.keep`` réduit à la sentinelle bootstrap exacte)
 # =============================================================================
 
 

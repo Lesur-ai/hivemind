@@ -173,6 +173,7 @@ def test_top_level_pytest_has_no_false_nested_failure() -> None:
 def test_dedicated_and_manual_suites_are_explicit_and_complete() -> None:
     assert set(DEDICATED_SUITES) == {
         "embedded_secret_docker",
+        "manual_async_ingest_e2e",
         "manual_recipe",
         "playwright",
         "reviewer_tooling",
@@ -180,12 +181,16 @@ def test_dedicated_and_manual_suites_are_explicit_and_complete() -> None:
     assert DISTRIBUTIONS == ("private", "public")
     assert set(dedicated_suites_for_distribution("public")) == {
         "embedded_secret_docker",
+        "manual_async_ingest_e2e",
         "manual_recipe",
         "playwright",
     }
     with pytest.raises(ValueError, match="unknown repository distribution"):
         dedicated_suites_for_distribution("unknown")
-    assert manual_suite_paths() == frozenset({"scripts/test_recette.py"})
+    assert manual_suite_paths() == frozenset({
+        "scripts/test_recette.py",
+        "scripts/test_async_ingest_e2e.py",
+    })
     assert unclassified_test_scripts(ROOT) == []
     for suite in DEDICATED_SUITES.values():
         assert suite["command"]

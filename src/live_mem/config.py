@@ -13,7 +13,6 @@ Usage :
 """
 
 import logging
-import math
 import re
 from functools import lru_cache
 
@@ -140,6 +139,7 @@ class Settings(BaseSettings):
     )
     llmaas_max_tokens: int = 16384  # Max tokens de SORTIE demandés à l'API
     llmaas_temperature: float = 0.3
+    llm_model_effort: str = "low"
 
     # ─── Long embarqué (Graph Memory) — P7-3 / ADR-0019 ───────
     # URL INTERNE du runtime long embarqué : le hostname du service compose,
@@ -199,19 +199,21 @@ class Settings(BaseSettings):
     default_rules_file: str = ""
 
     # ─── Consolidation ────────────────────────────────────────
-    consolidation_timeout: int = 600  # Timeout par appel LLM (secondes)
+    # Per-call LLM timeout in seconds. The 1800 s (30 min) default allows
+    # slower models to process a large bank while bounding a stalled call.
+    # Bounded transient retries are configured separately below.
+    consolidation_timeout: int = 1800
+    # Retries after the initial call, with delays of 60/120/300 seconds.
+    consolidation_transient_retries: int = 3
     # LM2-14 fix : limite revue à la baisse pour brider la conso budget LLM.
     # 200 = ~1 MB d'input LLM si chaque note fait 5 KB ; ~10 MB si 50 KB.
-    # Au-delà, l'auto-compact bank prend le relais. Une note massive reste
+    # Au-delà, un fichier bank trop gros n'est que signalé (`bank_size_advisory`) ;
+    # la compaction est manuelle (`bank_compact`). Une note massive reste
     # bornée par MAX_NOTE_CONTENT_SIZE (100 KB) côté live.py.
     consolidation_max_notes: int = 200  # Max notes traitées par consolidation
-    consolidation_batch_size: int = (
-        5  # Notes par lot LLM (réponses courtes = moins de drift)
-    )
-    # V1.4.0 compatibility bridge: Hivemind-owned consolidator prompts are
-    # English by default. Existing deployments can keep the imported Live
-    # Memory French prompts until the v1.6.0 language selector lands.
-    consolidation_legacy_french_prompts: bool = False
+    # Notes per LLM batch. The internal default is 3; the deployment example
+    # selects 2 explicitly through CONSOLIDATION_BATCH_SIZE.
+    consolidation_batch_size: int = 3
     # LM2-18 fix : cooldown entre deux consolidations du même space.
     # Empêche un agent write de boucler sur bank_consolidate et de
     # saturer le budget LLM ou de monopoliser le lock du space.
@@ -238,23 +240,23 @@ class Settings(BaseSettings):
 
 
 
-    # ─── Bank Compaction ──────────────────────────────────────
-    # The aggregate context-pressure signal is a ratio of the resolved chat
-    # output budget. A strictly positive, finite value no greater than one is
-    # required so a malformed setting cannot silently disable the admission
-    # guard. The independent per-file limit below is the persisted UTF-8-byte
-    # safety boundary; strict planning may still refuse an incompatible file.
-    compact_threshold: float = (
-        0.6  # 60% of the resolved output budget
-    )
+    # ─── Bank size advisory / manual compaction ──────────────
+    # La compaction est une décision humaine (`bank_compact`) ;
+    # la consolidation ne la déclenche jamais. Cette
+    # limite par fichier (octets UTF-8 persistés) n'est qu'un INDICATEUR : un
+    # dépassement est journalisé et rapporté (`bank_size_advisory`), jamais
+    # agi. Elle reste le seuil de candidature et la cible de la compaction
+    # manuelle. L'ancien COMPACT_THRESHOLD (admission de l'auto-compaction)
+    # n'existe plus ; une variable d'environnement résiduelle est ignorée.
     bank_file_max_size: int = (
-        15360  # Universal per-file persisted UTF-8-byte maximum
+        35000  # Universal per-file persisted UTF-8-byte advisory / compaction target
     )
 
     # ─── Graph Push — Volatile-file guardrail (P4-8) ──────────
     # Fichiers bank "volatils" que `graph_push` SAUTE par défaut : ce sont des
     # snapshots transitoires (focus de session, journal récent borné) que le
-    # consolidateur réécrit/compacte/élague en continu. Les indexer dans Graph
+    # consolidateur réécrit en continu et qu'une compaction manuelle
+    # (`bank_compact`, décision humaine) peut réécrire. Les indexer dans Graph
     # Memory enseigne au graphe du contenu déjà périmé, et une compaction
     # ultérieure les laisse orphelins (voir
     # DESIGN/live-mem/EVOLUTION_LIVE_GRAPH_INTEGRATION.md, Vague B).
@@ -366,6 +368,8 @@ class Settings(BaseSettings):
             )
 
         # Consolidation ranges
+        if not 0 <= self.consolidation_transient_retries <= 3:
+            errors.append("CONSOLIDATION_TRANSIENT_RETRIES must be between 0 and 3")
         if self.consolidation_timeout < 10:
             errors.append(
                 f"CONSOLIDATION_TIMEOUT={self.consolidation_timeout} too low (min 10s)"
@@ -379,17 +383,7 @@ class Settings(BaseSettings):
                 f"CONSOLIDATION_BATCH_SIZE={self.consolidation_batch_size} must be ≥1"
             )
 
-        # Compaction admission and persisted-byte limits. ``nan`` would make
-        # every threshold comparison false, so it must fail at startup rather
-        # than silently weakening the context-pressure signal.
-        if not (
-            math.isfinite(self.compact_threshold)
-            and 0.0 < self.compact_threshold <= 1.0
-        ):
-            errors.append(
-                "COMPACT_THRESHOLD="
-                f"{self.compact_threshold!r} must be finite and in (0, 1]"
-            )
+        # Bank size advisory / manual compaction target (persisted UTF-8 bytes).
         if self.bank_file_max_size < 1:
             errors.append(
                 "BANK_FILE_MAX_SIZE="

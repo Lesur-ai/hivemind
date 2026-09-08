@@ -47,7 +47,7 @@ def test_select_bank_checks_all_three_identities_before_every_post_await_mutatio
     # (tests/js/bank_selection_runtime.mjs) — space alone (cross-space, same
     # filename), filename alone (cross-file, same space), and generation
     # alone (ABA: same space AND filename re-selected, e.g. alpha -> beta ->
-    # alpha, Terra PR #257 review finding).
+    # alpha).
     is_stale_index = body.index("const isStale = () =>")
     predicate = body[is_stale_index:body.index(";", is_stale_index)]
     assert "app.spaceId !== requestedSpaceId" in predicate

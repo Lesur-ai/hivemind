@@ -263,16 +263,17 @@ async def memory_create(
             if access_err:
                 return access_err
         
-        # Vérifier que l'ontologie existe et la récupérer
+        # Vérifier que l'ontologie existe et la récupérer (noms enregistrés uniquement)
         from .core.ontology import get_ontology_manager
         ontology_manager = get_ontology_manager()
-        ontology_data = ontology_manager.get_ontology(ontology)
+        ontology_data = ontology_manager.get_registered_ontology(ontology)
         
         if not ontology_data:
             available = [o["name"] for o in ontology_manager.list_ontologies()]
+            onto_label = ontology_manager.get_ontology_label(ontology)
             return {
                 "status": "error",
-                "message": f"Ontology '{ontology}' not found. Available: {available}"
+                "message": f"Ontology '{onto_label}' not found. Available: {available}"
             }
         
         # Stocker l'ontologie sur S3 pour la mémoire
@@ -510,6 +511,7 @@ async def memory_stats(
             "document_count": stats.document_count,
             "entity_count": stats.entity_count,
             "relation_count": stats.relation_count,
+            "entity_types": getattr(stats, "entity_types", {}),
             "top_entities": stats.top_entities,
             "embedding_collection": embedding_collection,
         }
@@ -847,6 +849,7 @@ async def memory_ingest_batch_async(
     memory_id: Annotated[str, Field(description="Target memory identifier")],
     documents: Annotated[List[Dict[str, Any]], Field(description="Documents, each containing {content_base64, filename, source_path, sha256, metadata?, source_modified_at?}")],
     replace_existing: Annotated[bool, Field(default=False, description="Replace documents with changed checksums across the entire batch")] = False,
+    ontology: Annotated[Optional[str], Field(default=None, description="Optional ontology schema name or YAML override for extraction")] = None,
 ) -> dict:
     """
     Soumet un LOT de documents à l'ingestion asynchrone.
@@ -870,6 +873,19 @@ async def memory_ingest_batch_async(
 
         if not documents:
             return {"status": "error", "message": "No document provided."}
+
+        if ontology is not None:
+            if not isinstance(ontology, str) or not ontology.strip():
+                return {"status": "error", "message": "ontology must be a non-empty string"}
+            trimmed_ont = ontology.strip()
+            from .core.ontology import get_ontology_manager
+            from .core.ontology_validator import _validate_and_parse_ontology
+            mgr = get_ontology_manager()
+            if not mgr.is_registered_name(trimmed_ont):
+                val_res, _ = _validate_and_parse_ontology(trimmed_ont)
+                if not val_res.get("valid"):
+                    err_msg = "; ".join(val_res.get("errors", ["Invalid ontology YAML"]))
+                    return {"status": "error", "message": f"Invalid ontology override: {err_msg}"}
 
         requested_by = ""
         try:
@@ -914,6 +930,7 @@ async def memory_ingest_batch_async(
                     source_modified_at=doc.get("source_modified_at"),
                     requested_by=requested_by,
                     batch_id=batch_id,
+                    ontology=ontology,
                 )
             except Exception as item_err:
                 res = {"status": "error", "message": str(item_err), "source_path": doc.get("source_path")}
@@ -940,7 +957,8 @@ async def memory_ingest_batch_async(
 
 @mcp.tool(description="Return the status of an asynchronous ingestion job.")
 async def ingest_job_status(
-    job_id: Annotated[str, Field(description="Job ID returned by memory_ingest_async")]
+    job_id: Annotated[str, Field(description="Job ID returned by memory_ingest_async")],
+    expected_memory_id: Annotated[Optional[str], Field(default=None, description="Optional memory ID for space-bound verification")] = None,
 ) -> dict:
     """
     Consulte l'état d'un job d'ingestion asynchrone.
@@ -952,8 +970,16 @@ async def ingest_job_status(
     try:
         from .core.ingest_queue import get_ingest_queue
         result = await get_ingest_queue().get_job(job_id)
-        # Contrôle d'accès si le job est connu
+        if result.get("status") == "not_found":
+            return result
         mem = result.get("memory_id")
+        if expected_memory_id:
+            validate_memory_id(expected_memory_id)
+            if mem and mem != expected_memory_id:
+                return {
+                    "status": "error",
+                    "message": f"Job '{job_id}' does not belong to memory '{expected_memory_id}'",
+                }
         if mem:
             access_err = check_memory_access(mem)
             if access_err:
@@ -969,6 +995,8 @@ async def ingest_job_list(
     status: Annotated[Optional[str], Field(default=None, description="Status filter (queued|running|succeeded|failed|cancelled|skipped|changed_skipped)")] = None,
     source_path: Annotated[Optional[str], Field(default=None, description="Filter by source_path when resuming after a client timeout")] = None,
     batch_id: Annotated[Optional[str], Field(default=None, description="batch_id filter")] = None,
+    limit: Annotated[int, Field(default=50, description="Maximum number of jobs to return (1-100)")] = 50,
+    offset: Annotated[int, Field(default=0, description="Number of jobs to skip")] = 0,
 ) -> dict:
     """
     Liste les jobs d'ingestion d'une mémoire (reprise après timeout client).
@@ -982,15 +1010,27 @@ async def ingest_job_list(
         access_err = check_memory_access(memory_id)
         if access_err:
             return access_err
+        if type(limit) is not int or limit < 1 or limit > 100:
+            return {"status": "error", "message": "limit must be an integer between 1 and 100"}
+        if type(offset) is not int or offset < 0:
+            return {"status": "error", "message": "offset must be a non-negative integer"}
         from .core.ingest_queue import get_ingest_queue
-        return await get_ingest_queue().list_jobs(memory_id, status=status, source_path=source_path, batch_id=batch_id)
+        return await get_ingest_queue().list_jobs(
+            memory_id,
+            status=status,
+            source_path=source_path,
+            batch_id=batch_id,
+            limit=limit,
+            offset=offset,
+        )
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 @mcp.tool(description="Request cancellation of an asynchronous ingestion job.")
 async def ingest_job_cancel(
-    job_id: Annotated[str, Field(description="Identifier of the job to cancel")]
+    job_id: Annotated[str, Field(description="Identifier of the job to cancel")],
+    expected_memory_id: Annotated[Optional[str], Field(default=None, description="Optional memory ID for space-bound verification")] = None,
 ) -> dict:
     """
     Annule un job d'ingestion (best-effort, sans corrompre le graphe).
@@ -1002,9 +1042,17 @@ async def ingest_job_cancel(
     try:
         from .core.ingest_queue import get_ingest_queue
         queue = get_ingest_queue()
-        # Contrôle d'accès via la mémoire du job
         info = await queue.get_job(job_id)
+        if info.get("status") == "not_found":
+            return info
         mem = info.get("memory_id")
+        if expected_memory_id:
+            validate_memory_id(expected_memory_id)
+            if mem and mem != expected_memory_id:
+                return {
+                    "status": "error",
+                    "message": f"Job '{job_id}' does not belong to memory '{expected_memory_id}'",
+                }
         if mem:
             access_err = check_memory_access(mem)
             if access_err:
@@ -1165,16 +1213,27 @@ async def question_answer(
             query_result = await get_embedder().embed_query_result(question)
 
             # Recherche Qdrant :
-            # - Graph-Guided : filtrée par les documents identifiés par le graphe
-            # - RAG-only : recherche sur TOUS les chunks de la mémoire (fallback)
+            # - Graph-Guided : filtrée par les documents actifs identifiés par le graphe
+            # - RAG-only : filtrée par TOUS les documents actifs de la mémoire (exclut les candidats non promus)
             score_threshold = settings.rag_score_threshold
             chunk_limit = settings.rag_chunk_limit
-            
+
+            get_active_fn = getattr(get_graph(), "get_active_doc_ids", None)
+            active_doc_ids = await get_active_fn(memory_id) if callable(get_active_fn) else None
+            target_doc_ids: Optional[list[str]] = None
+            if graph_doc_ids:
+                if active_doc_ids is not None:
+                    target_doc_ids = [d for d in graph_doc_ids if d in active_doc_ids]
+                else:
+                    target_doc_ids = graph_doc_ids
+            else:
+                target_doc_ids = active_doc_ids
+
             chunk_results = await get_vector_store().search(
                 memory_id=memory_id,
                 embedding_result=query_result,
-                doc_ids=graph_doc_ids if graph_doc_ids else None,
-                limit=chunk_limit
+                doc_ids=target_doc_ids,
+                limit=chunk_limit,
             )
 
             # Sauver tous les résultats avant filtrage (pour diagnostic)
@@ -1397,12 +1456,23 @@ async def memory_query(
             
             score_threshold = settings.rag_score_threshold
             chunk_limit = settings.rag_chunk_limit
-            
+
+            get_active_fn = getattr(get_graph(), "get_active_doc_ids", None)
+            active_doc_ids = await get_active_fn(memory_id) if callable(get_active_fn) else None
+            target_doc_ids: Optional[list[str]] = None
+            if graph_doc_ids:
+                if active_doc_ids is not None:
+                    target_doc_ids = [d for d in graph_doc_ids if d in active_doc_ids]
+                else:
+                    target_doc_ids = graph_doc_ids
+            else:
+                target_doc_ids = active_doc_ids
+
             chunk_results = await get_vector_store().search(
                 memory_id=memory_id,
                 embedding_result=query_result,
-                doc_ids=graph_doc_ids if graph_doc_ids else None,
-                limit=chunk_limit
+                doc_ids=target_doc_ids,
+                limit=chunk_limit,
             )
             
             total_before = len(chunk_results)
@@ -1895,33 +1965,49 @@ async def memory_graph(
         return {"status": "error", "message": str(e)}
 
 
-@mcp.tool(description="List the documents in a memory.")
+@mcp.tool(description="List documents indexed in a memory with optional pagination and filters.")
 async def document_list(
-    memory_id: Annotated[str, Field(description="Memory identifier")]
+    memory_id: Annotated[str, Field(description="Memory identifier")],
+    limit: Annotated[Optional[int], Field(default=None, description="Maximum number of documents to return (1-100), or None to return all documents")] = None,
+    offset: Annotated[int, Field(default=0, description="Number of documents to skip")] = 0,
+    status: Annotated[Optional[str], Field(default=None, description="Optional filter by ingestion status (e.g. succeeded, failed)")] = None,
+    query: Annotated[Optional[str], Field(default=None, description="Optional search filter on filename or source_path")] = None,
 ) -> dict:
     """
-    Liste tous les documents d'une mémoire.
+    Liste les documents d'une mémoire avec pagination optionnelle et filtres.
 
     Args:
         memory_id: ID de la mémoire
-        
+        limit: Nombre maximum de documents à retourner (optionnel, max 100 ; si omis, retourne tous les documents)
+        offset: Offset de pagination (défaut 0)
+        status: Filtre optionnel par statut d'ingestion
+        query: Filtre textuel optionnel sur le nom de fichier ou source_path
+
     Returns:
-        Liste des documents avec leurs métadonnées
+        Dictionnaire avec pagination, total_count et liste des documents.
     """
     try:
         # Vérifier l'accès à la mémoire
         access_err = check_memory_access(memory_id)
         if access_err:
             return access_err
-        
-        graph_data = await get_graph().get_full_graph(memory_id)
-        docs = graph_data.get("documents", [])
-        
+
+        catalog = await get_graph().list_documents_catalog(
+            memory_id=memory_id,
+            limit=limit,
+            offset=offset,
+            status=status,
+            query=query,
+        )
+
         return {
             "status": "ok",
             "memory_id": memory_id,
-            "count": len(docs),
-            "documents": docs
+            "count": len(catalog["documents"]),
+            "total_count": catalog["total_count"],
+            "limit": catalog["limit"],
+            "offset": catalog["offset"],
+            "documents": catalog["documents"],
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -1930,26 +2016,21 @@ async def document_list(
 @mcp.tool(description="Return a document and optional decoded content.")
 async def document_get(
     memory_id: Annotated[str, Field(description="Memory identifier")],
-    document_id: Annotated[str, Field(description="Document identifier (UUID)")],
+    document_id: Annotated[Optional[str], Field(default=None, description="Document identifier (UUID)")] = None,
+    source_path: Annotated[Optional[str], Field(default=None, description="Stable canonical source path of the document")] = None,
     include_content: Annotated[bool, Field(default=False, description="Download and include S3 content; this can be slow")] = False,
     content_format: Annotated[str, Field(default="text", description="Binary-file content format: 'text' for extracted text (default) or 'raw' for original bytes encoded as base64")] = "text"
 ) -> dict:
     """
-    Récupère les métadonnées d'un document, et optionnellement son contenu.
+    Récupère les métadonnées d'un document par son document_id ou son source_path.
 
-    Par défaut, retourne uniquement les métadonnées (rapide, pas de téléchargement S3).
-    Passez include_content=True pour télécharger et inclure le contenu du document.
-    
-    Pour les fichiers binaires (DOCX, PDF, XLSX...), deux modes :
-    - content_format="text" (défaut) : extrait le texte lisible (paragraphes, tableaux)
-    - content_format="raw" : retourne les bytes originaux en base64 (pour forwarding vers d'autres services)
-    
     Args:
         memory_id: ID de la mémoire
-        document_id: ID du document
+        document_id: ID du document (UUID)
+        source_path: Chemin source canonique du document
         include_content: Si True, télécharge et inclut le contenu S3 (lent). Défaut: False.
         content_format: "text" (texte extrait, défaut) ou "raw" (base64 original). Défaut: "text".
-        
+
     Returns:
         Métadonnées du document (et contenu si demandé)
     """
@@ -1958,34 +2039,29 @@ async def document_get(
         access_err = check_memory_access(memory_id)
         if access_err:
             return access_err
-        
+
+        if not document_id and not source_path:
+            return {
+                "status": "error",
+                "message": "At least one of 'document_id' or 'source_path' must be provided",
+            }
+
         # Récupérer les infos du document depuis le graphe (rapide, pas de S3)
-        doc_info = await get_graph().get_document(memory_id, document_id)
-        
+        doc_info = await get_graph().get_document_details(
+            memory_id=memory_id,
+            doc_id=document_id,
+            source_path=source_path,
+        )
+
         if not doc_info:
-            return {"status": "error", "message": f"Document '{document_id}' not found"}
-        
+            target = document_id or source_path
+            return {"status": "error", "message": f"Document '{target}' not found"}
+
         result = {
             "status": "ok",
-            "document": {
-                "id": doc_info.get("id"),
-                "filename": doc_info.get("filename"),
-                "uri": doc_info.get("uri"),
-                "hash": doc_info.get("hash"),
-                "sha256": doc_info.get("sha256"),
-                "ingested_at": doc_info.get("ingested_at"),
-                "source_path": doc_info.get("source_path"),
-                "repo_path": doc_info.get("repo_path"),
-                "source_modified_at": doc_info.get("source_modified_at"),
-                "size_bytes": doc_info.get("size_bytes", 0),
-                "text_length": doc_info.get("text_length", 0),
-                "content_type": doc_info.get("content_type"),
-                "ingestion_status": doc_info.get("ingestion_status", "unknown"),
-                "last_ingest_job_id": doc_info.get("last_ingest_job_id"),
-                "chunk_count": doc_info.get("chunk_count", 0),
-            },
+            "document": doc_info,
         }
-        
+
         # Télécharger le contenu S3 seulement si demandé
         if include_content and doc_info.get("uri"):
             try:
@@ -2020,8 +2096,13 @@ async def document_get(
                         result["content_base64"] = base64.b64encode(content_bytes).decode('ascii')
                         result["content_format"] = "raw"
                         result["content_note"] = f"Text extraction is unsupported for {content_type}; using automatic base64 fallback."
-            except Exception as e:
-                result["content"] = f"[S3 read error: {e}]"
+            except Exception:
+                # A failed read is not document content. Keep storage details
+                # out of this response and leave the indexed source untouched.
+                return {
+                    "status": "error",
+                    "message": "Document content could not be read.",
+                }
         
         return result
     except Exception as e:
@@ -2160,21 +2241,53 @@ def _ontology_file_for_name(name: str) -> Optional[str]:
     return None
 
 
+from .core.ontology_validator import (
+    MAX_ONTOLOGY_BYTES,
+    _normalize_yaml_text,
+    _validate_and_parse_ontology,
+    _validate_ontology_data,
+)
+
+
+
 def _load_ontology_yaml(content_yaml: str) -> dict:
-    """Parse et valide le minimum structurel d'une ontologie YAML."""
+    """Parse et valide le minimum structurel d'une ontologie YAML (compatibilité legacy)."""
     import yaml
     try:
-        data = yaml.safe_load(content_yaml) or {}
-    except yaml.YAMLError as e:
+        data = yaml.safe_load(content_yaml)
+    except Exception as e:
         raise ValueError(f"Invalid YAML: {e}")
-
+    if not isinstance(data, dict):
+        raise ValueError("Ontology root must be a dictionary")
     name = _safe_ontology_name(str(data.get("name", "")))
-    if not isinstance(data.get("entity_types"), list) or not data["entity_types"]:
-        raise ValueError("entity_types must be a non-empty list")
-    if not isinstance(data.get("relation_types"), list) or not data["relation_types"]:
-        raise ValueError("relation_types must be a non-empty list")
+    if not name:
+        raise ValueError("Field 'name' is required")
     data["name"] = name
+    if "entity_types" not in data or not isinstance(data["entity_types"], list) or len(data["entity_types"]) == 0:
+        raise ValueError("Field 'entity_types' must be a non-empty list")
+    if "relation_types" not in data or not isinstance(data["relation_types"], list) or len(data["relation_types"]) == 0:
+        raise ValueError("Field 'relation_types' must be a non-empty list")
     return data
+
+
+@mcp.tool(description="Validate an ontology definition without saving.")
+async def ontology_validate(
+    content_yaml: Annotated[str, Field(description="Ontology YAML content to validate")]
+) -> dict:
+    """
+    Valide une ontologie YAML sans l'enregistrer.
+
+    Args:
+        content_yaml: Contenu YAML brut de l'ontologie
+
+    Returns:
+        Résultat de validation avec nom, version, sha256 et liste d'erreurs éventuelles
+    """
+    try:
+        return _validate_ontology_data(content_yaml)
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 
 @mcp.tool(description="Return an ontology's parsed definition.")
@@ -2828,7 +2941,7 @@ async def system_about() -> dict:
             "Asynchronous ingestion": ["memory_ingest_async", "memory_ingest_batch_async", "ingest_job_status", "ingest_job_list", "ingest_job_cancel"],
             "Search & Q&A": ["memory_search", "memory_query", "memory_get_context", "question_answer"],
             "Documents": ["document_list", "document_get", "document_delete"],
-            "Ontologies": ["ontology_list", "ontology_get", "ontology_export", "ontology_import", "ontology_update", "ontology_delete"],
+            "Ontologies": ["ontology_list", "ontology_get", "ontology_validate", "ontology_export", "ontology_import", "ontology_update", "ontology_delete"],
             "Backup/Restore": ["backup_create", "backup_list", "backup_restore", "backup_download", "backup_delete", "backup_restore_archive"],
             "Maintenance": ["memory_reindex"],
             "Administration": ["admin_create_token", "admin_list_tokens", "admin_revoke_token", "admin_update_token"],
@@ -2867,7 +2980,7 @@ async def system_about() -> dict:
             "services": services_status,
             "configuration": (
                 {
-                    # P13-1C : les identités de modèle viennent des profils
+                    # Les identités de modèle viennent des profils
                     # RÉSOLUS (frontière partagée), plus des variables legacy —
                     # celles-ci restent vides sur un déploiement INFERENCE_*.
                     # Surface AUTHENTIFIÉE : métadonnées sûres uniquement,
@@ -3361,7 +3474,7 @@ async def _close_llm_singletons() -> None:
     l'objet n'est fermé qu'une fois ; tout objet distinct reste fermé exactement
     une fois. Idempotent et no-op quand rien n'a été instancié.
 
-    P13-1C : les transports provider possédés (proxy inclus) ne vivent PLUS
+    Les transports provider possédés (proxy inclus) ne vivent PLUS
     ici — ils appartiennent au runtime d'inférence partagé, libéré par le hook
     frère ``_close_inference_runtime``. Séparer les deux est ce qui garantit
     qu'un échec ici ne peut pas sauter la libération des transports : c'est
@@ -3432,8 +3545,8 @@ async def _close_inference_runtime() -> None:
     A SIBLING of ``_close_llm_singletons``, not a step inside it: the guard
     runs every ``on_shutdown`` entry through ``run_finalizers``, so an
     extractor/embedder close that raises or is cancelled cannot skip the
-    transport release — the exact defect the P13-1C round-3 sweep found when
-    the provider step was last in a hand-written sequence.
+    transport release. Putting the provider step last in a hand-written
+    sequence would allow an earlier failure to skip it.
     """
 
     from .core.inference_runtime import close_inference_runtime_if_initialized
@@ -3447,7 +3560,7 @@ def _report_egress_lifespan(line: str) -> None:
 
 # The extractor/embedder registries and the shared inference runtime holder are
 # module singletons, but each `_create_app()` builds its own guard with its own
-# startup gate. This gate reconciles the two scopes (#276 / R7-F1).
+# startup gate. This gate reconciles the two scopes.
 _process_window = ProcessWindowGate(service="Graph Memory")
 
 
@@ -3503,7 +3616,7 @@ def main():
     # Sécurité v2.1.0 : vérifier la clé bootstrap au démarrage
     check_bootstrap_key_safety(settings.admin_bootstrap_key or "")
 
-    # P13-1C (ADR-0027) : la validation fail-closed de la configuration
+    # La validation fail-closed de la configuration
     # d'inférence n'est PAS appelée ici. Elle appartient au hook `on_startup`
     # du guard (`_validate_inference_startup`), qui la joue une fois par
     # fenêtre de service et répond `lifespan.startup.failed` au superviseur.

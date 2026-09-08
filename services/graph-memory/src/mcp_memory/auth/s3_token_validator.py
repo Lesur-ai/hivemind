@@ -263,7 +263,7 @@ class S3TokenValidator:
             token_hash="hivemind:" + token_hash,
             client_name=entry.get("name", ""),
             permissions=perms,
-            memory_ids=[],  # mono-tenant: never per-token scoping (NO-GO #8)
+            memory_ids=[],  # mono-tenant: never per-token scoping
             is_active=True,
             expires_at=entry.get("expires_at"),
         )

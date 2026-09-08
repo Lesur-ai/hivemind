@@ -84,7 +84,7 @@ def _uncertain_result(reason: str) -> dict:
 def test_long_reindex_is_direct_hidden_non_idempotent_operator_tool() -> None:
     tool, count = _tool_and_registration_count()
 
-    assert count == 7
+    assert count == 16
     assert tool.annotations.readOnlyHint is False
     assert tool.annotations.idempotentHint is False
     assert "long_reindex" not in ALIAS_MAP

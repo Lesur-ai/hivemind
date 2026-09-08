@@ -143,15 +143,15 @@ class TestAdapterLifecycle:
         assert all(adapter.closed == 1 for adapter in others)
 
     async def test_a_failed_close_is_terminal_and_never_re_attempted(self):
-        """PR #303 sweep (S2-F1): the retry this method used to promise was a
+        """The retry this method used to promise was a
         fiction, and the fiction leaked.
 
         ``httpx.AsyncClient.aclose()`` sets its state to CLOSED *before*
         awaiting the transport, so once a close has failed part-way, a second
         call returns instantly having touched nothing. The old contract then
         read that quiet success as "closed", cleared the slot, and the holder
-        dropped the last reference to a still-open connection pool — R1-F2
-        again, one layer down.
+        dropped the last reference to a still-open connection pool, leaking
+        the transport one layer down.
 
         So a failed close is now TERMINAL-UNCONFIRMED: never re-attempted,
         never clearable, and reported on every subsequent call.
@@ -175,10 +175,10 @@ class TestAdapterLifecycle:
 
 
 class TestTerminalShutdown:
-    """PR #303 round 1 (Codex Sol, high x2): shutdown is TERMINAL and
+    """Shutdown is TERMINAL and
     cancellation-safe.
 
-    Both findings are the same defect seen from two sides — the runtime had no
+    Both failure modes share a cause — the runtime had no
     model of "we are shutting down", so a late caller could open a transport
     nobody would close, and a cancelled cleanup could strand one that nobody
     COULD close.
@@ -208,15 +208,15 @@ class TestTerminalShutdown:
             runtime.chat_provider()
 
     async def test_cancelling_aclose_completes_every_close_before_returning(self):
-        """PR #303 round 2 (Codex Sol, high): the round-1 repair was incomplete.
+        """Cancellation must wait for every interrupted close to finish.
 
         Shielding kept a started close alive only while the loop lived. Because
         ``aclose()`` re-raised the cancellation WITHOUT waiting for the
         interrupted task, it could return with that close still pending — and
         the caller's event-loop teardown then killed it. The interrupted close
-        is deliberately SLOWER than every sibling here, which is exactly the
-        ordering the round-1 test missed (it made the slow close last, so the
-        siblings' own waiting hid the defect). No post-cancellation sleep: the
+        is deliberately SLOWER than every sibling here: making the slow close
+        last would let the siblings' own waiting hide the defect.
+        No post-cancellation sleep: the
         assertions run the instant ``aclose()`` returns.
         """
         finished: list[str] = []
@@ -256,7 +256,7 @@ class TestTerminalShutdown:
     def test_cancelled_shutdown_survives_event_loop_teardown(self):
         """The same property observed from OUTSIDE the loop.
 
-        This is the shape the round-1 test could not see: ``asyncio.run``
+        The event-loop teardown is essential to this proof: ``asyncio.run``
         returns, tearing the loop down, and the question is whether the
         transport close actually happened. Deliberately NOT an async test.
         """
@@ -347,14 +347,14 @@ class TestTerminalShutdown:
         assert runtime._close_tasks == {}
 
     async def test_a_cancelled_close_task_is_not_a_closed_transport(self):
-        """PR #303 systemic audit (D2): the retry that reported success.
+        """A failed close must not become a successful no-op retry.
 
         A close task retained as unsettled and then killed by ordinary event-
         loop teardown came back CANCELLED. The drain treated that as nothing to
         report — it recorded neither an error nor a cancellation — so
         ``aclose()`` RETURNED NORMALLY with the slot still populated and its
         transport still open, and the holder then dropped its last reference.
-        Unclosed and unreachable: the R1-F2 leak, one retry later.
+        Unclosed and unreachable: the same transport leak, one retry later.
         """
         runtime = InferenceRuntime(make_inference_config(chat=True))
         adapter = LifecycleAdapter()
@@ -472,8 +472,8 @@ class TestTerminalShutdown:
 
         Today an unconfirmed slot always still holds its adapter, so the
         adapter check alone would answer this correctly and no black-box test
-        can tell the two clauses apart. But "the slot is retained" is exactly
-        the invariant four review rounds kept breaking, so the predicate must
+        can tell the two clauses apart. But "the slot is retained" is itself
+        an invariant to protect, so the predicate must
         not depend on it: unconfirmed is enough, by itself, to withhold
         ownership.
         """
@@ -486,8 +486,8 @@ class TestTerminalShutdown:
         """The predicate the owner reads to decide "may I drop this?".
 
         Derived from the slots rather than recorded in a flag, because a flag
-        has to be set on every path and the branch that forgets is exactly how
-        one ownership hole became four review findings.
+        has to be set on every path; a forgotten branch would incorrectly
+        allow ownership to be dropped.
         """
         runtime = InferenceRuntime(make_inference_config(chat=True))
         assert runtime.is_fully_closed, "a runtime that built nothing owns nothing"

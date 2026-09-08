@@ -229,6 +229,7 @@ async def test_status_unchanged_batch() -> None:
         "document_count": 0,
         "entity_count": 0,
         "relation_count": 0,
+        "entity_types": {},
     }
 
 
@@ -604,10 +605,18 @@ def test_long_engine_public_async_surface_is_canonical() -> None:
         "disconnect",
         "ingest",
         "list_ontologies",
+        "get_ontology",
+        "validate_ontology",
         "query",
         "search",
         "reindex",
         "plan_ingest",
+        "ingest_async",
+        "ingest_status",
+        "ingest_list",
+        "ingest_cancel",
+        "list_documents",
+        "get_document",
     }
     # No protocol-authority method may exist, async or otherwise.
     forbidden = (

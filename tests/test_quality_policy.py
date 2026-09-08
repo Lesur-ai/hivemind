@@ -127,6 +127,12 @@ DEDICATED_SUITES: dict[str, DedicatedSuite] = {
         "category": "manual",
         "distributions": ("private", "public"),
     },
+    "manual_async_ingest_e2e": {
+        "paths": ("scripts/test_async_ingest_e2e.py",),
+        "command": "python3 scripts/test_async_ingest_e2e.py --help",
+        "category": "manual",
+        "distributions": ("private", "public"),
+    },
 }
 
 # ``scripts/test_*.py`` is reserved for an explicit manual suite or a listed

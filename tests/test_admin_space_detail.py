@@ -604,23 +604,6 @@ def test_activity_job_drilldown_is_field_mapped_manual_and_guarded() -> None:
         assert field in result
 
 
-def test_failed_job_inspector_exposes_only_safe_compaction_attribution() -> None:
-    source = _source()
-    detail = _function("safeCompactionTargetDetail", source)
-    failures = _function("renderSafeCompactionFailures", source)
-    inspector = _function("renderJobInspector", source)
-    for field in (
-        "operation_index",
-        "target_resolution",
-        "target_match_count",
-        "target_heading_sha256",
-    ):
-        assert field in detail
-    assert "failure.heading" not in detail
-    assert "failure.reason" not in detail
-    assert "result.compaction_failures" in failures
-    assert "renderSafeCompactionFailures(job.result)" in inspector
-    assert "Refresh job" in inspector
 
 
 def test_forbidden_sinks_and_mock_markers_are_absent() -> None:
@@ -646,3 +629,24 @@ def test_css_changes_stay_inside_space_detail_banner() -> None:
     assert "@media (max-width: 1100px)" in section
     assert "@media (max-width: 1023px)" in section
     assert "@media (max-width: 767px)" not in section
+
+
+# ---------------------------------------------------------------------------
+# #457 round 2 — l'inspecteur de job doit avouer une compaction refusée sur un
+# job qui a RÉUSSI, sinon l'opérateur perd le pointeur vers l'archive conservée.
+# ---------------------------------------------------------------------------
+
+
+def test_job_inspector_reports_the_bank_size_advisory_only() -> None:
+    """The space-detail inspector shows oversized bank files as an
+    advisory (compaction is a human decision) and no compaction envelope."""
+    source = _source()
+    fn = _function("renderBankSizeAdvisory", source)
+    assert "result.bank_size_advisory" in fn
+    assert "Number.isSafeInteger(item.utf8_bytes)" in fn and "Number.isSafeInteger(item.max_size)" in fn
+    assert "safe(item.filename)" in fn and "safe(item.utf8_bytes)" in fn
+    assert "if (!valid.length) return '';" in fn
+    assert "compaction is a human decision" in fn
+    assert "renderBankSizeAdvisory(job.result)" in _function("renderJobInspector", source) or "renderBankSizeAdvisory(job.result)" in source
+    for banned in ("renderCompactionAdvisory", "renderSafeCompactionFailures", "compaction_advisory", "compaction_failures"):
+        assert banned not in source, banned

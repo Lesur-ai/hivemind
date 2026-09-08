@@ -127,7 +127,7 @@ async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
     appelle `Server.run()` par session). Y attacher un singleton de process
     faisait qu'une déconnexion client fermait les transports pour tout le
     monde. Ce cycle de vie appartient au guard ASGI extérieur, une fois au
-    démarrage et une fois au shutdown du processus (#306 / P13-1C).
+    démarrage et une fois au shutdown du processus.
     """
     # LM2-11 : migration auth critique one-shot v1 -> v2. Elle vit dans le
     # lifespan (pas dans main()) afin de couvrir uvicorn --factory, gunicorn et
@@ -228,7 +228,7 @@ def _report_lifespan(line: str) -> None:
 # Every resource the shutdown hooks below release is process-global — the
 # consolidator singleton and the shared inference runtime holder — while each
 # `create_app()` builds its OWN guard with its own startup gate. This gate is
-# what makes those two scopes agree (#276 / R7-F1).
+# what makes those two scopes agree.
 _process_window = ProcessWindowGate(service="Hivemind")
 
 
@@ -283,11 +283,11 @@ def create_app():
     # `change_me_in_production` → compromission admin totale zéro-connaissance.
     _reject_weak_bootstrap_key(settings.admin_bootstrap_key)
 
-    # P13-1C : la validation d'inférence n'est PAS répétée ici. Elle était
-    # appelée à la factory (revue Codex ronde 5, R5-F1) parce que la faire
+    # La validation d'inférence n'est PAS répétée ici. Elle était
+    # appelée à la factory parce que la faire
     # uniquement dans le handshake lifespan la rendait tributaire de
     # l'existence de ce handshake — `uvicorn --factory ... --lifespan off` ne
-    # dispatche aucun scope lifespan. Le guard partagé (#306) règle ce cas
+    # dispatche aucun scope lifespan. Le guard partagé règle ce cas
     # sans acquérir quoi que ce soit : déclarer un hook de cycle de vie rend
     # le protocole lifespan OBLIGATOIRE, et une requête arrivant sans lui est
     # refusée avant tout dispatch applicatif. Valider à la factory publierait

@@ -1173,12 +1173,12 @@ async def test_crash_after_pointer_before_watermark_keeps_tombstone() -> None:
 
 
 # =============================================================================
-# C4-C5 — atomicité crash bank vivant multi-fichiers (finding Codex PR #99 #2)
+# C4-C5 — atomicité crash bank vivant multi-fichiers
 # =============================================================================
 
 
 async def test_crash_mid_promote_multifile_rolls_forward_to_coherent_state() -> None:
-    """C4 (finding 2 — atomicité bank vivant) — manifest MULTI-FICHIERS où le 1er
+    """C4 (atomicité bank vivant) — manifest MULTI-FICHIERS où le 1er
     put live RÉUSSIT et un put live ULTÉRIEUR ÉCHOUE. On prouve qu'à la frontière :
 
     - le journal commits/{N} est présent (JOURNAL-FIRST, source de roll-forward) ;
@@ -1239,7 +1239,7 @@ async def test_crash_mid_promote_multifile_rolls_forward_to_coherent_state() -> 
 
 
 async def test_crash_on_append_commit_leaves_live_bank_untouched() -> None:
-    """C5 (finding 2 — JOURNAL-FIRST, preuve d'ordre) — si l'écriture du JOURNAL
+    """C5 (JOURNAL-FIRST, preuve d'ordre) — si l'écriture du JOURNAL
     (append_commit) elle-même échoue, AUCUN fichier du bank vivant n'a été muté et
     le pointeur reste N-1. Prouve que le journal précède STRICTEMENT le promote :
     rien de live ne bouge tant que le record durable n'est pas posé.
@@ -1272,12 +1272,12 @@ async def test_crash_on_append_commit_leaves_live_bank_untouched() -> None:
 
 
 # =============================================================================
-# C6-C8 — resume post-pointeur : vérification du commit durable (finding #1)
+# C6-C8 — resume post-pointeur : vérification du commit durable
 # =============================================================================
 
 
 def test_assert_durable_commit_matches_pure() -> None:
-    """C6 (finding 1 — couche pure) — `assert_durable_commit_matches` passe sur un
+    """C6 (couche pure) — `assert_durable_commit_matches` passe sur un
     commit identique au record durable, et FERME (RESUME_COMMIT_DIVERGENT) dès
     qu'un champ définissant le commit diverge (commit_id, parent, term,
     membership_epoch, notes_consumed, manifest). RED si l'un de ces champs n'était
@@ -1318,7 +1318,7 @@ def test_assert_durable_commit_matches_pure() -> None:
 
 
 async def test_resume_divergent_commit_fails_closed_no_mutation() -> None:
-    """C7 (finding 1 — resume divergent) — le pointeur nomme (bank_version=0,
+    """C7 (resume divergent) — le pointeur nomme (bank_version=0,
     commit_id=cidR) et commits/0 durable porte un manifest/notes donné. Un re-apply
     avec un BankCommit qui partage (bank_version, commit_id) MAIS DIVERGE (manifest
     + notes_consumed) FERME en RESUME_COMMIT_DIVERGENT et ne mute RIEN (pas de
@@ -1363,7 +1363,7 @@ async def test_resume_divergent_commit_fails_closed_no_mutation() -> None:
 
 
 async def test_resume_missing_durable_commit_fails_closed() -> None:
-    """C8 (finding 1 — resume sans journal) — le pointeur nomme (0, cidR) mais le
+    """C8 (resume sans journal) — le pointeur nomme (0, cidR) mais le
     record durable commits/0 est ABSENT (état critique incohérent). Le resume FERME
     en CorruptedStateError (jamais réparé en silence, jamais de mutation sur la base
     du seul pointeur). RED-without : l'ancien chemin appelait directement
@@ -1390,10 +1390,10 @@ async def test_resume_missing_durable_commit_fails_closed() -> None:
 
 
 async def test_resume_matching_durable_commit_completes_roll_forward() -> None:
-    """C9 (finding 1 — resume sain) — quand le commit fourni ÉGALE le record durable
+    """C9 (resume sain) — quand le commit fourni ÉGALE le record durable
     commits/0, le resume COMPLÈTE idempotemment les étapes post-pointeur (watermark,
     release token) sans VERSION_CONFLICT. Garantit que la vérification durcie ne
-    casse PAS le roll-forward légitime (chemin GREEN du finding 1)."""
+    casse PAS le roll-forward légitime."""
     storage = FakeStorage()
     clock = DeterministicClock()
     store, queue, lease, commit_rt = _runtime(storage, clock)
@@ -1417,13 +1417,13 @@ async def test_resume_matching_durable_commit_completes_roll_forward() -> None:
 
 
 # =============================================================================
-# C10-C13 — findings Codex PR #99 (pr99.out) : roll-forward sans lease vivant
-#           (finding 1) + marqueur de publication MANIFEST.json (finding 2)
+# C10-C13 — roll-forward sans lease vivant
+#           et marqueur de publication MANIFEST.json
 # =============================================================================
 
 
 def test_assert_staging_manifest_matches_pure() -> None:
-    """C10 (finding 2 — couche pure) — `assert_staging_manifest_matches` PASSE sur
+    """C10 (couche pure) — `assert_staging_manifest_matches` PASSE sur
     un manifest stagé identique au commit, FERME en STAGING_MANIFEST_MISSING quand
     le marqueur est ABSENT (None), et en STAGING_MANIFEST_DIVERGENT dès qu'un champ
     définissant (bank_version inclus, car la clé de lecture est le commit_id)
@@ -1463,7 +1463,7 @@ def test_assert_staging_manifest_matches_pure() -> None:
 
 
 async def test_apply_missing_staging_manifest_marker_fails_closed() -> None:
-    """C11 (finding 2 — end-to-end) — un arbre stagé dont le MARQUEUR DE PUBLICATION
+    """C11 (end-to-end) — un arbre stagé dont le MARQUEUR DE PUBLICATION
     staging/{commit_id}/MANIFEST.json est ABSENT (crash de stage_commit avant le
     manifest-last) fait FERMER l'apply en STAGING_MANIFEST_MISSING, AVANT toute
     mutation. Les fichiers bank stagés EXISTENT (load_staged + verify_manifest
@@ -1506,7 +1506,7 @@ async def test_apply_missing_staging_manifest_marker_fails_closed() -> None:
 
 
 async def test_apply_divergent_staging_manifest_marker_fails_closed() -> None:
-    """C12 (finding 2 — marqueur divergent) — si le MANIFEST.json stagé existe mais
+    """C12 (marqueur divergent) — si le MANIFEST.json stagé existe mais
     NOMME un autre commit (commit_id/forme différents) que le BankCommit fourni,
     l'apply FERME en STAGING_MANIFEST_DIVERGENT. Couvre le cas « un caller présente un
     commit cohérent avec les fichiers bank d'un AUTRE stage publié ».
@@ -1546,7 +1546,7 @@ async def test_apply_divergent_staging_manifest_marker_fails_closed() -> None:
 
 
 async def test_durable_commit_rolls_forward_after_lease_expired() -> None:
-    """C13 (finding 1 — roll-forward PRÉ-pointeur SANS lease vivant) — un commit
+    """C13 (roll-forward PRÉ-pointeur SANS lease vivant) — un commit
     DURABLE (commits/{N} écrit JOURNAL-FIRST, pointeur ENCORE à N-1 après un crash
     mid-promote) DOIT pouvoir être COMPLÉTÉ par roll-forward MÊME APRÈS l'expiration
     du lease du holder originel. La reprise FINIT un apply DÉJÀ AUTORISÉ (le lease
@@ -1612,7 +1612,7 @@ async def test_durable_commit_rolls_forward_after_lease_expired() -> None:
 
 
 async def test_fresh_commit_still_requires_live_lease() -> None:
-    """C14 (finding 1 — garde : l'autorisation FRAÎCHE n'est PAS affaiblie) — un
+    """C14 (garde : l'autorisation FRAÎCHE n'est PAS affaiblie) — un
     commit FRAIS (aucun record durable commits/{N}) sous un lease EXPIRÉ DOIT être
     rejeté FENCED par G0. Le roll-forward pré-pointeur ne s'applique QU'à un commit
     déjà journalisé : il ne doit jamais ouvrir une porte pour un commit jamais
@@ -1650,12 +1650,12 @@ async def test_fresh_commit_still_requires_live_lease() -> None:
 
 
 # =============================================================================
-# A12-A14 — résolution des trois findings Codex (PR #99)
+# A12-A14 — convergence du token, validation du commit et reprise
 # =============================================================================
 
 
 async def test_remote_peer_apply_converges_token_to_free() -> None:
-    """A12 (finding 1 — convergence token) — un PAIR RÉEL (nodeB) qui applique un
+    """A12 (convergence token) — un PAIR RÉEL (nodeB) qui applique un
     BANK_COMMIT authoré par nodeA (holder) DOIT faire converger son token.json
     local de HELD(nodeA) vers FREE. RED sans la convergence : l'ancien code gatait
     le release sur ``local_node_id == committed_by_node_id`` (donc nodeB laissait
@@ -1727,7 +1727,7 @@ async def test_converge_token_release_is_idempotent_and_monotone() -> None:
 
 
 async def test_extra_staged_file_outside_manifest_fails_closed_end_to_end() -> None:
-    """A13 (finding 3 — PARTIAL_STAGE) — un objet stagé sous
+    """A13 (PARTIAL_STAGE) — un objet stagé sous
     staging/{commit_id}/bank/ mais ABSENT du manifest fait FERMER l'apply réel
     (PARTIAL_STAGE) et ne mute RIEN. RED sans la LIST réelle des objets stagés :
     load_staged ne lit que les paths du manifest, donc l'extra serait invisible,
@@ -1762,7 +1762,7 @@ async def test_extra_staged_file_outside_manifest_fails_closed_end_to_end() -> N
 
 
 async def test_apply_fencing_token_must_match_intent() -> None:
-    """A14 (finding MINOR) — le ``fencing_token`` explicite n'est plus une surface
+    """A14 — le ``fencing_token`` explicite n'est plus une surface
     morte : s'il diverge de ``intent.fencing_token`` (la source d'autorisation),
     l'apply FERME en FENCING_TOKEN_MISMATCH AVANT toute mutation. RED si l'argument
     était silencieusement ignoré (apply réussirait avec un fencing incohérent)."""

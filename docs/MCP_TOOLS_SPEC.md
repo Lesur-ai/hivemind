@@ -3,7 +3,7 @@
 > **Contract revision**: 2.8.0 (independent of the product release version in
 > [`VERSION`](../VERSION)) | **Author**: Hivemind maintainers
 >
-> The live registered MCP tool surface is **63 tools = 50 direct registrations
+> The live registered MCP tool surface is **72 tools = 59 direct registrations
 > + 13 canonical tier aliases**, arranged in 8 categories. 13 canonical
 > `short_*`/`mid_*`/`long_*` aliases are registered and callable as thin,
 > behaviorally-identical re-registrations of their historical `live_*` /
@@ -12,13 +12,13 @@
 > `admin_audit_recent` is a deliberate cross-cutting, admin-gated registration;
 > `token_create` and `space_invite_token` are direct registrations with no
 > alias, and `space_create` requires `manage` permission. The direct
-> `long_ingest`, `long_query`, and hidden operator-only `long_reindex` tools
+> `long_ingest`, `long_ingest_async`, `long_ingest_status`, `long_ingest_list`, `long_ingest_cancel`, `long_document_list`, `long_document_get`, `ontology_list`, `ontology_get`, `ontology_validate`, `long_query`, and hidden operator-only `long_reindex` tools
 > have no `graph_*` twin.
 >
 > The permission model is the real **4-level hierarchy
 > `admin ⊃ manage ⊃ write ⊃ read`** enforced in `auth/context.py`
 > (`check_write_permission` / `check_manage_permission` /
-> `check_admin_permission`). The permission matrix below covers all 50 direct
+> `check_admin_permission`). The permission matrix below covers all 59 direct
 > tools and flags every destructive / `confirm`-gated tool. See
 > [Rules immutability](#rules-immutability-clarification) for the
 > `space_update_rules` contract. Each tier-mapped tool is annotated with its
@@ -31,14 +31,16 @@
 
 ## Overview
 
-Hivemind exposes **50 direct MCP tools** in 8 categories, plus **13 canonical
+Hivemind exposes **59 direct MCP tools** in 8 categories, plus **13 canonical
 tier aliases**. Historical `live_*`, `bank_*`, and `graph_*` names remain
 registered as compatibility surfaces; they are tool aliases, not the current
 product identity.
-The **live registered surface is 63 = 50 + 13**
-(50 direct registrations + 13
-`short_*`/`mid_*`/`long_*` aliases). The direct `long_ingest`, `long_query`,
-and `long_reindex` tools, `admin_audit_recent`, `inference_self_test`, and
+The **live registered surface is 72 = 59 + 13**
+(59 direct registrations + 13
+`short_*`/`mid_*`/`long_*` aliases). The direct `long_ingest`, `long_ingest_async`,
+`long_ingest_status`, `long_ingest_list`, `long_ingest_cancel`, `long_document_list`,
+`long_document_get`, `ontology_list`, `ontology_get`, `ontology_validate`,
+`long_query`, and `long_reindex` tools, `admin_audit_recent`, `inference_self_test`, and
 `token_create` / `space_invite_token` are all registered directly with no
 alias. Tool
 names are derived 1:1 from the decorated
@@ -52,18 +54,18 @@ Python function name; there are **zero `@mcp.tool(name=...)` overrides** in
 | **Token** (1)   | 1     | Manager-safe non-admin token creation              |
 | **Live** (3)    | 3     | Real-time notes (`short` tier)                     |
 | **Bank** (11)   | 11    | LLM-consolidated Memory Bank (`mid` tier)          |
-| **Graph** (7)   | 7     | Bridge to Graph Memory / ontology engine (`long` tier) |
+| **Graph** (16)  | 16    | Bridge to Graph Memory / ontology engine (`long` tier) |
 | **Backup** (5)  | 5     | Backup & restore                                   |
 | **Admin** (9)   | 9     | Token management, maintenance (GC), recent console/auth audit |
 
 Per-category counts match the code: system 4, space 10, token 1, live 3, bank
-11, graph 7, backup 5, admin 9 = **50 direct**. The 13 aliases bring the
-registered total to **63**.
+11, graph 16, backup 5, admin 9 = **59 direct**. The 13 aliases bring the
+registered total to **72**.
 
 ### Registration versus discovery
 
 Registration is the complete compatibility contract; discovery is the compact
-agent-facing projection. The server keeps all **63** names registered and
+agent-facing projection. The server keeps all **72** names registered and
 callable by exact name, while authenticated `tools/list` responses advertise
 only canonical `agent_core` names for the effective request permission:
 
@@ -90,9 +92,11 @@ The `live_*` / `bank_*` / `graph_*` tools map to the public `short` / `mid` /
 canonical `short_*`/`mid_*`/`long_*` names are registered as additive aliases bound to the
 identical implementation function (ADR-0005 "thin re-registration, never a copy").
 Both names are callable today. The historical name always stays callable. 13 tools
-earn a tiered alias; the other 37 direct tools — including `space_*`, `token_*`,
-`system_*`, `backup_*`, `admin_*`, bank ops/supervision, and the three direct
-long tools — keep their names only. `long_ingest`, `long_query`, and
+earn a tiered alias; the other 46 direct tools — including `space_*`, `token_*`,
+`system_*`, `backup_*`, `admin_*`, bank ops/supervision, and direct long tools —
+keep their names only. `long_ingest`, `long_ingest_async`, `long_ingest_status`,
+`long_ingest_list`, `long_ingest_cancel`, `long_document_list`, `long_document_get`,
+`ontology_list`, `ontology_get`, `ontology_validate`, `long_query`, and
 `long_reindex` are direct registrations with no `graph_*` twin. Each
 affected section below is annotated **→ alias (live): `…`** or
 **→ no tiered alias (keep historical)**.
@@ -807,8 +811,64 @@ async def bank_consolidate(
 - The per-space queue is in-memory only (`guarantee="in_memory_best_effort"`)
 - The response explicitly sets `next_action="return_to_user_without_polling"`
 - `polling.recommended=false`; `bank_consolidation_status` is manual-only for explicit status checks
-- If no live notes exist, the background job result is `{"status": "ok", "notes_processed": 0, "message": "No new notes to consolidate"}`
-- Configurable timeout (`CONSOLIDATION_TIMEOUT`, default 600s)
+- If no live notes exist, the background job result is `{"status": "ok", "notes_processed": 0, "message": "No new notes to consolidate"}`, plus the optional `bank_size_advisory` list when a bank file exceeds `BANK_FILE_MAX_SIZE` (the advisory is computed before the zero-note return; compaction is a human decision through `bank_compact`)
+- Configurable per-call timeout (`CONSOLIDATION_TIMEOUT`, default 1800s — a slow model is not a fault)
+
+**Transient provider recovery (v1.5.0).**
+`CONSOLIDATION_TRANSIENT_RETRIES` accepts 0..3 (default 3). Normalized chat
+`timeout`, `rate_limited` and `unavailable` failures may retry the same prompt
+before any batch write, after 60, 120, 300 seconds respectively. Logs show the
+cause, retry counter, delay and resumption. During the wait the job remains
+`running`; progress contains `phase="batch_retry_wait"`, `retry_reason`,
+`retry_attempt`, `retry_limit` and `retry_delay_seconds`. Resumption returns to
+`batch_running` with delay 0. The phase determines whether a displayed wait is
+active; terminal phases remain `done`/`failed`. The wait is interruptible but
+not persisted across process restart.
+
+The transient counter is shared with the existing two generation/correction
+operations: at most four requests for transient errors alone, five including a
+model correction. This ceiling covers the main generation/correction calls;
+auxiliary deduplication keeps its existing inference policy. Optional
+post-consolidation validation is local and makes no inference request.
+Adapter retries are disabled for these normal-generation requests. Refusal, auth/quota, unknown errors, cancellation, validation and
+storage failures never qualify. Exhaustion stops cleanly with previous verified
+batches preserved and remaining notes retained. Provider usage or server-side
+termination after a client timeout may be unknown. This is separate from manual
+compaction; it neither launches nor retries bank compaction.
+
+The budget resets per batch. With three retries, transient recovery alone can
+consume up to `4 * CONSOLIDATION_TIMEOUT + 480` seconds of main-generation calls
+and waits per batch (2 h 08 min at 1800 s), before auxiliary work; including a
+model correction permits `5 * CONSOLIDATION_TIMEOUT + 480` seconds (2 h 38 min).
+Intermittent faults can incur this additional time and up to three extra paid
+main-generation calls in each batch. A persistent failure exhausts the current
+batch's budget and stops the run. Identical-prompt retries may recover a transient
+incident; they do not remedy a reproducible content-dependent generation failure.
+The same-space consolidation lock remains held during these waits and calls:
+manual compaction, GC old-note deletion, GC consolidation and Mesh source
+preparation can refuse work while it is held. Other spaces keep their own lanes.
+
+Retry progress fields describe the current batch, not a cumulative run counter.
+Retain the full console log to count retries across a run and recover their
+categories/correlations. Reported token usage covers only usage returned by the
+provider; requests that time out may incur unreported usage.
+
+**Language and preservation limits.** Generated bank prose and the residual
+synthesis are requested in English, regardless of the language of the rules,
+notes or existing bank. The prompt preserves required headings, exact terms,
+identifiers, URLs and quotations, and forbids translating untouched content
+solely to change its language. An existing French bank may therefore become
+bilingual as it is updated. `CONSOLIDATION_LEGACY_FRENCH_PROMPTS` was removed;
+remaining values are ignored and do not restore French generation.
+
+Every processed note has an explicit integrated or discarded disposition, but
+this accounting and persisted-byte readback do not prove semantic completeness
+or accuracy of the model's summary. Review important changes and retain
+authoritative source records separately. Validation precedes batch writes;
+normal consolidation is not a batch-wide storage transaction. If a later write
+fails, earlier writes can remain applied with a `partial` result and the
+failed batch's source notes retained. There is no batch-wide rollback or
+automatic retry of those writes.
 
 **Response**:
 
@@ -834,18 +894,23 @@ async def bank_consolidate(
 **Job result contract (P12-1 — honest structured outcomes).** When the job
 finishes, its `result` carries a three-state status:
 
-- `status="ok"` — every selected operation completed successfully;
+- `status="ok"` — every selected **note** operation completed successfully. A
+  consolidation never compacts the bank (compaction is a human decision),
+  so the status describes the consolidation
+  only;
 - `status="error"` — a batch failed before any live bank, note, or metadata
-  mutation, or compaction failed after every attempted bank write was
-  read-back and restored to its verified preimage; zero ordinary batches were
-  applied. The retained preimage may still be available for audit;
+  mutation; zero batches were applied;
 - `status="partial"` — work was already applied, a durable write started or
-  may have started, or durable state is ambiguous. In particular, a compaction
-  whose attempted writes cannot all be verified back to their preimage stays
-  `partial`, **including on the first batch**.
+  may have started, or durable state is ambiguous.
 
 Additional result fields:
 
+- `bank_size_advisory` (optional) — present when at least one bank file, as
+  read at job start, exceeds `BANK_FILE_MAX_SIZE`: a list of
+  `{filename, utf8_bytes, max_size}` items (persisted UTF-8 bytes). It is an
+  **indicator only** — nothing was compacted, refused or changed because of it;
+  the same fact is logged once as a WARNING. Compaction is the operator's
+  decision through `bank_compact`.
 - `failed_batch` (optional, one-based) — present only for an identifiable
   batch failure, including a batch whose bank integration was rejected or
   incomplete (`batch_write_failed`). Exact-selection truncation,
@@ -855,40 +920,13 @@ Additional result fields:
   incomplete (the retained notes stay eligible for a controlled retry).
 - `failure_reason` — stable structured token: `batch_prompt_failed`,
   `batch_llm_failed`, `batch_refresh_failed`, `batch_write_failed`,
-  `compaction_prepare_failed`, `compaction_apply_reverted`,
-  `compaction_apply_recovery_unverified`, the attributable
-  `compaction_preimage_*` / `compaction_prewrite_*` diagnostics,
-  `direct_local_route_required`,
-  `bank_compact_failed`, `consolidation_cancelled`, `note_delete_failed`,
-  `exact_selection_truncated`,
-  or `metadata_update_failed`. `compaction_prepare_failed` means the complete
-  compaction batch was rejected before any compaction or ordinary-consolidation
-  write; `compaction_failures` names the safe target/error diagnostics and the
-  additive `remediation` field points to `bank_repair` for a canonical-name
-  collision or `bank_write` for a document repair. `compaction_apply_reverted`
-  means a DirectLocal write may have been attempted but every transaction-owned
-  result was restored and read back from its verified preimage; source notes
-  remain untouched. `compaction_apply_recovery_unverified` is `partial`: a
-  target could not be proved restored, so the source notes remain untouched and
-  the live-bank ambiguity is retained rather than guessed.
-  `consolidation_cancelled` is also `partial`: the queue records a terminal
-  failure and any safe rollback diagnostics rather than leaving the job running.
-  `direct_local_route_required` means the defense-in-depth DirectLocal
-  compaction route proof was unavailable; restore that route before retrying.
-  A consolidation that crashes before producing any result is reported by the
-  queue as
-  `failure_reason="consolidation_crashed"`.
-- `compaction_failures` — safe per-file diagnostics when strict compaction
-  refused the complete batch. Every item begins with `filename` and `error`. For
-  `error="ambiguous_or_missing_compaction_target"`, a complete additive tuple
-  may identify the rejected model operation without exposing its heading:
-  `operation_index` (zero-based), `target_resolution` (`missing` or
-  `ambiguous`), `target_match_count` (zero for `missing`, at least two for
-  `ambiguous`), and `target_heading_sha256` (lowercase SHA-256 of the
-  requested UTF-8 heading). The hash is a stable correlation aid with a
-  residual dictionary-guessing risk; no raw heading, reason, source, prompt,
-  completion, or exception text is returned. Clients must treat the tuple as
-  absent unless all four fields meet that contract.
+  `consolidation_cancelled`, `note_delete_failed`, `exact_selection_truncated`,
+  or `metadata_update_failed`. `consolidation_cancelled` is `partial`: the
+  queue records a terminal failure rather than leaving the job running. A
+  consolidation that crashes before producing any result is reported by the
+  queue as `failure_reason="consolidation_crashed"`. The compaction tokens
+  (`compaction_*`, `direct_local_route_required`, `bank_compact_failed`) belong
+  to the manual `bank_compact` result only.
 - `operation_failures` — safe normal-consolidation validation diagnostics.
   Every item contains a stable server-owned `reason` and may contain the
   zero-based `bank_file_index`, zero-based `file_index`, zero-based
@@ -901,31 +939,18 @@ Additional result fields:
   `target_heading_sha256` (lowercase SHA-256 of the requested UTF-8 heading).
   Normal edits resolve the raw heading first and, only after zero raw matches,
   may accept one source span matching the same level/case after NFC, the closed
-  dash substitutions, and ASCII horizontal-whitespace normalization. A
-  normalized collision, case/punctuation/invisible change, truncation, or
-  fuzzy match remains fail-closed. The digest has residual dictionary-guessing
+  dash substitutions, and ASCII horizontal-whitespace normalization. After a
+  second zero-match, a third and last tier folds case only, still requiring
+  exactly one surviving span and still keeping the ATX level part of the key.
+  A collision at any tier, a punctuation or invisible change, a different
+  heading level, truncation, or a fuzzy match remains fail-closed. Compaction
+  keeps only the first two tiers: it refuses a target instead of recreating
+  one, so it carries no history-forking risk. The digest has residual dictionary-guessing
   risk; raw heading, source, prompt, completion, model reason, exception, and
   provider detail are never returned. Public relays drop every field outside
   this closed schema. `operations_failed` remains the semantic failure count
   before projection, so it may exceed the displayed list if an unknown internal
   diagnostic is safely omitted.
-- `recovery_required` — present and `true` on an unresolved DirectLocal
-  compaction recovery, including a cancellation whose rollback could not be
-  verified. It is a stop signal: clients must not automatically retry,
-  restore, or continue ordinary consolidation.
-- `failed_phase` / `rollback_outcome` — additive compaction diagnostics when
-  a compaction terminates the job. They use the same bounded enum contract as
-  `bank_compact`: `prepare`, `preimage`, `apply`, or `unknown`; and
-  `not_needed`, `verified`, `unverified`, or `unknown`, respectively. They
-  describe only the compaction sub-operation and never convert a failed job
-  into success.
-- `preimage_id` — an opaque identifier for the retained, complete-space
-  snapshot in the existing
-  `_backups/{space_id}/{timestamp}-{operation-suffix}/` layout. A direct/manual
-  apply may include it even after verified success; automatic consolidation
-  forwards it only when compaction fails. It is required recovery attribution
-  whenever `recovery_required=true`, and is an operator-inspection handle,
-  not an automatic or newly public restore route.
 - `message` — safe generic client text; raw provider/exception detail stays
   server-side, including on the queue crash path.
 
@@ -1088,21 +1113,27 @@ async def bank_delete(
 
 ### `bank_compact` 🛠️ (manage) — → no tiered alias (internal/ops)
 
-Compacts oversized bank files via LLM. Files exceeding the universal size limit
-(`BANK_FILE_MAX_SIZE`, default 15 KB) are summarized/cleaned using the space rules
-to understand each file's role. Default `dry_run=True` scans and reports without
-modifying. The logical per-file limit is a hard safety gate even below the
-aggregate `COMPACT_THRESHOLD` context-pressure signal. When `dry_run=False`, the
-operation is protected by the per-space consolidation lock and returns `conflict`
-if a consolidation is in progress.
+Compacts oversized bank files via LLM — the **only** compaction path: compaction is
+a human decision, a consolidation never compacts and only reports the
+files above the threshold as `bank_size_advisory`. Files exceeding the universal
+advisory threshold (`BANK_FILE_MAX_SIZE`, default 35 000 bytes) are candidates,
+summarized/cleaned using the space rules to understand each file's role. Default
+`dry_run=True` scans and reports without modifying. The per-file value is the
+candidate threshold and the model's target, not a hard cap on the persisted
+result: a strictly smaller result that retains at least 5% of its source is
+accepted even when it still exceeds the target, and successive passes converge.
+When `dry_run=False`, the operation is protected by the per-space consolidation
+lock and returns `conflict` if a consolidation is in progress.
 
 All historical size fields — `size`, `max_size`, `total_size_before`,
 `total_size_after`, and `compacted_size` — are persisted UTF-8 byte counts, not
-characters. `COMPACT_THRESHOLD` must be finite and in `(0, 1]`; it is only an
-aggregate admission signal. `BANK_FILE_MAX_SIZE` must be a positive byte limit
-and remains a hard per-file gate. An oversized or context-incompatible source
+characters. `BANK_FILE_MAX_SIZE` must be a positive byte value; it is an advisory
+threshold for consolidation and the candidate threshold for this tool, never a
+hard gate on persisted size. An oversized or context-incompatible source
 fails closed rather than being split. Multipart compaction and crash-durable
-recovery are deferred to v1.5.0.
+recovery are not provided by this path in v1.5.0. Recovery of unusable
+manual-compaction responses is planned separately for v1.5.1; it is not part
+of the normal-consolidation recovery described above.
 
 ```python
 @mcp.tool()
@@ -1358,6 +1389,118 @@ non-authoritative — never on the commit / rollback / audit / recovery path.
 
 ---
 
+### `long_ingest_async` 🛠️ — net-new async ingest tool
+
+Submits a batch of canonical documents to be ingested asynchronously into long-term memory.
+`readOnlyHint=False`, `idempotentHint=False`. Requires `manage` permission.
+Rejects volatile documents by default (`activeContext.md`, `progress.md`), unless `include_volatile=True` is explicitly specified with `manage` permission (which records an audit event).
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False))
+async def long_ingest_async(
+    space_id: str,
+    documents: list[dict],
+    options: Optional[dict] = None,
+    include_volatile: bool = False,
+) -> dict:
+```
+
+Each document requires `filename`, a stable `source_path` business key,
+`content_base64`, and a hexadecimal `sha256` of the decoded bytes. Optional
+fields are `metadata` and `source_modified_at` (ISO 8601). Unlike the
+`long_ingest` planning helper, this async path does **not** convert a plain
+`content` field or compute a missing checksum for the caller. For example,
+after preparing the bytes locally:
+
+```python
+import base64
+import hashlib
+
+source = b"# Project overview\nA small example for long-term discovery.\n"
+arguments = {
+    "space_id": "my-project",
+    "documents": [{
+        "filename": "overview.md",
+        "source_path": "docs/overview.md",
+        "content_base64": base64.b64encode(source).decode("ascii"),
+        "sha256": hashlib.sha256(source).hexdigest(),
+    }],
+    "options": {"replace_existing": False},
+}
+# Submit `arguments` through your MCP client's long_ingest_async call.
+```
+
+`options.replace_existing` is a boolean (default `false`) shared by the batch.
+`options.ontology` accepts a registered ontology name or valid YAML override;
+`ontology_yaml` is a fallback alias when `ontology` is absent. Validate a
+custom schema with `ontology_validate` before submitting.
+
+Within one memory, duplicate handling uses the normalized `source_path` and
+content checksum: unchanged, successfully ingested documents are `skipped`;
+changed content is `changed_skipped` unless `replace_existing=true`. Matching
+pending jobs are coalesced. **Changing only the ontology or metadata does not
+force re-extraction**, even with `replace_existing=true`, because those fields
+are not part of the duplicate key. This release does not provide an
+ontology-change reindex through this tool; do not assume a resubmission
+updated existing entities or relations.
+
+The response includes `batch_id`, `counts`, `items` and `errors`.
+`status="ok"` acknowledges submission, not successful ingestion of every
+document: check per-item errors and follow the returned jobs with
+`long_ingest_status` using each item's `job_id`, or filter `long_ingest_list`
+with the returned `batch_id`. Do not resubmit
+the batch merely to check its progress.
+
+---
+
+### `long_ingest_status` 🔑 — net-new async ingest tool
+
+Retrieves the current execution status and progress of an asynchronous ingestion job.
+`readOnlyHint=True`, `idempotentHint=True`. Requires `read` permission on `space_id`.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+async def long_ingest_status(
+    space_id: str,
+    job_id: str,
+) -> dict:
+```
+
+---
+
+### `long_ingest_list` 🔑 — net-new async ingest tool
+
+Returns a paginated list of asynchronous ingestion jobs for the target space.
+`readOnlyHint=True`, `idempotentHint=True`. Requires `read` permission on `space_id`.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+async def long_ingest_list(
+    space_id: str,
+    batch_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+```
+
+---
+
+### `long_ingest_cancel` 🛠️ — net-new async ingest tool
+
+Requests cooperative cancellation of a queued or running asynchronous ingestion job.
+`readOnlyHint=False`, `idempotentHint=True`. Requires `write` permission on `space_id`.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
+async def long_ingest_cancel(
+    space_id: str,
+    job_id: str,
+) -> dict:
+```
+
+---
+
 ### long_reindex maintenance
 
 **Hidden `manage` tool; no `graph_*` twin.**
@@ -1426,7 +1569,7 @@ zero-downtime guarantee, cross-process or HA fencing, crash resume, automatic
 orphan cleanup, backup/restore repair, retention, deletion, or other general
 long-data lifecycle behavior.
 After active-alias activation, `memory_delete` fails closed without cleanup
-until whole-memory lifecycle recovery is implemented by EPIC #309.
+because whole-memory lifecycle recovery for that state is not yet implemented.
 
 After access and `manage` authorization succeed, every outcome uses exactly this
 bounded, redacted nine-field shape; extra/malformed internal fields become
@@ -1512,6 +1655,112 @@ A valid internal post-switch error also uses `phase="activated"`,
 `activated=true`, and `active_state="unavailable"`, but may preserve its
 operation id and counts. No result includes backend, provider, source,
 collection, endpoint, or vector values.
+
+---
+
+### `ontology_list` 🔑 — net-new ontology tool
+
+Lists available domain ontologies registered in Graph Memory.
+`readOnlyHint=True`, `idempotentHint=True`. Requires read permission on `space_id`.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+async def ontology_list(space_id: str) -> dict:
+```
+
+---
+
+### `ontology_get` 🔑 — net-new ontology tool
+
+Retrieves the YAML schema and normalized metadata of a specific domain ontology by name.
+`readOnlyHint=True`, `idempotentHint=True`. Requires read permission on `space_id`.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+async def ontology_get(space_id: str, name: str) -> dict:
+```
+
+---
+
+### `ontology_validate` 🔑 — net-new ontology tool
+
+Performs strict, fail-closed validation of an arbitrary ontology YAML payload against structural, typing, integrity, and size limits (`MAX_ONTOLOGY_BYTES = 512 KiB`).
+Returns `status: ok`, `valid: true/false`, normalized `yaml_content`, computed `sha256`, entity/relation counts, and structured `errors` / `warnings`.
+`readOnlyHint=True`, `idempotentHint=True`. Requires read permission on `space_id`. Backend validation is a pure function without I/O.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+async def ontology_validate(space_id: str, content_yaml: str) -> dict:
+```
+
+---
+
+### `long_document_list` 🔑 — net-new long memory document catalog tool
+
+Lists indexed documents in long memory for a space with pagination and filters.
+`readOnlyHint=True`, `idempotentHint=True`. Requires read permission on `space_id`.
+
+Parameters:
+- `space_id` (`str`, required): Target space identifier.
+- `limit` (`int`, optional, default 50): Maximum items to return (1-100).
+- `offset` (`int`, optional, default 0): Items offset.
+- `status` (`str`, optional): Optional filter by ingestion status (e.g. `succeeded`, `failed`).
+- `query` (`str`, optional): Optional text search on filename or `source_path`.
+
+Returns `status: ok`, `space_id`, `count`, `total_count`, `limit`, `offset`, and a list of `documents` with their `document_id`, `filename`, `sha256`, `source_path`, `repo_path`, `source_modified_at`, `ingested_at`, `ingestion_status`, `chunk_count`, `size_bytes`, `text_length`, and `content_type`.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+async def long_document_list(
+    space_id: str,
+    limit: int = 50,
+    offset: int = 0,
+    status: Optional[str] = None,
+    query: Optional[str] = None,
+) -> dict:
+```
+
+---
+
+### `long_document_get` 🔑 — net-new long memory document lookup tool
+
+Retrieves indexed document metadata and optional content by `document_id` or canonical `source_path`.
+`readOnlyHint=True`, `idempotentHint=True`. Requires read permission on `space_id`.
+
+Parameters:
+- `space_id` (`str`, required): Target space identifier.
+- `document_id` (`str`, optional): Internal document UUID.
+- `source_path` (`str`, optional): Stable canonical source path of the document.
+- `include_content` (`bool`, optional, default False): Download and include content from storage.
+
+On success, returns `status: ok`, `space_id`, and a `document` dictionary with
+metadata. With `include_content=True`, readable text is returned in `content`;
+binary files use extracted text when available, or the original bytes in
+`content_base64` with `content_format: raw` when extraction is unsupported or
+cannot read the file (including malformed PDFs). Content fields are also
+available at the top level. Metadata-only requests do not download the file.
+
+If the requested download fails or an unexpected extraction exception escapes,
+returns `{"status": "error", "message": "Document content could not be read."}`
+without document metadata or content fields. The read does not delete, change
+or reingest the indexed source. Document text is never interpreted as an error
+message: literal text such as `[S3 read error: example]` is preserved.
+
+This contract applies to the bundled Graph Memory backend shipped with this
+release. Upgrade that backend together with Hivemind; an older backend selected
+through the advanced external override may still return its legacy read-error
+text as successful content, which the facade cannot reliably distinguish from
+a real document containing the same text.
+
+```python
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+async def long_document_get(
+    space_id: str,
+    document_id: Optional[str] = None,
+    source_path: Optional[str] = None,
+    include_content: bool = False,
+) -> dict:
+```
 
 ---
 
@@ -1889,12 +2138,10 @@ Completion is explicit and count-honest:
   per-agent `consolidation_details`. Agent details always expose requested and
   processed counts when that agent was selected; after a notice attempt they
   may also expose `notice_written`, `notice_processed`, `notice_cleaned`, and
-  `notice_cleanup_reason`, plus bank-file counts and a server message. When a
-  selected consolidation safely refuses compaction, its per-agent detail also
-  carries the safe `failure_reason`, `compaction_failures` (the same
-  filename/error contract and optional complete target-resolution tuple as a
-  consolidation job), and `remediation` so unattended GC does not hide the
-  operator recovery path;
+  `notice_cleanup_reason`, plus bank-file counts and a server message. A
+  consolidation never compacts the bank, so a per-agent detail
+  carries no compaction envelope; a failed consolidation exposes its safe
+  `failure_reason` only;
 - delete returns `status:"deleted"` or `status:"partial"` plus
   `delete_requested`, `deleted`, `delete_failed`; partial delete uses
   `reason:"partial_delete"` and may add `failure_reason` when a later
@@ -1943,7 +2190,7 @@ two statements are not contradictory once the permission tier is named. There is
 
 ---
 
-## Complete Matrix — Tools × Permissions (all 50 direct tools)
+## Complete Matrix — Tools × Permissions (all 59 direct tools)
 
 Permission is the **minimum** scope that satisfies the call; higher scopes inherit
 it (`admin ⊃ manage ⊃ write ⊃ read`). "Dest." = `destructiveHint=True`. "Confirm" =
@@ -2004,8 +2251,17 @@ name registered (additive, live, never a rename of the historical name);
 | 48 | `long_ingest` | | ✅ | | (✅) | | | `mode=apply` deferred; `include_volatile` needs `manage` | — (net-new) |
 | 49 | `long_reindex` | | | | ✅ | (✅) | | — | — (hidden operator maintenance) |
 | 50 | `inference_self_test` | | | | ✅ | (✅) | | — | — (hidden operator readiness probe) |
+| 51 | `ontology_list` | | ✅ | | | | | — | — (net-new) |
+| 52 | `ontology_get` | | ✅ | | | | | — | — (net-new) |
+| 53 | `ontology_validate` | | ✅ | | | | | — | — (net-new) |
+| 54 | `long_ingest_async` | | | | ✅ | (✅) | | batch async ingestion; `manage` required; volatile opt-in audits | — (net-new) |
+| 55 | `long_ingest_status` | | ✅ | | | | | query async ingestion job status | — (net-new) |
+| 56 | `long_ingest_list` | | ✅ | | | | | list async ingestion jobs | — (net-new) |
+| 57 | `long_ingest_cancel` | | | ✅ | | | | cooperative cancellation request | — (net-new) |
+| 58 | `long_document_list` | | ✅ | | | | | list indexed documents in long memory | — (net-new) |
+| 59 | `long_document_get` | | ✅ | | | | | get indexed document metadata and content | — (net-new) |
 
-\* `bank_consolidate`: `write` is sufficient to consolidate your own notes
+* `bank_consolidate`: `write` is sufficient to consolidate your own notes
 (`agent=caller`, omitted, or `null`). `manage`/`admin` is required to consolidate
 ALL notes (`agent=""` explicitly supplied) or another agent's notes
 (`agent=other`). Shown as `write`
@@ -2055,12 +2311,12 @@ This section governs the long-term relationship between the **historical tool na
   Callers using the historical names will continue to work without change.
 - New integrations should prefer the canonical `short_*` / `mid_*` / `long_*`
   names — they are the recommended grammar going forward.
-- The 37 direct no-alias tools (`space_*`, `token_*`, `system_*`, `backup_*`,
-  `admin_*`, bank ops/supervision, plus direct-only long tools) have no tier
+- The 46 direct no-alias tools (`space_*`, `token_*`, `system_*`, `backup_*`,
+  `admin_*`, bank ops/supervision, plus direct-only long/ontology tools) have no tier
   alias now and keep their names as canonical.
-- `long_ingest`, `long_query`, and hidden operator-only `long_reindex` are
-  direct long-tier registrations with no historical `graph_*` twin and no
-  alias.
+- `long_ingest`, `long_ingest_async`, `long_ingest_status`, `long_ingest_list`, `long_ingest_cancel`, `long_document_list`, `long_document_get`, `long_query`, hidden operator-only `long_reindex`, and ontology tools
+  (`ontology_list`, `ontology_get`, `ontology_validate`) are direct long-tier
+  registrations with no historical `graph_*` twin and no alias.
 - Hidden manage-only `inference_self_test` is a direct cross-cutting system
   registration with no tier alias.
 

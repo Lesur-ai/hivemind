@@ -84,8 +84,7 @@ class ConsolidatorFakeStorage(WriteSinkFakeStorage):
     list_objects/exists) + ``list_and_get`` — the read the consolidator needs.
 
     ``ConsolidatorService.consolidate`` reads notes + bank via
-    ``storage.list_and_get`` (``_collect_inputs`` at consolidator.py:898/922,
-    ``_compact_bank_if_needed`` re-read at 570). The shared
+    ``storage.list_and_get`` (``_collect_inputs`` at consolidator.py:898/922). The shared
     ``WriteSinkFakeStorage`` adds only ``delete_many`` (required by the
     consolidator's notes-cleanup ``delete_many`` at 1491) and lacks
     ``list_and_get``; three sibling suites already extend the fake the same way
@@ -146,6 +145,7 @@ _LLM_RESULT: dict = {
                 "filename": "activeContext.md",
                 "action": "create",
                 "reason": "Create the initial bank file from the batch.",
+                "notes": [1, 2, 3],
                 "content": (
                     "# Active Context\n"
                     "\n"
@@ -160,6 +160,7 @@ _LLM_RESULT: dict = {
                 ),
             }
         ],
+        "discarded_notes": [],
         "synthesis": "Consolidated two seeded notes into activeContext.md.",
     },
     "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
@@ -186,10 +187,9 @@ _SETTINGS_BASE = {
     "default_rules_file": "",
     "consolidation_timeout": 600,
     "consolidation_max_notes": 500,
-    "consolidation_batch_size": 5,
+    "consolidation_batch_size": 3,
     "consolidation_cooldown_seconds": 60,
     "consolidation_validation_enabled": False,
-    "compact_threshold": 0.6,
     "bank_file_max_size": 15360,
     "response_max_bytes": 512 * 1024,
     "proxy_url": None,
@@ -240,9 +240,7 @@ _NOTE_KEYS = (
 async def _seed(storage: ConsolidatorFakeStorage) -> None:
     """Seed ONE space with ``_meta.json`` + ``_rules.md`` + 3 live notes.
 
-    Kept tiny so the bank stays well under the auto-compact threshold
-    (~39KB => ``_compact_bank_if_needed`` short-circuits, consolidator.py:1762)
-    and the 3 notes are a SINGLE batch (batch_size=5 => one ``_call_llm`` => one
+    Kept tiny so the 3 notes are a SINGLE batch (batch_size=3 => one ``_call_llm`` => one
     ``_write_results(skip_meta=True)`` => one epilogue ``_meta.json`` put). At
     least one consolidatable note is required: with zero notes ``consolidate``
     returns early ("No new notes") and never writes the epilogue meta.

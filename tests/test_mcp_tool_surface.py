@@ -76,8 +76,8 @@ Token-context auth gates without ``check_*`` helpers:
     on token presence directly via ``current_token_info.get()`` /
     ``_get_effective_token_info()`` followed by an ``if token_info is None:
     return error`` pattern, rather than through a ``check_*_permission``
-    helper. The round-1 walker only inspected ``check_*`` Call nodes, so it
-    saw nothing and collapsed these handlers to ``"public"`` — but the live
+    helper. A walker that only inspects ``check_*`` Call nodes would
+    see nothing and collapse these handlers to ``"public"`` — but the live
     code requires a token, which is at least ``"read"`` per ``TOOL_MAPPING.md``.
 
     The walker now also detects this token-context auth shape:
@@ -154,7 +154,7 @@ _HELPER_LEVEL: dict[str, str] = {
     "check_manage_permission": "manage",
     "check_admin_permission": "admin",
 }
-# Token-context helpers (P6-3 round-4): a Call to one of these returns the
+# Token-context helpers: a Call to one of these returns the
 # current token info (or None when unauthenticated). When the handler then
 # guards on `if <var> is None: return <error>`, that pattern IS the auth
 # gate — equivalent to a `check_access`-style ``read`` minimum.
@@ -344,7 +344,7 @@ def _effective_permission_profile(fn) -> dict:
             continue
         _classify(node, _HELPER_LEVEL[helper_name])
 
-    # --- P6-3 round-4: token-context auth gates (no check_* helper) ----------
+    # --- Token-context auth gates (no check_* helper) -----------------------
     # Detect the live-code shape:
     #
     #     token_info = current_token_info.get()    # or _get_effective_token_info()
@@ -1101,7 +1101,7 @@ async def test_long_ingest_default_path_does_not_require_manage_and_volatile_doe
     )
 
 
-# --- P6-3 round-4 fix-up: behavioral mutation-proof on token-context auth gate
+# --- Behavioral mutation-proof on token-context auth gate
 
 @pytest.mark.asyncio
 async def test_backup_list_requires_auth():
@@ -1110,8 +1110,8 @@ async def test_backup_list_requires_auth():
     ``backup_list`` (``src/live_mem/tools/backup.py:191``) gates on
     ``current_token_info.get()`` then ``if token_info is None: return
     {"status": "error", ...}`` — a token-context auth check that does
-    NOT route through a ``check_*_permission`` helper. The round-4
-    walker now detects this shape and classifies ``backup_list`` as
+    NOT route through a ``check_*_permission`` helper. The
+    walker detects this shape and classifies ``backup_list`` as
     ``read``-minimum, matching ``TOOL_MAPPING.md``.
 
     This test pins the runtime behavior end-to-end: with no token in

@@ -26,15 +26,167 @@ Locks the structural identity reset away from the inherited Live Memory
   ``image-build`` sentinel enforcing the Docker-image gate alongside
   pytest / tool-surface / docs / non-claims / provenance / smoke.
 
-Stdlib-only, offline. Resolves the repo root from ``__file__``.
+Offline. Resolves the repo root from ``__file__``.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import tomllib
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _assert_creator_credit(readmes: dict[str, str], project: dict) -> None:
+    for name, content in readmes.items():
+        assert "Christophe Lesur" in content, f"{name}: missing creator credit"
+    assert any(
+        author.get("name") == "Christophe Lesur"
+        for author in project.get("authors", [])
+    ), "package metadata: missing creator credit"
+
+
+def test_public_creator_credit_survives_packaging() -> None:
+    readmes = {
+        name: (_REPO_ROOT / name).read_text(encoding="utf-8")
+        for name in ("README.md", "README.fr.md")
+    }
+    project = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    _assert_creator_credit(readmes, project)
+
+
+@pytest.mark.parametrize("surface", ("README.md", "README.fr.md", "package"))
+def test_creator_credit_guard_rejects_removed_attribution(surface: str) -> None:
+    readmes = {name: "Created by Christophe Lesur" for name in ("README.md", "README.fr.md")}
+    project = {"authors": [{"name": "Christophe Lesur"}]}
+    if surface == "package":
+        project["authors"] = []
+    else:
+        readmes[surface] = "Created by the project team"
+    with pytest.raises(AssertionError, match="missing creator credit"):
+        _assert_creator_credit(readmes, project)
+
+
+def _assert_documented_long_tools_exist(text: str, tool_names: set[str]) -> None:
+    documented = set(re.findall(r"\b(?:long|ontology)_[a-z_]+\b", text))
+    assert documented, "release notes must describe the long-memory additions"
+    assert documented <= tool_names, f"unknown advertised tools: {documented - tool_names}"
+
+
+def test_v150_public_notes_only_advertise_registered_long_tools() -> None:
+    # The mapped public changelog differs from the private engineering history.
+    overlay = _REPO_ROOT / "release" / "public-overlay" / "CHANGELOG.md"
+    changelog = overlay if overlay.exists() else _REPO_ROOT / "CHANGELOG.md"
+    section = changelog.read_text(encoding="utf-8").split("## [1.5.0]", 1)[1].split("\n## [", 1)[0]
+    fixture = json.loads((_REPO_ROOT / "tests/fixtures/tool_surface.json").read_text(encoding="utf-8"))
+    tool_names = set(fixture["permission_level"]) | set(fixture["alias_map"].values())
+    _assert_documented_long_tools_exist(section, tool_names)
+    normalized = " ".join(section.split())
+    for disclosure in (
+        "not a storage transaction",
+        "no batch-wide rollback",
+        "not a semantic guarantee",
+        "2 h 38 min per batch",
+        "generated bank prose and residual synthesis are in English",
+        "Christophe Lesur",
+    ):
+        assert disclosure in normalized, f"missing release disclosure: {disclosure}"
+
+
+def test_release_tool_guard_rejects_an_unregistered_operation() -> None:
+    with pytest.raises(AssertionError, match="unknown advertised tools"):
+        _assert_documented_long_tools_exist("Use long_nonexistent", {"long_document_list"})
+
+
+def _assert_reader_focused_hivemind_history(text: str) -> None:
+    assert not re.search(r"\b(?:ADR-\d{4}|P\d+-\d+|TQ-\d+|ADM-\d+|LM2-\d+|VULN-\d+)\b", text), (
+        "public release notes must explain behavior without inaccessible work-item labels"
+    )
+    for internal_history in (
+        "private certification runner",
+        "certification-contract-incomplete",
+        "token-ceiling-unproven",
+        "pending release train",
+    ):
+        assert internal_history not in text, "private certification history in public notes"
+
+
+def test_hivemind_public_history_is_reader_focused() -> None:
+    overlay = _REPO_ROOT / "release/public-overlay/CHANGELOG.md"
+    public_changelog = overlay if overlay.exists() else _REPO_ROOT / "CHANGELOG.md"
+    history = public_changelog.read_text(encoding="utf-8")
+    _assert_reader_focused_hivemind_history(history)
+
+
+@pytest.mark.parametrize(
+    "internal_history",
+    ("ADR-0042", "P13-4", "TQ-12", "ADM-01", "LM2-19", "VULN-25", "private certification runner"),
+)
+def test_reader_focused_history_guard_rejects_private_work_log(internal_history: str) -> None:
+    _assert_reader_focused_hivemind_history("Fixed note accounting after a storage failure.")
+    with pytest.raises(AssertionError):
+        _assert_reader_focused_hivemind_history(f"Reviewed {internal_history} before the release.")
+
+
+def _public_inherited_history_prelude() -> str:
+    overlay = _REPO_ROOT / "release/public-overlay/CHANGELOG.md"
+    changelog = overlay if overlay.exists() else _REPO_ROOT / "CHANGELOG.md"
+    inherited = changelog.read_text(encoding="utf-8").split(
+        "## Inherited Live Memory history (provenance)", 1
+    )[1]
+    return inherited.split("<!-- non-claims -->", 1)[0]
+
+
+def _assert_historical_provenance_without_process_claims(prelude: str) -> None:
+    normalized = " ".join(prelude.split())
+    for false_claim in (
+        r"\b(?:retained|preserved|copied)\s+verbatim\b",
+        r"\b(?:pending|at this stage|tracked separately)\b",
+        r"\b(?:fully|completely)\s+(?:cleaned|sanitized|curated)\b",
+        r"\b(?:editorial\s+)?cleanup\s+(?:is\s+)?complete\b",
+    ):
+        assert not re.search(false_claim, normalized, re.IGNORECASE), (
+            "historical provenance must not claim textual fidelity, cleanup completion, "
+            "or a pending editorial workflow"
+        )
+    assert re.search(
+        r"Live Memory\s+`1\.5\.0`.{0,80}(?:different|distinct).{0,80}Hivemind\s+`1\.5\.0`",
+        normalized,
+    ), "historical and current 1.5.0 versions must remain distinct"
+
+
+def test_public_history_prelude_describes_provenance_not_cleanup_state() -> None:
+    _assert_historical_provenance_without_process_claims(_public_inherited_history_prelude())
+
+
+@pytest.mark.parametrize(
+    "false_claim",
+    (
+        "The entries are retained verbatim.",
+        "The entries are preserved verbatim.",
+        "Editorial cleanup remains a separate pending step.",
+        "All entries are fully sanitized.",
+        "Editorial cleanup is complete.",
+    ),
+)
+def test_history_prelude_guard_rejects_false_fidelity_and_cleanup_claims(false_claim: str) -> None:
+    prelude = _public_inherited_history_prelude()
+    _assert_historical_provenance_without_process_claims(prelude)
+    with pytest.raises(AssertionError, match="must not claim"):
+        _assert_historical_provenance_without_process_claims(prelude + "\n" + false_claim)
+
+
+def test_history_prelude_guard_requires_version_disambiguation() -> None:
+    prelude = _public_inherited_history_prelude()
+    _assert_historical_provenance_without_process_claims(prelude)
+    with pytest.raises(AssertionError, match="versions must remain distinct"):
+        _assert_historical_provenance_without_process_claims(
+            prelude.replace("Hivemind `1.5.0`", "Hivemind's current release")
+        )
 
 
 # ---------------------------------------------------------------------------

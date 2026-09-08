@@ -283,7 +283,7 @@ async def test_reingest_delete_never_touches_canonical_sharing_bank_filename() -
     only the mirror copy (``source_path`` None) is replaced. GM's real
     ``document_list`` exposes ``source_path`` (always present, None if
     absent), so the delete map is built exclusively from nul-source_path
-    docs (Codex round-1 HIGH: data-loss path)."""
+    docs, preventing deletion of canonical data."""
     storage = FakeStorage(bank={"systemPatterns.md": "patterns"})
     await storage.put_json(_META, _explicit_meta(bank_mirror=["systemPatterns.md"]))
     bridge, factory = _bridge(
@@ -348,8 +348,7 @@ async def test_orphan_clean_never_touches_canonical_sharing_filename() -> None:
 async def test_unresolved_orphan_is_kept_in_ledger_for_retry() -> None:
     """An orphan whose cleanup is skipped for lack of a resolvable mirror id
     STAYS in the rewritten ``bank_mirror`` ledger — it remains a cleanup
-    candidate on the next push instead of silently leaving retry scope
-    (Codex round-1 B2 weakness)."""
+    candidate on the next push instead of silently leaving retry scope."""
     storage = FakeStorage(bank={"systemPatterns.md": "patterns"})
     await storage.put_json(
         _META, _explicit_meta(bank_mirror=["systemPatterns.md", "stale.md"])
@@ -483,7 +482,7 @@ async def test_register_normalizes_drifted_reserved_entry_scope() -> None:
     """An EXISTING same-hash `internal-long` entry whose permissions drifted
     (e.g. registered wider before the exact-scope lock) is brought back to
     exactly {read, write} on the next registration — a widened internal
-    scope can never stay live (Codex round-1 B5 residual)."""
+    scope can never stay live."""
     import hashlib as _hashlib
 
     raw = "tok-internal"

@@ -93,15 +93,6 @@ jobs:
       - name: Check public documentation links
         run: uv run --no-sync python scripts/check_doc_links.py
 
-# TQ-11 (#349): this workflow used to end with a `build` job (matrix: Hivemind,
-# WAF, Graph Memory) that built every shipped image without publishing it, on
-# every pull_request and push to main. That coverage is now the exact-SHA
-# pre-release-validate.yml workflow's job in the private canonical repository
-# (TQ-9, #347), which builds and smokes the identical Dockerfiles (Dockerfile,
-# waf/Dockerfile, services/graph-memory/Dockerfile) this staged public tree
-# also ships, on every push to private main, before any release candidate can
-# publish. Unlike the private build.yml `build` job, this one carries no
-# required-status-check name to preserve: the public repository this template
-# is staged into does not exist yet (ADR-0023), so there is no live ruleset
-# depending on a "Build ... image" context here. The final release-time build
-# remains release.yml's tag-triggered publish job.
+# This workflow tests the public source tree. It does not build container
+# images or publish packages. Image publication runs in release.yml after
+# tag verification; maintainers validate release images separately before a cut.

@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.4.1-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.5.0-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -451,7 +451,8 @@ uv run python scripts/test_recette.py
 > toute coexistence refuse le démarrage, sans repli champ par champ. Le service
 > Hivemind et le runtime long embarqué résolvent les mêmes profils depuis le
 > même fichier.
-> Le `qwen3.5:27b` historique du template n'est pas le profil Cloud Temple v1.4
+> Le `.env.example` 1.5.0 utilise `Qwen/Qwen3.8-27B-FP8` avec effort `low` ;
+> ce profil de recette ne modifie pas le profil Cloud Temple v1.4 certifié
 > nommé `Qwen/Qwen3.6-27B-FP8`. L'identité fournisseur, l'endpoint, le modèle et les
 > dimensions participent à l'identité vectorielle. Toute dérive bloque les
 > lectures/écritures jusqu'au `long_reindex` borné explicite ; voir le
@@ -478,7 +479,22 @@ exigence d'installation.
 ### Variables optionnelles — LLM (consolidation `mid`)
 
 Le consolidateur `mid` utilise un LLM (API compatible OpenAI) pour
-transformer les notes live `short` en bank `mid` structurée.
+transformer les notes live `short` en bank `mid` structurée. Les défauts de la
+table ci-dessous sont ceux du logiciel **sans réglage explicite**. Le
+[`.env.example`](.env.example) impose le profil de recette : modèle
+`Qwen/Qwen3.8-27B-FP8`, effort `low`, contexte `500000`, sortie `200000`,
+température `0.6` et lots de `2` notes (défaut interne : `3`). Une mise à jour
+ne remplace pas les valeurs de votre `.env`.
+
+**Changement de langue pour les spaces existants :** le modèle reçoit désormais
+la consigne de rédiger la nouvelle prose de la bank et la synthèse résiduelle
+en anglais, même si vos notes, vos règles et votre bank sont en français.
+Les titres requis, termes exacts, identifiants, URL et citations sont conservés ;
+le contenu non modifié n'est pas traduit uniquement pour changer sa langue.
+Une bank française peut donc devenir bilingue au fil des mises à jour.
+`CONSOLIDATION_LEGACY_FRENCH_PROMPTS` a été retiré : une valeur résiduelle est
+ignorée et ne rétablit pas la génération en français. Sauvegardez et vérifiez
+une copie représentative avant de mettre à jour un usage sensible à la langue.
 
 | Variable                  | Défaut            | Description                     |
 | ------------------------- | ----------------- | ------------------------------- |
@@ -486,7 +502,31 @@ transformer les notes live `short` en bank `mid` structurée.
 | `LLMAAS_CONTEXT_WINDOW`   | `131072`          | Context window TOTAL du modèle (input + output combinés, en tokens) |
 | `LLMAAS_MAX_TOKENS`       | `16384`           | Budget de SORTIE max par requête (en tokens). Doit rester **strictement inférieur** à `LLMAAS_CONTEXT_WINDOW`, sinon le démarrage échoue avec une erreur de configuration nommant les deux valeurs. Le consolidateur l'ajuste dynamiquement : `output = min(MAX_TOKENS, CONTEXT_WINDOW - input)` |
 | `LLMAAS_TEMPERATURE`      | `0.3`             | Créativité du LLM (0.0 = déterministe, 1.0 = très créatif) |
+| `LLMAAS_EFFORT` | _(non imposé)_ | `low`, `medium` ou `high` ; le modèle `.env.example` fixe `low`. Prioritaire sur l’alias `LLM_MODEL_EFFORT`. Avec les profils séparés : `INFERENCE_CHAT_EFFORT`, pris en charge par `openai` et `openai-compatible` |
 | `PROXY_URL`               | _(aucun)_         | Proxy HTTP sortant (ex. `http://10.0.0.1:3128`). **Variable maison** (pas `HTTP_PROXY`) — injectée manuellement dans boto3 (S3) et httpx (appels LLM de consolidation, sondes de santé LLM légères de `/health` et `system_health`, et egress Internet du Graph Memory embarqué : appels LLM d'extraction/embeddings avec leurs sondes provider-health, S3 des documents, lectures S3 du token-store partagé). Le pont MCP interne Hivemind→graph-memory, Neo4j, Qdrant et les healthchecks locaux des conteneurs restent toujours directs. Un échec proxy échoue fermé — jamais de repli direct silencieux. |
+
+Les retries de consolidation portent sur les erreurs chat `timeout`,
+`rate_limited` et `unavailable`, avant les écritures du lot : trois nouvelles
+tentatives au maximum, après 60, 120 et 300 secondes. Les logs du serveur indiquent
+la cause, le délai et la reprise ; le job reste `running` en phase
+`batch_retry_wait`. Le budget est partagé avec l’unique correction du modèle :
+au plus quatre appels de génération principale, ou cinq avec cette correction.
+Cela réduit les relances manuelles, mais chaque lot peut entraîner des appels
+facturables supplémentaires et jusqu'à **2 h 38 min** d'appels principaux et
+d'attentes avec le timeout par défaut de 1800 secondes, avant le travail
+auxiliaire. Le verrou du space reste pris : les autres jobs du même space
+attendent, et une compaction manuelle ou le GC peuvent refuser d'intervenir.
+Les autres spaces gardent leur propre file. Voir les
+[outils et métriques MCP](docs/MCP_TOOLS_SPEC.md) pour le budget détaillé.
+
+Un job réussi attribue chaque note traitée à une intégration ou à un abandon
+explicite avec motif ; les notes non traitées restent disponibles. Ce contrôle
+porte sur les dispositions et les octets persistés, pas sur l'exhaustivité ou
+l'exactitude du résumé produit par le modèle. Relisez les changements importants
+et conservez les sources faisant autorité séparément. Une panne de stockage
+peut laisser appliquées les premières écritures du même lot : la consolidation
+normale n'a pas de rollback global du lot et conserve les notes sources du lot
+en échec pour le diagnostic.
 
 ### Variables optionnelles — Consolidation et compaction
 
@@ -494,15 +534,15 @@ transformer les notes live `short` en bank `mid` structurée.
 | ------------------------- | ----------------- | ------------------------------- |
 | `MCP_SERVER_PORT`         | `8002`            | Port d'écoute du serveur MCP    |
 | `MCP_SERVER_DEBUG`        | `false`           | Logs détaillés ; les diagnostics terminaux de l'outil de compaction bank restent filtrés et n'exposent jamais source, prompt ou completion LLM |
-| `CONSOLIDATION_TIMEOUT`   | `600`             | Timeout par appel LLM (secondes) |
+| `CONSOLIDATION_TIMEOUT`   | `1800`            | Timeout par appel LLM (secondes) — borne contre un appel suspendu ; un modèle lent n'est pas une faute |
+| `CONSOLIDATION_TRANSIENT_RETRIES` | `3`      | Nouvelles tentatives par lot après timeout ou indisponibilité temporaire du fournisseur : `0..3`, attentes de 60, 120 puis 300 secondes ; `0` désactive ces retries |
 | `CONSOLIDATION_MAX_NOTES` | `200`             | Max de notes par consolidation  |
-| `CONSOLIDATION_BATCH_SIZE`| `5`               | Notes par batch LLM (petit = précis, grand = plus rapide) |
-| `CONSOLIDATION_LEGACY_FRENCH_PROMPTS` | `false` | `false` utilise les nouveaux prompts Hivemind en anglais ; `true` conserve les prompts français historiques. Redémarrez après modification ; le mode choisi s'applique à la consolidation suivante sans traduire les sections bank non touchées. Pour une bank existante en français, activez `true` avant la mise à niveau afin d'éviter une prose générée multilingue |
+| `CONSOLIDATION_BATCH_SIZE`| `3`               | Notes par batch LLM (petit = précis, grand = plus rapide) |
 | `CONSOLIDATION_COOLDOWN_SECONDS` | `60`      | Cooldown anti-spam par space pour `bank_consolidate` (`0` désactive) |
 | `CONSOLIDATION_VALIDATION_ENABLED` | `false` | Vérification optionnelle post-consolidation des claims non sourcés |
 | `CONSOLIDATION_VALIDATION_MAX_EXAMPLES` | `20` | Nombre max d'exemples retournés par la validation |
-| `COMPACT_THRESHOLD`       | `0.6`             | Signal agrégé de pression de contexte ; nombre fini dans `(0, 1]` (0.6 = bank > 60% du budget). Les plans restent soumis aux gardes par fichier et de contexte |
-| `BANK_FILE_MAX_SIZE`      | `15360`           | Limite dure positive par fichier bank, en octets UTF-8 persistés (15 KiB). Au-dessus = candidat, jamais découpage implicite |
+| `BANK_FILE_MAX_SIZE`      | `35000`           | Seuil d'AVERTISSEMENT par fichier bank, en octets UTF-8 persistés, et seuil de candidature / cible de la compaction manuelle (outil bank compact, décision humaine). La consolidation ne compacte jamais : vous choisissez quand résumer davantage vos fichiers. Jamais un plafond dur |
+| ~~`COMPACT_THRESHOLD`~~   | retiré            | N'admettait que l'auto-compaction, supprimée ; une valeur résiduelle est ignorée. Ancien texte : signal agrégé de pression de contexte ; nombre fini dans `(0, 1]` (0.6 = bank > 60% du budget). Les plans restent soumis aux gardes par fichier et de contexte |
 | `RESPONSE_MAX_BYTES`      | `524288`          | Taille max des réponses non-MCP avant troncature |
 | `API_TOOL_MAX_BODY_BYTES` | `1048576`         | Taille max du corps accepté par `/api/tool` |
 | `ADMIN_AUDIT_RING_SIZE`   | `500`             | Capacité par instance du buffer d'audit console/auth en mémoire ; validée dans `1..500` au démarrage |
@@ -696,9 +736,10 @@ grant concurrent ou ultérieur peut réintroduire la barrière fail-closed et do
 `bank_compact --apply` ne peut écrire que sur une route DirectLocal. Une route
 Project Mesh partagée est refusée avant l'appel fournisseur, le préimage ou une
 écriture bank — sans repli local. Les documents surdimensionnés ou incompatibles
-avec le contexte échouent fermé au lieu d'être découpés. La compaction multipart
-et la reprise durable après crash sont reportées à v1.5.0 ; le contrat détaillé
-de diagnostic et de récupération est dans la
+avec le contexte échouent fermé au lieu d'être découpés. Ce chemin ne fournit
+pas de compaction multipart ni de reprise durable après crash. La récupération
+des réponses inutilisables de la compaction manuelle est prévue en v1.5.1 ;
+l’outil manuel existant reste disponible. Le contrat détaillé est dans la
 [spécification MCP](docs/MCP_TOOLS_SPEC.md).
 
 ### `long` — ontologie / graphe de connaissances (historiquement `graph_*`)
@@ -1177,8 +1218,8 @@ docker compose logs waf --tail 20
 ### La consolidation échoue
 
 - Vérifiez les credentials LLM dans `.env`
-- Le timeout par défaut est de 600s — augmentez `CONSOLIDATION_TIMEOUT`
-  si besoin
+- Le timeout par défaut est de 1800 s (30 min) par appel LLM — augmentez
+  `CONSOLIDATION_TIMEOUT` si besoin
 - `bank_consolidate` retourne un accusé de job async (`running` ou
   `queued`) avec `next_action="return_to_user_without_polling"` ;
   appelez-le une seule fois et ne surveillez/pollez pas sauf demande
@@ -1224,8 +1265,11 @@ Apache License 2.0
 
 ## 👤 Origine
 
-Hivemind s'appuie sur des moteurs originalement développés par
-**Christophe Lesur**. Le projet est publié sous licence Apache-2.0.
+Hivemind et ses moteurs mémoire d'origine ont été créés par
+**Christophe Lesur**. Les releases publiques doivent conserver cette
+paternité du code. Le projet est publié sous licence Apache-2.0 ; les composants
+tiers conservent leurs attributions et licences propres dans
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 > L'identité de release publique est enregistrée dans [`VERSION`](VERSION) et
 > le [`CHANGELOG.md`](CHANGELOG.md) public : le projet est publié sous le nom

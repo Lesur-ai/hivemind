@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-P7-3 — derive_memory_id : déterministe, GM-regex-safe, anti-collision.
+derive_memory_id : déterministe, GM-regex-safe, anti-collision.
 
 RED sans src/live_mem/core/memory_id.py. Le golden littéral fige l'algorithme :
 tout changement de préfixe/longueur/hash le casse (anti-dérive).
@@ -12,6 +12,7 @@ import re
 
 import pytest
 
+from live_mem.core import memory_id
 from live_mem.core.memory_id import derive_memory_id
 
 # Byte-identique à GM ``VALID_MEMORY_ID`` (services/graph-memory/src/mcp_memory/
@@ -23,10 +24,21 @@ VALID_MEMORY_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 def test_derive_is_deterministic_and_frozen() -> None:
     # Golden gelé : si ceci change, l'anti-dérive a détecté une modif d'algo.
-    assert derive_memory_id("lesur-ai-hivemind") == "hm-lesur-ai-hivemind-a943bfbdb0f5f73a"
+    assert derive_memory_id("example-project") == "hm-example-project-7357820d4b2f1bba"
     # Déterminisme strict : deux appels identiques.
     assert derive_memory_id("space-a") == derive_memory_id("space-a")
     assert derive_memory_id("space-a") == "hm-space-a-a70172e8ecf5336e"
+
+
+@pytest.mark.parametrize(
+    ("constant", "mutated"),
+    (("_PREFIX", "other-"), ("_HASH_BYTES", 7), ("_BODY_MAX", 8)),
+)
+def test_neutral_golden_fixture_still_detects_algorithm_drift(monkeypatch, constant, mutated):
+    test_derive_is_deterministic_and_frozen()
+    monkeypatch.setattr(memory_id, constant, mutated)
+    with pytest.raises(AssertionError):
+        test_derive_is_deterministic_and_frozen()
 
 
 @pytest.mark.parametrize(
@@ -34,7 +46,7 @@ def test_derive_is_deterministic_and_frozen() -> None:
     [
         "a",
         "space-a",
-        "lesur-ai-hivemind",
+        "example-project",
         "A" * 64,  # space_id maximal
         "weird/../..\x00chars ok?",  # chars illégaux + traversal + null + espace
         "UPPER_and-lower_123",

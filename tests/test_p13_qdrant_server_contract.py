@@ -41,6 +41,9 @@ class _Graph:
             return [{"name": "Known entity", "type": "Concept"}]
         return []
 
+    async def get_active_doc_ids(self, memory_id):
+        return []
+
     async def get_entity_context(self, memory_id, entity_name, depth):
         return SimpleNamespace(
             documents=[],
@@ -228,6 +231,7 @@ async def test_memory_stats_includes_only_the_safe_collection_contract(monkeypat
         "document_count": 3,
         "entity_count": 5,
         "relation_count": 8,
+        "entity_types": {},
         "top_entities": [{"name": "safe"}],
         "embedding_collection": safe_collection,
     }

@@ -85,6 +85,7 @@ async def _long_status(embedding_collection: object, *, include_field: bool = Tr
         "document_count": 2,
         "entity_count": 3,
         "relation_count": 4,
+        "entity_types": {"Person": 2, "Organization": 1},
         "top_entities": [],
     }
     if include_field:
@@ -144,6 +145,8 @@ async def test_long_status_propagates_only_exact_collection_statuses(
         "document_count": 2,
         "entity_count": 3,
         "relation_count": 4,
+        # #462: the per-type entity distribution is part of the exact projection
+        "entity_types": {"Person": 2, "Organization": 1},
     }
     assert result["embedding_collection"] == collection_status
     assert type(result["embedding_collection"]) is dict

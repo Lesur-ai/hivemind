@@ -70,7 +70,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # ─────────────────────────────────────────────────────────────────────────────
 # WriteSink durable-mutation call-site enumeration (the #8/#9 deliverable).
 #
-# Anchored on SEMANTIC descriptions. The seven normal-consolidation line hints
+# Anchored on SEMANTIC descriptions. The six normal-consolidation line hints
 # are maintained source anchors (and pinned by the focused engine test); the
 # remaining branch hints are advisory. This is the FULL eventual WriteSink
 # mutation set for the mid / bank write path, in TWO branches:
@@ -99,7 +99,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/bank/<unicode-dup>",
-        "line_hint": 5209,
+        "line_hint": 6587,
         "description": (
             "Unicode-duplicate bank cleanup DELETE after every canonical bank "
             "write readback succeeds."
@@ -112,7 +112,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/bank/{filename}",
-        "line_hint": 5191,
+        "line_hint": 6561,
         "description": (
             "Prepared normal bank-file PUT for every validated create, edit, or "
             "rewrite candidate."
@@ -125,7 +125,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/_synthesis.md",
-        "line_hint": 5222,
+        "line_hint": 6619,
         "description": "Prepared normal synthesis markdown PUT (_synthesis.md).",
     },
     {
@@ -135,7 +135,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/_meta.json",
-        "line_hint": 5236,
+        "line_hint": 6633,
         "description": (
             "Private direct-application metadata JSON PUT when ``skip_meta`` is "
             "false."
@@ -144,15 +144,18 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
     {
         "engine": "MidEngine",
         "branch": "consolidator",
-        "op": "delete_many",
+        "op": "delete",
         "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._apply_prepared_normal_batch",
+        "method": "ConsolidatorService._delete_notes_reporting",
         "key_pattern": "{space_id}/live/* (consumed notes)",
-        "line_hint": 5281,
+        "line_hint": 6461,
         "description": (
-            "Private direct-application consumed-note DELETE_MANY when "
-            "``defer_note_finalization`` is false, after bank/synthesis and "
-            "applicable metadata verification."
+            "Consumed-note DELETE, one key at a time. Reached from "
+            "the private direct application when ``defer_note_finalization`` is "
+            "false, after bank/synthesis and applicable metadata verification, "
+            "and from the deferred normal consolidate() finalization after the "
+            "run-level metadata write/readback. Each discarded note is logged "
+            "only after its own delete returned."
         ),
     },
     {
@@ -162,23 +165,10 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService.consolidate",
         "key_pattern": "{space_id}/_meta.json",
-        "line_hint": 3983,
+        "line_hint": 5075,
         "description": (
             "Run-level metadata JSON PUT after all completed prepared batches "
             "are verified."
-        ),
-    },
-    {
-        "engine": "MidEngine",
-        "branch": "consolidator",
-        "op": "delete_many",
-        "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService.consolidate",
-        "key_pattern": "{space_id}/live/* (consumed notes)",
-        "line_hint": 3999,
-        "description": (
-            "Deferred consumed-note DELETE_MANY after the run-level metadata "
-            "write/readback; this is normal consolidate() finalization."
         ),
     },
     {
@@ -191,16 +181,8 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "line_hint": 1977,
         "description": "compact_bank effective bank-file PUT (manual compaction).",
     },
-    {
-        "engine": "MidEngine",
-        "branch": "consolidator",
-        "op": "put",
-        "module": "live_mem.core.consolidator",
-        "method": "ConsolidatorService._compact_bank_if_needed/_compact_single_file",
-        "key_pattern": "{space_id}/bank/{filename}",
-        "line_hint": 1817,
-        "description": "Auto-compaction bank-file PUT inside the consolidate run.",
-    },
+    # The automatic compaction PUT inside the consolidate run no longer
+    # exists (compaction is a human decision through compact_bank, above).
     # ---- BANK-TOOL branch (documented for #8/#9; not surfaced by MidEngine) ---
     {
         "engine": "MidEngine",

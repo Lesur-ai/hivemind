@@ -533,7 +533,7 @@ class BackupService:
         store = HivemindStateStore(storage, space_id)
 
         # ---- 1. Lire l'état live (pointeur, membership, term, tombstones, +
-        # token/queue/watermark : Codex P6-1 medium #4 — toute corruption
+        # token/queue/watermark : toute corruption
         # de l'état protocolaire LIVE doit faire échouer le préflight AVANT
         # le marker RESYNC_REQUIRED, sinon une corruption tardive (touchée
         # après les premiers writes) cassait au milieu de la chorégraphie).
@@ -550,7 +550,7 @@ class BackupService:
             _ = await store.list_queue()
             if local_node is not None and local_node.node_id:
                 _ = await store.get_watermark(local_node.node_id)
-            # Codex R2 high #2 : le préflight token DOIT exercer les MÊMES
+            # Le préflight token DOIT exercer les MÊMES
             # gardes fail-closed que ``lease_runtime`` sur un token ACTIF
             # (HELD/RELEASING) ; ``get_token()`` seul ne prouve QUE que le
             # JSON s'aligne avec ``TokenLeaseState`` (les ``Optional`` du
@@ -600,7 +600,7 @@ class BackupService:
             }
 
         # ---- 3. Lire l'état du backup (epoch / term / pointer / tombstones) ----
-        # Codex P6-1 high #3 : fail-closed sur tout fichier critique du backup
+        # Fail-closed sur tout fichier critique du backup
         # malformé (node.json / members.json / term.json / token.json /
         # bank_version.json / node_status.json / tombstones/*). Pas de defaults
         # silencieux, pas de skip d'un tombstone malformé. Le refus a lieu
@@ -674,7 +674,7 @@ class BackupService:
         except PairingActivationError as exc:
             return {"status": "error", "message": str(exc)}
 
-        # ---- 4bis. STEP 1 — marker RESYNC_REQUIRED (Codex P6-1 high #1) ----
+        # ---- 4bis. STEP 1 — marker RESYNC_REQUIRED ------------------------
         # Le marker `node_status.RESYNC_REQUIRED` + l'event RESYNC_REQUIRED
         # DOIVENT être les TOUT PREMIERS writes durables une fois la
         # préflight validation passée, AVANT le bump epoch/term, AVANT le
@@ -929,14 +929,14 @@ class BackupService:
                 ),
             }
 
-        # ---- 14bis. Compute bank/* orphelins live (Codex P6-1 high #2) ----
+        # ---- 14bis. Compute bank/* orphelins live ------------------------
         # `apply_commit` a écrit les fichiers du manifeste backup ; les
         # fichiers `bank/*` live ABSENTS du manifeste sont stale (présents
         # avant le restore mais pas dans le snapshot backup). Les laisser
         # vivre = restore = backup_bank ∪ live_bank, ce qui contredit la
         # garantie « bank live == bank du backup ».
         #
-        # Codex R2 medium #3 — AUDIT-THEN-DELETE : on CALCULE la liste
+        # AUDIT-THEN-DELETE : on CALCULE la liste
         # complète des orphelins ICI, puis on émet l'audit
         # UNSAFE_RECOVERY_RESTORED avec la liste complète en payload AVANT
         # d'exécuter le delete loop (étape 14ter). Cette inversion garantit
@@ -970,7 +970,7 @@ class BackupService:
         bank_orphans_deleted = len(orphan_keys)
 
         # ---- 14quater. Anti-résurrection sur la sous-arborescence live/ -----
-        # Codex R3 NO-GO #1 : la chorégraphie ci-dessus a rendu le bank/*
+        # La chorégraphie ci-dessus a rendu le bank/*
         # exact, mais la sous-arborescence live/ (short-tier) pouvait
         # contredire l'union de tombstones que CE MÊME restore vient de
         # rendre autoritaire. Une note dont le ``note_id`` est dans
@@ -1063,14 +1063,14 @@ class BackupService:
                     "purged": purged,
                     "bank_orphans_deleted": bank_orphans_deleted,
                     "live_resurrection_deleted": live_resurrection_deleted,
-                    # Codex R2 medium #3 : liste COMPLÈTE des clés vouées à
+                    # Liste COMPLÈTE des clés vouées à
                     # la suppression EN payload. Un crash mid-delete-loop
                     # n'efface pas la trace durable de l'intention ; un
                     # opérateur peut rejouer la suppression depuis cette
                     # liste (clés absolues storage). Liste triée pour
                     # déterminisme cross-host.
                     "bank_orphan_keys": orphan_keys,
-                    # Codex R3 NO-GO #1 : liste COMPLÈTE des clés
+                    # Liste COMPLÈTE des clés
                     # ``live/{note_id}.md`` vouées à la suppression au
                     # nom de l'invariant anti-résurrection (le
                     # ``note_id`` est dans ``tombstone_union``). Mêmes
@@ -1083,7 +1083,7 @@ class BackupService:
             )
         )
 
-        # ---- 14ter. DELETE LOOP (après l'audit, Codex R2 medium #3) --------
+        # ---- 14ter. DELETE LOOP (après l'audit) ---------------------------
         # L'audit est posé : tout crash ici laisse une trace durable de la
         # liste complète des clés que le restore AVAIT L'INTENTION de
         # supprimer. La retry/convergence peut consommer
@@ -1093,7 +1093,7 @@ class BackupService:
         for key in orphan_keys:
             await storage.delete(key)
 
-        # ---- 14quinquies. DELETE LOOP live/ anti-résurrection (Codex R3) ----
+        # ---- 14quinquies. DELETE LOOP live/ anti-résurrection -------------
         # Mêmes garanties que le bank-orphan loop ci-dessus : l'audit
         # ``UNSAFE_RECOVERY_RESTORED`` est posé AVANT, sa payload porte
         # la liste complète des clés vouées à la suppression
@@ -1137,7 +1137,7 @@ class BackupService:
             # Exclure bank/* (déjà matérialisé par apply_commit).
             if relative.startswith("bank/"):
                 continue
-            # Codex R3 NO-GO #1 : anti-résurrection appliquée à la copie
+            # Anti-résurrection appliquée à la copie
             # backup -> live. Le backup peut contenir
             # ``live/{note_id}.md`` pour un ``note_id`` qui figure dans
             # ``tombstone_union`` (le tombstone vient du LIVE, et le
@@ -1185,7 +1185,7 @@ class BackupService:
         tombstones) directement depuis le sous-arbre ``_hivemind/`` du backup
         (le store ne pointe pas dessus — c'est une copie historique).
 
-        Fail-closed (Codex P6-1 high #3, R2 schema-deep) : chaque fichier
+        Fail-closed avec validation du schéma : chaque fichier
         critique présent dans le backup est VALIDÉ contre le modèle Pydantic
         canonique (``NodeIdentity`` / ``MembershipView`` / ``TermState`` /
         ``TokenLeaseState`` / ``BankVersionPointer`` / ``NodeHealth``). Un
@@ -1247,8 +1247,8 @@ class BackupService:
                     f"violation ({exc})"
                 ) from exc
 
-        # Validation Pydantic stricte des fichiers critiques (Codex R2 high
-        # #1). Chaque ``None`` reflète un fichier absent → default
+        # Validation Pydantic stricte des fichiers critiques.
+        # Chaque ``None`` reflète un fichier absent → default
         # conservateur côté caller. Présent-mais-malformé lève au-dessus.
         node = await _validate_model("_hivemind/node.json", NodeIdentity)
         members = await _validate_model("_hivemind/members.json", MembershipView)
@@ -1297,9 +1297,9 @@ class BackupService:
                 f"bank_version ({backup_bank_version}, expected >= -1)"
             )
 
-        # Tombstones : tout fichier non-parsable refuse le restore (Codex
-        # high #3 : un tombstone skipped silencieusement pourrait
-        # ressusciter une note supprimée après l'union backup+live).
+        # Tombstones : tout fichier non-parsable refuse le restore :
+        # un tombstone ignoré silencieusement pourrait
+        # ressusciter une note supprimée après l'union backup+live.
         backup_tombs: list[Tombstone] = []
         tomb_prefix = f"{backup_prefix}_hivemind/tombstones/"
         tomb_objs = await storage.list_objects(tomb_prefix)

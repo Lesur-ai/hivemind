@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -23,7 +22,6 @@ from typing import Any
 
 from ..config import get_settings
 from .consolidator import (
-    _sanitize_compaction_failure_payloads,
     _sanitize_normal_operation_failure_payloads,
     get_consolidator,
 )
@@ -44,24 +42,11 @@ NO_AUTO_POLLING_CONTRACT = {
         "only if an explicit status check is needed."
     ),
 }
-_COMPACTION_PREIMAGE_ID_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}/"
-    r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[0-9a-f]{32}$"
-)
-
 
 def _sanitize_failure_diagnostics_in_result(result: dict[str, Any]) -> dict[str, Any]:
     """Keep the job-status relay from widening mutation diagnostics."""
 
     safe_result = dict(result)
-    if "compaction_failures" in safe_result:
-        safe_failures = _sanitize_compaction_failure_payloads(
-            safe_result.get("compaction_failures")
-        )
-        if safe_failures:
-            safe_result["compaction_failures"] = safe_failures
-        else:
-            safe_result.pop("compaction_failures", None)
     if "operation_failures" in safe_result:
         safe_operation_failures = _sanitize_normal_operation_failure_payloads(
             safe_result.get("operation_failures")
@@ -282,7 +267,7 @@ class ConsolidationQueueService:
                                 "batch_size", job.progress.get("batch_size")
                             ),
                             "notes_total": result.get(
-                                "notes_processed", job.progress.get("notes_total")
+                                "notes_total", job.progress.get("notes_total")
                             ),
                             "notes_done": result.get(
                                 "notes_processed", job.progress.get("notes_done")
@@ -312,31 +297,9 @@ class ConsolidationQueueService:
                     worker_task is not None and worker_task.cancelling() > 0
                 )
 
-                # A queued job must never stay "running" after a compaction
-                # rollback may have been interrupted. The compactor attaches
-                # only safe filename/error diagnostics to this exception.
-                raw_failures = getattr(cancelled, "compaction_rollback_failures", ())
-                if type(raw_failures) in {tuple, list}:
-                    rollback_failures = [
-                        failure
-                        for failure in raw_failures
-                        if type(failure) is dict
-                        and type(failure.get("filename")) is str
-                        and type(failure.get("error")) is str
-                        and failure["error"].startswith("compaction_rollback_")
-                    ]
-                    compaction_failures = _sanitize_compaction_failure_payloads(
-                        rollback_failures
-                    )
-                else:
-                    compaction_failures = []
-                raw_preimage_id = getattr(cancelled, "compaction_preimage_id", None)
-                preimage_id = (
-                    raw_preimage_id
-                    if type(raw_preimage_id) is str
-                    and _COMPACTION_PREIMAGE_ID_RE.fullmatch(raw_preimage_id)
-                    else None
-                )
+                # A queued job must never stay "running" after the consolidator
+                # raised a job-level cancellation (no compaction runs
+                # inside a consolidation any more, so no rollback state is relayed).
                 generic_message = (
                     "Consolidation was cancelled; bank recovery may be "
                     "incomplete. Check the server logs before retrying."
@@ -349,11 +312,6 @@ class ConsolidationQueueService:
                         "message": generic_message,
                         "failure_reason": "consolidation_cancelled",
                     }
-                    if compaction_failures:
-                        job.result["compaction_failures"] = compaction_failures
-                        job.result["recovery_required"] = True
-                    if preimage_id is not None:
-                        job.result["preimage_id"] = preimage_id
                     job.progress.update({"phase": "failed"})
                     job.finished_at = _now()
                     self._finish_active_locked(space_id, job.job_id)
@@ -374,7 +332,7 @@ class ConsolidationQueueService:
                 continue
             except Exception:
                 logger.exception("Consolidation job failed — job=%s", job.job_id)
-                # P12-1 (revue Codex PR #256) : ne JAMAIS persister str(e)
+                # Ne JAMAIS persister str(e)
                 # dans le payload du job — bank_consolidation_status le
                 # renvoie à tout appelant read et une exception provider/
                 # storage peut contenir endpoint et credentials. Message

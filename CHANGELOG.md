@@ -6,8 +6,10 @@ Based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The Hivemind public line starts at `1.0.0-beta.1` (2026-07-07). Inherited Live
 Memory `2.5.x` and earlier records are preserved below under an imported-history
 heading and do **not** continue the Hivemind version line. Historical entries
-retain some original issue and work-item labels for traceability; those labels
-are not installation steps or public architecture contracts.
+describe the version and product named at their release date, not the current
+configuration or guarantees. In particular, an inherited Live Memory `1.5.0`
+entry is not Hivemind `1.5.0`. Use the current release's upgrade checklist and
+linked guides when installing or upgrading.
 
 ---
 
@@ -22,7 +24,160 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 
 ---
 
-## [1.4.1] — 2026-09-02
+## [1.5.0] — Unreleased
+
+Hivemind 1.5.0 makes consolidation easier to operate: fewer interruptions after
+unusable model responses, visible progress when a provider is slow, and explicit
+accounting for the notes processed. You decide when to compact the memory bank.
+
+**Release identity.** Hivemind now reports runtime version `1.5.0`.
+
+> Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
+> boundary. Downstream extension seams are described in
+> `docs/EXTENSION_POINTS.md`.
+
+Upgrading from separate Live Memory and Graph Memory services is covered by the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### Changed — consolidation you can follow and control
+
+- **Fewer manual restarts after unusable model responses.** A batch can request
+  one corrective completion for an unusable response or invalid edit plan,
+  including malformed JSON/Markdown, missing note dispositions and selected
+  truncated or empty responses. A second model fault still stops that batch.
+  Unsafe source state, content filtering and exhausted context remain failures.
+- **Temporary provider failures get a bounded recovery window.** Timeouts,
+  rate limits and temporary unavailability can trigger up to three additional
+  attempts, after waits of 60, 120 and 300 seconds. The retry budget is shared
+  between generation and correction and resets for each batch; it never wraps
+  bank writes or note deletion. Cancellation can interrupt a retry wait.
+- **Progress explains what is happening.** Logs and job status show the batch,
+  retry cause, attempt and wait. The admin console refreshes running/queued
+  jobs every 60 seconds and stops refreshing when inactive or hidden. Reports,
+  the console and CLI show integrated, discarded, deleted and remaining note
+  counts even after a failed run; retry counters describe the current batch.
+- **Each processed note has an explicit outcome.** A note is attributed to a
+  bank edit, or declared unnecessary with a supported reason: already present,
+  superseded, obsolete or without bank value. Both outcomes consume the note;
+  discarded notes have a reason code in the logs. An all-discarded batch need
+  not write bank content.
+- **More resilient edits to existing banks.** Consolidation resolves unambiguous
+  case-only heading differences, chains compatible insertions, recovers missing
+  section/after anchors, and creates missing canonical bank files. A refused
+  duplicate-section merge can retain the duplicates without blocking otherwise
+  valid edits. Structural checks and recovery counters remain visible.
+- **Clearer summaries are a prompt objective, not a semantic guarantee.**
+  Prompts ask for concise facts dated from their source notes, identifiers and
+  durable outcomes preserved, and superseded current state retired without
+  duplicating whole histories. These instructions do not prove that every
+  useful fact survives the model's summary. Review important bank changes.
+- **Compaction is manual.** Consolidation no longer compacts the bank
+  automatically. Files above `BANK_FILE_MAX_SIZE` generate a
+  `bank_size_advisory`, not an automatic rewrite or refusal. Use `bank_compact`
+  with `manage` access on DirectLocal spaces: inspect a dry-run and back up
+  before explicitly applying. A valid reduction may remain above the target;
+  it must be strictly smaller and retain at least 5% of the source size.
+  Multipart compaction and crash-durable recovery are not included.
+
+### Fixed
+
+- **Dependency maintenance.** Update the PDF parser and HTTP/2 support libraries,
+  with refreshed dependency locks and document-reading compatibility checks.
+  Malformed PDFs with oversized Unicode mappings can now fail text extraction.
+  Ingestion then returns a warning and attempts to remove the newly uploaded
+  object; requesting content for an already-stored affected PDF falls back to
+  the original file encoded as base64. For documents ingested with an earlier
+  parser, reindexing stops before rebuilding if extraction fails or the chunk
+  count changes (`source_extraction_failed` /
+  `source_chunk_accounting_mismatch`). No configuration change is required
+  when upgrading.
+
+- **Safer local async-ingestion example.** The Docker demonstrator refuses to
+  reuse committed existing spaces and rejects ambiguous creation results.
+  The backend may resume an exact uncommitted bootstrap prefix under its
+  lifecycle checks; `created` does not prove that the prefix was previously
+  empty. Use a new test identifier. The helper hides credentials, checks
+  submission and job results, and bounds status waits.
+  Cancellation must finish as `cancelled`; completion
+  races are inconclusive. Cleanup requires successful checks and confirmed
+  deletion. Earlier failures retain the space; a failed deletion requires
+  operator inspection because its outcome may be partial or uncertain.
+  This helper is not a release gate or proof of cross-store atomicity.
+
+### Important limits and operating costs
+
+- **Batch validation is not a storage transaction.** The entire plan is
+  validated before bank writes, but writes are sequential: a later storage
+  failure can leave earlier writes applied. There is no batch-wide rollback.
+  Notes from the failed batch remain pending; earlier batches are finalized only
+  while their persistence proof remains valid. Inspect the bank and failure
+  diagnostics before retrying.
+- **Recovery can take time and incur additional provider charges.** With the
+  default `CONSOLIDATION_TIMEOUT=1800` seconds and three retries, transient
+  recovery permits up to four main-generation calls per batch, or five with the
+  one model correction. Calls and waits can total 2 h 38 min per batch
+  (`5 * 1800 + 480` seconds), before auxiliary deduplication and other work.
+  This is a worst-case budget, not an expected duration or a whole-run limit.
+  The same-space consolidation lock stays held; manual compaction, GC deletion
+  and Mesh source preparation may refuse work while it is held. Other spaces
+  keep their own lanes.
+- **Usage and restart limits remain.** A timed-out request may still be billed
+  or running at the provider; reported tokens cover only returned usage.
+  Auxiliary deduplication uses its existing inference policy; optional local
+  validation makes no inference call. Retry waits and job status are in-memory,
+  not durable across a server restart. Keep logs to count retries across a run.
+  Identical retries do not fix reproducible content-dependent generation faults.
+
+### Added — inspect and manage long-memory ingestion
+
+- **Document inspection:** `long_document_list` paginates indexed documents;
+  `long_document_get` retrieves metadata, chunk counts and ingestion status.
+  If requested content cannot be downloaded or an unexpected extraction error
+  occurs, you receive a structured error without content. The stored document
+  is unchanged; metadata-only reads and the binary/base64 fallback described
+  above remain available.
+  Document path/hash indexes support deduplication. These are inspection tools,
+  not a document-deletion API on the Hivemind MCP facade.
+- **Asynchronous ingestion:** `long_ingest_async`, `long_ingest_status`,
+  `long_ingest_list` and `long_ingest_cancel` submit, inspect and cooperatively
+  cancel jobs. Replacement documents are staged before atomic activation;
+  post-activation cleanup is reported separately as `cleanup_pending`.
+- **Ontology inspection:** `ontology_list`, `ontology_get` and
+  `ontology_validate` let you inspect schemas and validate YAML before ingestion.
+- **Entity distribution:** `long_status.graph_stats.entity_types` reports entity
+  counts by type, or an empty object when no entities are present.
+
+### Upgrade checklist
+
+- **Review the language change.** All server-owned consolidator prompts are
+  English-only, and generated bank prose and residual synthesis are in English,
+  even with French notes, rules or existing files. Required existing headings,
+  exact terms, identifiers, URLs and quotations are preserved. Existing French
+  prose is not mass-translated, so a bank can become bilingual as it is updated.
+  `CONSOLIDATION_LEGACY_FRENCH_PROMPTS` is removed; a leftover value is ignored
+  and does not restore French output.
+- **Remove obsolete compaction configuration.** `COMPACT_THRESHOLD` is removed
+  and ignored. Plan explicit bank-size review and manual compaction if needed.
+- **Check latency and cost settings.** The per-call timeout default rises from
+  600 to 1800 seconds; `CONSOLIDATION_TRANSIENT_RETRIES=0..3` defaults to 3.
+  Set it to 0 to disable transient retries. The internal batch-size default
+  drops from 5 to 3; `.env.example` explicitly selects batches of 2.
+- **Merge example settings selectively.** The example uses
+  `Qwen/Qwen3.8-27B-FP8`, explicit low effort, context 500000, output 200000 and
+  temperature 0.6. Check these against your provider's supported limits; do not
+  replace credentials, storage settings or endpoints, or mix legacy `LLMAAS_*`
+  configuration with split-role `INFERENCE_*` settings. Named certification
+  profiles are unchanged; the example is not a universal provider guarantee.
+
+See the [MCP tool reference](docs/MCP_TOOLS_SPEC.md) for contracts and diagnostics
+and the [FAQ](FAQ.md) for operating guidance.
+
+Hivemind was created and is developed by **Christophe Lesur**. Upstream authors
+retain their attribution and rights; see [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+---
+
+## [1.4.1] — 2026-08-20
 
 > Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
 > boundary. Downstream extension seams are described in
@@ -36,16 +191,8 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 - **Release identity.** Hivemind now reports runtime version `1.4.1`.
 
 - **Project Mesh readiness and activation recovery.** Source readiness
-  classifies availability failures during bounded product-storage probes as
-  non-actionable `unavailable` and malformed or ambiguous product state as
-  `unsafe`.
-  Mesh-local pairing-store read failures remain fail-closed as `unsafe`;
-  `unavailable` is not a blanket classification for every transient dependency
-  failure. A Mesh-local I/O ambiguity poisons the process-local pairing store
-  until restart. Subsequent pairing-store reads, including the admin Mesh
-  status inventory, can fail closed before a readiness projection is available;
-  they are not guaranteed to degrade to an `unsafe` entry. Restore backend
-  health and restart before using status or retrying.
+  distinguishes a transient unavailable dependency from corrupt protocol state
+  without hiding healthy neighbours, pairing history, or recovery controls.
   Target ordinary-write fencing uses a signed, durable per-space authority
   instead of scanning append-only pairing-session history. Before accepting an
   invitation, same-space writers/jobs must be quiesced. An independently lost
@@ -73,30 +220,11 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 - **Bank-compaction and normal-consolidation safety converged.** Compaction
   prevalidates complete immutable batches before any DirectLocal write, retains
   verified preimages and readback diagnostics, and treats unresolved recovery as
-  explicit. Normal consolidation accepts only direct strict JSON or one bounded
-  terminal fenced JSON envelope, validates a complete logical batch before
-  persistence, and retains source notes on later failures.
+  explicit. Normal consolidation accepts only a terminal closed JSON schema,
+  validates a complete logical batch before persistence, and retains source
+  notes on later failures.
 
 ### Fixed
-
-- **Reasoning-aware compaction and duplicate-merge budgets.** Strict
-  compaction planning and duplicate-section body merging retain bounded visible
-  output admission floors, then use the configured reasoning-inclusive
-  chat-profile budget capped by the remaining context window. Provider calls
-  remain single-attempt and fail closed; malformed output, oversized results,
-  and insufficient context still produce no bank mutation, and prompts and
-  completions are not logged.
-
-- **Bounded model-output recovery and heading attribution.** Normal
-  consolidation accepts either direct strict JSON or one bounded fenced JSON
-  envelope with a short preface and no suffix; generic extraction, repair,
-  multiple fences, trailing prose, and truncated JSON remain rejected. Strict
-  compaction and normal consolidation now share exact-first heading resolution
-  with a uniquely matched fallback limited to NFC, a closed dash set, and ASCII
-  horizontal whitespace. Unresolved targets keep the batch fail-closed while
-  adding content-free attribution through operation index,
-  missing-versus-ambiguous classification, match count, and a requested-heading
-  hash.
 
 - **Existing local spaces can become Project Mesh invitation sources.** The
   admin console supplies a server-owned source-readiness view and an explicit
@@ -108,13 +236,6 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   shared mutations remain fail-closed. Invitation creation remains a distinct
   action.
 
-### Security
-
-- **Patched HTTP/2 and PDF dependencies.** The core lock resolves `h2` 4.4.1,
-  and the embedded Graph Memory image pins `pypdf` 6.15.0. These replace the
-  affected 4.4.0 and 6.14.2 releases with the first fixed releases identified
-  by the corresponding upstream advisories.
-
 ---
 
 ## [1.4.0] — 2026-08-07
@@ -125,18 +246,12 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 
 ### Added
 
-- **v1.4.0 release preparation.** Runtime identity now reports `1.4.0` for the
-  pending release train. This is not a tag, image publication, deployment,
-  GitHub Release, or provider-certification claim; the four required
-  exact-SHA protected proofs remain a release gate.
+- **Release identity.** Hivemind reports runtime version `1.4.0`.
 
-- **Certification-budget enforcement compatibility.** The public
-  OpenAI-compatible adapter honors the strict shared request/token counter when
-  an authorized private certification runner activates it; ordinary runtime
-  behavior is unchanged when that mode is absent. The public distribution does
-  not ship the private workflow, runner, promotion schema, credentials, or live
-  evidence. This code change itself performs no provider call and creates no
-  certification or release claim.
+- **Bounded inference verification.** The OpenAI-compatible adapter supports
+  shared request/token limits during explicitly budgeted verification. Ordinary
+  runtime behavior is unchanged when that mode is absent. This support does not
+  itself call a provider or establish live verification or certification.
 - **Exact v1.4.0 inference matrix and bounded readiness check.** Hivemind now
   publishes one operator matrix for Cloud Temple, OpenAI, native Anthropic chat
   with Cloud Temple embeddings, and Gemini across consolidation, extraction,
@@ -147,17 +262,15 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   an eight-token chat ceiling. It is never invoked by public health checks. The
   accompanying guide provides an all-or-nothing `LLMAAS_*`
   migration and the bounded embedding-identity reindex journey. Deterministic
-  conformance establishes `compatible`. The schema-v3 primary evaluator stops
-  before credential reads, discovery, Compose startup, or provider egress with
-  `certification-contract-incomplete` and `token-ceiling-unproven`; the
-  separately gated P13-4 successor above leaves that non-promotable schema
-  unchanged. Declared retention, usage, token-ceiling, and incomplete-contract
-  blockers mechanically prevent schema-v3 promotion; no paid, protected-live,
-  or release-ready claim is made by this entry.
+  conformance establishes `compatible`, not live verification of a hosted
+  provider. Live evidence, when available, applies only to its exact source,
+  models and configuration. See the
+  [provider guide](docs/INFERENCE_PROVIDER_PROFILES.md) for the distinction and
+  the bounded readiness check; table membership alone implies no certification.
 
 ### Removed
 
-- **Obsolete compaction utility (TQ-2, #286).** Retired
+- **Obsolete compaction utility.** Retired
   `scripts/test_bank_compact.py`, an uncollected harness whose mocks no longer
   satisfied the production proxy contract. Its unique behavior now runs in the
   collected `tests/test_consolidator_compaction.py` suite.
@@ -204,14 +317,16 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   post-switch outcomes report possible activation and are never safe to retry
   automatically. Online reindex, HA fencing, crash resume, cleanup, and general
   long-data lifecycle remain out of scope.
-- **Mid-memory consolidation prompts are English by default.** The main
-  consolidation, duplicate-section merge, and compaction paths now use English
-  server-owned instructions. Set
-  `CONSOLIDATION_LEGACY_FRENCH_PROMPTS=true` and restart before the next
-  consolidation to retain the historical French prompts; this is recommended
-  when upgrading an established French-language bank. The switch does not
-  translate untouched bank content or space rules. A general language selector
-  remains planned for v1.6.0.
+- **Mid-memory consolidation prompts became English by default.** In 1.4.x,
+  the main consolidation, duplicate-section merge, and compaction paths used
+  English server-owned instructions. Users could set
+  `CONSOLIDATION_LEGACY_FRENCH_PROMPTS=true` and restart to retain French
+  prompts; that was the recommended migration for an existing French-language
+  bank. The switch did not translate untouched content or rules. At release
+  time, a general language selector was planned for v1.6.0; it was not a shipped
+  feature. **Upgrading to 1.5.0:** the switch is removed and ignored. Read the
+  1.5.0 upgrade checklist above and the
+  [current language contract](docs/MCP_TOOLS_SPEC.md).
 - **Process-scoped ASGI lifecycle is now explicit and fail-closed.** Hivemind
   Core and the embedded Graph Memory service use one shared outer lifespan
   guard with sticky startup/shutdown failures and exhaustive cleanup. Core no
@@ -358,7 +473,7 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 ### Changed
 
 - **Manager provisioning discovery.** Permission-aware MCP discovery now
-  advertises ADR-0022's complete `space_create` → `token_create` →
+  advertises the complete `space_create` → `token_create` →
   `space_invite_token` onboarding flow to `manage` and `admin` tokens. The
   existing fresh runtime guards remain authoritative; read/write stays at
   17/20 tools, manage/admin moves to 24/24, and every other operator tool and
@@ -406,32 +521,15 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   a confirmed **Push mid → long** projection. Consolidation remains
   server-scoped and asynchronous, while long remains a derived, non-authoritative
   projection and volatile bank content is never opted in.
-- **Admin console integration proof (visual, responsive, accessibility, and
-  security).** A committed, reproducible Playwright harness covers the complete
-  redesigned `/admin` console: `scripts/admin_console_proof.py` — operator-run like
-  `release_smoke.sh`, never collected by pytest, never wired into CI. Run
-  against the compose stack, it seeds real content through `POST /api/tool`,
-  crawls every shipped view at 1440×900 and the agreed narrow 768×1024
-  viewport, and asserts no blank views, no horizontal overflow, no truncated
-  critical IDs without a tooltip/copy affordance, no fake-data placeholders
-  (with real-data cross-checks against `space_list`/`admin_list_tokens` that
-  fail closed on a failed read), visible keyboard focus, loaded vendored fonts,
-  zero console/CSP violations, no idle polling, and a full session wipe when the
-  auth cookie is cleared; it stays under half the WAF request budget, masks the
-  one-time token secret before any capture, and always revokes+deletes its
-  throwaway token and confirms it removed only the resources it created.
-  **The full through-WAF run against the compose stack is an operator step (it
-  requires Docker); it is not executed in CI.** Operator documentation
-  (README EN/FR, FAQ EN/FR,
-  `docs/SECURITY.md`, `docs/DEPLOYMENT.md`, `scripts/README` EN/FR) is updated
-  to the shipped information architecture — Dashboard, Spaces, Space Detail,
-  Consolidation, Audit, Access, and Operator tools (Backups, Maintenance) —
-  the retired "inherited implementation" framing and emoji section labels are
-  removed, the `/admin`↔`mcp_cli.py` parity is stated as directional (not
-  bijective), and release-surface lints now sweep the admin UI string sources
-  for the forbidden V1 non-claims tokens and freeze the Cloud Temple asset
-  removal. No console feature, server tool, permission gate, audit path,
-  body-size limit, Content-Security-Policy, or security posture changed.
+- **Reproducible admin-console checks and updated operator guides.**
+  `scripts/admin_console_proof.py` exercises the real Docker stack through the
+  WAF at desktop and narrow viewports. It checks data-backed views, layout,
+  keyboard focus, vendored fonts, console/CSP errors, idle behavior and session
+  cleanup. One-time secrets are masked before captures, and cleanup is limited
+  to the harness's own resources. This is an operator-run Docker check, not an
+  automatic CI result. English/French guides cover Dashboard, Spaces, Space
+  Detail, Consolidation, Audit, Access and Operator tools. Console/CLI parity is
+  directional, not a promise that every action exists in both interfaces.
 - **Bounded writer scope and manager provisioning (breaking role
   migration).** `write` can now mutate only spaces in its persisted
   `space_ids` allowlist and is denied from `space_create`, token creation, and
@@ -470,9 +568,9 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   writer is promoted automatically: operators must explicitly upgrade trusted
   provisioners or use a separate manager. CLI, admin-console role gating,
   architecture, security, migration, integration, and public docs follow the
-  same contract. The registered surface is now **61 names = 48 direct + 13
-  aliases across 8 categories**; the frozen P0 inventory/mapping stays
-  historical.
+  same contract. The registered surface at this release is **61 names = 48 direct
+  + 13 aliases across 8 categories**; see [tool exposure](docs/TOOL_EXPOSURE.md)
+  for the current inventory.
 - **Admin console Consolidation view and Operator tools.** The
   Consolidation view (`#/consolidation`) now renders real consolidation lanes
   from `bank_consolidation_queues` (per-space state, running-job progress as of
@@ -533,16 +631,14 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   read-only tool accepts `limit` (default 50, clamped `1..500`) and returns the
   full configured ring in one call with `entries`, `total`, `capacity`, and a
   fixed `scope_note`. `ADMIN_AUDIT_RING_SIZE` defaults to 500 and startup
-  rejects values outside `1..500`. This deliberate additive change moves the
-  registered surface at that point to **59 names = 46 historical/direct + 13
-  tier aliases** (Admin 9). It receives no tier alias. The current complete
-  surface is documented in `docs/TOOL_EXPOSURE.md`; earlier inventory counts
-  in this changelog remain historical snapshots.
+  rejects values outside `1..500`. It adds one admin tool without a tier alias.
+  The release's final tool inventory includes the manager-provisioning additions
+  above; see `docs/TOOL_EXPOSURE.md` for the current complete surface.
 - **Unified Space Detail operator view.** The admin console now gives
-  each space a field-mapped, lazy-loading detail view for short notes, mid-bank
-  files, derived long state, rules, consolidation activity, access summaries,
-  backups, and permission-gated destructive actions. Entry loads only
-  `space_info`; full-bank payloads are never requested, sensitive token data is
+  each space a field-mapped detail view for short notes, mid-bank files, derived
+  long state, rules, consolidation activity, access summaries, backups and
+  permission-gated destructive actions, with the scoped preloading described
+  above. Full-bank payloads are never requested, sensitive token data is
   admin-gated, destructive operations require explicit confirmations, and
   stale async responses are discarded after navigation. The long panel keeps
   Graph Memory visibly derived and non-authoritative and treats unsafe,
@@ -556,17 +652,15 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   console (`/admin`) is rebuilt on a hash-routed shell (`#/dashboard`,
   `#/spaces`, `#/consolidation`, `#/audit`, `#/access`,
   `#/operator/backups`, `#/operator/maintenance`) with a shared view
-  registry (`AdminRouter`/`AdminViews`) that later admin-console work builds
-  on. Visuals move to the Hivemind "Lattice" design system: a fixed dark
+  registry (`AdminRouter`/`AdminViews`). Visuals move to the Hivemind "Lattice"
+  design system: a fixed dark
   sidebar, a light content canvas, a CSS design-token set, vendored WOFF2
   fonts (Space Grotesk / Hanken Grotesk / JetBrains Mono, served under
   `/static/fonts/`), an inline-SVG icon set, and shared components (tables,
   panels, pills, status dots, buttons, forms, toasts, and a single-modal
-  architecture including a typed-confirmation destructive variant). During
-  implementation, the seven target routes used honest "not available in this
-  build" placeholders instead of mock data. The final release replaces those
-  placeholders with real views or explicit unavailable/empty/error states as
-  documented below; no mock data ships.
+  architecture including a typed-confirmation destructive variant). The seven
+  routes render real views or explicit unavailable/empty/error states, never
+  mock data.
   Existing login/logout mechanics, cookie-only auth, and the `/health`
   version display are unchanged.
 - **Dashboard and Spaces views now show real data.** The Dashboard
@@ -581,8 +675,7 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
   Attention filters (Attention calls `bank_stale_spaces` only when
   activated) and the existing create-space flow. No prototype fixture
   values ship; unavailable data renders an explicit unavailable/empty/error
-  state instead. No backend or shell changes — the two view modules and
-  their own CSS banner sections only.
+  state instead. Backend contracts and console navigation are unchanged.
 - **Timestamp display switches from `fr-FR` locale formatting to a
   locale-independent mono UTC format** (`YYYY-MM-DD HH:mm` with a visible
   "UTC" unit label and the full-precision original value in the tooltip).
@@ -680,20 +773,18 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 
 ## [1.0.0-beta.1] — 2026-07-07
 
-First public Hivemind release. The starting SemVer was decided at release-cut
-time per ADR-0018; it does **not** continue the inherited
-Live Memory `2.5.x` line (preserved below as provenance).
+First public Hivemind release. This starts a separate version line; it does
+**not** continue the inherited Live Memory `2.5.x` line preserved below.
 
-> **Mandatory mono-tenant statement (ADR-0018).** Hivemind OSS is strictly
+> Hivemind OSS is strictly
 > mono-tenant; `space_id` allowlist is NOT a tenant boundary; downstream
 > extension seams are described in
-> [docs/EXTENSION_POINTS.md](docs/EXTENSION_POINTS.md)
-> (ADR-0003). Migration from separate Live Memory + Graph Memory deployments
+> [docs/EXTENSION_POINTS.md](docs/EXTENSION_POINTS.md).
+> Migration from separate Live Memory + Graph Memory deployments
 > is covered in
-> [docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md)
-> (ADR-0004 / ADR-0005 / ADR-0010 / ADR-0014).
+> [docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
 
-> **Pre-release — unstable public contract (ADR-0018 pre-1.0 rule).** This is
+> **Pre-release — unstable public contract.** This is
 > a **beta**: the public contract (MCP tool surface, configuration keys,
 > on-disk layout) may still change between pre-releases and until `1.0.0`
 > final, and pre-1.0 `MINOR` bumps may carry breaking changes. Release notes
@@ -705,20 +796,19 @@ Hivemind `1.0.0-beta.1` is the first public cut of the unified agent-memory
 service: three memory tiers (short / mid / long) behind a single MCP facade
 (58 tools — 45 historical + 13 canonical `short_*`/`mid_*`/`long_*` aliases),
 the **embedded mandatory long runtime** (Graph Memory ontology engine with
-Neo4j + Qdrant, ADR-0019) shipped in the default compose stack with internal
-auto-provisioning and a single Hivemind token authority (Model B),
+Neo4j + Qdrant) shipped in the default compose stack with internal
+auto-provisioning and a single Hivemind token authority,
 the Mesh Sync V1 full-mesh all-ACK coordination runtime as the
 protocol foundation (agent-level sharing of a space is available today;
 instance-level federation is not yet operator-reachable), fail-closed
-state-safety guards throughout (ADR-0008 / ADR-0012 / ADR-0014), and the
-ADR-0018 release gate (non-claims / provenance lints, operator smoke,
-human-confirmed publication). The long tier stays derived and
-non-authoritative (ADR-0010): it is never on the commit / rollback / audit /
+state-safety guards throughout, and release checks for documented capabilities,
+provenance and a working deployment. The long tier stays derived and
+non-authoritative: it is never on the commit / rollback / audit /
 recovery path.
 
 ### Added
 
-- **Internal long auto-bind & provisioning (ADR-0019).** A
+- **Embedded long auto-bind and provisioning.** A
   Hivemind space now binds to the embedded Graph Memory runtime with **no manual
   `graph_connect`**: the first `long_push` (write path) derives a deterministic
   `memory_id` from the `space_id`, provisions the embedded memory, and persists
@@ -728,12 +818,12 @@ recovery path.
   - **Local-only secret, never at rest in shared state.** The embedded token is
     resolved from `LONG_EMBEDDED_TOKEN` or auto-generated (0600, local volume
     `hivemind_secrets`); the persisted `graph_memory` block stores a sentinel,
-    never the live token — so raw `_meta.json` backups can never leak it
-    (ADR-0010 / ADR-0012). New config: `LONG_EMBEDDED_URL`,
+    never the live token — so raw `_meta.json` backups do not contain that token.
+    New config: `LONG_EMBEDDED_URL`,
     `LONG_EMBEDDED_TOKEN`, `LONG_EMBEDDED_TOKEN_FILE`.
   - **Fail-closed & least-privilege.** The internal token is registered in the
     shared token store with `read,write` only (never admin), validated by the
-    embedded runtime via the unified Model-B S3 token authority and
+    embedded runtime via the unified S3 token authority and
     revocable. Every resolved connection URL is SSRF-guarded before any client
     is built; malformed health, a missing secret, or an embedded-binding URL
     mismatch fail closed with no write.
@@ -752,7 +842,7 @@ recovery path.
     split-brain, so corruption surfaces as unsafe by design.
   - **Non-Hivemind spaces are unaffected.** A space with `_meta.json` but no
     `_hivemind/` marker reports `"local_only"`, and every other response field
-    is byte-identical to the pre-P2 baseline (the field is purely additive).
+    retains its previous shape (the field is purely additive).
   - **No change to the write path.** `space_update` continues to persist the
     full merged `_meta.json` document; no projected/lossy `_meta.json` is ever
     written. `graph_memory.token` remains absent from `space_summary` /
@@ -760,24 +850,21 @@ recovery path.
 
 ### Changed
 
-- **Security & backup hardening of the embedded Graph
-  Memory state (ADR-0019).**
+- **Security and backup hardening of the embedded Graph Memory state.**
   - **Fixed a latent data-path bug in `long_push`/`graph_push`:** both
     `document_delete` sites (delete-before-reingest and ledger-scoped orphan
     cleanup) passed `filename`, but the real Graph Memory tool is keyed by
     `document_id` (UUID) — every delete silently failed against a real GM
     (each re-push then stacked a duplicate document). The bridge now resolves
     document ids from `document_list` and never deletes without positive
-    mirror evidence: only docs with a nul `source_path` are delete
-    candidates (GM's `document_list` exposes `source_path` — a canonical
+    mirror evidence: only docs with a null `source_path` are delete
+    candidates (GM's `document_list` exposes `source_path` — a
     canonical document sharing a bank filename is never touched), a document
     without a resolvable id is skipped fail-closed (warning logged;
     re-ingest still proceeds; a skipped orphan stays in the `bank_mirror`
     ledger for retry), and multiple mirror ids for the same bank filename
     (duplicates inherited from the bug) are all replaced — pushes
-    self-heal. The `FakeGraphTransport` test fake now enforces the
-    real GM contract (`document_delete` errors without `document_id`), so the
-    permissive-fake masking can never return.
+    self-heal. Regression tests enforce the real document-ID contract.
   - **Embedded GM `document_delete` is now write-gated:** the vendored tool
     requires `check_write_permission` (after `check_memory_access`, before
     any deletion) — read-only tokens can no longer delete documents.
@@ -790,18 +877,18 @@ recovery path.
     space carries the `__embedded__` sentinel, never the live internal token
     (locked end-to-end by test); the Hivemind backup/restore module is
     structurally free of any Graph Memory edge (restoring Hivemind protocol
-    state never consumes long graph state, ADR-0010 — locked by AST test).
-  - **`docs/SECURITY.md` updated for the embedded topology:** internal
-    services and trust boundary (§2.1), sentinel-at-rest vs explicit-override
-    backups (§4.2), internal token lifecycle (§4.5), Graph Memory-native
+    state never consumes long graph state).
+  - **Security guidance for the embedded topology:** internal services and
+    trust boundary, sentinel-at-rest vs explicit-override backups, token
+    lifecycle, and Graph Memory-native
     backups documented as long-runtime-only and never Hivemind protocol
-    recovery truth (§4.6), and new operator-hardening checklist items
+    recovery truth, plus operator-hardening checklist items
     (NEO4J_PASSWORD, no host ports on internal services, `hivemind_secrets`
     volume protection, `LOCALHOST_AUTH_BYPASS=false` / `ADMIN_BOOTSTRAP_KEY`
     unset).
 
-- **Release smoke now REQUIRES the embedded long
-  runtime (ADR-0019).** `scripts/release_smoke.sh` no longer accepts a
+- **Release smoke requires the embedded long
+  runtime.** `scripts/release_smoke.sh` no longer accepts a
   disabled long tier as a valid release result: the legacy disabled-state
   shapes (`disabled`, `long_disabled`, `not_configured`,
   `not_connected`) are explicit failures. The smoke now defaults to the WAF
@@ -811,22 +898,18 @@ recovery path.
   end-to-end: a real `long_push` (binds the space via auto-provision;
   asserted `pushed >= 1` and `errors == 0`), a `long_status` asserted
   `connected` **and** `reachable`, and a `long_ingest` dry-run asserted to
-  return a non-empty plan echoing the `source_path`. The release workflow
-  doc states that a disabled long tier blocks the release, and new anchored
-  lints in `tests/test_release_rebrand_lint.py` prevent reintroducing
-  disabled-state acceptance, non-WAF defaults, or a smoke without the
-  end-to-end long proof. ADR-0010 unchanged: long stays derived and
+  return a non-empty plan echoing the `source_path`. A disabled long tier fails
+  the check. Long stays derived and
   non-authoritative — the smoke asserts product presence, not protocol
   authority.
 
-- **`backup_restore` now refuses restoring OVER a shared/unsafe/corrupted
-  Hivemind space unless an explicit `unsafe_recovery=True` flag is passed**
-  (ratifies ADR-0014 — Accepted).
+- **`backup_restore` refuses shared-space targets by default and always refuses
+  corrupt coordination state.**
   - A new refuse-by-default guard classifies the target space via the
-    read-only `hive_status_label` (ADR-0008) before any copy. If the label is
+    read-only `hive_status_label` before any copy. If the label is
     `hivemind_healthy` / `hivemind_blocked` / `unsafe` / `resync_required`, the
-    restore is refused with a hive-aware blocking `status: "error"` response
-    citing ADR-0014, **unless** the new additive `unsafe_recovery=True`
+    restore is refused with a blocking `status: "error"` response
+    **unless** the new additive `unsafe_recovery=True`
     parameter is passed. Corruption (`CorruptedStateError` on
     node/members/node_status.json) is refused **fail-closed regardless** of the
     flag.
@@ -834,17 +917,16 @@ recovery path.
     `_meta.json` absent ⇒ label `unsafe`) that the inherited
     `_meta.json`-exists check would have let through, clobbering orphaned
     coordination state.
-  - Read-only detection only — **no `_hivemind/` writes, no coordination-field
-    forcing** from the guard. The field-by-field forward-forcing choreography,
-    the audit event, and `assert_commit_allowed()` authorization remain deferred
-    (ADR-0014).
+  - This is a read-only admission guard: it does not repair `_hivemind/`
+    coordination fields or implement a complete shared-space recovery
+    transaction. The unsafe flag is not an automatic repair mechanism.
   - The MCP `backup_restore` tool gains an additive `unsafe_recovery: bool =
     False` parameter (default unchanged behavior); the existing `confirm=True`
     gate is unchanged. The success / `not_found` / inherited "space exists,
     delete first" response shapes are unchanged; the new hive-aware refusal is a
     new `status: "error"` variant.
 
-- **Mechanical release gate in CI (ADR-0018).** On a `v*`
+- **Tag and image consistency checks.** On a `v*`
   tag, the build workflow now refuses publication when the tagged commit is
   not reachable from `main` or when the tag does not match the `VERSION`
   file (`v${VERSION}` == tag), and `:latest` is only published for **stable**
@@ -865,51 +947,42 @@ recovery path.
   `core/__init__.py` re-exports are lazy (PEP 562, mirroring the
   `auth/__init__.py` treatment), and a structural guard forbids any vendored
   module from hardcoding a boto3 `signature_version` without consulting the
-  shared mode. The health-gate failure was reproduced end-to-end by the
-  release smoke against the compose dev stack (MinIO + `sigv4`); the fix is
-  locked by RED→GREEN unit/structural tests, and the embedded runtime's S3
-  health leg was re-proven in-container against MinIO + `sigv4` after the
-  fix. ADR-0010 unchanged: this is a storage-signing fix inside the derived
-  long tier.
-- **release smoke asserted a wrong `short_note` contract.**
-  `scripts/release_smoke.sh` expected `status == "ok"` from `short_note`, but
-  the real note-creation contract returns `"created"` — the smoke failed
-  against a healthy stack (same defect class as the `space_create` contract
-  finding fixed earlier). The assertion now checks the real contract.
-- **release-facing docs corrected against shipped
-  behavior.** README placeholder cluster resolved (real clone URL, real CI
-  badge, version badge, placeholder markers); Project Mesh copy reframed to
-  what ships in V1 (protocol foundation + agent-level sharing;
-  instance-level federation not yet operator-reachable); FAQ long-tier row
-  aligned with the embedded runtime (ADR-0019); `docs/DEPLOYMENT.md`
-  first-deploy token bootstrap rewritten to an executable procedure and the
-  backup section aligned with the scoped `unsafe_recovery` contract;
-  `docs/SECURITY.md` hardening item 15 made achievable; the migration
-  guide's `backup_restore` section rewritten to the shipped ADR-0014
-  contract.
-- **test hermeticity against operator environments.** The
-  proxy wiring tests pinned no `s3_signature_mode`, so running the suite on a
-  machine with `S3_SIGNATURE_MODE=sigv4` (MinIO/AWS operator `.env`) produced
-  two false failures; the dual-wiring assumption is now pinned explicitly.
+  shared mode. The MinIO/SigV4 deployment smoke covers the fixed storage path.
+- **Release smoke recognizes successful note creation.**
+  `scripts/release_smoke.sh` checks the actual `short_note` success status,
+  `created`, instead of rejecting a healthy stack because it expected `ok`.
+- **Executable onboarding and migration documentation.** README clone links
+  and badges identify Hivemind; the FAQ explains the mandatory embedded long
+  runtime. Deployment and migration guides cover first-token bootstrap,
+  shared-space restore limitations and operator hardening. At this beta's
+  release, Project Mesh provided the protocol foundation and agent-level
+  sharing; instance-level federation was not yet operator-reachable.
+- **Tests work with SigV4 operator environments.** Proxy tests now explicitly
+  select the signing mode they exercise, eliminating false failures when the
+  caller's environment selects `S3_SIGNATURE_MODE=sigv4`.
 
 ---
 
 ## Inherited Live Memory history (provenance)
 
-The entries below pre-date the Hivemind public release and were authored under
-the inherited Live Memory product line (`2.5.x` and prior). They are preserved
-verbatim as provenance and do **not** count as Hivemind release notes. Per
-ADR-0018 the Hivemind public SemVer does not continue the `2.5.x` line; it
-started at `1.0.0-beta.1` and the current release version is recorded in
-`VERSION`.
+The entries below pre-date Hivemind and describe the inherited **Live Memory**
+product line (`2.5.x` and prior). Selected historical release notes are retained
+here for provenance. Original French entries are marked by their French
+section headings. These versions, configuration instructions, audit assessments
+and future-work statements belong to Live Memory at the stated dates, not to
+the current Hivemind release. In particular, Live Memory `1.5.0` below is a
+different product version from Hivemind `1.5.0` above.
 
-The provenance entries below are wrapped in a `<!-- non-claims -->` HTML
-fence so the release-gate non-claims lint
-(`tests/test_release_non_claims_lint.py`) does not interpret historical Live
-Memory vocabulary (e.g. "isolation multi-tenant" in inherited release notes)
-as fresh Hivemind release claims. Hivemind's binding non-claims guardrail
-(ADR-0018) applies to the `[Unreleased]` section and to future Hivemind
-release headers, not to this preserved provenance.
+Hivemind's separate version line started at `1.0.0-beta.1`; `VERSION` records
+the current release. Use the current [deployment guide](docs/DEPLOYMENT.md),
+[security guidance](docs/SECURITY.md) and
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md), not these historical
+entries, for present-day operations and guarantees. Original upstream licenses
+and attribution remain documented in [Third-party notices](THIRD_PARTY_NOTICES.md).
+
+The non-claims fence below keeps historical product statements distinct from
+the current release's guarantees; it does not certify the imported text as
+public-ready.
 
 <!-- non-claims -->
 
@@ -1027,8 +1100,8 @@ release headers, not to this preserved provenance.
   Bank must not be indexed wholesale into Graph Memory, points to the
   canonical-repository-document agent-side ingestion pattern, and lists
   the two acceptable usages (one-off graph bootstrap, explicit debug /
-  migration). Behaviour is **unchanged**: this is doctrinal only — a
-  follow-up release will introduce a server-side guardrail.
+  migration). Behaviour was **unchanged** in this release: this was documented
+  usage guidance, not an implemented server-side guardrail.
 - **Integration guides** (Cline / Claude Code / Codex, EN + FR) now
   surface the two workspace rules templates and tell the agent **which
   one to pick** depending on whether Graph Memory is wired in.
@@ -1041,8 +1114,8 @@ release headers, not to this preserved provenance.
   consolidator still updates only the Memory Bank; `graph_push` is
   unchanged at the code level. v2.5.0 is purely a doctrinal /
   documentation release that finalises the Live Memory + Graph Memory
-  responsibility separation before the server-side guardrail work
-  scheduled for v2.6.0+.
+  responsibility separation. Server-side guardrails were planned for the
+  historical Live Memory v2.6.0+ line, not delivered by this release.
 
 ---
 
@@ -1181,48 +1254,48 @@ release headers, not to this preserved provenance.
 
 ## [2.0.2] — 2026-05-16 (Admin Console Security Hardening)
 
-**🔒 Security Audit & Remediation** — 10 findings identified, 7 fixed, 3 risk-accepted.
+Security hardening for the historical Live Memory admin console.
 
 ### Fixed
 
-- **ADM-01 🔴 CRITICAL — XSS via attribute injection**: `esc()` in `admin-app.js`
+- **XSS via attribute injection**: `esc()` in `admin-app.js`
   now escapes `"` → `&quot;` and `'` → `&#x27;`, preventing token names or
   descriptions from breaking out of HTML attributes.
-- **ADM-02 🟠 HIGH — Exception message leakage**: `/api/tool` now uses
+- **Exception message leakage**: `/api/tool` now uses
   `safe_error()` instead of bare `str(e)`, preventing exposure of internal
   file paths, S3 endpoints, and stack traces to the client.
-- **ADM-03 🟠 HIGH — No CSP without WAF**: `_serve_file()` now adds
+- **Security headers without the WAF**: `_serve_file()` now adds
   `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options`,
   `Referrer-Policy`, and `Permissions-Policy` headers on all HTML responses
   (defense-in-depth, protects direct port 8002 access).
-- **ADM-05 🟡 MEDIUM — No body size limit**: `/api/tool` now enforces
+- **Request body size limit**: `/api/tool` now enforces
   `API_TOOL_MAX_BODY_BYTES` (default 1 MB, configurable). Returns `413`
   if exceeded, preventing memory exhaustion without WAF.
-- **ADM-06 🟡 MEDIUM — No permission gate**: `/api/tool` now requires
+- **Permission gate**: `/api/tool` now requires
   `write` permission minimum. Read-only tokens get `403 Forbidden`.
   ⚠️ **Breaking change** for read-only tokens using the admin console
   (use `/live` for read-only viewing instead).
-- **ADM-08 🟡 MEDIUM — Incomplete audit trail**: `/api/tool` now emits a
+- **Tool-call audit trail**: `/api/tool` now emits a
   dedicated `admin_tool_call` audit entry with tool name, argument keys,
   and client identity before execution.
-- **ADM-09 🔵 LOW — Internal API regression**: Added regression tests for
+- **Direct-call error handling**: Added regression tests for
   `call_tool_direct()` covering unknown tools and uninitialized state.
 
 ### Added
 
-- **`tests/test_admin_console_security.py`** — 13 non-complaisant tests
-  (7 classes) covering all fixed findings. Convention: each test tries to
-  *break* the fix, not validate the happy path.
+- **Admin-console security regression tests** cover attribute escaping,
+  safe errors, headers, request limits, permissions and audit events.
 - **`API_TOOL_MAX_BODY_BYTES`** setting in `config.py` (default 1 MB).
 
-### Risk Accepted (Not Fixed)
+### Limitations at this release
 
-- **ADM-04 🟠 HIGH** — Raw token in cookie (HttpOnly+SameSite=Strict sufficient
-  for internal tool; server-side session store deferred to backlog).
-- **ADM-07 🟡 MEDIUM** — Admin console HTML publicly visible (Swagger UI on `/`
-  already exposes same information; login form requires public access).
-- **ADM-10 🔵 LOW** — No CSRF token mechanism (SameSite=Strict + JSON
-  Content-Type per OWASP guidelines for internal APIs).
+- The raw token was stored in an HttpOnly, SameSite=Strict cookie, not a
+  server-side session store. Cookie flags do not make a stolen token harmless.
+- Admin-console HTML and the login form were publicly readable; tool actions
+  still required authentication and the permission gate above.
+- There was no separate CSRF token mechanism; the interface relied on
+  SameSite=Strict cookies and JSON requests. This records the historical design,
+  not a present-day security approval; use the current security guide.
 
 ---
 
@@ -1276,7 +1349,7 @@ breaking changes.
 
 - **CSP violation in `bank.js`** — inline `onclick="selectBank(...)"` handlers
   replaced with `addEventListener` + `data-filename` attributes to comply with
-  `script-src 'self'` Content Security Policy (LM2-19 related).
+  `script-src 'self'` Content Security Policy.
 - **Bank tabs overflow** — `.bank-tabs` now uses `flex-wrap: wrap` with
   `max-height: 4.5rem` and vertical scroll, replacing the invisible horizontal
   scroll. Handles spaces with 20+ bank files gracefully.
@@ -1315,10 +1388,10 @@ breaking changes.
 
 ## [2.0.0+] — 2026-05-15 (post-2.0.0)
 
-**🔬 Consolidator backlog** : implementation of the 2 mitigations
-left in backlog by v1.9.0 (post-pass validation `unattributed_claims_count`
-+ `[inféré]` marker for inference traceability). No version bump: these
-additions are **opt-in** (zero impact for existing deployments).
+**Optional consolidation diagnostics**: post-pass validation
+(`unattributed_claims_count`) and the `[inféré]` marker for inference
+traceability. These additions did not change the version number and were
+**opt-in** (zero impact for existing deployments unless enabled).
 
 ### Added
 
@@ -1334,8 +1407,9 @@ additions are **opt-in** (zero impact for existing deployments).
   must now annotate every fact produced by transitive inference (rule #7)
   with the `[inféré]` marker. The marker serves as explicit attribution
   and ensures the validation pass does not flag those lines as unsourced.
-  Note: the SYSTEM_PROMPT is kept in French for consistency with the
-  7 other anti-hallucination rules already defined in French in v1.9.0.
+  At this historical release, the SYSTEM_PROMPT remained French, like the
+  seven rules introduced in Live Memory v1.9.0. Hivemind 1.5.0 uses English
+  server-owned prompts; see its upgrade checklist above.
 - **New opt-in ENV vars** (safe defaults, disabled by default):
   - `CONSOLIDATION_VALIDATION_ENABLED=false` — enables the validation pass
     and the addition of the `validation` block in the MCP response.
@@ -1357,93 +1431,92 @@ additions are **opt-in** (zero impact for existing deployments).
 
 ## [2.0.0] — 2026-05-15
 
-**🛡️ Security Hardening Release** — full remediation of the 2026-05-15
-internal security audit. All 27
-new findings (LM2-01 to LM2-31) are now addressed in a single release.
+**Security hardening release** — fixes for browser rendering, credentials,
+permissions, input validation and dependency security.
 Breaking change: requires `mcp[cli]>=1.27.0`, drops `httpx-sse`, and
 introduces a new `/api/login` + `/api/logout` cookie auth flow for the
 web UI (the bearer header still works for agents).
 
-### Security fixes (audit 2026-05-15)
+### Security fixes
 
 #### Critical
-- **LM2-01 — Stored XSS via bank filename** (`static/js/bank.js`) :
+- **Stored XSS via bank filename** (`static/js/bank.js`) :
   filename was injected unescaped into `innerHTML`. Now `esc(name)` is
   applied systematically, and the server refuses dangerous chars
-  (`< > " ' \\` + control chars) in `bank_write` filenames (LM2-12).
+  (`< > " ' \\` + control chars) in `bank_write` filenames.
 
 #### High
-- **LM2-02 — SSRF in `graph_connect`** : new helper `_validate_gm_url()`
+- **SSRF in `graph_connect`** : new helper `_validate_gm_url()`
   blocks non-HTTP schemes, private/loopback/link-local IPs and cloud
   metadata endpoints (169.254.169.254) before any HTTP call or S3 persistence.
-- **LM2-03 — Graph Memory token leak in space_export/backup_download** :
+- **Graph Memory token leak in space_export/backup_download** :
   new `mask_meta_secrets()` helper applied to every code path exposing
   `_meta.json` (REST API, `space_export`, `backup_download`).
-- **LM2-04 — Token bearer in localStorage** : migrated to HttpOnly cookie
-  via `/api/login` + `/api/logout`. The raw token never leaves the
-  network → server; an XSS can no longer exfiltrate it.
-- **LM2-05 — CSP `'unsafe-inline'` on `script-src`** : removed.
+- **Bearer token in localStorage** : migrated to an HttpOnly cookie
+  via `/api/login` + `/api/logout`. Page JavaScript cannot read the cookie;
+  this does not prevent an XSS from making authenticated requests.
+- **CSP `'unsafe-inline'` on `script-src`** : removed.
   CDN whitelist (`unpkg`, `jsdelivr`) also removed.
-- **LM2-06 — CDN dependency for marked.js** : vendored locally in
+- **CDN dependency for marked.js** : vendored locally in
   `static/vendor/` (marked@12.0.2 + DOMPurify@3.1.6) with SHA-384 hashes
   documented in `static/vendor/README.md`.
-- **LM2-10 — Broken `gc.py`** : `live.write_note(agent=...)` removed
+- **Broken `gc.py`** : `live.write_note(agent=...)` removed
   in v0.8.1 but still called by GC. Replaced with new
   `_write_gc_notice()` writing directly to S3 with the orphan agent's
   identity in the front-matter.
-- **LM2-19 — `marked.parse()` without sanitization** : DOMPurify applied
+- **`marked.parse()` without sanitization** : DOMPurify applied
   systematically to all output of `marked.parse()`. Eliminates the second
-  XSS vector (malicious Markdown in notes or bank files).
+  XSS vector described here (malicious Markdown in notes or bank files).
 
 #### Medium
-- **LM2-07 — `_fresh_token_store` ghost permissions** : new
+- **`_fresh_token_store` ghost permissions** : new
   `invalidate_token_in_store()` called after every token mutation
   (revoke, delete, purge, update, bulk_update) prevents long-running
   operations from seeing stale permissions post-revocation.
-- **LM2-08 — Bootstrap key asymmetry doc** : added explicit comment
-  in `update_fresh_token()` explaining the volontary fallback.
-- **LM2-09 — `backup_id` regex validation** : new `_parse_backup_id()`
+- **Bootstrap-key fallback documented** in `update_fresh_token()`; token
+  handling behavior was unchanged.
+- **`backup_id` regex validation** : new `_parse_backup_id()`
   validates `space_id` regex + ISO timestamp format before any S3 access.
-- **LM2-13 — Anti-erasure rewrite guard** : the consolidator now
+- **Anti-erasure rewrite guard** : the consolidator now
   refuses any `rewrite` operation that shrinks the file by more than 70 %
   (suspect prompt injection). The original file remains untouched and the
   event is logged for audit.
-- **LM2-14 — `CONSOLIDATION_MAX_NOTES` lowered** : default 500 → 200 to
+- **`CONSOLIDATION_MAX_NOTES` lowered** : default 500 → 200 to
   cap LLM budget exhaustion. Notes still bounded by 100 KB each.
-- **LM2-15 — S3 Server-Side Encryption** : new `S3_SSE` env var
+- **S3 Server-Side Encryption** : new `S3_SSE` env var
   (default off for Dell ECS compat). Set `S3_SSE=AES256` or `S3_SSE=aws:kms`
   + `S3_SSE_KMS_KEY_ID` to enable.
-- **LM2-17 — X-Forwarded-For in audit logs** : new `_client_ip_from_scope()`
+- **X-Forwarded-For in audit logs** : new `_client_ip_from_scope()`
   reads `X-Forwarded-For` (or `X-Real-IP`) before falling back to
   `scope["client"]`. Audit logs now show real client IPs behind WAF.
-- **LM2-18 — `bank_consolidate` cooldown** : new
+- **`bank_consolidate` cooldown** : new
   `CONSOLIDATION_COOLDOWN_SECONDS` env var (default 60s) prevents an
   agent from looping on `bank_consolidate` and saturating LLM budget.
-- **LM2-24 — `str(e)` in public `/health`** : replaced by generic
+- **`str(e)` in public `/health`** : replaced by generic
   message ("S3 unreachable" / "LLMaaS unreachable"). Server-side
   warning log keeps the full exception. Same fix applied to
   `system_health` MCP tool for defense in depth.
-- **LM2-25 — `str(e)` in consolidator responses** : LLM call and
+- **`str(e)` in consolidator responses** : LLM call and
   `test_connection` errors now return generic messages (full exception
   logged server-side). Debug mode (`MCP_SERVER_DEBUG=true`) keeps the
   legacy verbose behavior.
-- **LM2-29 — Cross-tenant backup access** : `backup_restore` and
+- **Cross-space backup access** : `backup_restore` and
   `backup_delete` now call `check_access(space_id)` in addition to
   `check_manage_permission()`. A `manage` operator restricted to
   `["project-a"]` can no longer restore/delete a `project-b` backup.
-- **LM2-31 — Missing `confirm=True`** : added to `bank_delete`
+- **Explicit `confirm=True`** : added to `bank_delete`
   (irreversible) and `admin_purge_tokens(revoked_only=False)` (the
   total-purge variant, otherwise leaves only the bootstrap key).
 
 #### Low
-- **LM2-12 — Filename validation** : see LM2-01 (combined fix).
-- **LM2-22/21 — Egress filter + TLS internal** : documented in
-  `DEPLOIEMENT_PRODUCTION.md` (no code change — operational guidance).
-- **LM2-26 — Lower bounds bumped in `pyproject.toml`** :
+- **Filename validation** : included in the stored-XSS fix above.
+- **Egress filtering and internal TLS** : deployment guidance added; no code
+  change. Consult the current deployment guide for today's topology.
+- **Lower bounds bumped in `pyproject.toml`** :
   `mcp[cli]>=1.27.0` (CVE-2026-32871), `httpx>=0.28`, `boto3>=1.40`,
   `openai>=1.50`. `uv.lock` was already correct; this protects
   `pip install live-memory` builds.
-- **LM2-27 — `httpx-sse` removed** from `pyproject.toml` (no longer
+- **`httpx-sse` removed** from `pyproject.toml` (no longer
   imported since the Streamable HTTP migration).
 
 ### Breaking changes
@@ -1454,10 +1527,11 @@ web UI (the bearer header still works for agents).
 - **`bank_delete` requires `confirm=True`** : add `confirm=True` to
   any CLI/automation call (alignment with `space_delete`, etc.).
 - **`admin_purge_tokens(revoked_only=False)` requires `confirm=True`**.
-- **`graph_connect` rejects private/loopback URLs** : if you used a
-  loopback URL for local development, switch to a public address or
-  add a temporary DNS entry. The error message points to the precise
-  IP class blocked.
+- **`graph_connect` rejects private/loopback URLs** : deployments using a
+  loopback address needed a reachable endpoint accepted by the SSRF policy.
+  A DNS alias does not make a blocked resolved address safe. The error message
+  identifies the blocked IP class; use the current deployment guide for
+  Hivemind's embedded long-runtime configuration.
 - **`pip install live-memory`** now requires `mcp[cli]>=1.27.0` (no
   longer compatible with mcp<1.27 due to CVE-2026-32871).
 
@@ -1473,17 +1547,10 @@ web UI (the bearer header still works for agents).
 - `localStorage.livemem_auth_token` (legacy token storage, auto-purged
   at first load by `purgeLegacyTokenStorage()`).
 
-### Validation
-- **Audit summary** : 27/27 new findings addressed. 15/15 v1.0.0 fixes
-  confirmed non-regressed in v1.9.0 source code review.
-- **Tests** : 152/152 existing test suite expected to pass (no behavioral
-  regression). New tests should be added for SSRF, XSS escaping, cookie
-  auth and rewrite guard (next iteration).
-
 ## [1.9.0] — 2026-05-15
 
 ### Added
-- **Anti-hallucination rules in LLM consolidator** — 7 new rules in the SYSTEM_PROMPT to prevent the LLM from inventing content not derived from source notes:
+- **Source-grounding instructions in the LLM consolidator** — Seven SYSTEM_PROMPT rules instruct the model not to invent content. These are prompt objectives, not a guarantee of semantic completeness or correctness:
   1. **Strict source attribution**: every factual claim in the bank MUST be derivable from at least one note. Empty sections stay empty or are marked "TBD".
   2. **Domain vocabulary preservation**: project-specific terms are used verbatim from notes, never reinterpreted via LLM priors.
   3. **Metrics gating**: numbers (LoC, test counts, percentages) only appear if explicitly sourced from a note. Sourced metrics are always carried over.
@@ -1541,17 +1608,17 @@ web UI (the bearer header still works for agents).
   - Autocomplétion enrichie pour tous les nouveaux flags.
 - **Affichage Rich** : nouvelle fonction `show_bulk_update_result()` qui affiche un tableau `before/after` par token modifié (ajouts, retraits, no-op).
 
-### Décisions de design (challengeables)
+### Limites et compatibilité
 
-- **Pas de remplacement complet en bulk** : volontairement absent. Propager un `space_ids="x,y"` sur N tokens est une opération destructive trop facile à mal utiliser. Si le besoin émerge, il faudra l'ajouter explicitement avec un garde-fou (ex: `--allow-replace`).
+- **Pas de remplacement complet en bulk** : `space_ids="x,y"` n'est pas disponible pour une mise à jour groupée, afin d'éviter de remplacer accidentellement les accès de plusieurs tokens. Aucun flag `--allow-replace` n'est fourni par cette version.
 - **Sucre `*`/`all` interdit dans les deltas** : `space_ids_add="*"` voudrait dire "ajouter tous les spaces existants" — mais ce serait un snapshot figé incohérent avec la sémantique stricte v1.5.0. Pour cet usage, utiliser `space_ids="*"` en remplacement complet (sur un seul token).
 - **`include_revoked=True` par défaut** : préserve strictement le comportement antérieur de `admin_list_tokens`. Aucun script existant n'est cassé.
-- **Atomicité = naturelle** : pas de logique de rollback complexe. `tokens.json` est mono-fichier S3 — toutes les modifs sont en mémoire, puis une seule écriture finale. Si une validation échoue (permissions invalides détectées avant `_save_store`), rien n'est persisté.
+- **Écriture du registre en une fois** : les modifications de `tokens.json` sont préparées en mémoire, validées, puis sauvegardées dans un seul objet S3. Une erreur de validation avant `_save_store` ne persiste rien. Cela décrit ce registre, pas une transaction distribuée ni un rollback multi-ressources.
 
 ## [1.7.4] — 2026-05-10
 
 ### Ajouté
-- **Réparation automatique de JSON LLM tronqué** — Nouvelle fonction `_repair_json()` dans `consolidator.py` qui détecte les erreurs "Unterminated string" (fréquentes avec qwen3.x, `finish_reason=stop`) et répare le JSON avant de retomber sur le retry coûteux. Stratégie : tronquer au point de l'erreur, fermer les structures JSON ouvertes via `_close_json_structure()`, supprimer la dernière opération tronquée. Économise ~100s et ~50K tokens par occurrence.
+- **Réparation automatique de JSON LLM tronqué** — `_repair_json()` détecte les erreurs "Unterminated string" et tente une réparation avant le retry LLM : troncature au point d'erreur, fermeture des structures ouvertes via `_close_json_structure()` et retrait de la dernière opération incomplète. Les observations historiques avec qwen3.x (`finish_reason=stop`) rapportaient environ 100 s et 50K tokens économisés sur les cas réparés ; ce n'est pas un gain garanti par appel.
 - **Garde-fou retry sur repair vide** — Si la réparation JSON réussit mais produit 0 `file_edits` (troncature très précoce), le code retombe sur le retry LLM au lieu d'accepter silencieusement un résultat vide (évite la perte de données).
 - **29 tests unitaires** (`tests/test_json_repair.py`) — Couvrent `_close_json_structure` (10 tests : niveaux imbriqués, strings avec accolades, échappements, backslash) et `_repair_json` (19 tests : comptage exact d'opérations, troncature dans content/heading/filename, create tronqué, guillemets échappés, scénario réaliste qwen3.6, intégrité JSON).
 
@@ -1661,7 +1728,7 @@ web UI (the bearer header still works for agents).
 ## [1.4.1] — 2026-04-11
 
 ### Corrigé
-- **Anti-doublon sémantique dans le consolidateur** — Après une compaction, le consolidateur ne reconnaissait pas que les entrées résumées (format court) et les nouvelles notes (format détaillé) décrivaient le même travail. Résultat : doublons massifs dans `progress.md` (ex: "Phase B — LiveMemoryService créé" ET "Session du 10/04 — Phase B COMPLÈTE"). Ajout d'une instruction explicite dans le `SYSTEM_PROMPT` pour détecter les jalons sémantiquement équivalents et enrichir l'existant au lieu de créer de nouvelles sections.
+- **Instruction anti-doublon sémantique dans le consolidateur** — Après une compaction, des entrées résumées et de nouvelles notes détaillées décrivant le même travail pouvaient être répétées dans `progress.md`. Une instruction du `SYSTEM_PROMPT` demande de reconnaître les jalons équivalents et d'enrichir l'existant. Il s'agit d'une consigne au modèle, pas d'une garantie de déduplication sémantique.
 - **Migration du modèle LLM par défaut** — Remplacement de `qwen3-2507:235b` par `qwen3.5:27b` dans toute la codebase (config, descriptions MCP, documentation). Les descriptions MCP utilisent désormais des références génériques (`LLMAAS_MODEL`) au lieu de noms de modèles en dur.
 
 ---
@@ -1687,7 +1754,7 @@ Expose la mécanique de compaction (implémentée dans le consolidateur depuis v
 - 5 nouveaux paramètres de configuration : `compact_threshold`, `bank_file_max_size`, `bank_active_context_max_size`, `bank_progress_max_size`.
 - **Budget de sortie dynamique** (`_call_llm`) : `output_budget = max(8192, context_window - estimated_input_tokens)` — évite les dépassements de context window.
 - **SYSTEM_PROMPT anti-accumulation** : instructions explicites pour nettoyer l'obsolète et résumer les sections anciennes.
-- Tests automatisés : `scripts/test_bank_compact.py` — 20/20 PASS.
+- Tests automatisés de la compaction dans `scripts/test_bank_compact.py` à cette version.
 
 ### Corrigé
 - **Bug CLI `--json` : ANSI pollution** — `show_json()` utilisait `Rich.Syntax` qui injectait des codes ANSI dans le JSON, rendant la sortie `--json` non-parseable quand redirigée ou pipée. Corrigé par un `print(json.dumps(...))` brut sur stdout. Le JSON est désormais machine-readable et pipeable (`| jq`, `| python -c "import json..."`, etc.).
@@ -1755,33 +1822,22 @@ Expose la mécanique de compaction (implémentée dans le consolidateur depuis v
 
 ## [1.0.0] — 2026-03-24
 
-### Sécurité — Audit complet et 15 remédiations
+### Sécurité
 
-**Audit de sécurité complet** réalisé sur la v0.9.0, couvrant 10 domaines (authentification, validation des entrées, S3, LLM, web, réseau, cryptographie, configuration, gestion d'erreurs, supply chain). 27 constats, correspondance OWASP API Security Top 10.
-
-**15 vulnérabilités corrigées** — 56/56 tests PASS.
-
-#### 🔴 Critiques (3)
-- **VULN-01 — Race condition tokens.json** — `validate_token()` ne fait plus de `_save_store()` pour `last_used_at`. Le champ est mis en cache mémoire (`_last_used_cache`), éliminant la race condition avec `create_token()`/`revoke_token()` qui sont sous lock.
-- **VULN-02 — API REST sans contrôle d'accès par espace** — `check_access(space_id)` ajouté dans les 5 endpoints `/api/*` (`_api_space_info`, `_api_live_notes`, `_api_bank_list`, `_api_bank_file`). Un token restreint ne peut plus lire les données d'un autre espace via l'interface web.
-- **VULN-07 — Validation de taille sur content/rules/description** — Limites implémentées : `MAX_NOTE_CONTENT_SIZE=100000` (live_note), `MAX_RULES_SIZE=50000` (space_create), `MAX_DESCRIPTION_SIZE=500` (space_create). Empêche le DoS par épuisement S3.
-
-#### 🟠 Élevés (6)
-- **VULN-03 — Correspondance hash tokens sécurisée** — Nouveau helper `_find_token_by_hash()` avec minimum 16 caractères de préfixe et détection d'ambiguïté (erreur si plusieurs tokens matchent). Appliqué à `revoke_token`, `delete_token`, `update_token`.
-- **VULN-08 — Validation space_id dans check_access()** — Regex `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$` vérifiée dans `check_access()` avant la vérification des permissions. Empêche les path traversal via `_system`, `_backups`, `../`.
-- **VULN-12 — Token Graph Memory masqué** — Le token Graph Memory dans `_meta.json` est masqué dans les réponses API (8 premiers caractères + `...`). Empêche l'escalade de privilèges read → write sur Graph Memory.
-- **VULN-17 — CORS supprimé** — Le header `Access-Control-Allow-Origin: *` a été supprimé de `_send_json()`. L'interface `/live` est servie par le même serveur (même origine), aucun CORS nécessaire.
-- **VULN-25 — Bootstrap key obligatoire** — Le serveur refuse de démarrer si `ADMIN_BOOTSTRAP_KEY` est dans la liste des clés faibles (`change_me_in_production`, `changeme`, `admin`, `password`, vide) ou fait moins de 32 caractères (warning).
-
-#### 🟡 Moyens (5)
-- **VULN-04 — Comparaison constant-time bootstrap key** — `hmac.compare_digest()` remplace `==` pour la comparaison du bootstrap key.
-- **VULN-09 — Validation filename contre path traversal** — Rejet des filenames contenant `..` ou commençant par `/` dans `_api_bank_file`.
-- **VULN-10 — Paramètre limit borné** — `live_read` limite le `limit` à `MAX_LIVE_READ_LIMIT=500`.
-- **VULN-13 — Logging des erreurs dans delete_many()** — Les erreurs de suppression S3 sont loggées (`logger.warning`) au lieu d'être ignorées silencieusement.
-- **VULN-27 — Erreurs masquées en production** — Nouveau helper `safe_error()` dans `auth/context.py` : message générique en prod (`MCP_SERVER_DEBUG=false`), message complet en debug. 34 blocs `except` remplacés dans 6 fichiers tools.
-
-#### 🟢 Faible (1)
-- **VULN-11 — bank_relpath dans API REST** — `_api_bank_list` utilise `bank_relpath()` au lieu de `split("/")[-1]` pour supporter les sous-dossiers.
+- **Écritures concurrentes de tokens.json** — `validate_token()` ne sauvegarde plus `last_used_at` dans le registre partagé : ce champ passe en cache mémoire (`_last_used_cache`), supprimant ce conflit avec `create_token()` et `revoke_token()` sous lock.
+- **Contrôle d'accès REST par espace** — `check_access(space_id)` protège les endpoints d'information d'espace, de notes et de bank. Un token restreint ne peut plus lire un autre espace par ce chemin.
+- **Limites de taille** — `MAX_NOTE_CONTENT_SIZE=100000`, `MAX_RULES_SIZE=50000` et `MAX_DESCRIPTION_SIZE=500` bornent les entrées de `live_note` et `space_create` pour limiter l'épuisement des ressources.
+- **Recherche de token par hash** — `_find_token_by_hash()` exige au moins 16 caractères de préfixe et refuse une correspondance ambiguë, pour révoquer, supprimer ou modifier un token.
+- **Validation de space_id** — `check_access()` vérifie `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$` avant les permissions, bloquant les chemins tels que `_system`, `_backups` ou `../`.
+- **Token Graph Memory masqué** — Les réponses API ne montrent que les huit premiers caractères suivis de `...`, au lieu du secret utilisable pour accéder à Graph Memory.
+- **CORS générique supprimé** — Retrait de `Access-Control-Allow-Origin: *` ; `/live` est servi depuis la même origine.
+- **Bootstrap key vérifiée** — Le serveur refuse les clés faibles répertoriées (`change_me_in_production`, `changeme`, `admin`, `password`, vide) ; les clés de moins de 32 caractères déclenchent un avertissement.
+- **Comparaison constant-time** — `hmac.compare_digest()` remplace `==` pour la bootstrap key.
+- **Validation des noms de fichiers** — `_api_bank_file` refuse les noms contenant `..` ou commençant par `/`.
+- **Lecture bornée** — `live_read` limite `limit` à `MAX_LIVE_READ_LIMIT=500`.
+- **Erreurs de suppression visibles** — `delete_many()` journalise les erreurs S3 avec `logger.warning` au lieu de les ignorer.
+- **Erreurs masquées en production** — `safe_error()` retourne un message générique avec `MCP_SERVER_DEBUG=false`, et conserve le détail en debug, dans les six modules d'outils concernés.
+- **Sous-dossiers REST préservés** — `_api_bank_list` utilise `bank_relpath()` plutôt que le seul nom final du chemin.
 
 ## [0.9.0] — 2026-03-19
 
@@ -1789,8 +1845,8 @@ Expose la mécanique de compaction (implémentée dans le consolidateur depuis v
 
 **Refonte architecturale** — La bank supporte désormais les fichiers dans des sous-dossiers (ex: `personaProfiles/acheteur.md`). Auparavant, tous les `split("/")[-1]` dans le code ne gardaient que le basename des clés S3, ce qui causait des doublons quand le LLM créait des fichiers dans des sous-répertoires définis par les rules.
 
-- **Cause racine identifiée** — Bug découvert sur le space `presales` : les rules mentionnent `personaProfiles/` comme dossier et `1.MEMORY_BANK/` comme répertoire racine. Le LLM créait des fichiers aux chemins `presales/bank/personaProfiles/acheteur.md` et `presales/bank/1.MEMORY_BANK/personaProfiles/acheteur.md`, mais le code extrayait uniquement `acheteur.md` → doublons avec perte de correspondance → `bank_read("acheteur.md")` retournait "not_found".
-- **`bank_relpath(s3_key, space_id)`** — Nouvelle fonction utilitaire dans `storage.py`. Extrait le chemin relatif complet depuis le préfixe `{space_id}/bank/`. Ex: `presales/bank/personaProfiles/acheteur.md` → `personaProfiles/acheteur.md`.
+- **Chemins de sous-dossiers conservés** — Quand les rules combinaient un dossier `personaProfiles/` et une racine `1.MEMORY_BANK/`, les fichiers pouvaient être créés sous plusieurs préfixes puis réduits au seul nom `acheteur.md`. Cette perte de chemin créait des doublons et des lectures `not_found`.
+- **`bank_relpath(s3_key, space_id)`** — Nouvelle fonction utilitaire dans `storage.py`. Extrait le chemin relatif complet depuis `{space_id}/bank/`, par exemple `personaProfiles/acheteur.md`.
 - **21 occurrences de `split("/")[-1]` remplacées** par `bank_relpath()` dans 6 fichiers : consolidator.py, bank.py (tools), space.py, graph_bridge.py.
 - **`_sanitize_filename()` enrichi** — Garde les `/` (sous-dossiers légitimes). Supprime les préfixes parasites que le LLM invente en lisant les rules (`1.MEMORY_BANK/`, `MEMORY_BANK/`, `bank/`). Nettoie les `/` en début/fin et les doubles `//`.
 - **Nettoyage auto des doublons** — Lors de chaque écriture bank (create/edit/rewrite), le consolidateur supprime automatiquement les anciennes clés S3 qui sanitisent vers le même nom de fichier.
@@ -1802,10 +1858,9 @@ Expose la mécanique de compaction (implémentée dans le consolidateur depuis v
 - **`bank_delete`** 👑 (admin) — Supprime un fichier bank et tous ses doublons (clés S3 avec le même nom sanitisé). Irréversible.
 - **37 outils MCP** (était 35) — catégorie Bank passe de 5 à 7 outils.
 
-### ⚠️ À compléter (follow-up)
-- CLI Click : ajouter commandes `bank write`, `bank delete`, `bank repair`
-- Shell interactif : ajouter handlers correspondants
-- Web UI bank.js : affichage raccourci des noms longs dans les onglets (cosmétique, fonctionnel en l'état)
+### Limites à cette version
+- Les commandes `bank write`, `bank delete` et `bank repair` n'étaient pas encore disponibles dans la CLI Click et le shell interactif.
+- Les onglets web restaient fonctionnels mais ne raccourcissaient pas encore les noms longs.
 
 ---
 
@@ -1885,14 +1940,14 @@ Expose la mécanique de compaction (implémentée dans le consolidateur depuis v
 - **Affichage Rich** : `show_space_updated()` — panel avec champs modifiés
 - **Colonne Owner dans `space list`** — le champ owner était absent de l'affichage (corrigé)
 - **Owner dans `space info`** — ajouté entre Description et Notes live
-- **Test de recette** : `space_update` ajouté dans la suite qualité (21/21 PASS)
+- **Test de recette** : couverture de `space_update` ajoutée.
 
 ## [0.7.6] — 2026-03-13
 
 ### Ajouté — Répertoire `RULES/` : modèles de rules pour la création d'espaces
 - **Nouveau répertoire `RULES/`** avec des modèles de rules (templates) prêts à l'emploi pour créer des espaces mémoire via `space_create`.
-- **`RULES/standard.memory.bank.md`** — Modèle **general purpose** pour tout projet logiciel. 6 fichiers obligatoires (projectbrief, productContext, activeContext, systemPatterns, techContext, progress). C'est le modèle utilisé par le space `live-mem`.
-- **`RULES/medical.memory.bank.md`** — Modèle **suivi médical**. 7 fichiers obligatoires (profilGeneral, histoireDiagnostic, contexteSante, medicamentationTraitements, specialistesSuivi, profilSante, progression) + 2 optionnels (visualisationDonnees, protocoleUrgence). Inclut une **règle de fiabilité absolue** pour les données biologiques (double vérification, fidélité parfaite, unités conservées).
+- **`RULES/standard.memory.bank.md`** — Modèle **general purpose** pour tout projet logiciel. 6 fichiers obligatoires (projectbrief, productContext, activeContext, systemPatterns, techContext, progress).
+- **`RULES/medical.memory.bank.md`** — Modèle **suivi médical**. 7 fichiers obligatoires (profilGeneral, histoireDiagnostic, contexteSante, medicamentationTraitements, specialistesSuivi, profilSante, progression) + 2 optionnels (visualisationDonnees, protocoleUrgence). Les règles demandent une double vérification et la conservation exacte des données et unités ; elles ne garantissent pas l'exactitude médicale des sorties du modèle.
 - **`RULES/presales.memory.bank.md`** — Modèle **avant-vente B2B**. 5 fichiers de base (proposalContext, activeAnalysis, analysisProgress, rulesLearned, methodologieAnalyse) + fichiers **personas dynamiques** (un par décideur : dirigeant, acheteur, DSI, RSSI, expert). Gestion des contradictions, capitalisation des patterns argumentaires, tracking visuel avec ✅🔄⏱️❓.
 - **`RULES/README.md`** — Documentation complète : explication du rôle des rules, catalogue des modèles, guide d'utilisation, instructions pour créer un modèle personnalisé.
 - **Section "Pourquoi les Rules sont critiques"** dans le README — Explique que les rules sont **injectées mot pour mot dans le prompt du LLM consolidateur** à chaque `bank_consolidate`. Ce n'est pas de la documentation passive — c'est un contrat direct avec le modèle.
@@ -1928,7 +1983,7 @@ Expose la mécanique de compaction (implémentée dans le consolidateur depuis v
 
 ### Amélioré — Template `.clinerules/standard.memory.bank.md` (DRY)
 - **Centralisation de la configuration** — Le nom du space (`SPACE`) et de l'agent (`AGENT`) ne sont plus hardcodés à chaque ligne. Ils sont définis **une seule fois** dans un bloc de configuration en haut du fichier, puis référencés partout via les placeholders `{SPACE}` et `{AGENT}`.
-- **Avant** : `live-mem` apparaissait 12 fois et `cline-dev` 9 fois — chaque exemple, règle et commande devait être modifié manuellement pour réutiliser le template.
+- **Avant** : les identifiants d'espace et d'agent étaient répétés dans les exemples, règles et commandes, à modifier manuellement pour réutiliser le template.
 - **Après** : 2 lignes à modifier pour adapter le template à n'importe quel projet/agent.
 - **Exemples simplifiés** — Les 6 exemples `live_note` répétitifs (un par catégorie) sont remplacés par un seul exemple générique avec `<catégorie>`.
 - **Guide d'intégration Cline** (`GUIDE_INTEGRATION_CLINE.md`) mis à jour pour référencer le nouveau format template avec `{SPACE}/{AGENT}`.
@@ -1936,20 +1991,20 @@ Expose la mécanique de compaction (implémentée dans le consolidateur depuis v
 ## [0.7.2] — 2026-03-12
 
 ### Corrigé — Bug CLI `token create` (parsing des options)
-- **`permissions` transformé de `click.argument` (positionnel) en `click.option` (nommé)** — Quand on tapait `token create KSE --email kevin@... --permissions read,write`, Click interprétait `--email` comme la valeur positionnelle de `permissions` → erreur `"Permissions invalides : '--email'"`. Le paramètre est maintenant une option nommée `--permissions/-p` (required), cohérente avec `token update`.
-- **Shell interactif corrigé** — Le handler `token create` du shell parsait `args[2]` en dur comme permissions. Réécrit avec un parsing de flags nommés (`--permissions/-p`, `--email/-e`, `--space-ids/-s`, `--expires-in-days`) — même pattern que `token update`. Rétrocompatibilité préservée : la forme positionnelle `token create KSE read,write` fonctionne encore dans le shell.
+- **`permissions` devient une option nommée** — Dans `token create example-agent --email user@example.com --permissions read,write`, Click interprétait `--email` comme la permission positionnelle et rejetait la commande. `--permissions/-p` est maintenant une option obligatoire, cohérente avec `token update`.
+- **Shell interactif corrigé** — Le parsing accepte `--permissions/-p`, `--email/-e`, `--space-ids/-s` et `--expires-in-days`. La forme positionnelle historique `token create example-agent read,write` reste compatible dans le shell.
 - **Aide enrichie** — Exemples ajoutés dans le help de `token create` (CLI et shell).
 
 ### Nouvelle syntaxe
 ```bash
 # CLI Click
-token create KSE -p read,write --email user@example.com
+token create example-agent -p read,write --email user@example.com
 token create bot-ci --permissions read
 token create admin-ops -p read,write,admin
 
 # Shell interactif (rétrocompat positionnelle)
-token create KSE -p read,write --email user@example.com
-token create KSE read,write    # ← fonctionne encore
+token create example-agent -p read,write --email user@example.com
+token create example-agent read,write    # ← fonctionne encore
 ```
 
 ## [0.7.1] — 2026-03-12
@@ -1958,7 +2013,7 @@ token create KSE read,write    # ← fonctionne encore
 - **Auto-ajout du space au token à la création** — Quand un client restreint (`space_ids: ["A"]`) crée un space "B", le space B est automatiquement ajouté à ses `space_ids` dans `tokens.json`. Élimine le deadlock UX où le client ne pouvait pas accéder au space qu'il venait de créer. Nouvelle méthode `TokenService.add_space_to_token()`.
 - **Filtrage `backup_list` par space_ids du token** — Un client ne voit plus que les backups des spaces auxquels il a accès. Corrige une fuite d'information où un client pouvait lister tous les backups de tous les espaces.
 - **Confirmation `backup_download` sécurisé** — Vérifié que `check_access(space_id)` est déjà en place (extrait le space_id du backup_id). Aucune modification nécessaire.
-- **Script de recette unifié** — `scripts/test_recette.py` refait avec 4 suites sélectionnables par CLI (`--suite recette,isolation,qualite,graph`). Suite `isolation` : ~20 tests vérifiant l'isolation multi-tenant (accès inter-espaces refusé, filtrage backup_list, écriture read-only refusée, auto-ajout space au token).
+- **Script de recette unifié** — `scripts/test_recette.py` propose quatre suites (`--suite recette,isolation,qualite,graph`). La suite `isolation` vérifie les restrictions d'accès par espace, le filtrage des backups, le refus d'écriture read-only et l'ajout du nouvel espace au token. Ces contrôles d'allowlist ne constituent pas une frontière multi-tenant Hivemind.
 - **Champ `email` dans les tokens** — Alignement Graph Memory : `admin_create_token(email=)` optionnel pour la traçabilité. Affiché dans `token list` (colonnes : Nom, Email, Hash, Permissions, Espaces, Créé le, Expire). CLI : `--email/-e`, Shell : `--email`.
 - **CLI complète (32/32 outils)** — Ajouté : `space summary`, `space export`, `backup download`, `gc` en Click et Shell interactif.
 - **WAF rate limits ×3** — MCP 200→600 req/min, API 60→120, Global 500→1500 (résout les TaskGroup errors).
@@ -1970,7 +2025,7 @@ token create KSE read,write    # ← fonctionne encore
 
 ### Changé — Consolidation chirurgicale (édition par section Markdown)
 - **Refonte majeure du consolidateur LLM** — Passage du mode "réécriture complète" au mode "édition chirurgicale". Le LLM produit désormais des **opérations d'édition par section Markdown** (`replace_section`, `append_to_section`, `prepend_to_section`, `add_section`, `delete_section`) au lieu de réécrire les fichiers entiers.
-- **Zéro perte de matière** — Ce qui n'est pas touché explicitement reste intact byte-for-byte. Test A/B validé : l'ancien mode perdait 28 lignes, le nouveau mode n'en perd aucune (hors `replace_section` attendu sur le focus).
+- **Préservation des sections non modifiées** — Les sections sans opération d'édition restent intactes octet pour octet. Les sections explicitement remplacées peuvent perdre du contenu : ce mécanisme ne garantit pas la conservation sémantique de tous les faits.
 - **Moteur d'édition Markdown** — Nouveau moteur dans `consolidator.py` : `_parse_sections()`, `_find_section_index()` (matching flexible 3 niveaux : exact → sans # → case-insensitive), `_reconstruct_from_sections()`, `_apply_operation()`.
 - **Prompts LLM mis à jour** — Le prompt système et utilisateur demandent des opérations d'édition au format JSON structuré, avec 3 actions par fichier : `edit` (opérations chirurgicales), `create` (nouveau fichier), `rewrite` (fallback justifié).
 - **Rétrocompatibilité** — Si le LLM retourne l'ancien format `bank_files`, conversion automatique via `_convert_legacy_format()`.
@@ -1981,7 +2036,11 @@ token create KSE read,write    # ← fonctionne encore
 - **Test E2E consolidation chirurgicale** — `test_surgical_consolidation.py` : 7 phases (création, consolidation create, snapshot, notes supplémentaires, consolidation chirurgicale, comparaison avant/après, nettoyage).
 - **Test A/B** — `run_ab_test.py` : compare production (ancien mode) vs local (nouveau mode) sur les mêmes données.
 
-### Gains mesurés (test A/B)
+### Mesures historiques sur un cas A/B
+
+Ces observations décrivent un seul essai de cette version, pas une garantie de
+performance, de coût ou de conservation des faits sur d'autres banques/modèles.
+
 | Métrique                     | Ancien mode (réécriture) | Nouveau mode (chirurgical)      |
 | ---------------------------- | ------------------------ | ------------------------------- |
 | Lignes perdues (progress.md) | 10                       | **0**                           |

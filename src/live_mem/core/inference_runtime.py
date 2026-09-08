@@ -45,8 +45,8 @@ PROBE_TIMEOUT_SECONDS = 5
 
 # The lifecycle state machine is shared with the embedded Graph Memory runtime
 # (``hivemind_inference.holder``). The two services previously carried
-# byte-identical copies of it, and four consecutive review rounds each fixed an
-# ownership defect in whichever copy the finding named.
+# byte-identical copies of it. Sharing the holder keeps lifecycle and ownership
+# fixes consistent across both services.
 _holder = InferenceRuntimeHolder(
     service="Hivemind",
     shutdown_message=(

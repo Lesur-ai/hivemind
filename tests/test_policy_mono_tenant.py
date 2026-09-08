@@ -206,11 +206,11 @@ def test_default_policy_provider_allows_legitimate_action() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3-bis) P6-6 R2 — fail-closed regression pins on authorize()
+# 3-bis) Fail-closed regression pins on authorize()
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Codex re-review on PR #111 flagged the seam as failing OPEN in three
-# cases (missing identity, unknown action, unrecognized context key).
+# The seam must fail CLOSED for missing identity, unknown action, and
+# unrecognized context keys.
 # These tests pin the hardened ADR-0003 §Implementation Notes §1
 # contract: each fail-closed case raises PermissionDenied; the happy
 # supplied-identity path still returns None.
@@ -376,11 +376,10 @@ def test_authorize_allows_legitimate_call_with_supplied_identity() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3-ter) P6-6 R3 — malformed (non-dict) context fails closed
+# 3-ter) Malformed (non-dict) context fails closed
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Codex round-3 review on PR #111 flagged the seam as still failing
-# OPEN (or AttributeError-crashing) for non-None non-dict context
+# The seam must not fail OPEN or raise AttributeError for malformed context
 # values. The contract is: ``context`` MUST be ``None`` or a ``dict``;
 # anything else — including falsy non-dicts (``[]``, ``""``, ``0``,
 # ``False``) that previously slipped through the ``if context:`` gate
@@ -406,7 +405,7 @@ def test_authorize_allows_legitimate_call_with_supplied_identity() -> None:
     ids=lambda v: v if isinstance(v, str) else repr(v),
 )
 def test_authorize_denies_on_non_dict_context(ctx, kind) -> None:
-    """Codex round 3: any non-None, non-dict context value fails closed."""
+    """Any non-None, non-dict context value fails closed."""
     provider = default_policy_provider()
     admin_token: dict = {
         "client_name": "test-admin",

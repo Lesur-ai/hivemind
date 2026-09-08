@@ -1,6 +1,6 @@
 """Behavioral coverage for the console's session-identity boundary.
 
-Codex round-7 re-review (PR #159, HIGH): the admin console binds its stale-bank
+The admin console binds its stale-bank
 cache to a per-session owner marker. The only UNIQUE session identity is the
 authenticated ``token_hash`` — ``client_name`` is explicitly non-unique. The
 server therefore MUST surface ``token_hash`` for token auth independently of the

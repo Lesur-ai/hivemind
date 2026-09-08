@@ -7,7 +7,7 @@ for the seven forbidden V1 non-claims tokens enumerated in
 non-claims guardrail) and rejects any occurrence that is **not** inside a
 recognised non-claims fence.
 
-Three fence styles are accepted (DECISION C in the P6-8 plan review):
+Three fence styles are accepted:
 
   (a) HTML-comment fence pair, case-insensitive::
 
@@ -103,8 +103,8 @@ _HTML_CLOSE_FENCE = re.compile(r"<!--\s*/non-claims\s*-->", re.IGNORECASE)
 _HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
 _ANCHOR_LINK_RE = re.compile(r"\[[^\]]+\]\(#(?P<anchor>[^)\s]+)\)")
 
-# Codex P6-8 review #4: blockquote-disclaimer style (c) used to accept ANY
-# in-page anchor, so a blockquote with a forbidden token AND
+# Accepting arbitrary in-page anchors in blockquote-disclaimer style (c)
+# would let a blockquote with a forbidden token AND
 # `[details](#quickstart)` would silently pass. Require the anchor itself to
 # look like a non-claims anchor (English EN, English alt, and French).
 _NON_CLAIMS_ANCHOR_RE = re.compile(
@@ -193,7 +193,7 @@ def _line_is_in_intervals(line_no: int, intervals: list[tuple[int, int]]) -> boo
 def _line_is_blockquote_disclaimer(line: str, forbidden_token: str) -> bool:
     """Fence style (c): blockquote that links to a non-claims anchor.
 
-    Codex P6-8 review #4 tightened this: the anchor MUST itself look like a
+    The anchor MUST itself look like a
     non-claims anchor (matches ``_NON_CLAIMS_ANCHOR_RE``). The previous
     impl accepted ANY in-page anchor, so a blockquote with a forbidden
     token AND ``[details](#quickstart)`` would silently pass.
@@ -356,7 +356,7 @@ quorum  -- back outside, MUST be flagged
 
 
 def test_blockquote_disclaimer_requires_non_claims_anchor() -> None:
-    """Codex P6-8 review #4: anchor must look like a non-claims anchor.
+    """The anchor must look like a non-claims anchor.
 
     Two negative cases prove an unrelated anchor (``#installation``,
     ``#quickstart``) does NOT silence a forbidden token. Two positive
@@ -369,7 +369,7 @@ def test_blockquote_disclaimer_requires_non_claims_anchor() -> None:
     )
     assert not _line_is_blockquote_disclaimer(neg_install, "quorum"), (
         "blockquote with #installation anchor must NOT count as a "
-        "non-claims disclaimer (Codex P6-8 review #4)"
+        "non-claims disclaimer"
     )
 
     neg_quickstart = (
@@ -377,7 +377,7 @@ def test_blockquote_disclaimer_requires_non_claims_anchor() -> None:
     )
     assert not _line_is_blockquote_disclaimer(neg_quickstart, "crdt"), (
         "blockquote with #quickstart anchor must NOT count as a "
-        "non-claims disclaimer (Codex P6-8 review #4)"
+        "non-claims disclaimer"
     )
 
     # POSITIVE — non-claims anchor MUST silence the token.

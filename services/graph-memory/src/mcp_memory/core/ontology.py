@@ -222,15 +222,8 @@ class OntologyManager:
                 except Exception as e:
                     print(f"❌ [Ontology] Error loading {filename}: {e}", file=sys.stderr)
     
-    def _load_ontology_file(self, filepath: str) -> Optional[Ontology]:
-        """Charge une ontologie depuis un fichier YAML."""
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f)
-        
-        if not data:
-            return None
-        
-        # Parser les types d'entités
+    def _build_ontology_from_data(self, data: dict) -> Ontology:
+        """Construit un objet Ontology depuis un dictionnaire validé."""
         entity_types = []
         for et in data.get('entity_types', []):
             entity_types.append(EntityTypeDefinition(
@@ -239,8 +232,7 @@ class OntologyManager:
                 examples=et.get('examples', []),
                 priority=et.get('priority', 'normal')
             ))
-        
-        # Parser les types de relations
+
         relation_types = []
         for rt in data.get('relation_types', []):
             relation_types.append(RelationTypeDefinition(
@@ -248,8 +240,7 @@ class OntologyManager:
                 description=rt.get('description', ''),
                 examples=rt.get('examples', [])
             ))
-        
-        # Parser les règles d'extraction
+
         rules_data = data.get('extraction_rules', {})
         extraction_rules = ExtractionRules(
             max_entities=rules_data.get('max_entities', 60),
@@ -261,10 +252,10 @@ class OntologyManager:
             priority_entities=rules_data.get('priority_entities', []),
             special_instructions=rules_data.get('special_instructions', '')
         )
-        
+
         return Ontology(
             name=data.get('name', 'unknown'),
-            version=data.get('version', '1.0'),
+            version=str(data.get('version', '1.0')),
             description=data.get('description', ''),
             context=data.get('context', ''),
             entity_types=entity_types,
@@ -272,37 +263,89 @@ class OntologyManager:
             extraction_rules=extraction_rules,
             examples=data.get('examples', [])
         )
-    
-    def get_ontology(self, name: str) -> Optional[Ontology]:
+
+    def _load_ontology_file(self, filepath: str) -> Optional[Ontology]:
+        """Charge une ontologie depuis un fichier YAML."""
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        if not data or not isinstance(data, dict):
+            return None
+        return self._build_ontology_from_data(data)
+
+    def is_registered_name(self, name: Optional[str]) -> bool:
+        """Indique si un nom correspond à une ontologie enregistrée sur disque."""
+        if not name or not isinstance(name, str):
+            return False
+        return name.strip() in self._ontologies
+
+    def get_registered_ontology(self, name: str) -> Optional[Ontology]:
+        """Récupère exclusivement une ontologie enregistrée sur disque par son nom."""
+        if not name or not isinstance(name, str):
+            return None
+        return self._ontologies.get(name.strip())
+
+    def get_ontology_label(self, name_or_yaml: Optional[str]) -> str:
+        """Retourne un label sûr et non-sensible pour les logs et erreurs."""
+        if not name_or_yaml or not isinstance(name_or_yaml, str):
+            return "none"
+        trimmed = name_or_yaml.strip()
+        if self.is_registered_name(trimmed):
+            return trimmed
+        import hashlib
+        raw_bytes = trimmed.encode("utf-8")
+        sha = hashlib.sha256(raw_bytes).hexdigest()[:8]
+        return f"custom_yaml(sha256:{sha}, {len(raw_bytes)} bytes)"
+
+    def parse_ontology_yaml(self, yaml_str: str) -> Optional[Ontology]:
+        """Parse et instancie une ontologie après validation stricte canonique."""
+        if not yaml_str or not isinstance(yaml_str, str):
+            return None
+        from mcp_memory.core.ontology_validator import _validate_and_parse_ontology
+        res, data = _validate_and_parse_ontology(yaml_str)
+        if not res.get("valid") or data is None:
+            return None
+        return self._build_ontology_from_data(data)
+
+    def get_ontology(self, name_or_yaml: str) -> Optional[Ontology]:
         """
-        Récupère une ontologie par son nom.
+        Récupère une ontologie par son nom ou en parsant une définition YAML directe.
         
         Args:
-            name: Nom de l'ontologie (ex: "legal", "cloud", "default")
+            name_or_yaml: Nom de l'ontologie (ex: "legal", "cloud") ou chaîne YAML
             
         Returns:
-            L'ontologie ou None si non trouvée
+            L'ontologie ou None si non trouvée/invalide
         """
-        return self._ontologies.get(name)
+        if not name_or_yaml or not isinstance(name_or_yaml, str):
+            return None
+        trimmed = name_or_yaml.strip()
+        if trimmed in self._ontologies:
+            return self._ontologies[trimmed]
+        if "\n" in trimmed or ":" in trimmed:
+            parsed = self.parse_ontology_yaml(trimmed)
+            if parsed is not None:
+                return parsed
+        return self._ontologies.get(trimmed)
     
-    def get_ontology_or_error(self, name: str) -> Ontology:
+    def get_ontology_or_error(self, name_or_yaml: str) -> Ontology:
         """
-        Récupère une ontologie par nom. Lève une erreur si introuvable.
+        Récupère une ontologie par nom ou YAML. Lève une erreur si introuvable.
         
         Args:
-            name: Nom de l'ontologie (ex: "legal", "cloud")
+            name_or_yaml: Nom de l'ontologie (ex: "legal", "cloud") ou chaîne YAML
             
         Returns:
             L'ontologie demandée
             
         Raises:
-            ValueError: Si l'ontologie n'existe pas
+            ValueError: Si l'ontologie n'existe pas ou est invalide
         """
-        ontology = self._ontologies.get(name)
+        ontology = self.get_ontology(name_or_yaml)
         if not ontology:
             available = list(self._ontologies.keys())
+            label = self.get_ontology_label(name_or_yaml)
             raise ValueError(
-                f"Ontology '{name}' not found. "
+                f"Ontology '{label}' not found or invalid. "
                 f"Available ontologies: {available}. "
                 "Every memory MUST have a valid ontology."
             )

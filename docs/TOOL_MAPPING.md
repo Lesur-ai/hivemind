@@ -44,7 +44,7 @@ The following mid supervision and maintenance names remain historical-only:
 
 Cross-cutting `system_*`, `space_*`, `backup_*`, `admin_*`, `token_create`,
 `space_invite_token`, and direct canonical additions such as `long_query`,
-`long_ingest`, and the hidden operator tools `long_reindex` and
+`long_ingest`, `long_ingest_async`, `long_ingest_status`, `long_ingest_list`, `long_ingest_cancel`, `long_document_list`, `long_document_get`, `ontology_list`, `ontology_get`, `ontology_validate`, and the hidden operator tools `long_reindex` and
 `inference_self_test` keep their registered names. They are not missing aliases
 and are not on an implied deprecation track.
 
@@ -60,6 +60,6 @@ and are not on an implied deprecation track.
 4. Destructive semantics do not soften behind an alias. In particular,
    `mid_delete` is exactly `bank_delete` and retains its current manage and
    confirmation contract as specified by the live handler and API reference.
-5. The frozen fixture currently records 50 direct registry entries plus these
-   13 aliases, for 63 registered names. The generated exposure inventory must
+5. The frozen fixture currently records 59 direct registry entries plus these
+   13 aliases, for 72 registered names. The generated exposure inventory must
    remain consistent with that fixture.

@@ -321,12 +321,12 @@ async def test_update_token_accepts_hex_only_hash():
 
 
 # ─────────────────────────────────────────────────────────────
-# Tests : review #12 — corrections du second tour
+# Tests : résolution du token et snapshots des espaces
 # ─────────────────────────────────────────────────────────────
 
 
 def test_find_token_error_message_uses_hex_length():
-    """Review #12 : le message d'erreur doit indiquer la longueur du hex pur,
+    """Le message d'erreur doit indiquer la longueur du hex pur,
     pas celle incluant le préfixe 'sha256:'."""
     svc = TokenService()
     store = TokensStore(tokens=[])
@@ -345,7 +345,7 @@ def test_find_token_error_message_uses_hex_length():
 
 @pytest.mark.asyncio
 async def test_update_token_star_takes_snapshot():
-    """Review #12 : update_token(space_ids='*') doit matérialiser un snapshot
+    """update_token(space_ids='*') doit matérialiser un snapshot
     des espaces existants (cohérence avec create_token)."""
     svc = TokenService()
     h = "1234" * 16  # 64 chars hex
@@ -379,7 +379,7 @@ async def test_update_token_star_takes_snapshot():
 
 @pytest.mark.asyncio
 async def test_update_token_warns_when_star_yields_empty_list():
-    """Review #12 : si update_token(space_ids='*') sur une instance sans
+    """Si update_token(space_ids='*') sur une instance sans
     aucun space, le token devient muet → warning_no_access attendu (non-admin)."""
     svc = TokenService()
     h = "5678" * 16
@@ -1198,7 +1198,7 @@ async def test_bulk_update_combined_filters_AND():
 
 
 # =============================================================================
-# Tests — Review PR #14 : has_space, include_revoked, audit, cas dégénéré
+# Tests : has_space, include_revoked, audit, cas dégénéré
 # =============================================================================
 
 
@@ -1207,7 +1207,7 @@ async def test_bulk_update_combined_filters_AND():
 
 @pytest.mark.asyncio
 async def test_bulk_update_by_has_space_only():
-    """Filtre `has_space` seul matche les tokens autorisant ce space (review #14)."""
+    """Filtre `has_space` seul matche les tokens autorisant ce space."""
     svc = TokenService()
     t1 = _make_token("agent-a", suffix="1" * 64, space_ids=["old-proj", "shared"])
     t2 = _make_token("agent-b", suffix="2" * 64, space_ids=["old-proj"])
@@ -1220,7 +1220,7 @@ async def test_bulk_update_by_has_space_only():
             has_space="old-proj", space_ids_remove="old-proj"
         )
 
-    # Cas d'usage Guillaume : "retirer old-proj de tous les tokens qui l'ont"
+    # Cas d'usage : "retirer old-proj de tous les tokens qui l'ont"
     # en un seul appel (pas 4 aller-retours).
     assert result["updated"] == 2
     names = {t["name"] for t in result["tokens"]}
@@ -1259,7 +1259,7 @@ async def test_bulk_update_has_space_case_sensitive():
 async def test_bulk_update_three_filters_combined_AND():
     """names + name_contains + has_space sont combinés en AND.
 
-    Piège Guillaume formalisé : un token doit satisfaire les 3 filtres
+    Un token doit satisfaire les 3 filtres
     fournis. Sinon il est exclu silencieusement (mais c'est documenté).
     """
     svc = TokenService()
@@ -1301,7 +1301,7 @@ async def test_bulk_update_three_filters_combined_AND():
 
 @pytest.mark.asyncio
 async def test_bulk_update_requires_at_least_one_of_three_filters():
-    """Sans aucun des 3 filtres → erreur (review #14 : has_space compte)."""
+    """Sans aucun des 3 filtres → erreur (has_space compte)."""
     svc = TokenService()
     with patch.object(svc, "_load_store", new=AsyncMock(return_value=TokensStore())), \
          patch.object(svc, "_save_store", new=AsyncMock()):
@@ -1639,7 +1639,7 @@ def test_apply_space_delta_degenerate_add_and_remove_same(
 
     Effet net : X est présent en queue de liste. L'ordre relatif final
     suit l'ordre de la liste `to_add` (pas l'ordre original de `current`).
-    Comportement documenté mais non évident à la lecture rapide (review #14 FYI).
+    Comportement documenté mais non évident à la lecture rapide.
     """
     new, _, _, _ = TokenService._apply_space_delta(current, to_add, to_remove)
     assert new == expected_final

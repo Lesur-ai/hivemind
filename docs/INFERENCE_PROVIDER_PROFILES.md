@@ -1,80 +1,55 @@
-# v1.4.0 inference provider matrix and operator guide
+# Inference providers and configuration
 
-> **Active evidence rule (P13-4 simplification, 2026-08-04):** deterministic CI
-> proves the complete MID/long/Graph capability matrix. The separate live gate
-> proves only the hosted boundary with one chat request and one embedding
-> request, zero retries, and at most two provider attempts. Its states are
-> `compatible`, `live-verified`, and `blocked`; `certified` is no longer an
-> active P13-4 promotion state. The older schema-v3/v4 full-stack route and its
-> historical runs remain diagnostic records only. They do not gate #264 or a
-> release and cannot create `live-verified`.
+Hivemind separates chat (mid consolidation and long extraction) from embeddings
+(long ingestion and semantic query). Choose one complete configuration for each
+role. Anthropic does not provide native embeddings; its native chat adapter
+must be paired with a separate embedding provider.
 
-Hivemind's v1.4 matrix exposes three single-provider references through the
-generic `openai-compatible` adapter and one explicit composite profile. The
-composite uses the repository-owned native `anthropic` chat adapter and Cloud
-Temple's generic embedding path. Anthropic does not provide native embeddings,
-so it is never registered or represented as the embedding provider.
-
-The repository's deterministic emulator proves the exact four v1.4 profiles
-against the same normalized capability matrix used by the shared inference
-boundary. That proof establishes **compatible**. For v1.4.0, only Cloud Temple
-may add **live-verified** when both real-provider roles pass on the same exact
-source SHA as successful deterministic CI. Gemini remains **compatible** and
-its live qualification is explicitly deferred after v1.4.0.
+The four reference profiles introduced in Hivemind 1.4 remain the compatibility
+baseline for 1.5. They are exact, frozen examples, not a recommendation to change
+a working deployment or a claim about every model a provider offers. The
+deployment example in `.env.example` is a separate profile; see
+[Exact split configuration](#exact-split-configuration) before copying settings.
 
 ## Current evidence snapshot
 
-This snapshot is current as of 2026-08-04. Deterministic evidence is rebound to
-the final PR SHA by ordinary CI; a checked-in document cannot truthfully embed
-the SHA of the commit that contains itself. Protected-live evidence remains a
-separate, immutable artifact.
+The evidence states are `compatible`, `live-verified`, and `blocked`.
+Deterministic tests establish compatibility with Hivemind's shared inference
+boundary; they do not call a hosted provider. Live verification, when available,
+is separate and applies only to its exact source, models and configuration.
+This guide does not imply certification, provider availability or account
+entitlement merely because a profile appears in the table.
 
-| v1.4 profile | Deterministic capability | Active live verification | Effective claim |
-| --- | --- | --- | --- |
-| `cloud-temple-reference` | complete current-tree conformance | required on the frozen release SHA; documented separately | `compatible` |
-| `openai-reference` | complete current-tree conformance | outside P13-4 | `compatible` |
-| `anthropic-cloud-temple-reference` | complete current-tree conformance | outside P13-4 | `compatible` |
-| `gemini-reference` | complete current-tree conformance | deferred after its recorded failure; not a v1.4.0 release prerequisite | `compatible` |
+| Reference profile | Deterministic capability | Live evidence |
+| --- | --- | --- |
+| `cloud-temple-reference` | compatible | separate exact-release evidence required for a live claim |
+| `openai-reference` | compatible | no live claim in this guide |
+| `anthropic-cloud-temple-reference` | compatible | no live claim in this guide |
+| `gemini-reference` | compatible | no live claim in this guide |
 
-The nine obsolete Cloud Temple full-stack dispatches remain diagnostic evidence:
-`30854985715.1` stopped pre-egress during cold Compose materialization;
-`30861840408.1` and `30868210874.1` stopped on bounded catalogue timeouts;
-`30886638350.1` crossed the first chat boundary but received no HTTP status;
-`30900287347.1` crossed one chat boundary and produced `invalid_response`;
-`30905230569.1` stopped pre-egress on secret-init Compose failure;
-`30906361163.1` crossed one chat boundary and produced `invalid_content` from
-HTTP 200; `30909893552.1` produced a valid chat result that failed the exact
-marker-and-model conjunction; and `30915677903.1` returned the exact marker but
-a non-exact provider-reported model. Each run stopped before promotion and
-retained only bounded, redacted evidence.
-
-`blocked` describes an execution, not an erasure of deterministic capability.
-These attempts do not affect the current `compatible` claims. P13-4/#264 stays
-open for Gemini's post-v1.4 qualification. The v1.4.0 release boundary requires
-only Cloud Temple's passing minimal manifest on the exact accepted source SHA.
+Check the provider's current model availability and pricing for your account.
+Use non-sensitive data to verify your configured chat and embedding roles
+before entrusting a project to them. Keep credentials out of logs and support
+reports.
 
 ## Functional parity ledger
 
-Every `compatible` cell below means the shared production consumer path and
-the profile's exact deterministic fixture pass together on the current tree.
-It does not mean a real provider was called. The same core chat interface feeds
-mid consolidation and long extraction; the same embedding interface feeds long
-ingestion and semantic query. Health remains discovery-only. The separate live
-smoke proves hosted reachability and response normalization, not this complete
-functional matrix.
+Every `compatible` cell means the production consumer path and the exact
+profile's deterministic fixture pass together. It does not mean a real provider
+was called. Health remains discovery-only; a live smoke checks hosted
+reachability and response normalization, not the complete functional matrix.
 
-| v1.4 profile | Mid consolidation | Long extraction | Embeddings/query | Probes/health | Proxy + safe errors | Model/usage/correlation observability | Active live verification |
+| Reference profile | Mid consolidation | Long extraction | Embeddings/query | Probes/health | Proxy + safe errors | Model/usage/correlation observability | Active live verification |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `cloud-temple-reference` | compatible | compatible | compatible, 1024 dimensions | compatible | compatible | compatible | required on the frozen release SHA |
-| `openai-reference` | compatible | compatible | compatible, 1536 dimensions | compatible | compatible | compatible | outside P13-4 |
-| `anthropic-cloud-temple-reference` | compatible, native Anthropic chat | compatible, native Anthropic chat | compatible, Cloud Temple, 1024 dimensions | compatible per role | compatible per role | compatible per role | outside P13-4 |
-| `gemini-reference` | compatible | compatible | compatible, 3072 dimensions | compatible | compatible | compatible | deferred after v1.4.0; `compatible` only |
+| `cloud-temple-reference` | compatible | compatible | compatible, 1024 dimensions | compatible | compatible | compatible | separate exact-release evidence required for a live claim |
+| `openai-reference` | compatible | compatible | compatible, 1536 dimensions | compatible | compatible | compatible | no live claim in this guide |
+| `anthropic-cloud-temple-reference` | compatible, native Anthropic chat | compatible, native Anthropic chat | compatible, Cloud Temple, 1024 dimensions | compatible per role | compatible per role | compatible per role | no live claim in this guide |
+| `gemini-reference` | compatible | compatible | compatible, 3072 dimensions | compatible | compatible | compatible | no live claim in this guide |
 
-The composite's separate embedding credential/provider is a required part of
-its parity, not a fallback. A missing role becomes `unsupported`. Any failure
-in the complete `short_note` → `mid_consolidate` → `long_push` → `long_query`
-journey prevents deterministic compatibility even when two direct role checks
-pass.
+The composite's separate embedding credential/provider is required, not a
+fallback. A missing role becomes `unsupported`. The deterministic journey
+covers `short_note` → `mid_consolidate` → `long_push` → `long_query`;
+two direct role checks alone do not establish that complete compatibility.
 
 ## Exact profiles
 
@@ -193,7 +168,13 @@ INFERENCE_EMBEDDING_MODEL=text-embedding-3-small
 INFERENCE_EMBEDDING_DIMENSIONS=1536
 ```
 
-Cloud Temple:
+Cloud Temple frozen reference:
+
+The named reference below retains its frozen Qwen3.6 model. The deployment
+recipe in `.env.example` instead selects Qwen3.8-27B with low effort and its
+operator-selected limits. Its split chat block uses `openai-compatible`, because
+the named `cloud-temple` provider does not advertise reasoning-effort support.
+This deployment example does not redefine or certify the named reference.
 
 ```dotenv
 INFERENCE_CHAT_PROVIDER=cloud-temple
@@ -266,10 +247,10 @@ the adapter never silently mutates or invents one.
 
 | Profile role | Sent fields | Boundary-rejected examples |
 | --- | --- | --- |
-| OpenAI chat | `model`, `messages`, `max_completion_tokens` | `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
-| Cloud Temple chat | `model`, `messages`, `max_tokens` | `max_completion_tokens`, `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
-| Gemini chat | `model`, `messages`, `max_tokens` | `max_completion_tokens`, `thinking`, `top_k`, `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
-| Native Anthropic chat | `model`, `messages`, `max_tokens`, conditional top-level `system` | `max_completion_tokens`, `thinking`, `top_k`, `top_p`, tools, streaming, penalties |
+| OpenAI chat | `model`, `messages`, `max_completion_tokens`, optional `reasoning_effort` | `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
+| Cloud Temple chat | `model`, `messages`, `max_tokens` | `max_completion_tokens`, `reasoning_effort`, `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
+| Gemini chat | `model`, `messages`, `max_tokens` | `max_completion_tokens`, `reasoning_effort`, `thinking`, `top_k`, `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
+| Native Anthropic chat | `model`, `messages`, `max_tokens`, conditional top-level `system` | `max_completion_tokens`, `reasoning_effort`, `thinking`, `top_k`, `top_p`, tools, streaming, penalties |
 | All named embeddings | `model`, `input` | `dimensions`, `encoding_format`, `output_dimension`, `output_dtype`, `user` |
 
 The Gemini embedding profile additionally rejects `task_type`; it does not
@@ -286,32 +267,16 @@ exact configured model is present. An observed 404, 405, or 501 records
 `discovery=unsupported` with reachable connectivity. An observed timeout is
 always an error and is never dynamically reclassified as unsupported.
 
-For Cloud Temple, `unsupported` is instead a route-specific frozen declaration,
-not a claim that the provider has no model-list endpoint or that it can never
-answer. In two protected exact-main attempts, both chat and embedding model-list
-calls failed to complete within the reviewed total deadlines: 15 seconds in run
-`30861840408.1` and 60 seconds in run `30868210874.1`. Cloud Temple's dated
-public catalogue names the exact chat and embedding models, but P13-4 has no
-reviewed source that supplies a response-time or availability contract making
-that listing a bounded prerequisite for this workflow.
-
-The identity-bound protected Cloud Temple route therefore omits its four runner
-and Graph catalogue calls. This removes the zero-token, pre-egress model-list
-guard. As compensating certification evidence after provider egress, the direct
-chat and embedding responses must each provider-report the exact configured
-model; chat must return the synthetic marker, and embedding must return exactly
-two vectors of the frozen 1,024 dimensions. Certification remains incomplete
-until every paid check passes. The manifest records `discovery=unsupported` and
-the `discovery-unsupported` limitation as the frozen route declaration even
-when a later operation fails; those values have no standalone promotion
-authority. For this profile they do not describe an observed HTTP method
-response or a provider-wide capability fact.
+For the frozen Cloud Temple reference, `unsupported` is a route-specific
+discovery declaration, not a claim that the provider has no model-list endpoint.
+Its verification relies on exact provider-reported model identities and embedding
+dimensions instead of a successful catalogue listing. This limitation must
+remain explicit in any corresponding evidence; it does not establish provider
+availability on its own.
 
 Ordinary operator-composed runtime health continues to use the generic adapter
-probe. The protected omission requires a complete ledger whose profile, role,
-provider, endpoint, and model match the frozen declaration; partial or
-mismatched strict state fails before provider egress. Gemini and every role
-declared `available` retain their zero-retry catalogue probes.
+probe. The frozen catalogue constrains reference-profile conformance; it does
+not silently override an operator-composed configuration.
 
 For the explicit `gemini` provider only, discovery accepts exactly the bare
 configured slug or Google's native resource representation
@@ -341,36 +306,17 @@ errors, or evidence.
 
 ## Capability and evidence states
 
-The active P13-4 evidence vocabulary is:
-
 | State | Meaning |
 | --- | --- |
-| `compatible` | Complete deterministic adapter/profile and MID/long/Graph evidence passes on the current source. |
-| `live-verified` | `compatible`, plus one real chat and one real embedding request passed with zero retry on the same exact source SHA. |
-| `blocked` | A prerequisite or live role failed. Deterministic compatibility is unchanged. |
+| `compatible` | Complete deterministic adapter/profile and mid/long/Graph checks pass for the source. |
+| `live-verified` | `compatible`, plus one real chat and one real embedding request passed with zero retry on the same exact source. |
+| `blocked` | A prerequisite or live role failed; deterministic compatibility is unchanged. |
 
-Role-level `discovery=unsupported` remains an adapter capability declaration;
-it is distinct from the three active profile-evidence states.
-
-Cloud Temple and Gemini have deterministic `compatible` evidence. A Cloud
-Temple minimal manifest is required for v1.4.0 and is valid only for its exact
-profile, configured models, adapter, source SHA, price schedule, and live run.
-Gemini has no v1.4.0 live-verification claim: its qualification is deferred
-after its recorded failure and needs a separately authorized future source
-change. Any live claim requires a new exact-SHA run; there is no cross-SHA
-freshness window.
-
-A green chat cannot hide a failed embedding: both role records and an exact
-two-invocation total are required for `live-verified`. Conversely, two green
-direct roles do not replace the deterministic `short_note` → `mid_consolidate`
-→ `long_push` → `long_query` proof. The two evidence layers are deliberately
-small and complementary.
-
-The deterministic suite uses
-`tests/fixtures/p13_provider_certification_v1.json`, a fabricated bilingual
-fixture bound to SHA-256
-`2986dc49a51d29df2484b17c4721fa6eda2ad82423ed5e8c60f73544e43b59d3`.
-It makes no external request and uses no provider credential.
+Role-level `discovery=unsupported` is an adapter capability declaration,
+distinct from these evidence states. A green chat result cannot hide a failed
+embedding result. Evidence for a different source, model or profile is not
+automatically valid for your configuration. Neither checking out a release nor
+running deterministic tests starts a paid provider operation.
 
 ## Readiness without health-side spending
 
@@ -425,253 +371,47 @@ maintenance-mode path, not online HA migration, crash resumption, or cleanup.
 
 ## Minimal live verification
 
-The active P13-4 live operation is maintainer-controlled, manual, and
-synthetic-data-only. It runs through a private protected workflow on an
-already-registered self-hosted Linux x86 runner selected by the exact labels
-`self-hosted`, `Linux`, `X64`, and `gle-ghrunners02`. Runner registration and
-host lifecycle remain operator-owned and outside this minimal workflow.
-Private workflow paths, environment names, secret-variable names, and raw
-operator diagnostics are not part of this public contract.
+A release verification record, when available, uses the
+`hivemind.provider-live-verification.v1` schema. It describes one chat invocation
+and one single-input embedding invocation, both with synthetic data and zero
+retry, bound to the exact source and configured models. It records normalized
+results, safe usage, dimensions and explicit cost limits, not prompts,
+completions, vectors or credentials.
 
-Before a provider secret enters the selected step, the workflow requires:
+This bounded hosted check is different from the operator
+[`inference_self_test`](#readiness-without-health-side-spending) and does not
+replace a test of your own deployment. Historical engineering attempts and
+internal execution infrastructure are not configuration instructions or
+evidence of current service availability.
 
-- dispatch from the exact current `main` SHA;
-- a successful exact-attempt `Private CI` run on that SHA;
-- locked dependency installation;
-- an allowlisted Cloud Temple or Gemini profile; and
-- a source-computed technical cost ceiling no greater than the explicit
-  operator maximum, which itself cannot exceed USD 1.
+## Cost and troubleshooting
 
-The credential-bearing step performs exactly one chat invocation capped at 8096
-output tokens and one single-input embedding invocation. Both use
-`retry_policy="none"`; discovery, health, fallback, MID, long, Graph, Docker,
-Compose, and provider-side writes are absent. The current conservative ceilings
-are USD 0.261376 for Cloud Temple and USD 0.061508 for Gemini, using the dated
-price schedules recorded in source; the workflow default authorizes at most
-USD 0.27. Reported usage above the source-owned ceilings blocks the manifest.
-A role failure stops immediately. The
-first RCA-grounded correction may be tried once on the same contract; a second
-failure remains `blocked` instead of starting another loop.
+- Check current provider pricing and account limits before enabling inference.
+  The links in [Exact profiles](#exact-profiles) are starting points, not frozen
+  billing promises. Configure token budgets suitable for your workload.
+- A discovered model is not proof of usable credentials, quota or successful
+  inference. Use the explicit bounded self-test, then a non-sensitive end-to-end
+  test in a disposable space.
+- Consolidation has its own per-batch retry policy. With the default timeout
+  and all retries plus a model correction, generation and waits can reach
+  **2 h 38 min per batch**, before auxiliary work. Calls may be billed even when
+  they time out and return no usage. See the
+  [consolidation tool reference](MCP_TOOLS_SPEC.md).
+- Keep `LLMAAS_*` and split `INFERENCE_*` families separate; do not solve a
+  failed startup by mixing partial configurations.
+- On `reindex_required`, keep writers stopped and follow the
+  [bounded reindex procedure](#embedding-identity-and-bounded-reindex).
+  Do not delete the old collection as a troubleshooting shortcut.
+- Report the Hivemind version, adapter/model names, normalized error category,
+  relevant non-secret limits and a minimal synthetic reproduction. Do not post
+  credentials, private endpoints, source notes or bank contents. See
+  [Support](../SUPPORT.md).
 
-The active schema is `hivemind.provider-live-verification.v1`. It records only
-the exact profile/models, adapter/provider identifiers, SHA, deterministic and
-live run identities, dated price-schedule id, authorized and technical cost
-ceilings, role invocation counts, normalized role facts, bounded safe usage,
-cleanup status, dimensions, timestamp, and safe normalized failure fields. It
-has no field for an endpoint, credential, prompt, completion, vector, provider
-body, exception text, bank content, source code, or project data. The temporary
-manifest is uploaded even on a provider failure and then removed from the
-runner.
+## Experimental Mistral profile
 
-### Historical protected full-stack route (diagnostic only)
-
-The schema-v3/v4 route below documents earlier P13-4 engineering and retained
-diagnostic tooling. As of 2026-08-04 it is not the active release gate, does not
-establish any profile state, and is not required to close #264.
-
-Schema v3 remains deliberately non-promotable: it cannot read a credential,
-start the certification stack, make a paid call, or derive `certified`. The
-schema-v3 limitations `certification-contract-incomplete` and
-`token-ceiling-unproven` therefore remain explicit and blocking. The
-schema-v4 successor is a separate, strict route limited to
-`cloud-temple-reference` and `gemini-reference`. Its private operator route
-requires a controller-provisioned execution environment; VM cleanliness,
-one-job registration, and destruction are operator controls, not manifest or
-GitHub jobs-API facts. The route requires the exact protected `main` SHA plus a
-successful deterministic CI run on that SHA and gives no dispatch path to
-ordinary PR or push CI. Before provider egress, a bounded preparation phase
-whose step environment contains no provider credential builds the exact
-repository-owned images, pulls the digest-pinned runtime images, proves the
-complete local image inventory, and leaves no project container or source-tree
-change. The selected credential-bearing step can then use only those local
-images: it may neither build nor pull, so missing preparation blocks before
-provider egress. Trust in the self-hosted execution environment is established
-separately by the operator before job registration; the in-job preparation and
-hygiene checks are not a credential-isolation boundary against a compromised
-runner. The trusted job may receive every protected provider secret referenced
-by its mutually exclusive paid steps; only the selected step environment
-projects one of them.
-
-Every allowed OpenAI-compatible `GET /models`, `POST /chat/completions`, and
-`POST /embeddings` attempt reserves its role, request, conservative input-token
-upper bound, and chat output reservation in one shared SQLite transaction
-before transport. The runner, Core, and Graph Memory use the same exact-run,
-profile, SHA, provider, and model-bound ledger. Reservations are never refunded
-for retries, failures, cancellation, or timeouts. Atomic sealing refuses
-unsettled work or any ceiling violation, prevents later provider egress, and
-supplies the manifest's aggregate totals. Missing or partial strict-mode state
-fails closed; normal runtime behavior is unchanged when certification mode is
-absent. A refused ceiling transaction commits a durable poison before raising,
-strict mode disables adapter retries, and protected readiness polls `/live`
-rather than the provider-probing `/health` endpoint. The exact journey inventory
-is profile-bound: `cloud-temple-reference` requires four chat and four embedding
-attempts, while `gemini-reference` requires six chat and six embedding attempts.
-Both reserve exactly 4,096 chat output tokens. The independent hard ceilings
-remain 12 chat requests, 20 embedding requests, 125,000 chat JSON bytes/tokens,
-50,000 embedding input tokens, and 4,096 protected chat output tokens. Ordinary
-schema-v3 certification evidence remains capped at 4,000 chat output tokens.
-
-The allowlisted price sources are
-[`https://openai.com/api/pricing/`](https://openai.com/api/pricing/) for
-OpenAI;
-[`https://mistral.ai/pricing/api/`](https://mistral.ai/pricing/api/) for
-Mistral;
-[`https://platform.claude.com/docs/en/about-claude/pricing`](https://platform.claude.com/docs/en/about-claude/pricing)
-for Anthropic;
-[`https://www.cloud-temple.com/en/our-public-rates/`](https://www.cloud-temple.com/en/our-public-rates/)
-for Cloud Temple; and
-[`https://ai.google.dev/gemini-api/docs/pricing`](https://ai.google.dev/gemini-api/docs/pricing)
-for Gemini. A live composite manifest requires both distinct provider
-entries. Changing an evidence source requires a reviewed code change; an
-arbitrary URL cannot enter a manifest.
-
-On the 2026-08-03 evidence date, Cloud Temple published EUR 1.80 per million
-input tokens, EUR 8.00 per million generated output tokens, and EUR 8.00 per
-million reasoning tokens. Google's standard paid rates were USD 1.50 per
-million input tokens and USD 7.50 per million output tokens, including
-thinking, for Gemini 3.6 Flash, plus USD 0.15 per million input tokens for
-`gemini-embedding-001`. These dated figures are evidence, not authorization to
-spend; every live run still requires its separately confirmed bounded estimate
-and maximum cost.
-
-The executable schedule charges Cloud Temple input and embedding reservations
-at EUR 1.80/M, charges every output reservation at both EUR 8/M generated and
-EUR 8/M reasoning, then applies a deliberately conservative USD 2 per EUR
-conversion ceiling. The 4,096-token protected output inventory makes the exact
-Cloud Temple envelope USD 0.761072. The corresponding Gemini Standard envelope
-is USD 0.225720. Before provider egress, the entered estimate must cover the
-applicable complete envelope and
-remain within the separately confirmed maximum of USD 1. After sealing, the
-manifest records a recalculated reservation cost that must exactly match the
-same versioned schedule and remain below the estimate. Current taxes, account
-plan, provider billing state, and actual exchange rate must still be checked at
-dispatch time; these bounds authorize nothing by themselves.
-
-The 2026-08-03 evidence snapshot records `gemini-3.6-flash` as stable since
-2026-07-21 with provider limits of 1,048,576 input and 65,536 output tokens,
-while Hivemind deliberately retains its smaller ceilings. It records
-`gemini-embedding-001` as the stable text-only 3,072-dimensional model released
-2025-07-14 and currently scheduled through 2028-05-14. The paid Gemini terms
-and logging policy are provider declarations: paid-service prompts/responses
-are not used for product improvement, but limited abuse-monitoring retention
-and optional project logging may still apply. Certification therefore uses
-synthetic content, records the declared retention boundary, and never claims
-provider-side deletion.
-
-Passing evidence requires proven cleanup of every run-scoped synthetic
-resource. Runner loss or ambiguous absence blocks certification. No
-provider-side retention deletion is claimed.
-
-## Historical schema-v3/v4 manifest contract
-
-This section is retained only so old artifacts and source remain explainable.
-It does not describe the active `hivemind.provider-live-verification.v1`
-manifest above.
-
-The certification artifact contains one canonical JSON manifest and no logs or
-raw response artifact. Its allowlisted content includes:
-
-- schema and capability-matrix ids;
-- profile plus role-scoped provider, adapter, endpoint fingerprint, and exact
-  configured/provider-reported model identities;
-- separate chat, embedding, mid, long, and cleanup results;
-- full source SHA, fixture id/hash, run id/URL, execution time, and live expiry;
-- the sealed shared-ledger request/input/output ceilings and aggregate
-  observations, including provider-reported safe usage when present, one
-  canonical price source per distinct provider, pricing schedule id,
-  recalculated sealed-reservation cost, conservative full-ceiling estimate,
-  and authorized maximum;
-- the deterministic run URL and exact attempt, suite hash, synthetic-data assertion,
-  region/data-boundary, license and retention declarations, dimensions,
-  duration, coarse latency, and proxy-path evidence;
-- safe normalized error categories and allowlisted limitation ids.
-
-The paid runner writes only a non-promotable factual candidate. After teardown,
-a secret-free phase purges the mutable virtual environment and bytecode,
-rebinds the clean source tree, then runs the finalizer with an isolated system
-interpreter. The finalizer re-fetches the exact attempt-scoped Private CI and
-current paid-run records, strictly scans the candidate, publishes the unchanged
-canonical facts durably, and exposes the exact byte digest. The sole uploadable
-artifact name binds profile, source SHA, paid run id/attempt, and that digest.
-It does not mint an attestation.
-
-Only `scripts/verify_provider_certification.py` is a supported certifying
-reader. After the paid run completes, it performs authenticated GitHub API
-readback pinned to `github.com`: the private-repository `main` ref before and
-after evidence collection, both exact attempts, the paid attempt's dedicated
-job assignment, and the paid run's artifact inventory. It refuses
-if `main` changes during readback and requires both runs to be successful, the
-single certification job to match the required dedicated Linux ARM64
-group/name/labels. It also requires current authenticated group policy to allow
-only the private repository and exact protected workflow, to forbid public
-repositories, and to contain zero registered runners after the job. Exactly one
-non-expired artifact must commit to the supplied bytes and belong to the private
-workflow. These GitHub readbacks still do not attest VM freshness, one-job
-registration, or disk destruction. The verifier then downloads that immutable
-artifact by id, checks the GitHub size and SHA-256, safely extracts exactly one
-bounded manifest member, and requires a byte-for-byte match. Status, freshness,
-release scope, validity, deterministic conformance, and redaction are then
-derived; none is serialized authority and the caller cannot supply its own
-notion of the current source. The empty restricted group is retained for as
-long as any retained artifact must remain verifiable; deletion or policy drift
-makes later verification fail closed.
-
-The schema has no field capable of storing a credential, raw endpoint, prompt,
-completion, vector, provider error body, MCP response, or container log.
-Deterministic evidence cannot carry a live run URL or cost fields and is capped
-at `compatible`. No schema-v3 `protected-live` manifest computes to
-`certified`. Raw schema-v4 JSON is always experimental. Authenticated readback
-can compute current `certified` only when every role, complete-Hivemind,
-cleanup, deterministic-run, paid-run, artifact identity/redaction, and sealed
-technical-budget requirement is green. `discovery-unsupported` and
-`usage-partially-reported` are disclosure-only; neither permits a missing or
-exceeded technical bound.
-
-The protected workflow never runs automatically. Each paid dispatch still
-requires a separate human GO naming the exact SHA, selected profile, exact
-deterministic CI run attempt, current
-price evidence, conservative estimate, and maximum cost. Implementing or
-testing this repository locally does not imply that authorization, and route
-availability alone is not certification evidence. Checking out or exporting
-this revision creates no new `certified` manifest or paid call.
-
-## v1.4.1 release preparation boundary
-
-The runtime identity is now `1.4.1` for the separately assembled private RC
-candidate. That identity does not create a Git tag, public image, deployment,
-GitHub Release, or provider call. The immutable private candidate suffix stays
-only in `rc-v1.4.1-rcN`, where `N >= 1`; it is not part of the runtime or
-package version.
-
-A later release-cut decision must start from one exact final source SHA and
-recheck all of the following:
-
-1. deterministic parity, the complete private and staged-public suites, public
-   audit, documentation links, Compose renders, and both image builds are green
-   on that SHA;
-2. Cloud Temple has a passing minimal manifest with
-   `profile_status=live-verified` on that same SHA; Gemini is deliberately not
-   a v1.4.1 live-verification or release prerequisite and remains `compatible`;
-3. the Cloud Temple live manifest retains exact request inventory, zero retry,
-   price-schedule, cost ceiling, redaction, model identity, and dimension
-   validity, while deterministic CI remains green for complete Hivemind;
-4. the assembled source has a fresh favorable independent review and all
-   findings are adjudicated; and
-5. the maintainer gives separate explicit approval for the exact tag, images,
-   release publication, and any deployment.
-
-Cloud Temple live verification, a private-image dispatch, and the digest-pinned
-smoke each require their own explicit human GO on the frozen final SHA. Gemini
-is deliberately not a v1.4.1 live-verification or release prerequisite; its
-profile remains `compatible` and a later qualification needs a new source SHA
-and its own authorization. Reusing or replacing an existing tag is never an
-execution step.
-
-## Deferred Mistral tooling (not v1.4)
-
-`mistral-reference` remains in the general catalogue and protected runner for
-a post-v1.4 provider wave. Its deterministic fixtures are experimental
-groundwork, not v1.4 compatibility, certification, or release evidence.
+`mistral-reference` remains experimental reference tooling. It is not part of
+the four-profile compatibility baseline and carries no live-verification or
+certification claim here. Its presence does not promise a release date.
 
 | Profile | Chat | Embeddings | Dimensions | Endpoint |
 | --- | --- | --- | ---: | --- |
@@ -692,7 +432,7 @@ INFERENCE_EMBEDDING_DIMENSIONS=1024
 ```
 
 The Mistral chat wire sends `model`, `messages`, and `max_tokens`; embeddings
-send only `model` and `input`. Relevant future-wave references are the
+send only `model` and `input`. Relevant provider references are the
 [chat endpoint](https://docs.mistral.ai/api/endpoint/chat),
 [embeddings endpoint](https://docs.mistral.ai/api/endpoint/embeddings), and
 [models endpoint](https://docs.mistral.ai/api/endpoint/models).

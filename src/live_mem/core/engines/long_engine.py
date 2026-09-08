@@ -224,6 +224,23 @@ class LongEngine:
         """
         return await self._bridge.list_ontologies(space_id)
 
+    async def get_ontology(self, space_id: str, name: str) -> dict:
+        """Get an ontology definition by name from the connected Graph Memory.
+
+        Pass-through to :meth:`GraphBridgeService.get_ontology` (read-only;
+        never a commit source).
+        """
+        return await self._bridge.get_ontology(space_id, name)
+
+    async def validate_ontology(self, space_id: str, content_yaml: str) -> dict:
+        """Validate an ontology YAML definition without mutating state.
+
+        Pass-through to :meth:`GraphBridgeService.validate_ontology` (read-only;
+        never a commit source).
+        """
+        return await self._bridge.validate_ontology(space_id, content_yaml)
+
+
     async def query(self, space_id: str, query: str, limit: int = 10) -> dict:
         """Structured (no-LLM) query over the graph.
 
@@ -271,4 +288,80 @@ class LongEngine:
         """
         return await self._bridge.plan_ingest(
             space_id, documents, mode=mode, include_volatile=include_volatile
+        )
+
+    async def ingest_async(
+        self,
+        space_id: str,
+        *,
+        documents: list[dict],
+        options: Optional[dict] = None,
+    ) -> dict:
+        """Queue a batch of documents for asynchronous ingestion."""
+        return await self._bridge.ingest_async(
+            space_id=space_id,
+            documents=documents,
+            options=options,
+        )
+
+    async def ingest_status(self, space_id: str, job_id: str) -> dict:
+        """Get status of an asynchronous ingestion job."""
+        return await self._bridge.ingest_status(space_id=space_id, job_id=job_id)
+
+    async def ingest_list(
+        self,
+        space_id: str,
+        *,
+        batch_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """List asynchronous ingestion jobs for space."""
+        return await self._bridge.ingest_list(
+            space_id=space_id,
+            batch_id=batch_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def ingest_cancel(self, space_id: str, job_id: str) -> dict:
+        """Request cancellation of an asynchronous ingestion job."""
+        return await self._bridge.ingest_cancel(space_id=space_id, job_id=job_id)
+
+    async def list_documents(
+        self,
+        space_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        status: str | None = None,
+        query: str | None = None,
+    ) -> dict:
+        """List indexed documents in long memory for space."""
+        return await self._bridge.list_documents(
+            space_id=space_id,
+            limit=limit,
+            offset=offset,
+            status=status,
+            query=query,
+        )
+
+    async def get_document(
+        self,
+        space_id: str,
+        *,
+        document_id: str | None = None,
+        source_path: str | None = None,
+        include_content: bool = False,
+        content_format: str = "text",
+    ) -> dict:
+        """Get indexed document metadata and optional content."""
+        return await self._bridge.get_document(
+            space_id=space_id,
+            document_id=document_id,
+            source_path=source_path,
+            include_content=include_content,
+            content_format=content_format,
         )

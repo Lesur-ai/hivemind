@@ -617,7 +617,7 @@ async def test_restore_orphan_node_identity_refused(monkeypatch):
 async def test_restore_orphan_no_pointer_with_higher_backup_refused_no_mutation(
     monkeypatch,
 ):
-    """Régression-pin du re-order MINOR 1 du review pré-commit.
+    """Le refus de précondition précède toute mutation de restauration.
 
     Cas : un nœud Hivemind a une `NodeIdentity` (donc PAS orphelin au sens
     strict de la check #2) mais pas encore de `bank_version.json` (pointeur
@@ -668,7 +668,7 @@ async def test_restore_orphan_no_pointer_with_higher_backup_refused_no_mutation(
     assert result["status"] == "error"
     msg = result["message"].lower()
     assert "précondition" in msg or "supérieur" in msg or "rebuild_pointer" in msg
-    # MINOR 1 (review pré-commit) : le refus précondition NE doit PAS avoir
+    # Le refus précondition NE doit PAS avoir
     # écrit le pointeur initial -1.
     assert bank_version_pointer_key not in storage.objects
     # ZÉRO mutation globale.
@@ -802,11 +802,11 @@ async def test_restore_into_not_a_space_target_proceeds_unchanged(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Codex P6-1 fix-up — review fixes (high #1/#2/#3 + medium #4)
+# Restauration : ordre des mutations et refus des états corrompus
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# === Codex P6-1 high #1 — marker RESYNC_REQUIRED EN PREMIER ==================
+# === Marker RESYNC_REQUIRED EN PREMIER ====================================
 
 
 async def test_restore_marks_resync_required_before_durable_mutations(monkeypatch):
@@ -842,7 +842,7 @@ async def test_restore_marks_resync_required_before_durable_mutations(monkeypatc
     assert membership.epoch == 5
 
 
-# === Codex P6-1 high #2 — bank/* orphelins live supprimés post-apply =========
+# === bank/* orphelins live supprimés post-apply ============================
 
 
 async def test_restore_deletes_stale_live_bank_orphans(monkeypatch):
@@ -886,7 +886,7 @@ async def test_restore_deletes_stale_live_bank_orphans(monkeypatch):
     assert payload["purged"]["bank_orphans_deleted"] == 1
 
 
-# === Codex P6-1 high #3 — backup malformé refusé fail-closed =================
+# === Backup malformé refusé fail-closed ===================================
 
 
 @pytest.mark.parametrize(
@@ -954,7 +954,7 @@ async def test_restore_corrupt_backup_tombstone_refused_fail_closed(monkeypatch)
     assert health is None or health.status != HiveNodeStatus.RESYNC_REQUIRED.value
 
 
-# === Codex P6-1 medium #4 — préflight live token/queue/watermark =============
+# === Préflight live token/queue/watermark =================================
 
 
 async def test_restore_corrupt_live_token_refused_no_mutation(monkeypatch):
@@ -1034,11 +1034,11 @@ async def test_restore_corrupt_live_watermark_refused_no_mutation(monkeypatch):
 
 
 # =============================================================================
-# Codex P6-1 R2 fix-up — re-review NO-GO addressed
+# Validation structurelle et sémantique avant restauration
 # =============================================================================
 
 
-# === Codex R2 high #1 — Pydantic schema-deep validation on backup state ======
+# === Pydantic schema-deep validation on backup state ======================
 
 
 async def _seed_minimal_live(storage: "CopyFakeStorage") -> "HivemindStateStore":
@@ -1160,7 +1160,7 @@ async def _seed_minimal_live(storage: "CopyFakeStorage") -> "HivemindStateStore"
 async def test_restore_schema_violation_in_backup_refused_fail_closed(
     monkeypatch, path, malformed_payload, label
 ):
-    """Codex R2 high #1 — un fichier critique du backup qui est un JSON
+    """Un fichier critique du backup qui est un JSON
     object valide mais qui ne respecte PAS le schéma Pydantic canonique
     DOIT refuser le restore. Régression-pin contre la version précédente
     où ``_probe_json_object`` ne contrôlait QUE isinstance(dict)."""
@@ -1184,11 +1184,11 @@ async def test_restore_schema_violation_in_backup_refused_fail_closed(
     assert health is None or health.status != HiveNodeStatus.RESYNC_REQUIRED.value
 
 
-# === Codex R2 high #2 — semantic token preflight via lease_runtime guards ====
+# === Semantic token preflight via lease_runtime guards ====================
 
 
 async def test_restore_refuses_live_token_held_without_lease_until(monkeypatch):
-    """Codex R2 high #2 — un token HELD sans ``lease_until`` est traité comme
+    """Un token HELD sans ``lease_until`` est traité comme
     CORROMPU par ``lease_runtime.is_lease_expired`` ; le préflight DOIT
     exercer la MÊME garde avant le marker RESYNC_REQUIRED."""
     storage = CopyFakeStorage()
@@ -1230,7 +1230,7 @@ async def test_restore_refuses_live_token_held_without_lease_until(monkeypatch):
 
 
 async def test_restore_refuses_live_token_held_without_holder_node_id(monkeypatch):
-    """Codex R2 high #2 — un token HELD sans ``holder_node_id`` est CORROMPU
+    """Un token HELD sans ``holder_node_id`` est CORROMPU
     (``HELD`` ⇒ un nœud tient le token, par DÉFINITION) — fail-closed."""
     storage = CopyFakeStorage()
     store = await _seed_healthy_hive(
@@ -1265,7 +1265,7 @@ async def test_restore_refuses_live_token_held_without_holder_node_id(monkeypatc
 
 
 async def test_restore_refuses_live_token_term_in_future(monkeypatch):
-    """Codex R2 high #2 — un token actif avec ``token.term > live term.term``
+    """Un token actif avec ``token.term > live term.term``
     est IMPOSSIBLE en flux normal (acquire bumpe term AVANT d'écrire le
     token) et constitue une CORRUPTION critique ; fail-closed."""
     storage = CopyFakeStorage()
@@ -1301,13 +1301,13 @@ async def test_restore_refuses_live_token_term_in_future(monkeypatch):
     assert storage.objects == before
 
 
-# === Codex R2 medium #3 — AUDIT-THEN-DELETE pour le bank-orphan cleanup ======
+# === AUDIT-THEN-DELETE pour le bank-orphan cleanup =========================
 
 
 async def test_restore_audit_emitted_before_orphan_delete_with_full_key_list(
     monkeypatch,
 ):
-    """Codex R2 medium #3 — l'audit UNSAFE_RECOVERY_RESTORED DOIT être posé
+    """L'audit UNSAFE_RECOVERY_RESTORED DOIT être posé
     AVANT le delete loop et porter la liste COMPLÈTE des
     ``bank_orphan_keys`` (clés absolues storage) dans son payload."""
     storage = CopyFakeStorage()
@@ -1351,7 +1351,7 @@ async def test_restore_audit_emitted_before_orphan_delete_with_full_key_list(
 async def test_restore_crash_between_audit_and_delete_preserves_intent_record(
     monkeypatch,
 ):
-    """Codex R2 medium #3 — si le delete loop crashe juste après l'audit,
+    """Si le delete loop crashe juste après l'audit,
     l'audit reste durable avec la liste COMPLÈTE des clés vouées à
     suppression ; les orphelins restent présents (mais sont
     recoverable depuis le payload audit)."""
@@ -1402,7 +1402,7 @@ async def test_restore_crash_between_audit_and_delete_preserves_intent_record(
 async def test_restore_crash_after_apply_before_audit_leaves_no_destructive_trace(
     monkeypatch,
 ):
-    """Codex R2 medium #3 — si un crash survient APRÈS apply_commit mais
+    """Si un crash survient APRÈS apply_commit mais
     AVANT que l'audit ne soit posé, AUCUN bank-orphan ne doit avoir été
     supprimé (pas de destructif sans audit)."""
     storage = CopyFakeStorage()
@@ -1441,7 +1441,7 @@ async def test_restore_crash_after_apply_before_audit_leaves_no_destructive_trac
 
 
 async def test_restore_retry_after_apply_completes_orphan_cleanup(monkeypatch):
-    """Codex R2 medium #3 — convergence : si le pointeur est avancé puis le
+    """Convergence : si le pointeur est avancé puis le
     cleanup ne s'est pas exécuté (crash mid-delete-loop), re-appeler
     ``restore`` du même backup doit converger vers un état où les
     orphelins sont nettoyés et l'audit n'est pas dupliqué de manière
@@ -1508,7 +1508,7 @@ async def test_restore_retry_after_apply_completes_orphan_cleanup(monkeypatch):
     assert f"{SPACE}/bank/orph-b.json" not in storage.objects
 
 
-# === Codex P6-1 R3 NO-GO #1 — anti-résurrection live/* sous tombstone union ===
+# === Anti-résurrection live/* sous tombstone union =========================
 #
 # La R2 a rendu le bank/* exact face au manifest. La R3 étend cette propriété au
 # sous-arbre ``live/`` : un ``note_id`` dans ``tombstone_union`` ne peut PAS

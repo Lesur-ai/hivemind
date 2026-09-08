@@ -9,9 +9,9 @@
  * cannot prove the *behaviour* — that, when the deferred `admin_create_token`
  * promise actually resolves at a hostile moment, the one-time secret is or isn't
  * surfaced, the modal is or isn't re-enabled, the route is or isn't reverted.
- * The Terra R2–R4 reviews (commits 27d559e, 0a2fc0b, 140d054 on branch
- * claude/p8-5-implementation-3cb723, PR #158) verified those behaviours with
- * ad-hoc browser harnesses that were NEVER committed. This file commits them.
+ * This committed runtime harness makes those behaviours reproducible without
+ * a live server, including ownership races, modal dismissal and navigation.
+ * The real-shell browser spec covers the integration boundaries below.
  *
  * DECISION: pytest suite via a subprocess `node` runner, NOT a separate JS test
  * target (documented in tests/test_admin_ui_p8_5.py). The repo has no
@@ -38,7 +38,7 @@
  * keeps the harness honest and makes each check mutation-proof: reverting the
  * corresponding guard in views-access.js flips exactly one scenario RED.
  *
- * DOM FIDELITY (Terra PR #167 review, [medium]). The fake `document` is NOT a
+ * DOM FIDELITY. The fake `document` is NOT a
  * fabricate-anything stub. `showModal` RENDERS the view's body: it registers
  * exactly the element IDs the body actually contains (with their inner text) and
  * `getElementById` returns null for any other ID — so a markup/ID drift or a
@@ -51,7 +51,7 @@
  * shell's `if (ok) closeModal()` contract, so it asserts the modal actually
  * hides (not just that the secret cleared).
  *
- * HASHCHANGE FIDELITY (Terra PR #167 review, [high]). hashchange is modeled as a
+ * HASHCHANGE FIDELITY. hashchange is modeled as a
  * QUEUED browser task, not a synchronous call inside the `location.hash` setter.
  * navigate() drains the queue immediately (the realizable ordering — a revert
  * queued at nav time runs before any strictly-later network reply); scenario I
@@ -71,14 +71,14 @@
  *   G Stop waiting -> dismiss dialog -> late `created` does NOT reopen the secret
  *     (and, staying on the open dialog, it still delivers in-context)
  *   H a `created` response that resolves AFTER a session boundary must suppress
- *     the prior session's one-time token (Terra PR #167 R1 review, [high]):
+ *     the prior session's one-time token:
  *       H1 logged-out-now (overlay visible)   — _sessionEnded overlay branch
  *       H2 logout-then-relogin (identity ref) — _sessionEnded identity branch
  *   I async-queued hashchange: the queued nav-lock revert pins the route while
  *     the create is pending, so the secret is delivered in-context and never
- *     rendered over the navigated-to route (Terra PR #167 R2 review, [high])
+ *     rendered over the navigated-to route
  *
- * Contract: DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §3.1.4, §3.3.2, §7.1.6, §7.4.
+ * Contract: session isolation, exclusive creation and one-time secret delivery.
  */
 
 import assert from 'node:assert/strict';
@@ -204,7 +204,7 @@ function createHarness() {
 
     // location: assigning a *different* hash updates it synchronously and QUEUES
     // the hashchange dispatch as a browser task — it does NOT fire inline, since
-    // real engines dispatch hashchange from a LATER task (Terra PR #167 [high]).
+    // real engines dispatch hashchange from a LATER task.
     // The nav-lock handler may re-assign hash (revert) during a dispatch, which
     // queues another dispatch; flushHashQueue() drains them iteratively with a
     // backstop that turns a runaway revert loop (a real regression) into a loud
@@ -331,7 +331,7 @@ function createHarness() {
         confirm() { return this.lastModal().onConfirm(); },
         // Model showModal's confirm wiring: `const ok = await onConfirm(); if
         // (ok === true) closeModal();`. Lets scenario C prove a truthy ack
-        // actually reaches the shell's close-on-success (Terra PR #167 [medium]).
+        // actually reaches the shell's close-on-success.
         async confirmModal() {
             const ok = await this.lastModal().onConfirm();
             if (ok === true) context.closeModal();
@@ -412,7 +412,7 @@ async function scenarioA() {
 }
 
 // B — a stale cross-session create FAILURE must not re-enable a newer session's
-// still-locked create modal (Terra R2 f1). Ownership (gen+session) is checked
+// still-locked create modal. Ownership (gen+session) is checked
 // before any modal mutation.
 async function scenarioB() {
     const h = createHarness();
@@ -472,7 +472,7 @@ async function scenarioC() {
 
 // D — same session, but the nav-lock revert churns the route epoch. A create
 // FAILURE on the still-owned modal must re-enable it (the error path's ownership
-// check deliberately excludes epoch — Terra R2 f1 corollary).
+// check deliberately excludes epoch).
 async function scenarioD() {
     const h = createHarness();
     const p = startCreate(h);
@@ -556,7 +556,7 @@ async function scenarioF() {
     }
 }
 
-// G — Terra R4: after Stop waiting re-enables ×/Cancel, DISMISSING the create
+// G — after Stop waiting re-enables ×/Cancel, DISMISSING the create
 // dialog (which only hides it — epoch/gen/session unchanged) must drop a late
 // `created` instead of REOPENING the secret; staying on the open dialog still
 // delivers.
@@ -590,7 +590,7 @@ async function scenarioG() {
 // H — a `created` response resolving AFTER a session boundary must suppress the
 // prior session's one-time token (never render the plaintext in a dead/other
 // session). This exercises the create branch's `_sessionEnded(sessionAtCall)`
-// guard, which A–G never reached (Terra PR #167 review, [high]). Two orderings,
+// guard, which A–G never reached. Two orderings,
 // one per branch of _sessionEnded:
 async function scenarioH() {
     // H1 — logged-out-now: the login overlay is visible (overlay branch).
@@ -622,7 +622,7 @@ async function scenarioH() {
     }
 }
 
-// I — async-queued hashchange fidelity (Terra PR #167 review, [high]). hashchange
+// I — async-queued hashchange fidelity. hashchange
 // is modeled as a QUEUED browser task, not a synchronous call inside the setter.
 // This drives the ordering explicitly: a navigation while the create is pending
 // queues the nav-lock revert, that revert task runs, and only THEN the (strictly

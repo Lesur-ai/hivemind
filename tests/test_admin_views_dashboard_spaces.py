@@ -2,9 +2,8 @@
 """
 Per-view source-contract pins for P8-2 (issue #140): Dashboard and Spaces.
 
-DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §4.2 (Dashboard parity), §4.3
-(Spaces parity), §5.2/§5.3 (data matrices). Source-inspection style, no
-browser/heavy imports — matches the convention in
+Dashboard and Spaces parity, including data availability and refresh races.
+Source-inspection style, no browser/heavy imports — matches the convention in
 tests/test_admin_console_security.py (§7.2.1 of the contract names this
 file explicitly as the P8-2 per-view pin file).
 
@@ -290,8 +289,8 @@ class TestEmojiGuard:
 
 
 class TestPreCommitReviewFixes:
-    """Codex GPT-5.5 pre-commit adversarial review (local-only, this branch),
-    round 1 NO-GO — findings confirmed and fixed here."""
+    """Overlapping loads and stale-session results must not replace current UI.
+    These tests pin ordering, identity and rendering boundaries."""
 
     def test_health_load_has_a_sequence_guard_against_out_of_order_completion(self):
         """[MEDIUM] Two overlapping system_health calls issued in the SAME
@@ -398,8 +397,8 @@ class TestPreCommitReviewFixes:
 
 
 class TestPreCommitReviewRound2Fixes:
-    """Codex GPT-5.5 pre-commit adversarial review round 2 (local-only) —
-    findings confirmed and fixed here."""
+    """REST loads and space-detail actions keep their own sequence guards.
+    Older continuations must not overwrite newer results."""
 
     def test_dashboard_rest_load_has_a_sequence_guard(self):
         """[MEDIUM] _loadRest (space_list/queues/tokens) had only an epoch
@@ -446,8 +445,8 @@ class TestPreCommitReviewRound2Fixes:
 
 
 class TestPrLevelReviewFixes:
-    """Codex GPT-5.5 PR-level adversarial review of PR #160 (published,
-    NO-GO): 6 MEDIUM + 1 LOW findings, confirmed and fixed here."""
+    """Unavailable data and failed requests retain usable, honest UI states.
+    These tests cover filtering, errors and guarded rendering."""
 
     def test_f1_consolidating_filter_degrades_when_lanes_unavailable(self):
         """[MEDIUM] A failed bank_consolidation_queues refresh sets

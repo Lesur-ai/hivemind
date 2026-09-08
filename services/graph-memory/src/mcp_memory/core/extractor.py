@@ -348,8 +348,9 @@ class ExtractorService:
         
         if not ontology:
             available = [o["name"] for o in ontology_manager.list_ontologies()]
+            label = ontology_manager.get_ontology_label(ontology_name)
             raise ValueError(
-                f"Ontology '{ontology_name}' not found. "
+                f"Ontology '{label}' not found or invalid. "
                 f"Available ontologies: {available}. "
                 "Every memory MUST have a valid ontology."
             )
@@ -483,8 +484,9 @@ class ExtractorService:
         ontology = ontology_manager.get_ontology(ontology_name)
         if not ontology:
             available = [o["name"] for o in ontology_manager.list_ontologies()]
+            label = ontology_manager.get_ontology_label(ontology_name)
             raise ValueError(
-                f"Ontology '{ontology_name}' not found. "
+                f"Ontology '{label}' not found or invalid. "
                 f"Available ontologies: {available}."
             )
         

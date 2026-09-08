@@ -37,7 +37,7 @@ import hashlib
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Callable, Optional, Any
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -53,7 +53,7 @@ from .reservation_guard import assert_space_not_reserved
 logger = logging.getLogger("live_mem.graph_bridge")
 
 # P7-3 — classification EXPLICITE du binding persisté dans le bloc
-# ``graph_memory`` (jamais inférée depuis url/token — cf. Codex round-2 R3).
+# ``graph_memory`` (jamais inférée depuis url/token).
 _BINDING_EMBEDDED = "embedded"
 _BINDING_EXPLICIT = "explicit"
 _GRAPH_VIEW_MAX_NODES = 160
@@ -712,17 +712,17 @@ class GraphBridgeService:
         return self._client_factory(url, token, **kwargs)
 
     async def _load_gm_config(
-        self, space_id: str
+        self, space_id: str, *, provision: bool = False
     ) -> tuple[Optional[GraphMemoryConfig], Optional[dict]]:
-        """Charge la config Graph Memory locale d'un space (READ, jamais bind).
+        """Charge la config Graph Memory locale d'un space (READ par défaut, write si provision=True).
 
         Thin wrapper sur le seam unique ``_resolve_or_embedded`` (P7-3) :
-        conserve la signature ``(config, err)`` pour les 5 méthodes typées de
+        conserve la signature ``(config, err)`` pour les méthodes typées de
         projection. ``provision=False`` → aucune écriture ; un space non lié
         renvoie l'erreur historique not_found / non-connecté (byte-for-byte).
         """
         config, _block, err = await self._resolve_or_embedded(
-            space_id, provision=False
+            space_id, provision=provision
         )
         return config, err
 
@@ -733,7 +733,7 @@ class GraphBridgeService:
         renvoyer. Doit être appelé AVANT ``_make_client`` dans toute nouvelle
         méthode, en miroir de la validation que fait le tool layer pour connect.
 
-        Finding 1 (revue Codex PR #150) : l'URL du runtime « long » embarqué
+        L'URL du runtime « long » embarqué
         (config OPÉRATEUR, défaut ``http://graph-memory:8002``) pointe
         LÉGITIMEMENT vers une IP privée du réseau Docker. Le garde SSRF renforcé
         (HM-11, qui résout le DNS et bloque les IP privées) la rejetait, cassant
@@ -776,7 +776,7 @@ class GraphBridgeService:
         """Fail-closed : santé GM valide UNIQUEMENT si ``status ∈ {ok, healthy}``.
 
         Une réponse malformée (non-dict, ou sans ``status``) → ``False`` : jamais
-        de fail-open sur « pas explicitement error » (Codex round-1 attack Q1)."""
+        de fail-open sur « pas explicitement error »."""
         return isinstance(health, dict) and health.get("status") in ("ok", "healthy")
 
     def _sentinelize_for_persist(self, block: dict) -> dict:
@@ -891,7 +891,7 @@ class GraphBridgeService:
     ) -> tuple[Optional[GraphMemoryConfig], Optional[dict], Optional[dict]]:
         """Auto-bind embedded (P7-3). Appelé UNIQUEMENT depuis le chemin write.
 
-        Ordre (Codex round-2 R1) : résoudre le token (rejet sentinel) → garde
+        Ordre : résoudre le token (rejet sentinel) → garde
         SSRF → ENREGISTRER le hash du token AVANT tout appel GM authentifié
         (Model B : le GM valide via le store S3) → health strict → memory_list →
         memory_create (exists=succès via re-check) → retourne le bloc sentinelisé
@@ -935,7 +935,7 @@ class GraphBridgeService:
             # Protected certification runs two sequential provider-discovery
             # probes inside Graph Memory's ``system_health``.  A complete,
             # validated strict-certification environment grants that one
-            # auto-bind call its reviewed larger bound.  Ordinary runtimes
+            # auto-bind call its larger bound.  Ordinary runtimes
             # retain the historical constructor byte-for-byte (no timeout
             # kwarg, therefore GraphMemoryClient's 120-second default), while
             # a partial strict environment raises here before any health call.
@@ -1751,6 +1751,7 @@ class GraphBridgeService:
                     "document_count": stats.get("document_count", 0),
                     "entity_count": stats.get("entity_count", 0),
                     "relation_count": stats.get("relation_count", 0),
+                    "entity_types": stats.get("entity_types", {}),
                 }
                 top_entities = stats.get("top_entities", [])
                 embedding_collection = _embedding_collection_view(
@@ -2004,22 +2005,59 @@ class GraphBridgeService:
     # ne lisent/écrivent jamais commit_id/bank_version/term, n'appellent jamais
     # assert_commit_allowed, ne touchent jamais _hivemind/.
 
+    async def _resolve_read_client_and_memory(
+        self, space_id: str
+    ) -> tuple[Any, Optional[str], Optional[dict]]:
+        """Résout un client Graph Memory et le memory_id correspondant en une seule transaction de configuration."""
+        config, err = await self._load_gm_config(space_id)
+        if err is None and config is not None:
+            guard = self._guard_url(config.url)
+            if guard is not None:
+                return None, None, guard
+            return self._make_client(config.url, config.token), config.memory_id, None
+
+        if err is not None and not ("is not connected to Graph Memory" in err.get("message", "")):
+            return None, None, err
+
+        # Fallback sans binding : vérifier si le space existe et si le runtime embarqué est accessible
+        storage = get_storage()
+        meta_data = await storage.get_json(f"{space_id}/_meta.json")
+        if meta_data is None:
+            return None, None, {
+                "status": "not_found",
+                "message": f"Space '{space_id}' not found",
+            }
+
+        settings = get_settings()
+        embedded_url = settings.long_embedded_url
+        live_token = resolve_embedded_token(settings, generate=False)
+        if not live_token:
+            return None, None, {
+                "status": "error",
+                "message": "Embedded long-runtime secret is unavailable.",
+            }
+        guard = self._guard_url(embedded_url)
+        if guard is not None:
+            return None, None, guard
+        return self._make_client(embedded_url, live_token), space_id, None
+
+    async def _resolve_read_client(self, space_id: str) -> tuple[Any, Optional[dict]]:
+        """Résout un client Graph Memory en lecture seule, avec fallback embarqué si non-lié."""
+        client, _, err = await self._resolve_read_client_and_memory(space_id)
+        return client, err
+
+
     async def list_ontologies(self, space_id: str) -> dict:
         """Liste les ontologies disponibles dans Graph Memory.
 
         Outil GM : ``ontology_list`` — AUCUN argument (le schéma ne prend pas
         de ``memory_id`` ; en passer un ferait échouer l'appel côté GM).
         """
-        config, err = await self._load_gm_config(space_id)
+        gm, err = await self._resolve_read_client(space_id)
         if err is not None:
             return err
 
-        guard = self._guard_url(config.url)
-        if guard is not None:
-            return guard
-
         try:
-            gm = self._make_client(config.url, config.token)
             return await gm.call_tool("ontology_list", {})
         except ConnectionError as e:
             return {
@@ -2031,6 +2069,51 @@ class GraphBridgeService:
                 "status": "error",
                 "message": f"ontology_list error: {e}",
             }
+
+    async def get_ontology(self, space_id: str, name: str) -> dict:
+        """Récupère la définition d'une ontologie par son nom.
+
+        Outil GM : ``ontology_get`` — args ``{name}``.
+        """
+        gm, err = await self._resolve_read_client(space_id)
+        if err is not None:
+            return err
+
+        try:
+            return await gm.call_tool("ontology_get", {"name": name})
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"ontology_get error: {e}",
+            }
+
+    async def validate_ontology(self, space_id: str, content_yaml: str) -> dict:
+        """Valide une ontologie YAML sans persistance.
+
+        Outil GM : ``ontology_validate`` — args ``{content_yaml}``.
+        """
+        gm, err = await self._resolve_read_client(space_id)
+        if err is not None:
+            return err
+
+        try:
+            return await gm.call_tool("ontology_validate", {"content_yaml": content_yaml})
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"ontology_validate error: {e}",
+            }
+
 
     async def query(self, space_id: str, query: str, limit: int = 10) -> dict:
         """Interroge le graphe (recherche structurée, SANS LLM).
@@ -2239,12 +2322,12 @@ class GraphBridgeService:
         return _reindex_result_view(raw_result)
 
     # ─────────────────────────────────────────────────────────
-    # P4-7 — Planification d'ingestion canonique (PLAN-ONLY, downstream-only)
+    # Planification d'ingestion canonique (PLAN-ONLY, downstream-only)
     # ─────────────────────────────────────────────────────────
     #
     # plan_ingest PLANIFIE l'ingestion canonique d'un SET de documents, keyés
     # par un ``source_path`` stable (PAS le nom de fichier bank mutable). Le
-    # serveur n'est PAS un proxy aveugle (EVOLUTION C-Q2.a) : l'ENGINE planifie.
+    # serveur n'est PAS un proxy aveugle : l'ENGINE planifie.
     # Trois modes, tous downstream-only (ADR-0010) — JAMAIS sur le chemin
     # commit/rollback/audit/recovery, AUCUN import du sous-paquet hivemind :
     #
@@ -2254,8 +2337,8 @@ class GraphBridgeService:
     # - ``check-remote``: plan SKIP/UPDATE/INGEST par comparaison du sha256 de
     #                     chaque doc au remote (UN seul ``document_list``
     #                     read-only, AUCUNE écriture).
-    # - ``apply``       : DÉFÉRÉ en v1 (D13 / EVOLUTION Vague C : apply est
-    #                     codex-gated, v2.7.0+) — ``applied: false`` + raison
+    # - ``apply``       : indisponible dans cette release —
+    #                     ``applied: false`` + raison
     #                     explicite, AUCUNE écriture aveugle.
     #
     # La garde volatile, la permission 'manage' et l'audit vivent UNIQUEMENT au
@@ -2310,9 +2393,9 @@ class GraphBridgeService:
                 "mode": "apply",
                 "applied": False,
                 "reason": (
-                    "apply deferred — plan-only in this release (D13 / EVOLUTION "
-                    "Vague C; codex-gated, v2.7.0+). Use mode='dry-run' or "
-                    "mode='check-remote' to plan; apply lands in v2.7.0+."
+                    "apply is unavailable in this release; this tool is plan-only. "
+                    "Use mode='dry-run' or mode='check-remote' to plan. "
+                    "No documents were ingested."
                 ),
             }
 
@@ -2383,6 +2466,338 @@ class GraphBridgeService:
             "status": "error",
             "message": "mode must be one of dry-run|check-remote|apply",
         }
+
+    async def ingest_async(
+        self,
+        space_id: str,
+        *,
+        documents: list[dict],
+        options: Optional[dict] = None,
+    ) -> dict:
+        """Soumet un lot de documents pour ingestion asynchrone dans Graph Memory.
+
+        Outil GM : ``memory_ingest_batch_async``.
+        """
+        config, err = await self._load_gm_config(space_id, provision=True)
+        if err is not None:
+            return err
+
+        guard = self._guard_url(config.url)
+        if guard is not None:
+            return guard
+
+        replace_existing = False
+        ontology = None
+        if options is not None:
+            if not isinstance(options, dict):
+                return {
+                    "status": "error",
+                    "message": f"options must be a dict (got {type(options).__name__})",
+                }
+            if "replace_existing" in options:
+                val = options["replace_existing"]
+                if type(val) is not bool:
+                    return {
+                        "status": "error",
+                        "message": f"options.replace_existing must be a boolean (got {type(val).__name__})",
+                    }
+                replace_existing = val
+            if "ontology" in options:
+                val = options["ontology"]
+                if not isinstance(val, str) or not val.strip():
+                    return {
+                        "status": "error",
+                        "message": "options.ontology must be a non-empty string",
+                    }
+                ontology = val
+            elif "ontology_yaml" in options:
+                val = options["ontology_yaml"]
+                if not isinstance(val, str) or not val.strip():
+                    return {
+                        "status": "error",
+                        "message": "options.ontology_yaml must be a non-empty string",
+                    }
+                ontology = val
+
+        arguments: dict = {
+            "memory_id": config.memory_id,
+            "documents": documents,
+            "replace_existing": replace_existing,
+        }
+        if ontology is not None:
+            arguments["ontology"] = ontology
+
+        try:
+            gm = self._make_client(config.url, config.token, timeout=60.0)
+            return await gm.call_tool("memory_ingest_batch_async", arguments)
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"memory_ingest_batch_async error: {e}",
+            }
+
+    async def ingest_status(self, space_id: str, job_id: str) -> dict:
+        """Consulte l'état d'avancement d'un job d'ingestion asynchrone.
+
+        Outil GM : ``ingest_job_status``.
+        """
+        client, memory_id, err = await self._resolve_read_client_and_memory(space_id)
+        if err is not None:
+            return err
+
+        try:
+            return await client.call_tool(
+                "ingest_job_status",
+                {"job_id": job_id, "expected_memory_id": memory_id},
+            )
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"ingest_job_status error: {e}",
+            }
+
+    async def ingest_list(
+        self,
+        space_id: str,
+        *,
+        batch_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Liste les jobs d'ingestion asynchrone d'un espace.
+
+        Outil GM : ``ingest_job_list``.
+        """
+        client, memory_id, err = await self._resolve_read_client_and_memory(space_id)
+        if err is not None:
+            return err
+
+        arguments: dict = {
+            "memory_id": memory_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        if batch_id is not None:
+            arguments["batch_id"] = batch_id
+        if status is not None:
+            arguments["status"] = status
+
+        try:
+            return await client.call_tool("ingest_job_list", arguments)
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"ingest_job_list error: {e}",
+            }
+
+    async def ingest_cancel(self, space_id: str, job_id: str) -> dict:
+        """Demande l'annulation d'un job d'ingestion asynchrone.
+
+        Outil GM : ``ingest_job_cancel``.
+        """
+        config, err = await self._load_gm_config(space_id)
+        if err is not None:
+            return err
+
+        guard = self._guard_url(config.url)
+        if guard is not None:
+            return guard
+
+        try:
+            gm = self._make_client(config.url, config.token, timeout=30.0)
+            return await gm.call_tool(
+                "ingest_job_cancel",
+                {"job_id": job_id, "expected_memory_id": config.memory_id},
+            )
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"ingest_job_cancel error: {e}",
+            }
+
+    async def list_documents(
+        self,
+        space_id: str,
+        *,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        status: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> dict:
+        """Liste les documents indexés dans la Long Memory d'un espace.
+
+        Outil GM : ``document_list``.
+        """
+        client, memory_id, err = await self._resolve_read_client_and_memory(space_id)
+        if err is not None:
+            return err
+
+        arguments: dict = {
+            "memory_id": memory_id,
+        }
+        if limit is not None:
+            arguments["limit"] = limit
+            arguments["offset"] = offset
+        if status is not None:
+            arguments["status"] = status
+        if query is not None:
+            arguments["query"] = query
+
+        try:
+            res = await client.call_tool("document_list", arguments)
+            if not isinstance(res, dict) or res.get("status") != "ok":
+                return res
+
+            raw_docs = res.get("documents", [])
+            projected = []
+            for d in raw_docs:
+                if isinstance(d, dict):
+                    projected.append({
+                        "document_id": d.get("document_id") or d.get("id"),
+                        "filename": d.get("filename"),
+                        "sha256": d.get("sha256") or d.get("hash"),
+                        "source_path": d.get("source_path"),
+                        "repo_path": d.get("repo_path"),
+                        "source_modified_at": d.get("source_modified_at"),
+                        "ingested_at": d.get("ingested_at"),
+                        "ingestion_status": d.get("ingestion_status") or d.get("status") or "unknown",
+                        "last_ingest_job_id": d.get("last_ingest_job_id"),
+                        "chunk_count": d.get("chunk_count", 0),
+                        "size_bytes": d.get("size_bytes", 0),
+                        "text_length": d.get("text_length", 0),
+                        "content_type": d.get("content_type"),
+                    })
+
+            out = {
+                "status": "ok",
+                "space_id": space_id,
+                "count": len(projected),
+                "total_count": res.get("total_count", len(projected)),
+                "documents": projected,
+            }
+            if limit is not None:
+                out["limit"] = limit
+                out["offset"] = offset
+            return out
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"document_list error: {e}",
+            }
+
+    async def get_document(
+        self,
+        space_id: str,
+        *,
+        document_id: Optional[str] = None,
+        source_path: Optional[str] = None,
+        include_content: bool = False,
+        content_format: str = "text",
+    ) -> dict:
+        """Récupère les détails d'un document indexé par document_id ou source_path.
+
+        Outil GM : ``document_get``.
+        """
+        client, memory_id, err = await self._resolve_read_client_and_memory(space_id)
+        if err is not None:
+            return err
+
+        arguments: dict = {
+            "memory_id": memory_id,
+            "include_content": include_content,
+            "content_format": content_format,
+        }
+        if document_id is not None:
+            arguments["document_id"] = document_id
+        if source_path is not None:
+            arguments["source_path"] = source_path
+
+        try:
+            res = await client.call_tool("document_get", arguments)
+            if not isinstance(res, dict) or res.get("status") != "ok":
+                return res
+
+            raw_doc = res.get("document", {})
+            doc_dict = {
+                "document_id": raw_doc.get("document_id") or raw_doc.get("id"),
+                "filename": raw_doc.get("filename"),
+                "sha256": raw_doc.get("sha256") or raw_doc.get("hash"),
+                "source_path": raw_doc.get("source_path"),
+                "repo_path": raw_doc.get("repo_path"),
+                "source_modified_at": raw_doc.get("source_modified_at"),
+                "ingested_at": raw_doc.get("ingested_at"),
+                "ingestion_status": raw_doc.get("ingestion_status") or raw_doc.get("status") or "unknown",
+                "last_ingest_job_id": raw_doc.get("last_ingest_job_id"),
+                "chunk_count": raw_doc.get("chunk_count", 0),
+                "size_bytes": raw_doc.get("size_bytes", 0),
+                "text_length": raw_doc.get("text_length", 0),
+                "content_type": raw_doc.get("content_type"),
+            }
+
+            out = {
+                "status": "ok",
+                "space_id": space_id,
+                "document": doc_dict,
+            }
+
+            # Projection des champs de contenu autorisés (top-level dans la réponse GM)
+            content_val = res.get("content") if "content" in res else raw_doc.get("content")
+            if content_val is not None:
+                out["content"] = content_val
+                doc_dict["content"] = content_val
+
+            fmt_val = res.get("content_format") if "content_format" in res else raw_doc.get("content_format")
+            if fmt_val is not None:
+                out["content_format"] = fmt_val
+                doc_dict["content_format"] = fmt_val
+
+            b64_val = res.get("content_base64") if "content_base64" in res else raw_doc.get("content_base64")
+            if b64_val is not None:
+                out["content_base64"] = b64_val
+                doc_dict["content_base64"] = b64_val
+
+            note_val = res.get("content_note") if "content_note" in res else raw_doc.get("content_note")
+            if note_val is not None:
+                out["content_note"] = note_val
+                doc_dict["content_note"] = note_val
+
+            return out
+        except ConnectionError as e:
+            return {
+                "status": "error",
+                "message": f"Could not connect to Graph Memory: {e}",
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"document_get error: {e}",
+            }
 
 
 # ─────────────────────────────────────────────────────────────

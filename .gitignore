@@ -1,8 +1,13 @@
-# === Dossiers de travail ===
+# Local working data and client configuration
 chantier/
 memory-bank/
+.mcp.json
+.codex/
+.claude/
+.clinerules/
+tests/bench/
 
-# === Python ===
+# Python environments, builds and caches
 __pycache__/
 *.py[cod]
 *$py.class
@@ -10,81 +15,48 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+bin/
 .eggs/
 *.egg
 .venv/
+.venv-tests/
 venv/
 env/
 
-# === Test / Coverage artifacts ===
+# Test and coverage artifacts
 .coverage
 .coverage.*
 htmlcov/
 .pytest_cache/
 .tox/
+proof-artifacts/
 
-# === Environment / Secrets ===
+# Environment files and secrets
 .env
 .env.local
 .env.production
 *.pem
 *.key
 
-# === Docker ===
+# Local Docker overrides
 docker-compose.override.yml
 docker-compose-local.yml
 
-# === MCP config (local) ===
-.mcp.json
-.codex/
-.claude/
-
-# === IDE ===
+# Editor and operating-system files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
+Thumbs.db
 
-# === Logs ===
+# Logs
 *.log
 logs/
 
-# === OS ===
-Thumbs.db
-.DS_Store
-DESIGN/Graph-mem/
-.clinerules/
-starter-kit/
-DESIGN/mcp-vault
-DESIGN/mcp-mission
-DESIGN/mcp-agent
-DESIGN/EVALUATION.md
-DESIGN/SYNTHESE_TRANSVERSE.md
-waf/.smbdeleteAAA73f84.4
-.venv-tests/
-scripts/test_hallucination.py
-
-# === Embedded Graph Memory runtime (services/graph-memory/) ===
-# Caches / venvs / secrets are already covered by the global Python + secret
-# rules above (they match at any depth). These cover datastore volumes if an
-# operator ever runs the embedded service standalone with bind mounts; the
-# default compose uses named volumes (P7-2), so these normally never appear.
+# Datastore directories for operator-managed bind mounts
 neo4j_data/
 neo4j_logs/
 qdrant_data/
 qdrant_snapshots/
-
-# === P8-7 admin console proof harness output (scripts/admin_console_proof.py) ===
-# Screenshots + proof-report.json are attached to the PR, never committed, so the
-# head SHA stays stable across proof re-runs.
-proof-artifacts/
-
-# === P13-2 protected provider certification output ===
-# The ownership marker and redacted workflow artifacts are run-local. A stale
-# marker is intentionally retained on ambiguous cleanup so the protected
-# workflow can recover only the stack it created.
-.provider-certification-owned
-.provider-certification-budget/
-artifacts/provider-certification/

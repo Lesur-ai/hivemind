@@ -20,7 +20,7 @@ by regular MCP discovery.
 
 ## Complete registered surface
 
-50 registry entries cover 63 registered names.
+59 registry entries cover 72 registered names.
 
 | Canonical name | Historical aliases | Audience | Minimum profile | Operation | Space-scope argument |
 |---|---|---|---|---|---|
@@ -59,6 +59,15 @@ by regular MCP discovery.
 | `long_connect` | `graph_connect` | `operator` | `write` | `mutation` | `space_id` |
 | `long_disconnect` | `graph_disconnect` | `operator` | `write` | `mutation` | `space_id` |
 | `long_reindex` | — | `operator` | `manage` | `mutation` | `space_id` |
+| `ontology_list` | — | `operator` | `read` | `read` | `space_id` |
+| `ontology_get` | — | `operator` | `read` | `read` | `space_id` |
+| `ontology_validate` | — | `operator` | `read` | `read` | `space_id` |
+| `long_ingest_async` | — | `operator` | `manage` | `mutation` | `space_id` |
+| `long_ingest_status` | — | `operator` | `read` | `read` | `space_id` |
+| `long_ingest_list` | — | `operator` | `read` | `read` | `space_id` |
+| `long_ingest_cancel` | — | `operator` | `write` | `mutation` | `space_id` |
+| `long_document_list` | — | `operator` | `read` | `read` | `space_id` |
+| `long_document_get` | — | `operator` | `read` | `read` | `space_id` |
 | `inference_self_test` | — | `operator` | `manage` | `mutation` | — |
 | `backup_create` | — | `operator` | `write` | `mutation` | `space_id` |
 | `backup_list` | — | `operator` | `read` | `read` | `space_id` |

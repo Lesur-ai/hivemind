@@ -1,22 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 P4-7 — ``long_ingest`` / ``long_query`` MCP tools + the ``LongEngine.plan_ingest``
-planning method, proven SAFE, deterministic, and strictly downstream (ADR-0010,
-reconciled EPIC-P4, EVOLUTION_LIVE_GRAPH_INTEGRATION.md Vague C, D13 plan-only).
+planning method, proven SAFE, deterministic, and strictly downstream (ADR-0010).
 
 ``long_ingest`` is canonical document ingestion as a FIRST-CLASS long-tier
 capability, DISTINCT from the filename-keyed ``graph_push`` bank mirror.
 Documents are keyed by a stable ``source_path`` (NOT the mutable bank filename)
-and carry an optional SHA-256. The ENGINE plans; the server is NOT a blind proxy
-(EVOLUTION C-Q2.a). Three modes:
+and carry an optional SHA-256. The ENGINE plans; the server is NOT a blind proxy.
+Three modes:
 
 - ``dry-run``     — return the planned ``{source_path, sha256}`` set with ZERO
                     transport write (no GM call at all).
 - ``check-remote``— SKIP / UPDATE / INGEST plan by comparing each doc's sha256
                     against the remote (read-only ``document_list``). No writes.
-- ``apply``       — DEFERRED in v1 (D13 / EVOLUTION Vague C apply is codex-gated,
-                    v2.7.0+): a structured ``applied: false`` result with a clear
-                    reason. NO blind ingestion write from the tool in v1.
+- ``apply``       — unavailable in this release: a structured ``applied: false``
+                    result with a clear reason. NO blind ingestion write.
 
 ``long_query`` is a READ-ONLY tool over ``LongEngine.query`` (``memory_query``).
 
@@ -194,15 +192,29 @@ def test_new_long_tools_are_not_aliases() -> None:
     assert "long_query" not in ALIAS_MAP.values()
 
 
-def test_graph_register_returns_seven() -> None:
-    """The graph category registers the legacy four plus three direct long tools."""
+def test_graph_register_returns_sixteen() -> None:
+    """The graph category registers the legacy four plus twelve direct long/ontology/catalog tools."""
     mcp = FastMCP(name="test-graph-count")
     n = graph_tools.register(mcp)
-    assert n == 7
+    assert n == 16
     names = set(mcp._tool_manager._tools)
-    assert {"long_ingest", "long_query", "long_reindex"} <= names
+    assert {
+        "long_ingest",
+        "long_query",
+        "long_reindex",
+        "ontology_list",
+        "ontology_get",
+        "ontology_validate",
+        "long_ingest_async",
+        "long_ingest_status",
+        "long_ingest_list",
+        "long_ingest_cancel",
+        "long_document_list",
+        "long_document_get",
+    } <= names
     # The legacy four are still there.
     assert {"graph_connect", "graph_push", "graph_status", "graph_disconnect"} <= names
+
 
 
 # =============================================================================
@@ -384,9 +396,9 @@ async def test_check_remote_makes_no_write_calls_when_remote_empty() -> None:
 
 
 async def test_apply_is_deferred_no_blind_ingest() -> None:
-    """mode='apply' returns status ok + applied:false + a clear deferral reason
-    (D13 / EVOLUTION Vague C: apply is codex-gated, v2.7.0+). It must NOT perform
-    any ingestion write — no GM client built, no memory_ingest issued."""
+    """mode='apply' returns status ok + applied:false + a clear plan-only reason.
+    It must NOT perform any ingestion write — no GM client built, no
+    memory_ingest issued."""
     long_ingest = _tool_fn("long_ingest")
 
     storage = FakeStorage()
@@ -410,6 +422,15 @@ async def test_apply_is_deferred_no_blind_ingest() -> None:
     # A clear, structured reason — not a silent no-op.
     assert isinstance(result.get("reason"), str) and result["reason"]
     assert "defer" in result["reason"].lower() or "plan-only" in result["reason"].lower()
+    assert result["reason"] == (
+        "apply is unavailable in this release; this tool is plan-only. "
+        "Use mode='dry-run' or mode='check-remote' to plan. "
+        "No documents were ingested."
+    )
+    assert set(result) == {"status", "space_id", "mode", "applied", "reason"}
+    assert result["space_id"] == _SPACE
+    for private_or_future_detail in ("D13", "EVOLUTION", "codex-gated", "v2.7.0+"):
+        assert private_or_future_detail not in result["reason"]
 
     # ── No blind ingest: nothing was written to GM ───────────────────────────
     assert factory.instances == []

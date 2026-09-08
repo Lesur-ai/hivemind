@@ -951,6 +951,47 @@ class GraphService:
             record = await result.single()
             return bool(record and record["updated"] > 0)
 
+    @_guard_graph_mutation
+    async def promote_candidate_document(
+        self,
+        memory_id: str,
+        old_doc_id: str,
+        new_doc_id: str,
+        canonical_source_path: str,
+        chunk_count: int,
+        last_ingest_job_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Commutation atomique de document (Safe Replace / Double Buffering).
+
+        Dans une seule transaction Cypher :
+        1. L'ancien document est marqué 'deprecated' et son source_path est libéré (null),
+           évitant toute violation de contrainte d'unicité (memory_id, source_path).
+        2. Le nouveau document reçoit le source_path canonique et passe en status 'succeeded'.
+        """
+        norm_source_path = self.normalize_source_path(canonical_source_path)
+        async with self.session() as session:
+            result = await session.run(
+                """
+                MATCH (old:Document {id: $old_doc_id, memory_id: $memory_id})
+                MATCH (new:Document {id: $new_doc_id, memory_id: $memory_id})
+                SET old.source_path = null, old.ingestion_status = 'deprecated'
+                SET new.source_path = $source_path,
+                    new.ingestion_status = 'succeeded',
+                    new.chunk_count = $chunk_count,
+                    new.last_ingest_job_id = $last_ingest_job_id
+                RETURN count(new) as updated
+                """,
+                memory_id=memory_id,
+                old_doc_id=old_doc_id,
+                new_doc_id=new_doc_id,
+                source_path=norm_source_path,
+                chunk_count=chunk_count,
+                last_ingest_job_id=last_ingest_job_id,
+            )
+            record = await result.single()
+            return bool(record and record["updated"] > 0)
+
     async def get_document_by_source_path(self, memory_id: str, source_path: str) -> Optional[Dict[str, Any]]:
         """
         Trouve un document par son source_path (clé métier stable).
@@ -991,6 +1032,23 @@ class GraphService:
                 "last_ingest_job_id": record["last_ingest_job_id"],
                 "chunk_count": record["chunk_count"] or 0,
             }
+
+    async def get_active_doc_ids(self, memory_id: str) -> list[str]:
+        """Retourne la liste des identifiants de documents actifs (ingestion_status == 'succeeded').
+
+        Utilisé pour filtrer strictement les recherches vectorielles Qdrant et empêcher
+        l'exposition de documents candidats ou partiellement ingérés.
+        """
+        async with self.session() as session:
+            result = await session.run(
+                """
+                MATCH (d:Document {memory_id: $memory_id, ingestion_status: 'succeeded'})
+                RETURN d.id as id
+                """,
+                memory_id=memory_id,
+            )
+            records = await result.data()
+            return [r["id"] for r in records if r.get("id")]
     
     async def get_document_by_hash(self, memory_id: str, doc_hash: str) -> Optional[Document]:
         """Trouve un document par son hash."""
@@ -1118,6 +1176,161 @@ class GraphService:
                     "content_type": r["content_type"],
                 }
             return out
+
+    async def list_documents_catalog(
+        self,
+        memory_id: str,
+        limit: Optional[int] = 50,
+        offset: int = 0,
+        status: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Liste les documents d'une mémoire avec pagination et filtres."""
+        where_clauses = ["d.memory_id = $memory_id"]
+        params: Dict[str, Any] = {"memory_id": memory_id}
+
+        if limit is not None:
+            limit = max(1, min(100, limit))
+            offset = max(0, offset)
+            params["limit"] = limit
+            params["offset"] = offset
+            pagination_clause = "SKIP $offset LIMIT $limit"
+        else:
+            pagination_clause = ""
+
+        if status:
+            where_clauses.append("d.ingestion_status = $status")
+            params["status"] = status
+
+        if query:
+            where_clauses.append("(toLower(d.filename) CONTAINS toLower($query) OR toLower(d.source_path) CONTAINS toLower($query))")
+            params["query"] = query.strip()
+
+        where_sql = " AND ".join(where_clauses)
+
+        count_cypher = f"""
+        MATCH (d:Document)
+        WHERE {where_sql}
+        RETURN count(d) as total_count
+        """
+
+        docs_cypher = f"""
+        MATCH (d:Document)
+        WHERE {where_sql}
+        RETURN d.id as id, d.filename as filename, d.uri as uri,
+               d.hash as hash, d.source_path as source_path,
+               d.source_modified_at as source_modified_at,
+               d.ingested_at as ingested_at,
+               d.ingestion_status as ingestion_status,
+               d.last_ingest_job_id as last_ingest_job_id,
+               d.chunk_count as chunk_count,
+               d.size_bytes as size_bytes,
+               d.text_length as text_length,
+               d.content_type as content_type
+        ORDER BY d.ingested_at DESC, d.id ASC
+        {pagination_clause}
+        """
+
+        async with self.session() as session:
+            count_res = await session.run(count_cypher, **params)
+            count_rec = await count_res.single()
+            total_count = count_rec["total_count"] if count_rec else 0
+
+            docs_res = await session.run(docs_cypher, **params)
+            docs = []
+            async for r in docs_res:
+                sp = self.normalize_source_path(r["source_path"])
+                docs.append({
+                    "id": r["id"],
+                    "document_id": r["id"],
+                    "filename": r["filename"],
+                    "uri": r["uri"],
+                    "hash": r["hash"],
+                    "sha256": r["hash"],
+                    "source_path": sp,
+                    "repo_path": self.derive_repo_path(sp),
+                    "source_modified_at": r["source_modified_at"] or None,
+                    "ingested_at": _iso(r["ingested_at"]),
+                    "ingestion_status": r["ingestion_status"] or "unknown",
+                    "status": r["ingestion_status"] or "unknown",
+                    "last_ingest_job_id": r["last_ingest_job_id"],
+                    "chunk_count": r["chunk_count"] or 0,
+                    "size_bytes": r["size_bytes"] or 0,
+                    "text_length": r["text_length"] or 0,
+                    "content_type": r["content_type"],
+                })
+
+            return {
+                "total_count": total_count,
+                "limit": limit,
+                "offset": offset if limit is not None else 0,
+                "documents": docs,
+            }
+
+    async def get_document_details(
+        self,
+        memory_id: str,
+        doc_id: Optional[str] = None,
+        source_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Récupère les métadonnées détaillées d'un document par doc_id ou source_path."""
+        if not doc_id and not source_path:
+            return None
+
+        where_clauses = ["d.memory_id = $memory_id"]
+        params: Dict[str, Any] = {"memory_id": memory_id}
+
+        if doc_id:
+            where_clauses.append("d.id = $doc_id")
+            params["doc_id"] = doc_id
+        if source_path:
+            norm_sp = self.normalize_source_path(source_path)
+            where_clauses.append("d.source_path = $source_path")
+            params["source_path"] = norm_sp
+
+        where_sql = " AND ".join(where_clauses)
+
+        cypher = f"""
+        MATCH (d:Document)
+        WHERE {where_sql}
+        RETURN d.id as id, d.filename as filename, d.uri as uri,
+               d.hash as hash, d.source_path as source_path,
+               d.source_modified_at as source_modified_at,
+               d.ingested_at as ingested_at,
+               d.ingestion_status as ingestion_status,
+               d.last_ingest_job_id as last_ingest_job_id,
+               d.chunk_count as chunk_count,
+               d.size_bytes as size_bytes,
+               d.text_length as text_length,
+               d.content_type as content_type
+        ORDER BY d.ingested_at DESC
+        LIMIT 1
+        """
+        async with self.session() as session:
+            res = await session.run(cypher, **params)
+            r = await res.single()
+            if not r:
+                return None
+            sp = self.normalize_source_path(r["source_path"])
+            return {
+                "id": r["id"],
+                "document_id": r["id"],
+                "filename": r["filename"],
+                "uri": r["uri"],
+                "hash": r["hash"],
+                "sha256": r["hash"],
+                "source_path": sp,
+                "repo_path": self.derive_repo_path(sp),
+                "source_modified_at": r["source_modified_at"] or None,
+                "ingested_at": _iso(r["ingested_at"]),
+                "ingestion_status": r["ingestion_status"] or "unknown",
+                "status": r["ingestion_status"] or "unknown",
+                "last_ingest_job_id": r["last_ingest_job_id"],
+                "chunk_count": r["chunk_count"] or 0,
+                "size_bytes": r["size_bytes"] or 0,
+                "text_length": r["text_length"] or 0,
+                "content_type": r["content_type"],
+            }
 
     async def list_reindex_documents(self, memory_id: str) -> List[Dict[str, Any]]:
         """Return the exact retained-source fields used by maintenance reindex.
@@ -1805,7 +2018,7 @@ class GraphService:
                 }
                 # source_path NORMALISÉ (contrat canonique) + repo_path dérivé.
                 # Clés TOUJOURS exposées (None si absent) pour un contrat homogène
-                # avec document_get et memory_query (finding Codex #4).
+                # avec document_get et memory_query.
                 source_path = self.normalize_source_path(record.get("source_path"))
                 doc_entry["source_path"] = source_path
                 doc_entry["repo_path"] = self.derive_repo_path(source_path)
@@ -2222,12 +2435,26 @@ class GraphService:
                     "type": r["type"],
                     "mentions": r["mentions"]
                 })
+
+            # Distribution complète de tous les types d'entités (sans limite)
+            types_result = await session.run(
+                """
+                MATCH (e:Entity {memory_id: $memory_id})
+                RETURN coalesce(e.type, 'Other') as type, count(e) as count
+                """,
+                memory_id=memory_id
+            )
+            entity_types: Dict[str, int] = {}
+            async for r in types_result:
+                t_name = str(r["type"] or "Other")
+                entity_types[t_name] = entity_types.get(t_name, 0) + int(r["count"])
             
             return MemoryStats(
                 memory_id=memory_id,
                 document_count=record["doc_count"],
                 entity_count=record["entity_count"],
                 relation_count=record["rel_count"],
+                entity_types=entity_types,
                 top_entities=top_entities
             )
 

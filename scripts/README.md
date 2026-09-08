@@ -1,7 +1,7 @@
 # 🖥️ Hivemind CLI, Shell & Tests
 
 > Scriptable CLI, interactive shell, and operational test scripts for Hivemind
-> `1.4.1`.
+> `1.5.0`.
 
 🇫🇷 [Version française](README.fr.md)
 
@@ -140,7 +140,7 @@ uv run python scripts/mcp_cli.py backup delete <backup_id> --confirm        # Pe
 ### Token delegation and admin lifecycle
 
 ```bash
-uv run python scripts/mcp_cli.py token create agent-cline -p read,write --email cline@team.io  # manage; starts with no spaces
+uv run python scripts/mcp_cli.py token create agent-cline -p read,write --email cline@example.com  # manage; starts with no spaces
 uv run python scripts/mcp_cli.py token list                                 # List tokens (filterable)
 uv run python scripts/mcp_cli.py token update <hash> --add-spaces my-proj   # Delta update (add/remove spaces, perms, email)
 uv run python scripts/mcp_cli.py token bulk-update --name-contains agent --add-spaces my-proj --confirm   # Mass update
@@ -275,12 +275,59 @@ uv run python scripts/test_recette.py --suite graph \
 
 ---
 
+### Async-ingestion demonstrator — `test_async_ingest_e2e.py`
+
+This is an experimental live example of async submission, status, listing,
+replacement and cancellation calls, **not a release-validation gate**. Inspect
+its options without contacting a service:
+
+```bash
+uv run python scripts/test_async_ingest_e2e.py --help
+```
+
+Running it can submit paid inference and mutate the selected space. Use only a
+disposable Docker Compose stack with the `dev` profile, dedicated test
+credentials, and a new, unused test-space identifier. Never target an existing
+customer space. Set `MCP_URL` and `MCP_TOKEN` deliberately: without an explicit
+token the helper can fall back to the local bootstrap credential.
+
+Checks and evidence limits:
+
+- `long_ingest_async` returns a batch acknowledgement; job ids are in `items`.
+  A submission does not prove that every document was ingested.
+- The helper checks terminal success for the first ingestion and replacement,
+  but does not independently prove cross-store atomicity, retained content or
+  absence of orphaned objects.
+- Creation must report `created` for the exact requested identifier. The helper
+  refuses committed existing spaces and ambiguous creation results; it never
+  pre-deletes a space. The backend may resume an uncommitted bootstrap prefix
+  only when it exactly matches the request and its lifecycle checks pass.
+  `created` therefore does not prove the storage prefix was previously empty.
+  Use a new test identifier. The access token is masked.
+- The listing must include the first job. Cancellation must reach `cancelled`;
+  a completion race is inconclusive, not success. Polling uses a monotonic
+  deadline including each call (`--max-wait`, default 90 seconds per job).
+- Cleanup runs only after all checks succeed, with `confirm=True`, and requires
+  a matching `deleted` response. On failure or ambiguity the space is retained
+  (or deletion remains uncertain); inspect jobs and data before any explicit
+  operator cleanup after writers are quiescent. `--no-cleanup` retains it.
+  The helper never requests `recover_access_grants`; it accepts only `deleted`,
+  so an unexpected `grants_cleaned` response is conservatively reported as
+  inconclusive and requires operator inspection, even if grant cleanup succeeded.
+
+These checks do not prove pagination completeness or datastore correctness.
+Use the focused tests in `tests/test_long_ingest_async.py` and
+the [MCP contract](../docs/MCP_TOOLS_SPEC.md) for the supported behavior.
+
+---
+
 ## Architecture
 
 ```
 scripts/
 ├── mcp_cli.py                # CLI entry point (Click) + Interactive shell
 ├── test_recette.py           # 🧪 Global test suite (4 suites, ~44 tests)
+├── test_async_ingest_e2e.py  # 🚀 Experimental async-ingestion demonstrator
 ├── configure_dev_env.py      # Secure local .env generator (refuses overwrite)
 ├── README.md                 # Documentation (English) ← You are here
 ├── README.fr.md              # Documentation (French)
@@ -288,10 +335,10 @@ scripts/
     ├── __init__.py           # Config (BASE_URL, TOKEN)
     ├── client.py             # MCPClient Streamable HTTP (MCP SDK)
     ├── commands.py           # Click commands (1 per MCP tool)
-    ├── display.py            # Rich display (tables, panels)
+    ├── display.py            # Rich display formatting (tables, panels)
     └── shell.py              # Interactive shell (prompt_toolkit)
 ```
 
 ---
 
-*Hivemind CLI — 1.4.1*
+*Hivemind CLI — 1.5.0*

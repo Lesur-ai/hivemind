@@ -95,13 +95,11 @@ def make_service(
     """Build only the attributes exercised by isolated compaction tests."""
 
     service = object.__new__(ConsolidatorService)
-    service._legacy_french_prompts = False
     service._bank_file_max_size = max_size
     service._max_tokens = max_tokens
     service._context_window = context_window
     service._context_window_env_name = "INFERENCE_CHAT_CONTEXT_WINDOW"
     service._timeout = 1
-    service._compact_threshold = 0.6
     service._model = "test-model"
     # ``consolidate`` first checks that a chat role exists.  Isolated
     # compaction tests do not construct the production inference runtime, but
@@ -196,111 +194,6 @@ def test_compaction_limit_is_independent_of_the_bank_filename(filename: str) -> 
     assert service._get_max_size_for_file(filename) == 15_360
 
 
-async def test_auto_compaction_hard_per_file_limit_applies_below_threshold(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    storage = CompactionStorage()
-    storage.objects = {"space-a/bank/facts.md": "x" * 200}
-    service = make_service(max_size=100, max_tokens=100)
-    service._plan_single_file_compaction = AsyncMock(
-        return_value=("c" * 60, _prepared_plan_details())
-    )
-    monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
-
-    bank_files = [{"key": "space-a/bank/facts.md", "content": "x" * 200}]
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        bank_files,
-        "# Rules",
-        direct_local_sink=DirectLocalWriteSink(storage),
-    )
-
-    assert _without_preimage_id(result) == {
-        "compacted": True,
-        "files_compacted": 1,
-        "size_before": 200,
-        "size_after": 60,
-    }
-    service._plan_single_file_compaction.assert_awaited_once_with(
-        "facts.md", "x" * 200, 100, "# Rules"
-    )
-    assert storage.objects["space-a/bank/facts.md"] == "c" * 60
-    archive_keys = [
-        key for key in storage.objects if key.startswith("_backups/space-a/")
-    ]
-    assert len(archive_keys) == 1
-    assert storage.objects[archive_keys[0]] == "x" * 200
-
-
-async def test_auto_compaction_skips_a_bank_below_threshold_and_file_limit() -> None:
-    service = make_service(max_size=100, max_tokens=100)
-    service._plan_single_file_compaction = AsyncMock()
-
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        [{"key": "space-a/bank/facts.md", "content": "x" * 80}],
-        "# Rules",
-    )
-
-    assert result == {
-        "compacted": False,
-        "files_compacted": 0,
-        "size_before": 80,
-        "size_after": 80,
-    }
-    service._plan_single_file_compaction.assert_not_awaited()
-
-
-async def test_auto_compaction_writes_only_a_smaller_over_limit_file(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    storage = CompactionStorage()
-    storage.objects = {
-        "space-a/bank/activeContext.md": "a" * 360,
-        "space-a/bank/facts.md": "f" * 40,
-    }
-    service = make_service(max_size=100, max_tokens=100)
-    service._plan_single_file_compaction = AsyncMock(
-        return_value=(
-            "c" * 60,
-            {
-                "status": "ok",
-                "action": "edit",
-                "operation_reasons": ("Remove repetition.",),
-            },
-        )
-    )
-    monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
-
-    bank_files = [
-        {"key": "space-a/bank/activeContext.md", "content": "a" * 360},
-        {"key": "space-a/bank/facts.md", "content": "f" * 40},
-    ]
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        bank_files,
-        "# Rules",
-        direct_local_sink=DirectLocalWriteSink(storage),
-    )
-
-    assert _without_preimage_id(result) == {
-        "compacted": True,
-        "files_compacted": 1,
-        "size_before": 400,
-        "size_after": 100,
-    }
-    service._plan_single_file_compaction.assert_awaited_once_with(
-        "activeContext.md", "a" * 360, 100, "# Rules"
-    )
-    assert storage.objects["space-a/bank/activeContext.md"] == "c" * 60
-    assert storage.objects["space-a/bank/facts.md"] == "f" * 40
-    archive_keys = [
-        key for key in storage.objects if key.startswith("_backups/space-a/")
-    ]
-    assert len(archive_keys) == 2
-    archive_values = {storage.objects[key] for key in archive_keys}
-    assert archive_values == {"a" * 360, "f" * 40}
-
 
 # =============================================================================
 # #394 — complete logical prepare phase before DirectLocal apply
@@ -314,102 +207,6 @@ def _prepared_plan_details() -> dict[str, object]:
         "operation_reasons": ("Remove redundant historical detail.",),
     }
 
-
-async def test_auto_prepare_rejects_invalid_second_candidate_before_any_apply() -> None:
-    storage = CompactionStorage()
-    storage.objects = {
-        "space-a/bank/a.md": "a" * 360,
-        "space-a/bank/b.md": "b" * 360,
-    }
-    before = storage.snapshot()
-    service = make_service(max_size=100, max_tokens=100)
-    planned: list[str] = []
-
-    async def planner(filename, content, max_size, rules):
-        planned.append(filename)
-        if filename == "a.md":
-            return "a" * 60, _prepared_plan_details()
-        return None, {"status": "error", "error": "invalid_compaction_json"}
-
-    service._plan_single_file_compaction = planner
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        await storage.list_and_get("space-a/bank/"),
-        "# Rules",
-        direct_local_sink=DirectLocalWriteSink(storage),
-    )
-
-    assert planned == ["a.md", "b.md"]
-    assert result["status"] == "error"
-    assert result["failure_reason"] == "compaction_prepare_failed"
-    assert result["failures"] == [
-        {"filename": "b.md", "error": "invalid_compaction_json"}
-    ]
-    assert storage.events == []
-    assert storage.objects == before
-
-
-async def test_auto_prepare_plans_every_candidate_before_the_first_mutation() -> None:
-    storage = CompactionStorage()
-    storage.objects = {
-        "space-a/bank/a.md": "a" * 360,
-        "space-a/bank/b.md": "b" * 360,
-    }
-    service = make_service(max_size=100, max_tokens=100)
-    events = storage.events
-
-    async def planner(filename, content, max_size, rules):
-        events.append(f"plan:{filename}")
-        return filename[0] * 60, _prepared_plan_details()
-
-    service._plan_single_file_compaction = planner
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        await storage.list_and_get("space-a/bank/"),
-        "# Rules",
-        direct_local_sink=DirectLocalWriteSink(storage),
-    )
-
-    assert result["compacted"] is True
-    first_mutation = next(
-        index for index, event in enumerate(events) if event.startswith("put:")
-    )
-    assert events[:first_mutation] == ["plan:a.md", "plan:b.md"]
-    assert storage.objects["space-a/bank/a.md"] == "a" * 60
-    assert storage.objects["space-a/bank/b.md"] == "b" * 60
-
-
-async def test_auto_apply_rechecks_route_before_backup_or_bank_mutation() -> None:
-    storage = CompactionStorage()
-    storage.objects = {"space-a/bank/facts.md": "f" * 120}
-    service = make_service(max_size=100, max_tokens=100)
-    service._plan_single_file_compaction = AsyncMock(
-        return_value=("c" * 60, _prepared_plan_details())
-    )
-    final_route = AsyncMock(side_effect=RuntimeError("route changed"))
-    service._final_direct_local_compaction_sink = final_route
-
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        await storage.list_and_get("space-a/bank/"),
-        "# Rules",
-        direct_local_sink=DirectLocalWriteSink(storage),
-    )
-
-    assert result == {
-        "compacted": False,
-        "files_compacted": 0,
-        "size_before": 120,
-        "size_after": 120,
-        "status": "error",
-        "failure_reason": "direct_local_route_required",
-        "failures": [
-            {"filename": "", "error": "direct_local_route_required"}
-        ],
-    }
-    final_route.assert_awaited_once()
-    assert storage.events == []
-    assert not any(key.startswith("_backups/") for key in storage.objects)
 
 
 async def test_final_route_fence_resolves_a_fresh_direct_local_sink(
@@ -1388,49 +1185,6 @@ async def test_consolidate_staged_route_reports_the_requested_operation(
     service._call_llm.assert_not_awaited()
 
 
-async def test_consolidate_uses_the_routed_storage_for_snapshot_and_apply(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A DirectLocal route supplies one coherent read/plan/write view."""
-
-    storage = CompactionStorage()
-    storage.objects = {
-        "space-a/_meta.json": "{}",
-        "space-a/_rules.md": "# Rules",
-        "space-a/live/20260101T000000_agent_observation_12345678.md": "note",
-        "space-a/bank/facts.md": "f" * 120,
-    }
-    service = make_service(max_size=100, max_tokens=100)
-    service._max_notes = 100
-    service._batch_size = 1
-    service._validation_enabled = False
-    service._plan_single_file_compaction = AsyncMock(
-        return_value=("f" * 60, _prepared_plan_details())
-    )
-    service._call_llm = AsyncMock(
-        return_value={"status": "error", "message": "stop after compaction"}
-    )
-
-    class DirectRegistry:
-        async def resolve_sink(self, space_id: str) -> DirectLocalWriteSink:
-            assert space_id == "space-a"
-            return DirectLocalWriteSink(storage)
-
-    def forbidden_global_storage():
-        raise AssertionError("consolidation escaped its routed DirectLocal view")
-
-    from live_mem.core import engines
-
-    monkeypatch.setattr(engines, "get_engine_registry", lambda: DirectRegistry())
-    monkeypatch.setattr(consolidator_module, "get_storage", forbidden_global_storage)
-
-    result = await service.consolidate("space-a", enforce_cooldown=False)
-
-    assert result["status"] == "partial"
-    assert storage.objects["space-a/bank/facts.md"] == "f" * 60
-    service._plan_single_file_compaction.assert_awaited_once_with(
-        "facts.md", "f" * 120, 100, "# Rules"
-    )
 
 
 async def test_manual_apply_failure_restores_verified_preimages() -> None:
@@ -1693,17 +1447,19 @@ async def test_normalized_adapter_refusal_is_a_safe_no_plan(
 
 
 @pytest.mark.parametrize(
-    "completion",
+    ("completion", "expected_error"),
     [
-        "```json\n{}\n```",
-        "The requested plan follows.\n```json\n{}\n```",
-        '{"file_edits":[{"filename":"facts.md"',
-        '{"file_edits":[],"file_edits":[]}',
-        '{"file_edits": NaN}',
+        ("```json\n{}\n```", "invalid_compaction_json"),
+        ("The requested plan follows.\n```json\n{}\n```", "invalid_compaction_json"),
+        ("```json\n{malformed\n```", "invalid_compaction_json"),
+        ('{"file_edits":[{"filename":"facts.md"', "invalid_compaction_json"),
+        ('{"file_edits":[],"file_edits":[]}', "invalid_compaction_json"),
+        ('{"file_edits": NaN}', "invalid_compaction_json"),
     ],
 )
 async def test_fenced_malformed_duplicate_and_non_json_completions_are_not_salvaged(
     completion: str,
+    expected_error: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = make_service()
@@ -1720,7 +1476,7 @@ async def test_fenced_malformed_duplicate_and_non_json_completions_are_not_salva
     )
 
     assert candidate is None
-    assert details["error"] == "invalid_compaction_json"
+    assert details["error"] == expected_error
 
 
 async def test_valid_plan_does_not_enter_generic_json_or_storage_paths(
@@ -1744,6 +1500,22 @@ async def test_valid_plan_does_not_enter_generic_json_or_storage_paths(
 
     assert candidate is not None
     assert details["status"] == "ok"
+
+
+async def test_compaction_plan_with_json_fence_is_rejected_as_direct_json_only() -> None:
+    source = _source()
+    service = make_service()
+    plan_json = _plan_json("facts.md", [_replace_details()])
+    # Fenced compaction plan must be rejected in fail-closed mode (direct-only)
+    completions_for(service).content = f"Here is the compaction plan:\n```json\n{plan_json}\n```\n"
+
+    candidate, details = await service._plan_single_file_compaction(
+        "facts.md", source, 10_000, "# Rules"
+    )
+
+    assert candidate is None
+    assert details["status"] == "error"
+    assert details["error"] == "invalid_compaction_json"
 
 
 async def test_strict_schema_rejects_unknown_fields_and_unsafe_operations() -> None:
@@ -2087,106 +1859,6 @@ def test_strict_compaction_rejects_two_normalized_aliases_for_one_target() -> No
     assert candidate is None
     assert error == "duplicate_compaction_target"
 
-
-async def test_auto_compaction_reports_a_redacted_missing_target_with_no_write(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Planner provenance stays actionable without exposing model-owned text."""
-
-    marker_heading = "## COMPLETION_HEADING_SECRET_4f27"
-    marker_reason = "COMPLETION_REASON_SECRET_9a31"
-    source = "# Bank\n\n## Details\n" + "obsolete detail " * 200
-    replacement = "condensed evidence " * 30
-    service = make_service(max_size=1_000)
-    completions_for(service).content = _plan_json(
-        "facts.md",
-        [
-            _replace_details(replacement),
-            {
-                "type": "delete_section",
-                "heading": marker_heading,
-                "reason": marker_reason,
-            },
-        ],
-    )
-    storage = CompactionStorage()
-    caplog.set_level(logging.WARNING, logger="live_mem.consolidator")
-
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        [{"key": "space-a/bank/facts.md", "content": source}],
-        "# Rules",
-        direct_local_sink=DirectLocalWriteSink(storage),
-    )
-
-    expected = {
-        "filename": "facts.md",
-        "error": "ambiguous_or_missing_compaction_target",
-        "operation_index": 1,
-        "target_resolution": "missing",
-        "target_match_count": 0,
-        "target_heading_sha256": hashlib.sha256(
-            marker_heading.encode("utf-8")
-        ).hexdigest(),
-    }
-    assert result["status"] == "error"
-    assert result["failure_reason"] == "compaction_prepare_failed"
-    assert result["failures"] == [expected]
-    assert storage.events == []
-    serialized = json.dumps(result, ensure_ascii=False) + caplog.text
-    assert marker_heading not in serialized
-    assert marker_reason not in serialized
-
-
-async def test_auto_compaction_reports_an_ambiguous_target_cardinality(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Operators can distinguish a zero-match typo from a source collision."""
-
-    marker_heading = "## Release − Evidence"
-    source = (
-        "# Bank\n\n"
-        "## Release — Evidence\n"
-        + "first source evidence " * 80
-        + "\n## Release - Evidence\n"
-        + "second source evidence " * 80
-    )
-    service = make_service(max_size=3_000)
-    completions_for(service).content = _plan_json(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": marker_heading,
-                "content": "condensed evidence " * 35,
-                "reason": "COMPLETION_REASON_SECRET_ambiguous",
-            }
-        ],
-    )
-    storage = CompactionStorage()
-    caplog.set_level(logging.WARNING, logger="live_mem.consolidator")
-
-    result = await service._compact_bank_if_needed(
-        "space-a",
-        [{"key": "space-a/bank/facts.md", "content": source}],
-        "# Rules",
-        direct_local_sink=DirectLocalWriteSink(storage),
-    )
-
-    assert result["failures"] == [
-        {
-            "filename": "facts.md",
-            "error": "ambiguous_or_missing_compaction_target",
-            "operation_index": 0,
-            "target_resolution": "ambiguous",
-            "target_match_count": 2,
-            "target_heading_sha256": hashlib.sha256(
-                marker_heading.encode("utf-8")
-            ).hexdigest(),
-        }
-    ]
-    assert marker_heading not in json.dumps(result, ensure_ascii=False) + caplog.text
-    assert storage.events == []
 
 
 def test_compaction_failure_serializer_drops_malformed_or_unknown_target_fields() -> None:
@@ -2654,29 +2326,37 @@ def test_empty_final_section_preserves_its_heading_terminal_eol(eol: str) -> Non
 @pytest.mark.parametrize(
     ("source", "max_size", "replacement", "expected_error"),
     [
-        (
-            "# Bank\n\n## Details\n" + "x" * 1_000,
-            10_000,
-            "y" * 990,
-            "compaction_reduction_below_minimum",
-        ),
+        # Le plancher de RÉTENTION reste : un candidat qui détruit plus de 95 %
+        # du source est refusé, quelle que soit la limite visée.
         (
             "# Bank\n\n## Details\n" + "x" * 2_000,
             10_000,
             "y",
             "compaction_retention_below_safety_floor",
         ),
+        # Et un candidat qui ne réduit pas — ou grossit — reste refusé.
         (
             "# Bank\n\n## Details\n" + "x" * 2_000,
             1_000,
-            "y" * 800,
-            "compaction_target_exceeded",
+            "x" * 2_000,
+            "compaction_not_smaller",
+        ),
+        (
+            "# Bank\n\n## Details\n" + "x" * 2_000,
+            1_000,
+            "y" * 2_500,
+            "compaction_not_smaller",
         ),
     ],
 )
-async def test_utf8_size_reduction_floor_and_target_are_fail_closed(
+async def test_retention_floor_and_strict_reduction_stay_fail_closed(
     source: str, max_size: int, replacement: str, expected_error: str
 ) -> None:
+    """L'enveloppe de sécurité conservée après #457 item 2.
+
+    Ce qui est retiré est le VETO d'idéal ; ce qui reste est le refus de vider
+    le fichier et le refus de ne pas réduire.
+    """
     service = make_service()
     completions_for(service).content = _plan_json(
         "facts.md", [_replace_details(replacement)]
@@ -2688,6 +2368,45 @@ async def test_utf8_size_reduction_floor_and_target_are_fail_closed(
 
     assert candidate is None
     assert details["error"] == expected_error
+
+
+@pytest.mark.parametrize(
+    ("source", "max_size", "replacement", "reduction_label"),
+    [
+        # 1 % de réduction : jetée avant par le plancher de 5 %.
+        ("# Bank\n\n## Details\n" + "x" * 1_000, 10_000, "y" * 990, "1 %"),
+        # Réduction réelle mais résultat encore TRÈS au-dessus de la limite :
+        # jetée avant par la cible à 75 % puis par la limite dure.  C'est le cas
+        # de `progress.md`, où aucun résultat réaliste ne passait, donc où le
+        # fichier ne pouvait jamais être amélioré.
+        ("# Bank\n\n## Details\n" + "x" * 20_000, 1_000, "y" * 8_000, "60 %"),
+        ("# Bank\n\n## Details\n" + "x" * 2_000, 1_000, "y" * 1_800, "10 %"),
+    ],
+)
+async def test_a_real_reduction_is_accepted_even_when_the_ideal_is_out_of_reach(
+    source: str, max_size: int, replacement: str, reduction_label: str
+) -> None:
+    """#457 item 2 — la limite de taille est un idéal, plus un veto.
+
+    Chacun de ces candidats réduit réellement le fichier et était pourtant
+    refusé : par le plancher de 5 %, par la cible à 75 %, ou par la limite dure.
+    Les refuser laissait le fichier hors limite pour toujours, puisque la
+    perfection était inatteignable en une passe.
+    """
+    service = make_service()
+    completions_for(service).content = _plan_json(
+        "facts.md", [_replace_details(replacement)]
+    )
+
+    candidate, details = await service._plan_single_file_compaction(
+        "facts.md", source, max_size, "# Rules"
+    )
+
+    assert details.get("error") is None, reduction_label
+    assert candidate is not None
+    # Strictement plus petit, et le H1 est préservé.
+    assert len(candidate.encode("utf-8")) < len(source.encode("utf-8"))
+    assert candidate.startswith("# Bank")
 
 
 def test_exact_utf8_reduction_retention_and_target_boundaries_are_accepted() -> None:
@@ -3043,3 +2762,192 @@ async def test_complete_chat_forwards_explicit_retry_policy_to_chat_request(
     request = captured["request"]
     assert request.max_output_tokens == 99
     assert request.retry_policy == "none"
+
+
+# ---------------------------------------------------------------------------
+# Les DEUX frontieres de validation doivent avoir une garde durable,
+# pas seulement le planificateur.
+# ---------------------------------------------------------------------------
+
+
+def test_a_result_above_the_limit_survives_preparation_and_apply_revalidation():
+    """`max_size < result < source` doit passer les deux frontieres.
+
+    ``compaction_result_exceeds_max_size`` ne doit être imposé ni à la
+    préparation de cible ni à la revalidation d'apply. Un test qui s'arrête au
+    planificateur ne garde ni l'un ni l'autre. Les deux doivent rester
+    cohérents, sinon l'apply refuserait ce que
+    la préparation vient d'accepter.
+    """
+    source = "# Bank\n\n## Details\n" + "x" * 300
+    result = "# Bank\n\n## Details\n" + "y" * 150
+    max_size = 100
+    assert max_size < len(result.encode("utf-8")) < len(source.encode("utf-8"))
+
+    target, error = consolidator_module._materialize_prepared_compaction_target(
+        space_id="s",
+        source_key="s/bank/facts.md",
+        filename="facts.md",
+        source=source,
+        max_size=max_size,
+        action="edit",
+        result=result,
+        reasons=("Condense the details.",),
+    )
+
+    assert error is None, error
+    assert target is not None
+
+    batch = consolidator_module._PreparedCompactionBatch(
+        space_id="s",
+        targets=(target,),
+        total_source_utf8_bytes=len(source.encode("utf-8")),
+        total_result_utf8_bytes=len(result.encode("utf-8")),
+    )
+    # La revalidation d'apply doit accepter exactement ce que la preparation a gele.
+    assert consolidator_module._prepared_compaction_batch_error(batch, "s") == ()
+
+
+@pytest.mark.parametrize(
+    ("source_body", "result_body", "expected_error"),
+    [
+        # Egal en taille, puis plus gros : la reduction doit rester STRICTE.
+        ("x" * 300, "x" * 300, "compaction_not_smaller"),
+        ("x" * 300, "y" * 400, "compaction_not_smaller"),
+        # Sous le plancher de RETENTION. Le source doit etre assez grand pour
+        # que l'en-tete conserve (19 octets) represente moins de 5 % : avec un
+        # source de 319 octets, 20/319 fait 6,3 % et ne franchit pas le seuil.
+        ("x" * 2_000, "", "compaction_retention_below_safety_floor"),
+    ],
+)
+def test_preparation_still_refuses_what_the_envelope_forbids(
+    source_body: str, result_body: str, expected_error: str
+):
+    """L'enveloppe conservee tient AUSSI a la frontiere de preparation.
+
+    C'est la derniere avant les ecritures durables. L'item 2 y a retire le seul
+    garde de taille qui s'y trouvait, donc le plancher de retention doit y etre
+    explicitement present : sans lui, un candidat qui vide le fichier passerait.
+    """
+    source = "# Bank\n\n## Details\n" + source_body
+    result = "# Bank\n\n## Details\n" + result_body
+    if expected_error == "compaction_retention_below_safety_floor":
+        assert len(result.encode("utf-8")) * 100 < len(source.encode("utf-8")) * 5
+    target, error = consolidator_module._materialize_prepared_compaction_target(
+        space_id="s",
+        source_key="s/bank/facts.md",
+        filename="facts.md",
+        source=source,
+        max_size=100,
+        action="edit",
+        result=result,
+        reasons=("Condense the details.",),
+    )
+    assert target is None
+    assert error == expected_error
+
+
+def test_compaction_rejects_delete_section_on_any_h1_heading() -> None:
+    """Deleting ANY H1 heading (primary or secondary) is forbidden."""
+    source = (
+        "# Primary H1\n\n"
+        "primary preamble\n\n"
+        "## Section 1\n\n"
+        "content 1\n\n"
+        "# Secondary H1\n\n"
+        "secondary preamble\n\n"
+        "## Section 2\n\n"
+        "content 2\n"
+    )
+    plan = _plan(
+        "facts.md",
+        [
+            {
+                "type": "delete_section",
+                "heading": "# Secondary H1",
+                "reason": "Secondary H1 must not be deleted.",
+            }
+        ],
+    )
+    candidate, error = consolidator_module._strict_compaction_candidate(
+        filename="facts.md",
+        content=source,
+        max_size=10_000,
+        plan=plan,
+    )
+    assert candidate is None
+    assert error == "protected_compaction_h1_target"
+
+
+def test_compaction_replace_section_on_secondary_h1_preamble_succeeds() -> None:
+    """Replacing preamble of a secondary H1 before its child section succeeds."""
+    source = (
+        "# Primary H1\n\n"
+        "primary preamble\n\n"
+        "## Section 1\n\n"
+        "content 1\n\n"
+        "# Secondary H1\n\n"
+        "long secondary preamble that needs compaction\n\n"
+        "## Section 2\n\n"
+        "content 2\n"
+    )
+    plan = _plan(
+        "facts.md",
+        [
+            {
+                "type": "replace_section",
+                "heading": "# Secondary H1",
+                "content": "compact secondary preamble",
+                "reason": "Compact the secondary preamble.",
+            }
+        ],
+    )
+    candidate, error = consolidator_module._strict_compaction_candidate(
+        filename="facts.md",
+        content=source,
+        max_size=10_000,
+        plan=plan,
+    )
+    assert error is None
+    assert candidate is not None
+    assert "# Primary H1" in candidate
+    assert "# Secondary H1" in candidate
+    assert "## Section 2" in candidate
+    assert "compact secondary preamble" in candidate
+
+
+def test_compaction_rejects_altered_or_reordered_h1_headings() -> None:
+    """If a replacement introduces or removes an H1 heading, candidate is rejected."""
+    source = (
+        "# First H1\n\n"
+        "content 1\n\n"
+        "## Section 1\n\n"
+        "body 1\n\n"
+        "# Second H1\n\n"
+        "content 2\n"
+    )
+    # Plan that injects an extra H1 inside a section replacement
+    plan = _plan(
+        "facts.md",
+        [
+            {
+                "type": "replace_section",
+                "heading": "## Section 1",
+                "content": "# Injected H1\n\ncorrupted",
+                "reason": "Attempt to inject an extra H1.",
+            }
+        ],
+    )
+    candidate, error = consolidator_module._strict_compaction_candidate(
+        filename="facts.md",
+        content=source,
+        max_size=10_000,
+        plan=plan,
+    )
+    assert candidate is None
+    # Either section heading nesting rejected or H1 tuple mismatch
+    assert error in {
+        "invalid_compaction_replacement_structure",
+        "compaction_replacement_heading_shallower",
+        "compaction_h1_not_preserved",
+    }

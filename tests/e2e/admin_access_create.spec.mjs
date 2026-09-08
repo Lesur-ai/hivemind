@@ -3,28 +3,27 @@
  *
  * The node:vm harness (tests/js/admin_access_lifecycle_runtime.mjs) proves the
  * view's async LOGIC fast and mutation-proof against a stubbed shell. It cannot,
- * by construction, prove behaviours the real shell owns. The Terra PR #167 review
- * called those out; this spec drives the REAL bundle (admin.html + admin-api.js +
+ * by construction, prove behaviours the real shell owns. This spec drives the
+ * REAL bundle (admin.html + admin-api.js +
  * admin-app.js + the view modules, unmodified) in headless chromium, intercepts
  * every request to serve the static files and a controlled API, and DEFERS
  * admin_create_token so the in-flight window is observable.
  *
- * Test 1 — single in-flight create ([high] R3): the real Create modal renders a
+ * Test 1 — single in-flight create: the real Create modal renders a
  * real #modalConfirmBtn; clicking it disables the confirm button AND both
- * dismissal controls (the header × and the footer Cancel — [medium] R4); a
+ * dismissal controls (the header × and the footer Cancel); a
  * second user activation of any control issues NO second admin_create_token and
  * does not close the modal; resolving `created` renders the one-time secret.
  *
- * Test 2 — navigate while pending ([high] R4): with the create deferred, an
+ * Test 2 — navigate while pending: with the create deferred, an
  * off-route hash change is REVERTED by the view's navigation lock in the real
  * browser, and when the create then resolves the secret renders over the LOCKED
  * route, never the destination. This exercises the realizable navigate-during-
- * deferred-create ordering. The sub-tick adversarial ordering the finding posits
+ * deferred-create ordering. The sub-tick adversarial ordering
  * (a network continuation running BETWEEN the synchronous hash write and its own
  * queued hashchange dispatch) cannot be forced deterministically from a driver,
- * and hardening the create->secret handoff for it would change the frozen,
- * already-merged views-access.js — out of this test-only PR's scope, tracked
- * separately in issue #168.
+ * so this spec does not claim coverage for that precise scheduler interleaving.
+ * The runtime harness separately exercises the create-to-secret handoff.
  */
 
 import { test, expect } from '@playwright/test';

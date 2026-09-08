@@ -8,11 +8,10 @@ worker so no unowned provider transport is ever built.
 
 **Why this lives here instead of once per service.** The two service modules
 held four lifecycle functions that were byte-identical after ``ast.unparse``;
-only an error string differed. Four consecutive adversarial-review rounds on
-PR #303 each found one ownership defect, and each repair naturally landed in
-whichever module the finding named — so the second copy kept the hole open. One
-state machine, exercised by one test matrix parametrised over both services, is
-the structural answer to a defect class that reappeared four times.
+only an error string differed. Duplicated ownership logic lets a lifecycle fix
+reach one service while leaving the other exposed. One state machine, exercised
+by one test matrix parametrised over both services, keeps their ownership and
+shutdown guarantees aligned.
 
 **The invariant, in one sentence.**
 
@@ -32,8 +31,7 @@ Two consequences worth stating explicitly, because both were previously wrong:
   unaccounted for. It does not adopt them (every operation would fail while
   startup claimed health) and it does not discard them either: dropping the
   last reference to a possibly-open transport is precisely the never-orphan
-  violation the earlier rounds were about. Refusing is the only option that
-  neither lies nor leaks.
+  violation. Refusing is the only option that neither lies nor leaks.
 
 No lock is taken. Every mutation happens in synchronous code except the single
 ``await`` in :meth:`close_if_initialized`, and the compare-and-clear against

@@ -537,7 +537,7 @@ class TestADM09_CallToolDirectRegression:
 
 # ═══════════════════════════════════════════════════════════════
 # P8-1a: server-side safe-error & static-serving hardening
-# (DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §6.3 items 8-9)
+# Safe errors and confined static-file serving.
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -691,7 +691,7 @@ class TestP8_1a_ServeFileContainment:
     """Independent containment layer inside _serve_file itself (defense in
     depth beyond the route matcher's string checks) — both tests build a
     real marker file outside a temp _static_dir so RED-before-fix is
-    guaranteed regardless of host filesystem layout (Codex R1 finding 1)."""
+    guaranteed regardless of host filesystem layout."""
 
     @pytest.mark.asyncio
     async def test_serve_file_realpath_containment_relative(self, tmp_path):
@@ -762,7 +762,7 @@ class TestP8_1a_ServeFileContainment:
 
 # ═══════════════════════════════════════════════════════════════
 # P8-1 / G3 items 1-7: safe-error routing for call_tool_direct and the
-# six _api_* REST handlers (DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §6.3)
+# six _api_* REST handlers
 # ═══════════════════════════════════════════════════════════════
 
 
@@ -1180,8 +1180,7 @@ class TestG3SafeErrorCallToolDirect:
 
 # ═══════════════════════════════════════════════════════════════
 # P8-1 (Track C — frontend shell rewrite, issue #139)
-# DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §2 (design system/app shell),
-# §3 (IA/routing), §5.0 (global client rules), §7 (security posture/XSS).
+# App shell, routing, global client rules and XSS security posture.
 # These classes are appended after Track A's G3 classes above and never
 # touch them.
 # ═══════════════════════════════════════════════════════════════
@@ -1317,7 +1316,7 @@ class TestP81AdminApiCallToolBehavior:
         assert "return body" in api_src
 
     def test_boot_renders_sentinel_message_not_generic_unavailable(self):
-        """Codex pre-commit finding 1: callTool()'s §5.0 sentinels
+        """callTool()'s §5.0 sentinels
         (read_only/rate_limited/truncated) reach _bootAuthenticated via
         system_whoami, but must render their own specific, mandated message
         (e.g. the §7.1.4 read-only blocked-state copy) — not be silently
@@ -1364,7 +1363,7 @@ class TestP81AdminApiCallToolBehavior:
 
 class TestP81RouteMatcher:
     """Route table (contract §3.1.1) dispatch, including the tier-scoped
-    #/spaces/<id>/<tier> route flagged by Codex R1 finding 2."""
+    #/spaces/<id>/<tier> route."""
 
     @staticmethod
     def _extract_match_route():
@@ -1375,9 +1374,8 @@ class TestP81RouteMatcher:
         import re as _re
         from urllib.parse import unquote
 
-        # SPACE_ID_RE deliberately not used here: per contract §3.1.2 step 3
-        # (and Codex pre-commit finding 2), that validation belongs to the
-        # Space Detail module, not the router.
+        # SPACE_ID_RE is deliberately not used here: that validation belongs to
+        # the Space Detail module, not the router.
         TIERS = {"short", "mid", "long"}
 
         # Python's unquote(..., errors="strict") is lenient: unquote("%zz")
@@ -1386,8 +1384,7 @@ class TestP81RouteMatcher:
         # by exactly two hex digits. This regex makes the Python mirror
         # reject the same malformed inputs JS would throw on (found via a
         # test failure once SPACE_ID_RE was no longer around to coincidentally
-        # mask this pre-existing mirror gap — see Codex pre-commit finding 2
-        # adjudication).
+        # mask this pre-existing mirror gap).
         _MALFORMED_PERCENT_RE = _re.compile(r"%(?![0-9A-Fa-f]{2})")
 
         def match(hash_value: str):
@@ -1429,7 +1426,7 @@ class TestP81RouteMatcher:
                 space_id = unquote(encoded_id, errors="strict")
             except Exception:
                 return {"view": None, "params": {}}
-            # NOTE (Codex pre-commit finding 2): SPACE_ID_RE validation does
+            # NOTE: SPACE_ID_RE validation does
             # NOT happen here. Per contract §3.1.2 step 3, that check belongs
             # to the Space Detail module, not the router — a regex-invalid
             # but decodable id still dispatches to 'space-detail' so the view
@@ -1483,7 +1480,7 @@ class TestP81RouteMatcher:
         assert result["view"] is None
 
     def test_decodable_but_regex_invalid_space_id_still_reaches_space_detail(self):
-        """Codex pre-commit finding 2: SPACE_ID_RE validation belongs to the
+        """SPACE_ID_RE validation belongs to the
         Space Detail module (§3.1.2 step 3), not the router. A space id that
         decodes cleanly but fails the regex (e.g. contains '!') must still
         dispatch to 'space-detail' with the raw id in params — it must NOT
@@ -1530,7 +1527,7 @@ class TestP81RouteMatcher:
         assert "SPACE_ID_RE" in content or "a-zA-Z0-9_-" in content
 
     def test_matchspacedetail_does_not_reject_on_regex(self):
-        """Codex pre-commit finding 2, source-inspection pin: _matchSpaceDetail
+        """Source-inspection pin: _matchSpaceDetail
         must not early-return view:null based on SPACE_ID_RE — that
         validation belongs to the Space Detail module (§3.1.2 step 3)."""
         content = _read_admin_source(_ADMIN_APP_JS)
@@ -1543,8 +1540,7 @@ class TestP81RouteMatcher:
         body = match.group(1)
         assert "SPACE_ID_RE.test" not in body, (
             "P8-1 BROKEN: _matchSpaceDetail rejects on SPACE_ID_RE again — "
-            "this must be the Space Detail view's job, not the router's "
-            "(Codex pre-commit finding 2)."
+            "this must be the Space Detail view's job, not the router's."
         )
 
 
@@ -1640,7 +1636,7 @@ class TestP81FontServingAndContentType:
 
 
 class TestP81ForbiddenSinks:
-    """Source-inspection assertions (Codex R1 'Weak Checks' note): the
+    """Source-inspection assertions: the
     grep-based escaping audit alone is insufficient — pin the forbidden
     sinks explicitly across admin-app.js and all 7 view modules throughout
     their stub-to-implementation lifecycle."""
@@ -1740,15 +1736,15 @@ class TestP81ViewStubsHonestPlaceholders:
 
 
 class TestP81PrReviewFindings:
-    """PR-level Codex adversarial review (PR #149), round 1 NO-GO: 3 MEDIUM
-    findings on a broader sweep of the shell contract, independent of the
-    PLAN/pre-commit review rounds already resolved on issue #139."""
+    """Shell parity, stale-session isolation and action-result rendering.
+    These tests retain generic actions while preventing late continuations
+    from restoring privileged state after navigation or logout."""
 
     def test_run_action_kept_per_feature_parity_row_s2(self):
         """Contract §4 row S2: the generic `run` action (data-action="run"
         -> shared result modal via callTool()) must be KEPT in P8-1, same
         POST /api/tool path, same TOOL_TITLES mechanism — restyled per §2,
-        not dropped. It was missing entirely from the first PR-review pass."""
+        not dropped. The shared action path is part of the public shell contract."""
         content = _read_admin_source(_ADMIN_APP_JS)
         assert "TOOL_TITLES" in content, (
             "P8-1 BROKEN: TOOL_TITLES mechanism (contract §4 row S2) is missing."
@@ -1773,8 +1769,7 @@ class TestP81PrReviewFindings:
         )
 
     def test_run_action_respects_epoch_guard(self):
-        """Codex PR-level review round 2 (new finding introduced by the
-        round-1 fixup): runAndShow()'s async callTool() continuation must
+        """runAndShow()'s async callTool() continuation must
         capture the epoch before the await and drop both the success and
         error branches if AdminRouter.epoch has since changed (§3.3.2 rule
         3) — otherwise a stale result/error modal can paint over a view the

@@ -107,7 +107,7 @@ def _has(code: str, needle: str) -> bool:
 
 def test_live_note_routes_through_registry_not_adhoc_storage() -> None:
     src = _tool_func_source(_module_source("live.py"), "live_note")
-    # SINGLE-resolution gate (codex PR #64): build the engine (resolves the route
+    # SINGLE-resolution gate: build the engine (resolves the route
     # once) and gate on its OWN resolved sink — NOT a separate resolve_sink call
     # whose verdict could differ from the engine's (that double-resolve let an
     # observed STAGED fall through to the inert legacy write).
@@ -162,7 +162,7 @@ def test_bank_delete_routes_delete_many_through_sink() -> None:
 def test_bank_compact_apply_gated_dry_run_read_stays() -> None:
     src = _tool_func_source(_module_source("bank.py"), "bank_compact")
     # Apply branch: initial tool-gate resolution on the engine's OWN sink
-    # (codex PR #64), then delegation to the mid engine. The compactor's later
+    # before delegation to the mid engine. The compactor's later
     # final transaction-boundary route check remains below this tool layer.
     assert _has(src, "mid_engine(space_id)")
     assert _has(src, "engine.write_sink")

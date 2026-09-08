@@ -119,6 +119,7 @@ class TestPositiveResolution:
         assert chat.context_window == 131072
         assert chat.max_output_tokens == 16384
         assert chat.temperature == 0.3
+        assert chat.reasoning_effort is None
         assert chat.source == "llmaas-legacy"
         assert embedding.provider_id == "openai-compatible"
         assert embedding.configured_model == "bge-m3:567m"
@@ -187,6 +188,76 @@ class TestPositiveResolution:
         assert config.configured_roles == ("chat", "embedding")
         assert config.chat.provider_id == "cloud-temple"
         assert config.chat.temperature is None  # omitted → omitted on wire
+        assert config.chat.reasoning_effort is None
+        assert config.embedding.expected_dimensions == 1024
+
+    def test_effort_resolution_explicit_values(self):
+        openai_chat = {
+            "INFERENCE_CHAT_PROVIDER": "openai",
+            "INFERENCE_CHAT_API_URL": "https://api.openai.com/v1",
+            "INFERENCE_CHAT_API_KEY": "chat-key",
+            "INFERENCE_CHAT_MODEL": "gpt-4o",
+            "INFERENCE_CHAT_CONTEXT_WINDOW": "131072",
+            "INFERENCE_CHAT_MAX_OUTPUT_TOKENS": "16384",
+        }
+        config_med = _resolve({**openai_chat, "INFERENCE_CHAT_EFFORT": "medium"})
+        assert config_med.chat.reasoning_effort == "medium"
+        config_split_global = _resolve({**openai_chat, "LLM_MODEL_EFFORT": "high"})
+        assert config_split_global.chat.reasoning_effort == "high"
+        config_high = _resolve({**LEGACY_PAIR, "LLM_MODEL_EFFORT": "high"})
+        assert config_high.chat.reasoning_effort == "high"
+
+    def test_unsupported_provider_rejects_effort(self):
+        errors = _errors({**NEW_CHAT, "INFERENCE_CHAT_EFFORT": "high"})
+        assert any("does not support reasoning effort" in err for err in errors)
+
+    def test_llm_model_effort_case_collision_fails_both_orders(self):
+        env1 = {**NEW_CHAT, "LLM_MODEL_EFFORT": "high", "llm_model_effort": "low"}
+        assert "case-variant environment collision" in " ".join(_errors(env1))
+        env2 = {**NEW_CHAT, "llm_model_effort": "low", "LLM_MODEL_EFFORT": "high"}
+        assert "case-variant environment collision" in " ".join(_errors(env2))
+
+    def test_env_example_template_uses_selected_qwen_low_recipe_profile(self):
+        from pathlib import Path
+        env_example_path = Path(__file__).resolve().parent.parent / ".env.example"
+        assert env_example_path.exists()
+        parsed: dict[str, str] = {}
+        for line in env_example_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                parsed[k.strip()] = v.strip()
+        parsed["LLMAAS_API_URL"] = "https://api.ai.cloud-temple.com/v1"
+        parsed["LLMAAS_API_KEY"] = "dummy-key"
+        config = _resolve(parsed)
+        assert config.legacy_active is True
+        assert config.chat.configured_model == "Qwen/Qwen3.8-27B-FP8"
+        assert config.chat.reasoning_effort == "low"
+        assert config.chat.context_window == 500000
+        assert config.chat.max_output_tokens == 200000
+        assert config.chat.temperature == 0.6
+
+    def test_env_example_split_recipe_resolves_low_effort(self):
+        from pathlib import Path
+
+        template = (Path(__file__).resolve().parent.parent / ".env.example").read_text()
+        parsed = dict(
+            line[2:].split("=", 1)
+            for line in template.splitlines()
+            if line.startswith("# INFERENCE_")
+        )
+        parsed["INFERENCE_CHAT_API_KEY"] = "dummy-key"
+        parsed["INFERENCE_EMBEDDING_API_KEY"] = "dummy-key"
+        config = _resolve(parsed)
+        assert config.legacy_active is False
+        assert config.chat.provider_id == "openai-compatible"
+        assert config.chat.configured_model == "Qwen/Qwen3.8-27B-FP8"
+        assert config.chat.reasoning_effort == "low"
+        assert config.chat.context_window == 500000
+        assert config.chat.max_output_tokens == 200000
+        assert config.embedding.configured_model == "bge-m3:567m"
         assert config.embedding.expected_dimensions == 1024
 
     def test_intentionally_absent_embedding_role(self):

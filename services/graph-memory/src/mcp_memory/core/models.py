@@ -137,6 +137,7 @@ class MemoryStats(BaseModel):
     relation_count: int = 0
     total_size_bytes: int = 0
     last_ingestion: Optional[datetime] = None
+    entity_types: Dict[str, int] = Field(default_factory=dict)
     top_entities: List[Dict[str, Any]] = Field(default_factory=list)
 
 

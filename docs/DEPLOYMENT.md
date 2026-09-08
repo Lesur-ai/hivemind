@@ -46,7 +46,7 @@ application’s default-on Mesh behavior is unchanged; a deployment that does
 not explicitly opt out requires the complete identity described in
 [Project Mesh deployment](#project-mesh-deployment).
 
-For the exact v1.4 provider matrix, strict eight-variable legacy migration,
+For the provider compatibility baseline, strict eight-variable legacy migration,
 role blocks, evidence states, and bounded readiness test, use the
 [inference provider operator guide](INFERENCE_PROVIDER_PROFILES.md).
 
@@ -56,10 +56,14 @@ endpoints. That requirement is per ROLE, not per deployment: with the split
 `INFERENCE_CHAT_*` / `INFERENCE_EMBEDDING_*` families each role may use a
 different provider, and the native `anthropic` chat profile speaks the Messages
 API instead of `/chat/completions` — it is chat-only and must be paired with a
-separate embedding provider. Model ids are provider-specific. The split Cloud
-Temple example is the exact named v1.4 profile; the active
-`LLMAAS_MODEL=qwen3.5:27b` value is the preserved illustrative 1.x legacy
-default, not an interchangeable alias. The embedding dimension must equal the
+separate embedding provider. Model ids are provider-specific. The active
+`.env.example` selects `Qwen/Qwen3.8-27B-FP8` with effort `low`; its split chat
+example uses `openai-compatible` to support that setting. The named
+`cloud-temple-reference` compatibility profile remains distinct. The software
+default without an explicit model setting is `qwen3.5:27b`, not an alias for
+either named model. Upgrading does not replace an existing `.env`; review the
+effective profile rather than copying the template over your configuration.
+The embedding dimension must equal the
 vector length returned by that model. Identity drift blocks long writes/search;
 after ingestion it requires the explicit bounded Qdrant reindex below, never
 an automatic rebuild.
@@ -180,7 +184,7 @@ repairing the embedding configuration/runtime, not reindexing;
 schema could not be read and requires backend repair, not a blind reindex;
 `invalid_status` means the connected Graph Memory omitted or malformed this
 contract and must be upgraded or repaired. `reindex_required` denotes persisted
-identity, schema, legacy, or ownership evidence that #277 never repairs
+identity, schema, legacy, or ownership evidence that the service never repairs
 automatically. Non-empty legacy state also blocks memory deletion; migrate or
 reindex it before use rather than treating deletion as a cleanup bypass.
 
@@ -248,7 +252,7 @@ lifecycle work are outside this operation. The exact bounded result examples,
 phases, states and reason codes are defined in
 [`MCP_TOOLS_SPEC.md`](MCP_TOOLS_SPEC.md#long_reindex-maintenance).
 After active-alias activation, `memory_delete` fails closed without cleanup
-until whole-memory lifecycle recovery is implemented by EPIC #309.
+because whole-memory lifecycle recovery for that state is not yet implemented.
 
 Do not change the setting to co-locate otherwise independent deployments.
 

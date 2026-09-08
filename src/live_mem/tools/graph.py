@@ -34,7 +34,7 @@ Voir core/graph_bridge.py pour la logique métier et le client MCP Streamable HT
 import os
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -656,4 +656,521 @@ def register(mcp: FastMCP) -> int:
 
             return _reindex_error("reindex_failed")
 
-    return 7  # 4 historiques + long_query / long_ingest / long_reindex
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    async def ontology_list(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+    ) -> dict:
+        """List ontologies available in Graph Memory for a space.
+
+        Args:
+            space_id: Target space identifier.
+
+        Returns:
+            Dictionary containing the list of available ontologies.
+        """
+        from ..auth.context import check_access, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+            return await get_engine_registry().long_engine().list_ontologies(space_id)
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    async def ontology_get(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        name: Annotated[
+            str,
+            Field(description="Ontology name"),
+        ],
+    ) -> dict:
+        """Get an ontology definition by name.
+
+        Args:
+            space_id: Target space identifier.
+            name: Name of the ontology to retrieve.
+
+        Returns:
+            Dictionary containing the ontology definition and YAML content.
+        """
+        from ..auth.context import check_access, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+            return await get_engine_registry().long_engine().get_ontology(space_id, name)
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    async def ontology_validate(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        content_yaml: Annotated[
+            str,
+            Field(description="Ontology YAML content to validate"),
+        ],
+    ) -> dict:
+        """Validate an ontology YAML definition without mutating state.
+
+        Args:
+            space_id: Target space identifier.
+            content_yaml: Raw YAML string of the ontology definition.
+
+        Returns:
+            Validation result with status, validity flag and errors if any.
+        """
+        from ..auth.context import check_access, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            MAX_ONTOLOGY_BYTES = 512 * 1024
+            if not isinstance(content_yaml, str):
+                return {
+                    "status": "ok",
+                    "valid": False,
+                    "name": None,
+                    "version": None,
+                    "sha256": None,
+                    "entity_types_count": 0,
+                    "relation_types_count": 0,
+                    "yaml_content": None,
+                    "errors": ["content_yaml must be a string"],
+                    "warnings": [],
+                }
+
+            try:
+                encoded = content_yaml.encode("utf-8")
+            except (UnicodeError, UnicodeEncodeError) as e:
+                return {
+                    "status": "ok",
+                    "valid": False,
+                    "name": None,
+                    "version": None,
+                    "sha256": None,
+                    "entity_types_count": 0,
+                    "relation_types_count": 0,
+                    "yaml_content": None,
+                    "errors": [f"Invalid Unicode encoding: {e}"],
+                    "warnings": [],
+                }
+
+            if len(encoded) > MAX_ONTOLOGY_BYTES:
+                return {
+                    "status": "ok",
+                    "valid": False,
+                    "name": None,
+                    "version": None,
+                    "sha256": None,
+                    "entity_types_count": 0,
+                    "relation_types_count": 0,
+                    "yaml_content": None,
+                    "errors": [f"Ontology content exceeds maximum allowed size ({MAX_ONTOLOGY_BYTES} bytes)"],
+                    "warnings": [],
+                }
+
+            return await get_engine_registry().long_engine().validate_ontology(space_id, content_yaml)
+        except Exception as e:
+            return safe_error(e, "graph")
+
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False))
+    async def long_ingest_async(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        documents: Annotated[
+            list[dict],
+            Field(description="Batch of documents to ingest asynchronously"),
+        ],
+        options: Annotated[
+            Optional[dict],
+            Field(description="Optional ingestion options (e.g. replace_existing)"),
+        ] = None,
+        include_volatile: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Allow volatile documents such as activeContext.md and "
+                    "progress.md. They are rejected by default. Enabling this "
+                    "option requires manage permission and records an audit event."
+                ),
+            ),
+        ] = False,
+    ) -> dict:
+        """Queue a batch of documents for asynchronous ingestion into long-term memory.
+
+        Args:
+            space_id: Target space identifier.
+            documents: Each dict requires filename, a stable source_path,
+                content_base64, and a hexadecimal sha256 of the decoded bytes.
+                Optional fields are metadata and source_modified_at (ISO 8601).
+                This async path does not convert plain content and
+                does not compute a missing checksum for the caller.
+            options: Ingestion options (e.g. replace_existing: bool).
+            include_volatile: Allow configured volatile basenames.
+
+        Returns:
+            Batch submission result with batch_id and list of queued job details.
+        """
+        from ..auth.context import (
+            check_access,
+            check_manage_permission,
+            check_write_permission,
+            safe_error,
+        )
+        from ..config import get_settings
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            manage_err = check_manage_permission()
+            if manage_err:
+                return manage_err
+
+            if not isinstance(documents, list) or not documents:
+                return {
+                    "status": "error",
+                    "message": "documents must be a non-empty list",
+                }
+
+            volatile = set(get_settings().graph_push_volatile_files)
+            offending = sorted(
+                {
+                    d.get("source_path", "")
+                    for d in documents
+                    if isinstance(d, dict) and os.path.basename(d.get("source_path", "")) in volatile
+                }
+            )
+            if offending:
+                if not include_volatile:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Volatile files (activeContext.md / progress.md) are "
+                            "REJECTED from canonical long-tier ingestion by "
+                            "default. Use include_volatile=True (the 'manage' permission "
+                            "is required) to force their admission."
+                        ),
+                        "rejected_volatile": offending,
+                    }
+                manage_err = check_manage_permission()
+                if manage_err:
+                    return manage_err
+
+                _emit_long_ingest_volatile_optin_audit(space_id, offending)
+
+            return await get_engine_registry().long_engine().ingest_async(
+                space_id=space_id,
+                documents=documents,
+                options=options,
+            )
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    async def long_ingest_status(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        job_id: Annotated[
+            str,
+            Field(description="Ingestion job identifier"),
+        ],
+    ) -> dict:
+        """Return the status and progress of an asynchronous ingestion job.
+
+        Args:
+            space_id: Target space identifier.
+            job_id: Job identifier returned by long_ingest_async.
+
+        Returns:
+            Job status dictionary with progress, step, entity/relation counts and error if any.
+        """
+        from ..auth.context import check_access, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            if not isinstance(job_id, str) or not job_id.strip():
+                return {
+                    "status": "error",
+                    "message": "job_id must be a non-empty string",
+                }
+
+            return await get_engine_registry().long_engine().ingest_status(
+                space_id=space_id,
+                job_id=job_id.strip(),
+            )
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    async def long_ingest_list(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        batch_id: Annotated[
+            Optional[str],
+            Field(description="Optional batch ID filter"),
+        ] = None,
+        status: Annotated[
+            Optional[str],
+            Field(description="Optional job status filter (e.g. queued, running, succeeded, failed)"),
+        ] = None,
+        limit: Annotated[
+            int,
+            Field(description="Maximum number of jobs to return (1-100)"),
+        ] = 50,
+        offset: Annotated[
+            int,
+            Field(description="Number of jobs to skip"),
+        ] = 0,
+    ) -> dict:
+        """List asynchronous ingestion jobs for a space.
+
+        Args:
+            space_id: Target space identifier.
+            batch_id: Optional filter by batch ID.
+            status: Optional filter by status.
+            limit: Maximum items to return.
+            offset: Items offset.
+
+        Returns:
+            List of job status dictionaries and pagination metadata.
+        """
+        from ..auth.context import check_access, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            if type(limit) is not int or limit < 1 or limit > 100:
+                return {
+                    "status": "error",
+                    "message": "limit must be an integer between 1 and 100",
+                }
+            if type(offset) is not int or offset < 0:
+                return {
+                    "status": "error",
+                    "message": "offset must be a non-negative integer",
+                }
+
+            return await get_engine_registry().long_engine().ingest_list(
+                space_id=space_id,
+                batch_id=batch_id,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True))
+    async def long_ingest_cancel(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        job_id: Annotated[
+            str,
+            Field(description="Ingestion job identifier to cancel"),
+        ],
+    ) -> dict:
+        """Request cooperative cancellation of an asynchronous ingestion job.
+
+        Args:
+            space_id: Target space identifier.
+            job_id: Job identifier to cancel.
+
+        Returns:
+            Cancellation acknowledgment result.
+        """
+        from ..auth.context import check_access, check_write_permission, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            write_err = check_write_permission()
+            if write_err:
+                return write_err
+
+            if not isinstance(job_id, str) or not job_id.strip():
+                return {
+                    "status": "error",
+                    "message": "job_id must be a non-empty string",
+                }
+
+            return await get_engine_registry().long_engine().ingest_cancel(
+                space_id=space_id,
+                job_id=job_id.strip(),
+            )
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    async def long_document_list(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Maximum number of documents to return (1-100)"),
+        ] = 50,
+        offset: Annotated[
+            int,
+            Field(description="Number of documents to skip"),
+        ] = 0,
+        status: Annotated[
+            Optional[str],
+            Field(description="Optional filter by ingestion status (e.g. succeeded, failed)"),
+        ] = None,
+        query: Annotated[
+            Optional[str],
+            Field(description="Optional search filter on filename or source_path"),
+        ] = None,
+    ) -> dict:
+        """List indexed documents in long memory for a space with pagination and filters.
+
+        Args:
+            space_id: Target space identifier.
+            limit: Maximum items to return (1-100).
+            offset: Items offset.
+            status: Optional filter by status.
+            query: Optional search filter.
+
+        Returns:
+            Dictionary with total_count, pagination, and documents list.
+        """
+        from ..auth.context import check_access, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            if type(limit) is not int or limit < 1 or limit > 100:
+                return {
+                    "status": "error",
+                    "message": "limit must be an integer between 1 and 100",
+                }
+            if type(offset) is not int or offset < 0:
+                return {
+                    "status": "error",
+                    "message": "offset must be a non-negative integer",
+                }
+
+            return await get_engine_registry().long_engine().list_documents(
+                space_id=space_id,
+                limit=limit,
+                offset=offset,
+                status=status,
+                query=query,
+            )
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
+    async def long_document_get(
+        space_id: Annotated[
+            str,
+            Field(description="Space identifier"),
+        ],
+        document_id: Annotated[
+            Optional[str],
+            Field(description="Internal document identifier (UUID)"),
+        ] = None,
+        source_path: Annotated[
+            Optional[str],
+            Field(description="Stable canonical source path of the document"),
+        ] = None,
+        include_content: Annotated[
+            bool,
+            Field(description="Download and include S3 content; default False"),
+        ] = False,
+    ) -> dict:
+        """Get indexed document metadata and optional content by document_id or source_path.
+
+        Args:
+            space_id: Target space identifier.
+            document_id: Optional internal document UUID.
+            source_path: Optional canonical source path.
+            include_content: Download content if True.
+
+        Returns:
+            Document metadata dictionary and content if requested.
+        """
+        from ..auth.context import check_access, safe_error
+        from ..core.engines import get_engine_registry
+
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+
+            if type(include_content) is not bool:
+                return {
+                    "status": "error",
+                    "message": f"'include_content' must be a boolean (True/False), got {type(include_content).__name__}: {include_content!r}",
+                }
+
+            if not document_id and not source_path:
+                return {
+                    "status": "error",
+                    "message": "At least one of 'document_id' or 'source_path' must be provided",
+                }
+
+            if document_id is not None and (not isinstance(document_id, str) or not document_id.strip()):
+                return {
+                    "status": "error",
+                    "message": "'document_id' must be a non-empty string when provided",
+                }
+            if source_path is not None and (not isinstance(source_path, str) or not source_path.strip()):
+                return {
+                    "status": "error",
+                    "message": "'source_path' must be a non-empty string when provided",
+                }
+
+            return await get_engine_registry().long_engine().get_document(
+                space_id=space_id,
+                document_id=document_id.strip() if isinstance(document_id, str) else None,
+                source_path=source_path.strip() if isinstance(source_path, str) else None,
+                include_content=include_content,
+            )
+        except Exception as e:
+            return safe_error(e, "graph")
+
+    return 16  # 4 historiques + long_query / long_ingest / long_reindex + 3 ontology_* + 4 long_ingest_* + 2 long_document_*

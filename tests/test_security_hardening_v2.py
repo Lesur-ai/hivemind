@@ -195,7 +195,7 @@ class TestLM2_02_GraphConnectSSRF:
         assert _validate_gm_url("http://nope.invalid/") is None
 
     def test_transient_dns_failure_fails_closed(self, monkeypatch):
-        """Codex #150 R2 : EAI_AGAIN (transitoire/indéterminé) → REFUSÉ (fail-closed)."""
+        """EAI_AGAIN (transitoire/indéterminé) → REFUSÉ (fail-closed)."""
         import socket as _socket
         import live_mem.core.url_guard as _url_guard
 
@@ -997,6 +997,8 @@ class TestLM2_26_DependencyBounds:
         expected = {
             "cryptography": ((50, 0, 0), "CVE-2026-69247"),
             "aiohttp": ((3, 14, 3), "CVE-2026-69244"),
+            "pypdf": ((6, 16, 1), "GHSA-763m-79hh-57f2"),
+            "h2": ((4, 4, 1), "GHSA-6hr6-w5qg-qmwg"),
         }
         for package, (minimum, cve) in expected.items():
             match = re.search(
@@ -1009,6 +1011,19 @@ class TestLM2_26_DependencyBounds:
             assert version >= minimum, (
                 f"Graph Memory demande {package} {match.group(1)}, vulnérable à {cve}"
             )
+
+    @pytest.mark.parametrize("package,minimum", [("pypdf", (6, 16, 1)), ("h2", (4, 4, 1))])
+    def test_document_dependency_floors_cover_root_and_embedded_locks(self, package, minimum):
+        document = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
+        versions = [item["version"] for item in document["package"] if item["name"] == package]
+        assert len(versions) == 1
+        embedded = re.findall(
+            rf"^{re.escape(package)}==(\d+\.\d+\.\d+)(?:\s|$)",
+            GRAPH_REQUIREMENTS_LOCK.read_text(encoding="utf-8"), re.MULTILINE,
+        )
+        assert len(embedded) == 1
+        for version in versions + embedded:
+            assert tuple(map(int, version.split("."))) >= minimum
 
     def test_graph_runtime_lock_pins_patched_aiohttp(self):
         lock = GRAPH_REQUIREMENTS_LOCK.read_text(encoding="utf-8")
@@ -1445,6 +1460,7 @@ class TestLM2_25_ConsolidatorNoStrErrorLeak:
         svc._model = "test-model"
         svc._context_window = 32768
         svc._max_tokens = 4096
+        svc._timeout = 1800  # named by the exception log since #490
         return svc
 
     @pytest.mark.asyncio

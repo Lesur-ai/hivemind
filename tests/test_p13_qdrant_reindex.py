@@ -2549,6 +2549,10 @@ async def test_cloud_temple_named_profile_migration_reindexes_then_ingests_and_q
             assert requested_memory_id == memory_id
             return SimpleNamespace(ontology="general")
 
+        async def get_active_doc_ids(self, requested_memory_id: str):
+            assert requested_memory_id == memory_id
+            return list(self.documents.keys())
+
         async def add_document(self, **fields) -> None:
             self.documents[fields["doc_id"]] = dict(fields)
 

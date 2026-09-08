@@ -728,31 +728,12 @@ async def test_graph_session_cancellation_uses_driver_cancel_without_waiting_for
 
 def _graph_service_class(monkeypatch: pytest.MonkeyPatch):
     from tests.fakes.inference_fakes import apply_graph_memory_baseline_env
+    from tests.fakes.neo4j_fakes import bind_fake_neo4j
 
     apply_graph_memory_baseline_env(monkeypatch)
-    neo4j = types.ModuleType("neo4j")
-    neo4j.AsyncGraphDatabase = object
-    neo4j.AsyncDriver = object
-    neo4j.AsyncSession = object
-
-    class _FakeQuery(str):
-        def __new__(cls, text: str, *, timeout: float | None = None):
-            value = str.__new__(cls, text)
-            value.timeout = timeout
-            return value
-
-    neo4j.Query = _FakeQuery
-    neo4j_exceptions = types.ModuleType("neo4j.exceptions")
-    neo4j_exceptions.ServiceUnavailable = type(
-        "ServiceUnavailable", (Exception,), {}
-    )
-    neo4j_exceptions.AuthError = type("AuthError", (Exception,), {})
-    monkeypatch.setitem(sys.modules, "neo4j", neo4j)
-    monkeypatch.setitem(sys.modules, "neo4j.exceptions", neo4j_exceptions)
-
-    from mcp_memory.core.graph import GraphService
-
-    return GraphService
+    # Bound on the graph module itself: an earlier test module that imported the
+    # graph with its own neo4j fake must not leak into these schema tests.
+    return bind_fake_neo4j(monkeypatch).GraphService
 
 
 async def test_graph_inventory_preserves_exact_native_fields_without_defaults(

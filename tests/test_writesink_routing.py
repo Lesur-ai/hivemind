@@ -746,7 +746,7 @@ async def test_graph_connect_ssrf_check_rejects_private_url_no_gate() -> None:
 
 
 # =============================================================================
-# Initial tool-gate single-resolution guard (codex PR #64): the tool must not
+# Initial tool-gate single-resolution guard: the tool must not
 # resolve once on its own and again while building its engine, because the old
 # two-step code could observe STAGED second yet write through the first direct
 # path. Gating on the engine's own resolved sink keeps the initial tool check

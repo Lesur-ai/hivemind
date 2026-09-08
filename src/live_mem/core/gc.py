@@ -334,10 +334,7 @@ class GCService:
         Returns:
             Rapport de consolidation par espace et par agent
         """
-        from .consolidator import (
-            _sanitize_compaction_failure_payloads,
-            get_consolidator,
-        )
+        from .consolidator import get_consolidator
         from .locks import get_lock_manager
 
         # Scanner d'abord
@@ -528,19 +525,42 @@ class GCService:
                         consolidation_results[sid][agent_name] = detail
                         continue
 
-                    raw_processed = r.get("notes_processed", 0)
-                    processed_count = (
-                        max(0, min(len(selected_keys), raw_processed))
-                        if isinstance(raw_processed, int)
-                        else 0
-                    )
-                    processed_keys = set(selected_keys[:processed_count])
+                    # An exact selection reports exactly which keys
+                    # were deleted.  A count projected onto a prefix is wrong as
+                    # soon as one deletion fails in the middle, so the prefix
+                    # projection is kept only for a legacy result that lacks the
+                    # field; a present-but-invalid field fails closed with zero
+                    # extrapolation.
+                    invalid_deleted_keys = False
+                    if "deleted_note_keys" in r:
+                        reported_keys = r.get("deleted_note_keys")
+                        if (
+                            isinstance(reported_keys, list)
+                            and all(isinstance(k, str) for k in reported_keys)
+                            and len(set(reported_keys)) == len(reported_keys)
+                            and set(reported_keys) <= set(selected_keys)
+                        ):
+                            processed_keys = set(reported_keys)
+                        else:
+                            processed_keys = set()
+                            invalid_deleted_keys = True
+                    else:
+                        raw_processed = r.get("notes_processed", 0)
+                        processed_count = (
+                            max(0, min(len(selected_keys), raw_processed))
+                            if isinstance(raw_processed, int)
+                            else 0
+                        )
+                        processed_keys = set(selected_keys[:processed_count])
                     old_notes_processed = sum(
                         key in processed_keys for key in selected_old_keys
                     )
                     agent_status = r.get("status", "error")
                     agent_reason = r.get("reason")
-                    if agent_status == "ok" and old_notes_processed < note_count:
+                    if invalid_deleted_keys:
+                        agent_status = "partial"
+                        agent_reason = "invalid_deleted_note_keys"
+                    elif agent_status == "ok" and old_notes_processed < note_count:
                         agent_status = "partial"
                         agent_reason = "partial_consolidation"
                     if agent_status != "ok":
@@ -573,14 +593,8 @@ class GCService:
                         detail["message"] = r["message"]
                     if isinstance(r.get("failure_reason"), str):
                         detail["failure_reason"] = r["failure_reason"]
-                    safe_compaction_failures = r.get("compaction_failures")
-                    diagnostics = _sanitize_compaction_failure_payloads(
-                        safe_compaction_failures
-                    )
-                    if diagnostics:
-                        detail["compaction_failures"] = diagnostics
-                    if isinstance(r.get("remediation"), str):
-                        detail["remediation"] = r["remediation"]
+                    # Une consolidation ne compacte jamais ; aucun
+                    # enveloppe de compaction à projeter dans le détail GC.
                     consolidation_results[sid][agent_name] = detail
                     total_consolidated += old_notes_processed
 

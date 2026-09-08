@@ -102,7 +102,7 @@ async def test_v1_all_ack_policy_is_default_and_blocking() -> None:
 @pytest.mark.asyncio
 async def test_v1_all_ack_is_identity_not_count() -> None:
     """
-    RÉGRESSION (Codex P2 #1) : all-ACK doit valider par IDENTITÉ, pas par
+    RÉGRESSION : all-ACK doit valider par IDENTITÉ, pas par
     comptage. Un ACK d'un nœud non-actif/évincé ne peut PAS se substituer à un
     membre actif manquant, même si le COMPTE des ACKers atteint ``expected``.
     """

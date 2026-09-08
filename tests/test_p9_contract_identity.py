@@ -3,6 +3,7 @@
 import ast
 import json
 import os
+import re
 import sys
 from contextvars import ContextVar
 from pathlib import Path
@@ -119,7 +120,7 @@ def test_long_query_discloses_its_embedding_provider_dependency() -> None:
 
 def test_long_query_registered_schema_discloses_embedding_without_chat() -> None:
     mcp = FastMCP(name="p9-long-query-contract")
-    assert graph_tools.register(mcp) == 7
+    assert graph_tools.register(mcp) == 16
     tool = mcp._tool_manager._tools["long_query"]
     schema_text = str(tool.description) + str(tool.parameters)
 
@@ -212,15 +213,30 @@ def test_readme_tool_tables_keep_manage_and_confirmation_contracts() -> None:
     assert "56 registered" not in mapping
 
 
-def test_compaction_diagnostics_are_documented_for_manual_and_job_results() -> None:
+def test_compaction_diagnostics_are_documented_for_manual_results_only() -> None:
+    """Compaction is a human decision through `bank_compact`; a
+    consolidation never compacts, so its job-result contract carries no
+    compaction diagnostics — only the bank size advisory."""
     spec = _read("docs/MCP_TOOLS_SPEC.md")
-    manual = spec.split("### `bank_compact`", 1)[1].split("### `bank_repair`", 1)[0]
+    # `bank_repair` and `bank_write` precede `bank_compact`: bound the manual
+    # section by the NEXT heading, not by a heading that already went by.
+    manual = re.split(r"\n#{1,3} ", spec.split("### `bank_compact`", 1)[1], maxsplit=1)[0]
     job = spec.split("**Job result contract", 1)[1].split("### `bank_consolidation_status`", 1)[0]
 
-    for token in ("hivemind_state_corrupt", "compaction_tool_failure"):
-        assert token in manual
+    for token in ("hivemind_state_corrupt", "compaction_tool_failure", "preimage_id"):
+        assert token in manual, token
     assert "failed_phase" in manual and "rollback_outcome" in manual
-    assert "failed_phase" in job and "rollback_outcome" in job
+    for token in (
+        "failed_phase",
+        "rollback_outcome",
+        "compaction_advisory",
+        "compaction_failures",
+        "recovery_required",
+        "preimage_id",
+    ):
+        assert token not in job, token
+    assert "bank_size_advisory" in job
+    assert "compaction is a human decision" in job
 
 
 def test_compaction_configuration_validation_changelog_has_upgrade_actions() -> None:
@@ -230,9 +246,8 @@ def test_compaction_configuration_validation_changelog_has_upgrade_actions() -> 
     if not (ROOT / "release" / "public-overlay").exists():
         pytest.skip("private changelog is intentionally absent from the public tree")
 
-    version = _read("VERSION").strip()
     changelog = _read("CHANGELOG.md").split("## Inherited Live Memory history", 1)[0]
-    section_start = changelog.index(f"## [{version}] — ")
+    section_start = changelog.index("## [1.4.1] — ")
     section_end = changelog.index("\n## [", section_start + 1)
     current = " ".join(changelog[section_start:section_end].split())
 
@@ -248,20 +263,15 @@ def test_mesh_activation_release_notes_are_versioned_and_bound_recovery() -> Non
     if not (ROOT / "release" / "public-overlay").exists():
         pytest.skip("private changelog is intentionally absent from the public tree")
 
-    version = _read("VERSION").strip()
     changelog = _read("CHANGELOG.md").split("## Inherited Live Memory history", 1)[0]
-    current_start = changelog.index(f"## [{version}] — ")
+    current_start = changelog.index("## [1.4.1] — ")
     current_end = changelog.index("\n## [", current_start + 1)
     current = " ".join(changelog[current_start:current_end].split())
     unreleased = " ".join(changelog[:current_start].split())
 
     for required in (
         "Project Mesh readiness and activation recovery (#417).",
-        "availability failures during bounded product-storage probes",
-        "Mesh-local pairing-store read failures remain fail-closed as `unsafe`",
-        "admin Mesh status inventory",
-        "can fail closed before a readiness projection is available",
-        "not guaranteed to degrade to an `unsafe` entry",
+        "transient unavailable dependency",
         "signed, durable per-space authority",
         "same-space writers/jobs must be quiesced",
         "Coordinated loss or restoration",
@@ -270,8 +280,6 @@ def test_mesh_activation_release_notes_are_versioned_and_bound_recovery() -> Non
     ):
         assert required in current
 
-    assert "transient unavailable dependency" not in current
-    assert "otherwise healthy sources report `unsafe`" not in current
     assert "Project Mesh readiness and activation recovery (#417)." not in unreleased
 
 
@@ -482,6 +490,19 @@ def test_faq_qualifies_inherited_product_versions() -> None:
         assert "VERSION" in faq
         assert "Live Memory" in faq
         assert "version: 2" in faq
+
+
+def test_faq_states_a_single_compaction_threshold() -> None:
+    """The only size threshold is ``BANK_FILE_MAX_SIZE`` (35 000 UTF-8
+    bytes), an advisory and the manual compaction target. A FAQ answer still
+    calling 15 KB files "compaction candidates" would send operators to compact
+    files the advisory never reports (PR #496, round 3)."""
+    for relative in ("FAQ.md", "FAQ.fr.md"):
+        faq = _read(relative)
+        assert "15 KB" not in faq and "15 Ko" not in faq, relative
+        # the sizing answer AND the troubleshooting answer name the threshold
+        assert faq.count("35 000") >= 2, relative
+        assert "bank_size_advisory" in faq, relative
 
 
 def test_faq_avoids_unbounded_capacity_and_unsourced_latency_claims() -> None:

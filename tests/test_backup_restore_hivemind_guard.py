@@ -445,7 +445,7 @@ async def test_p10_3_unsafe_recovery_refused_during_source_pairing_activation(mo
 
 
 async def test_p10_3_unsafe_recovery_phase2_refuses_pairing_armed_in_window(monkeypatch):
-    """Phase-2 re-check (finding #5a): a pairing that arms AFTER the phase-1
+    """Phase-2 re-check: a pairing that arms AFTER the phase-1
     preflight but before the roster write is caught under the membership lock. A
     call-count-gated checker passes phase-1 and raises on phase-2; the restore
     aborts and the roster is NOT replaced with [self]-only."""
@@ -483,8 +483,8 @@ async def test_p10_3_unsafe_recovery_phase2_refuses_pairing_armed_in_window(monk
 
 
 async def test_p10_3_unsafe_recovery_aborts_on_same_epoch_concurrent_advance(monkeypatch):
-    """Finding #1 (the residual split): a concurrent pairing converges to the EXACT
-    epoch the restore precomputed (orphan@1 -> new_epoch=2). `set_membership` rejects
+    """A concurrent pairing converges to the EXACT epoch the restore precomputed
+    (orphan@1 -> new_epoch=2). `set_membership` rejects
     only a STRICTLY lower epoch, so absent the phase-2 epoch-advance guard the roster
     would be overwritten at the SAME epoch — a split the peer epoch fence can't
     detect. The guard must abort and preserve the converged roster."""
@@ -533,7 +533,7 @@ async def test_p10_3_unsafe_recovery_aborts_on_same_epoch_concurrent_advance(mon
 
 
 async def test_p10_3_unsafe_recovery_refused_on_non_leader_worker(monkeypatch):
-    """Cross-process gate (Codex round-16): mesh membership is a single-writer
+    """Cross-process gate: mesh membership is a single-writer
     authority (the flock-elected leader). Out-of-band unsafe recovery, which
     replaces the roster outside the membership authority, must run ONLY on the
     leader — a non-leader worker refuses (fail-closed) so it can never race the

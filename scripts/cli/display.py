@@ -529,7 +529,11 @@ def show_consolidation_result(result: dict):
     """Displays the consolidation result."""
     console.print(
         Panel.fit(
+            f"[bold]Notes total    :[/bold] {result.get('notes_total', '?')}\n"
             f"[bold]Notes processed:[/bold] {result.get('notes_processed', 0)}\n"
+            f"[bold]Declared useless:[/bold] {result.get('notes_discarded_count', 0)}\n"
+            f"[bold]Notes deleted  :[/bold] {result.get('notes_deleted', 0)}\n"
+            f"[bold]Notes remaining:[/bold] {result.get('notes_remaining', 0)}\n"
             f"[bold]Files created  :[/bold] {result.get('bank_files_created', 0)}\n"
             f"[bold]Files updated  :[/bold] {result.get('bank_files_updated', 0)}\n"
             f"[bold]Synthesis  :[/bold] {result.get('synthesis_size', 0)} chars\n"
@@ -598,6 +602,31 @@ def _safe_compaction_failure_lines(failures: object) -> list[str]:
             else ""
         )
         lines.append(f"  - {filename or '<space>'}: {error}{suffix}")
+    return lines
+
+
+def _bank_size_advisory_lines(items: object) -> list[str]:
+    """Format the server-projected bank size advisory without inspecting extras."""
+
+    if not isinstance(items, list):
+        return []
+    lines: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename")
+        utf8_bytes = item.get("utf8_bytes")
+        max_size = item.get("max_size")
+        if (
+            not isinstance(filename, str)
+            or type(utf8_bytes) is not int
+            or type(max_size) is not int
+        ):
+            continue
+        lines.append(
+            f"  - {escape_markup(filename)}: {utf8_bytes} UTF-8 bytes "
+            f"(advisory threshold {max_size})"
+        )
     return lines
 
 
@@ -838,14 +867,35 @@ def show_consolidation_job(result: dict):
     if result.get("error"):
         lines.append(f"[bold]Error      :[/bold] [red]{result['error']}[/red]")
     job_result = result.get("result")
-    compaction_failure_lines = _safe_compaction_failure_lines(
-        job_result.get("compaction_failures")
-        if isinstance(job_result, dict)
-        else None
+    # Compaction is a human decision: a consolidation never runs
+    # it; oversized bank files are only reported, as an advisory.
+    advisory_lines = _bank_size_advisory_lines(
+        job_result.get("bank_size_advisory") if isinstance(job_result, dict) else None
     )
-    if compaction_failure_lines:
-        lines.extend(["[bold]Compaction failures:[/bold]", *compaction_failure_lines])
-
+    if advisory_lines:
+        lines.extend(
+            [
+                "[bold yellow]Bank size advisory[/bold yellow] "
+                "(compaction is a human decision: bank_compact, MCP tool with manage):",
+                *advisory_lines,
+            ]
+        )
+    # Les compteurs finaux sont affiches aussi pour un job echoue :
+    # un arret au lot K laisse un acquis (lots completes, notes supprimees) et
+    # une file en attente que l'operateur doit voir.
+    if isinstance(job_result, dict) and job_result.get("notes_total") is not None:
+        lines.append(
+            "[bold]Counters   :[/bold] "
+            f"total={job_result.get('notes_total', '?')} "
+            f"processed={job_result.get('notes_processed', 0)} "
+            f"useless={job_result.get('notes_discarded_count', 0)} "
+            f"deleted={job_result.get('notes_deleted', 0)} "
+            f"remaining={job_result.get('notes_remaining', 0)}"
+        )
+        for label, key in (("Failed batch", "failed_batch"), ("Failure    ", "failure_reason")):
+            value = job_result.get(key)
+            if isinstance(value, (int, str)) and value not in ("", None):
+                lines.append(f"[bold]{label}:[/bold] {escape_markup(str(value))}")
     console.print(
         Panel.fit(
             "\n".join(lines),

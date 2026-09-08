@@ -3,12 +3,14 @@
 Unit tests for startup configuration validation.
 """
 
+from pathlib import Path
+
 import pytest
 
 from live_mem.config import Settings
 
 
-def _make_settings(**overrides):
+def _make_settings(*, _env_file=None, **overrides):
     """Create Settings with sensible defaults, overridden by kwargs."""
     defaults = {
         "mcp_server_name": "Test",
@@ -31,15 +33,12 @@ def _make_settings(**overrides):
         "default_rules_file": "",
         "consolidation_timeout": 600,
         "consolidation_max_notes": 500,
-        "consolidation_batch_size": 5,
-        "consolidation_legacy_french_prompts": False,
-        "compact_threshold": 0.6,
         "bank_file_max_size": 15360,
         "response_max_bytes": 512 * 1024,
     }
     defaults.update(overrides)
-    # Use model_construct to bypass env file loading, then validate
-    s = Settings.model_validate(defaults)
+    # Default to no dotenv file; template tests opt into the actual file.
+    s = Settings(_env_file=_env_file, **defaults)
     return s
 
 
@@ -131,26 +130,62 @@ class TestLLMValidation:
 
 
 class TestConsolidationValidation:
-    def test_english_prompts_are_the_default(self):
-        assert _make_settings().consolidation_legacy_french_prompts is False
-        assert (
-            _make_settings(
-                consolidation_legacy_french_prompts="false"
-            ).consolidation_legacy_french_prompts
-            is False
+    def test_consolidation_batch_size_default_is_three(self, monkeypatch):
+        # Assert the class default without an operator override from env/.env.
+        monkeypatch.delenv("CONSOLIDATION_BATCH_SIZE", raising=False)
+        assert Settings.model_fields["consolidation_batch_size"].default == 3
+        assert _make_settings(_env_file=None).consolidation_batch_size == 3
+
+    def test_consolidation_batch_size_override(self):
+        assert _make_settings(consolidation_batch_size=7).consolidation_batch_size == 7
+
+    def test_deployment_template_selects_two_note_recipe_batches(self, monkeypatch):
+        # The deployment template explicitly
+        # overrides the preserved three-note class default with two-note batches.
+        template = Path(__file__).resolve().parents[1] / ".env.example"
+        values = [
+            line.split("=", 1)[1].strip()
+            for line in template.read_text(encoding="utf-8").splitlines()
+            if line.startswith("CONSOLIDATION_BATCH_SIZE=")
+        ]
+        assert values == ["2"]
+        monkeypatch.delenv("CONSOLIDATION_BATCH_SIZE", raising=False)
+        assert _make_settings(_env_file=template).consolidation_batch_size == 2
+
+    def test_legacy_french_prompt_setting_is_gone_and_ignored(self):
+        """The French compatibility bridge is removed. A stale variable in
+        an operator .env must be ignored (extra="ignore"), never crash startup."""
+        assert "consolidation_legacy_french_prompts" not in Settings.model_fields
+        assert not hasattr(
+            _make_settings(consolidation_legacy_french_prompts="true"),
+            "consolidation_legacy_french_prompts",
         )
-
-    def test_legacy_french_prompts_can_be_enabled(self):
-        settings = _make_settings(consolidation_legacy_french_prompts="true")
-        assert settings.consolidation_legacy_french_prompts is True
-
-    def test_v1_6_language_selector_values_are_not_accepted_early(self):
-        with pytest.raises(ValueError):
-            _make_settings(consolidation_legacy_french_prompts="fr")
 
     def test_timeout_too_low(self):
         with pytest.raises(ValueError, match="CONSOLIDATION_TIMEOUT"):
             _make_settings(consolidation_timeout=5)
+
+    def test_timeout_default_lets_a_slow_model_work(self):
+        """Large banks and slower models need a sufficient per-call budget.
+
+        The default is 1800 s; a silent return to the former 600 s bound must
+        fail here. Operators may tune it; the >= 10 s floor is unchanged.
+        """
+        assert Settings.model_fields["consolidation_timeout"].default == 1800
+        assert _make_settings(consolidation_timeout=1800).consolidation_timeout == 1800
+
+    def test_compact_threshold_no_longer_exists_and_its_env_var_is_ignored(self, monkeypatch):
+        """Compaction is a human decision.
+
+        Consolidation never triggers it, so the admission ratio has no consumer
+        left; the removed field must not come back and a stale env var must be
+        ignored rather than fail startup (``extra="ignore"``).
+        """
+        assert "compact_threshold" not in Settings.model_fields
+        monkeypatch.setenv("COMPACT_THRESHOLD", "0.6")
+        settings = _make_settings()
+        assert not hasattr(settings, "compact_threshold")
+        assert Settings.model_fields["bank_file_max_size"].default == 35000
 
     def test_max_notes_zero(self):
         with pytest.raises(ValueError, match="CONSOLIDATION_MAX_NOTES"):
@@ -162,17 +197,7 @@ class TestConsolidationValidation:
 
 
 class TestCompactionValidation:
-    @pytest.mark.parametrize(
-        "threshold",
-        (0.0, -0.01, 1.01, float("nan"), float("inf"), -float("inf")),
-    )
-    def test_compact_threshold_must_be_a_finite_positive_ratio(self, threshold):
-        with pytest.raises(ValueError, match="COMPACT_THRESHOLD"):
-            _make_settings(compact_threshold=threshold)
 
-    @pytest.mark.parametrize("threshold", (0.000001, 1.0))
-    def test_compact_threshold_accepts_positive_closed_unit_interval(self, threshold):
-        assert _make_settings(compact_threshold=threshold).compact_threshold == threshold
 
     @pytest.mark.parametrize("size", (0, -1))
     def test_bank_file_limit_must_be_positive(self, size):
@@ -205,8 +230,8 @@ class TestResponseLimitValidation:
 
 class TestProxyValidation:
     def test_valid_http_proxy(self):
-        s = _make_settings(proxy_url="http://10.185.132.250:3128")
-        assert s.proxy_url == "http://10.185.132.250:3128"
+        s = _make_settings(proxy_url="http://proxy.example.com:3128")
+        assert s.proxy_url == "http://proxy.example.com:3128"
 
     def test_valid_https_proxy(self):
         s = _make_settings(proxy_url="https://proxy.example.com:8080")

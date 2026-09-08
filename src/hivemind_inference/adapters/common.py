@@ -312,16 +312,14 @@ def safe_resolved_model(value: object, configured_model: str) -> str | None:
     bytes can reach the record even in principle: the function either echoes a
     value this process already had, or nothing.
 
-    The first attempt at this guard (review round 8) also accepted the
-    configured name extended at a separator boundary, to preserve real
-    resolutions like ``gpt-4o`` -> ``gpt-4o-2024-08-06``. Review round 9 showed
-    that rule is bypassable: the suffix was unconstrained apart from charset
-    and length, and ``<configured_model>-<api-key>`` is pure
-    letters/digits/hyphen, so a raw or base64url-encoded secret rode straight
-    through as ``provider_reported``. A prefix check cannot separate a version
-    pin from an appended payload, so the capability is withdrawn rather than
-    narrowed — there is no safe way to accept attacker-chosen trailing bytes
-    into a field bound for persisted identity.
+    Accepting the configured name extended at a separator boundary would
+    preserve resolutions like ``gpt-4o`` -> ``gpt-4o-2024-08-06``, but that rule
+    is bypassable: restricting a suffix only by charset and length allows
+    ``<configured_model>-<api-key>``, which is pure letters/digits/hyphen.
+    A raw or base64url-encoded secret could then reach ``provider_reported``.
+    A prefix check cannot separate a version pin from an appended payload,
+    so suffixes are rejected — there is no safe way to accept attacker-chosen
+    trailing bytes into a field bound for persisted identity.
 
     The consequence is deliberate and worth stating: ``resolved_model`` now
     carries no information beyond ``configured_model``. What it still records
