@@ -1,7 +1,7 @@
 # 🖥️ CLI, shell et tests Hivemind
 
 > CLI scriptable, shell interactif et scripts de test opérationnels pour
-> Hivemind `1.5.0`.
+> Hivemind `1.5.1`.
 
 🇬🇧 [English version](README.md)
 
@@ -344,4 +344,4 @@ scripts/
 
 ---
 
-*CLI Hivemind — 1.5.0*
+*CLI Hivemind — 1.5.1*

@@ -16,7 +16,7 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.5.0-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.5.1-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#requirements)
@@ -296,22 +296,35 @@ as it is updated. The removed French-prompt setting cannot restore French
 generation. Back up and review a representative copy before upgrading a
 language-sensitive workflow.
 
-Compaction is a human decision: a consolidation never compacts the bank, it only
-reports the files above `BANK_FILE_MAX_SIZE` as a `bank_size_advisory` (WARNING
-log and job result). `bank_compact` is the only compaction path and reports every
-historical size field in persisted UTF-8 bytes. `BANK_FILE_MAX_SIZE` is a positive
-per-file byte value: the advisory threshold, and the candidate threshold and
-target given to the model by the manual compaction, not a hard cap on what is
-persisted.
-A result must be strictly smaller than its source and must retain at least 5% of
-it, but it may still exceed the target; successive passes converge. A manual apply is
-available only on a DirectLocal route. A shared Project Mesh route refuses
-before the provider, preimage, or bank write rather than falling back to a
-local write. Oversized or context-incompatible documents fail closed instead
-of being split. Multipart compaction and crash-durable recovery are not
-provided by this compaction path. Recovery of unusable manual-compaction
-responses is planned for v1.5.1; the existing manual tool remains available.
-See the [MCP tool specification](docs/MCP_TOOLS_SPEC.md) for its recovery contract.
+Compaction is a human decision: consolidation only reports files above
+`BANK_FILE_MAX_SIZE` as a `bank_size_advisory`. The manual `bank_compact` tool
+refines medium-term memory so a new chat can understand the situation and resume
+useful work. It deliberately summarizes secondary detail. The program separates
+recent and undated passages from older dated history; the model extracts useful
+historical lessons, then writes a concise Markdown handoff. Dates guide reading
+priority and do not prove which statement is correct. The recent-input boundary
+keeps passages of the same date together, even above the advisory byte marker.
+
+`BANK_FILE_MAX_SIZE` remains a positive per-file threshold in persisted UTF-8
+bytes. It also guides the recent-input and output reservations; it imposes no
+summary length or retention ratio. A result must be non-empty and strictly
+smaller, but may remain above the threshold. Original H1 headings and file paths
+are owned by the code. One corrective generation per file is allowed for unusable
+model responses, shared across stages; timeouts and other provider failures
+remain terminal. Generated summary bodies are checked against the normal
+editor's Markdown grammar to support subsequent consolidation edits.
+
+Upgrading from 1.5.0 requires no new environment variable or storage migration.
+Compaction can now produce a summary smaller than 5% of its source: it keeps
+useful working context rather than a minimum quantity of text. Review a
+representative copy before applying it to an important bank.
+
+Apply is DirectLocal-only: all candidates are prepared before the existing
+verified backup, writes, readback and bounded rollback. Shared Project Mesh
+routes refuse before inference or mutation. Context-incompatible requests fail
+before that request is sent. There is no multipart persistence, crash-durable
+resume, or transfer of discarded detail to Graph in this version. See the
+[MCP tool specification](docs/MCP_TOOLS_SPEC.md) for the complete contract.
 
 ## Security and boundaries
 

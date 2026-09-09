@@ -194,7 +194,6 @@ def test_compaction_limit_is_independent_of_the_bank_filename(filename: str) -> 
     assert service._get_max_size_for_file(filename) == 15_360
 
 
-
 # =============================================================================
 # #394 — complete logical prepare phase before DirectLocal apply
 # =============================================================================
@@ -206,7 +205,6 @@ def _prepared_plan_details() -> dict[str, object]:
         "action": "edit",
         "operation_reasons": ("Remove redundant historical detail.",),
     }
-
 
 
 async def test_final_route_fence_resolves_a_fresh_direct_local_sink(
@@ -1185,8 +1183,6 @@ async def test_consolidate_staged_route_reports_the_requested_operation(
     service._call_llm.assert_not_awaited()
 
 
-
-
 async def test_manual_apply_failure_restores_verified_preimages() -> None:
     class FailSecondPutStorage(CompactionStorage):
         async def put(self, key: str, content: str, content_type: str = "text/plain") -> None:
@@ -1228,7 +1224,6 @@ async def test_manual_apply_failure_restores_verified_preimages() -> None:
     assert storage.objects["space-a/bank/b.md"] == "b" * 120
 
 
-
 @pytest.mark.parametrize(
     "chat_type",
     [OpenAICompatiblePlanChat, AnthropicNativePlanChat],
@@ -1239,7 +1234,7 @@ async def test_strict_planner_uses_normalized_provider_once_and_full_rules(
     source = _source()
     rules = "# Rules\n" + "R" * 4_096 + "\nEND-OF-RULES"
     service = make_service()
-    chat = chat_type(_plan_json("facts.md", [_replace_details()]))
+    chat = chat_type("condensed facts")
     service._complete_chat = chat
 
     candidate, details = await service._plan_single_file_compaction(
@@ -1256,7 +1251,16 @@ async def test_strict_planner_uses_normalized_provider_once_and_full_rules(
     assert call["output_budget"] == 4096
     prompt = "\n".join(message["content"] for message in call["messages"])
     assert "END-OF-RULES" in prompt
-    assert source in prompt
+    data = json.loads(call["messages"][1]["content"])
+    assert data["reference_rules"] == rules
+    sections = consolidator_module._strict_compaction_sections(source)
+    expected_bodies = []
+    for i, heading in enumerate(sections):
+        end = sections[i + 1].start if i + 1 < len(sections) else len(source)
+        body = source[heading.heading_end:end]
+        if body.strip():
+            expected_bodies.append(body)
+    assert "".join(item["body"] for item in data["undated_context"]) == "".join(expected_bodies)
     assert "untrusted data" in prompt
     assert "temperature" not in {
         field.name for field in dataclasses.fields(consolidator_module.ChatRequest)
@@ -1266,7 +1270,7 @@ async def test_strict_planner_uses_normalized_provider_once_and_full_rules(
 async def test_strict_planner_preserves_reasoning_profile_generation_budget() -> None:
     source = _source()
     service = make_service(max_tokens=200_000, context_window=1_000_000)
-    chat = RecordingChat(_plan_json("facts.md", [_replace_details()]))
+    chat = RecordingChat("condensed facts")
     service._complete_chat = chat
 
     candidate, details = await service._plan_single_file_compaction(
@@ -1296,7 +1300,7 @@ async def test_strict_planner_reaches_both_provider_shapes_only_through_chatrequ
         async def complete(self, request):
             requests.append(request)
             return ChatResult(
-                text=_plan_json("facts.md", [_replace_details()]),
+                text="condensed facts",
                 configured_model=f"{provider_shape}-test-model",
                 model_evidence="configured_only",
                 finish_reason="stop",
@@ -1336,7 +1340,7 @@ async def test_strict_planner_preserves_reasoning_budget_through_chatrequest(
         async def complete(self, request):
             requests.append(request)
             return ChatResult(
-                text=_plan_json("facts.md", [_replace_details()]),
+                text="condensed facts",
                 configured_model=f"{provider_shape}-test-model",
                 model_evidence="configured_only",
                 finish_reason="stop",
@@ -1372,7 +1376,7 @@ async def test_nonterminal_completion_is_rejected_before_plan_parse(
     finish_reason: str, expected_error: str
 ) -> None:
     service = make_service()
-    chat = RecordingChat(_plan_json("facts.md", [_replace_details()]), finish_reason)
+    chat = RecordingChat("condensed facts", finish_reason)
     service._complete_chat = chat
 
     candidate, details = await service._plan_single_file_compaction(
@@ -1381,7 +1385,7 @@ async def test_nonterminal_completion_is_rejected_before_plan_parse(
 
     assert candidate is None
     assert details == {"status": "error", "error": expected_error}
-    assert len(chat.calls) == 1
+    assert len(chat.calls) == (1 if finish_reason == "content_rejected" else 2)
 
 
 async def test_nonterminal_completion_cannot_reach_json_parser(
@@ -1446,45 +1450,12 @@ async def test_normalized_adapter_refusal_is_a_safe_no_plan(
     assert details == {"status": "error", "error": "compaction_provider_failure"}
 
 
-@pytest.mark.parametrize(
-    ("completion", "expected_error"),
-    [
-        ("```json\n{}\n```", "invalid_compaction_json"),
-        ("The requested plan follows.\n```json\n{}\n```", "invalid_compaction_json"),
-        ("```json\n{malformed\n```", "invalid_compaction_json"),
-        ('{"file_edits":[{"filename":"facts.md"', "invalid_compaction_json"),
-        ('{"file_edits":[],"file_edits":[]}', "invalid_compaction_json"),
-        ('{"file_edits": NaN}', "invalid_compaction_json"),
-    ],
-)
-async def test_fenced_malformed_duplicate_and_non_json_completions_are_not_salvaged(
-    completion: str,
-    expected_error: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    service = make_service()
-    completions_for(service).content = completion
-
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("generic JSON recovery must not enter compaction")
-
-    monkeypatch.setattr(consolidator_module, "_extract_json", forbidden)
-    monkeypatch.setattr(consolidator_module, "_repair_json", forbidden)
-
-    candidate, details = await service._plan_single_file_compaction(
-        "facts.md", _source(), 10_000, "# Rules"
-    )
-
-    assert candidate is None
-    assert details["error"] == expected_error
-
-
 async def test_valid_plan_does_not_enter_generic_json_or_storage_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source()
     service = make_service()
-    completions_for(service).content = _plan_json("facts.md", [_replace_details()])
+    completions_for(service).content = "condensed facts"
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("compaction planner used a forbidden generic path")
@@ -1502,363 +1473,13 @@ async def test_valid_plan_does_not_enter_generic_json_or_storage_paths(
     assert details["status"] == "ok"
 
 
-async def test_compaction_plan_with_json_fence_is_rejected_as_direct_json_only() -> None:
-    source = _source()
+async def test_compaction_rejects_a_lone_surrogate_before_hashing():
     service = make_service()
-    plan_json = _plan_json("facts.md", [_replace_details()])
-    # Fenced compaction plan must be rejected in fail-closed mode (direct-only)
-    completions_for(service).content = f"Here is the compaction plan:\n```json\n{plan_json}\n```\n"
-
-    candidate, details = await service._plan_single_file_compaction(
-        "facts.md", source, 10_000, "# Rules"
-    )
-
+    completions_for(service).content = "bad \ud800"
+    candidate, details = await service._plan_single_file_compaction("facts.md", _source(), 100, "")
     assert candidate is None
-    assert details["status"] == "error"
-    assert details["error"] == "invalid_compaction_json"
-
-
-async def test_strict_schema_rejects_unknown_fields_and_unsafe_operations() -> None:
-    source = _source()
-    valid = _plan("facts.md", [_replace_details()])
-    invalid_plans = []
-
-    unknown_root = json.loads(json.dumps(valid))
-    unknown_root["unexpected"] = True
-    invalid_plans.append(unknown_root)
-
-    unknown_edit = json.loads(json.dumps(valid))
-    unknown_edit["file_edits"][0]["unexpected"] = True
-    invalid_plans.append(unknown_edit)
-
-    unknown_operation = json.loads(json.dumps(valid))
-    unknown_operation["file_edits"][0]["operations"][0]["unexpected"] = True
-    invalid_plans.append(unknown_operation)
-
-    unknown_type = json.loads(json.dumps(valid))
-    unknown_type["file_edits"][0]["operations"][0]["type"] = "rewrite"
-    invalid_plans.append(unknown_type)
-
-    blank_reason = json.loads(json.dumps(valid))
-    blank_reason["file_edits"][0]["operations"][0]["reason"] = "  "
-    invalid_plans.append(blank_reason)
-
-    blank_replacement = json.loads(json.dumps(valid))
-    blank_replacement["file_edits"][0]["operations"][0]["content"] = "\n"
-    invalid_plans.append(blank_replacement)
-
-    replacement_h1 = json.loads(json.dumps(valid))
-    replacement_h1["file_edits"][0]["operations"][0]["content"] = "# New root"
-    invalid_plans.append(replacement_h1)
-
-    wrong_file = json.loads(json.dumps(valid))
-    wrong_file["file_edits"][0]["filename"] = "other.md"
-    invalid_plans.append(wrong_file)
-
-    many_files = json.loads(json.dumps(valid))
-    many_files["file_edits"].append(json.loads(json.dumps(valid))["file_edits"][0])
-    invalid_plans.append(many_files)
-
-    for plan in invalid_plans:
-        service = make_service()
-        completions_for(service).content = json.dumps(plan)
-        candidate, details = await service._plan_single_file_compaction(
-            "facts.md", source, 10_000, "# Rules"
-        )
-        assert candidate is None
-        assert details["status"] == "error"
-
-
-async def test_target_validation_rejects_h1_missing_duplicate_and_overlapping_ranges() -> None:
-    source = _source()
-    duplicate_operations = _plan(
-        "facts.md", [_replace_details(), _replace_details("different but duplicate")]
-    )
-    protected_h1 = _plan(
-        "facts.md",
-        [
-            {
-                "type": "delete_section",
-                "heading": "# Bank",
-                "reason": "attempt to remove title",
-            }
-        ],
-    )
-    missing = _plan(
-        "facts.md",
-        [
-            {
-                "type": "delete_section",
-                "heading": "## Missing",
-                "reason": "does not exist",
-            }
-        ],
-    )
-    overlap_source = "# Bank\n\n## Parent\ntext\n\n### Child\ntext\n\n## Tail\ntext"
-    overlapping = _plan(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": "## Parent",
-                "content": "short",
-                "reason": "compact parent",
-            },
-            {
-                "type": "delete_section",
-                "heading": "### Child",
-                "reason": "compact child",
-            },
-        ],
-    )
-    ambiguous_source = "# Bank\n\n## Details\none\n\n## Details\ntwo"
-
-    cases = [
-        (source, duplicate_operations, "duplicate_compaction_target"),
-        (source, protected_h1, "protected_compaction_h1_target"),
-        (source, missing, "ambiguous_or_missing_compaction_target"),
-        (
-            source,
-            _plan(
-                "facts.md",
-                [
-                    {
-                        "type": "delete_section",
-                        "heading": "Details",
-                        "reason": "missing exact hash prefix",
-                    }
-                ],
-            ),
-            "ambiguous_or_missing_compaction_target",
-        ),
-        (
-            source,
-            _plan(
-                "facts.md",
-                [
-                    {
-                        "type": "delete_section",
-                        "heading": "## details",
-                        "reason": "case differs",
-                    }
-                ],
-            ),
-            "ambiguous_or_missing_compaction_target",
-        ),
-        (overlap_source, overlapping, "overlapping_compaction_targets"),
-        (
-            ambiguous_source,
-            _plan("facts.md", [_replace_details()]),
-            "ambiguous_or_missing_compaction_target",
-        ),
-    ]
-    for case_source, plan, expected_error in cases:
-        service = make_service()
-        completions_for(service).content = json.dumps(plan)
-        candidate, details = await service._plan_single_file_compaction(
-            "facts.md", case_source, 10_000, "# Rules"
-        )
-        assert candidate is None
-        assert details["error"] == expected_error
-
-
-async def test_strict_compaction_rejects_a_lone_surrogate_before_hashing() -> None:
-    """A malformed model heading must not turn target attribution into an exception."""
-
-    service = make_service()
-    completions_for(service).content = json.dumps(
-        _plan(
-            "facts.md",
-            [
-                {
-                    "type": "delete_section",
-                    "heading": "\ud800",
-                    "reason": "Reject the malformed target before resolution.",
-                }
-            ],
-        )
-    )
-
-    candidate, details = await service._plan_single_file_compaction(
-        "facts.md", _source(), 10_000, "# Rules"
-    )
-
-    assert candidate is None
-    assert details == {
-        "status": "error",
-        "error": "invalid_compaction_operation_value",
-    }
-
-
-@pytest.mark.parametrize("invisible", ["\u200b", "\u00ad", "\ufeff"])
-def test_strict_compaction_never_tolerates_an_invisible_heading_variant(
-    invisible: str,
-) -> None:
-    """Visual lookalikes stay missing instead of silently retargeting a write."""
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=_source(),
-        max_size=10_000,
-        plan=_plan(
-            "facts.md",
-            [
-                {
-                    "type": "delete_section",
-                    "heading": f"## Det{invisible}ails",
-                    "reason": "An invisible character must remain significant.",
-                }
-            ],
-        ),
-    )
-
-    assert candidate is None
-    assert error == "ambiguous_or_missing_compaction_target"
-
-
-def test_strict_compaction_resolves_a_single_unicode_heading_transcription() -> None:
-    """A narrow visual fallback selects the original raw source span only."""
-
-    source_heading = "## 2026-07-29 — PR #305  &\tCafé"
-    planned_heading = "## 2026-07-29 - PR #305 & Cafe\u0301"
-    replacement = "condensed evidence " * 30
-    source = "# Bank\n\n" + source_heading + "\n" + "obsolete detail " * 200
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": planned_heading,
-                "content": replacement,
-                "reason": "Preserve the source heading while compacting its body.",
-            }
-        ],
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate == "# Bank\n\n" + source_heading + "\n" + replacement
-    assert candidate.split("\n", 2)[2].startswith(source_heading)
-    assert planned_heading not in candidate
-
-
-def test_strict_compaction_exact_heading_wins_over_a_normalized_collision() -> None:
-    """A raw exact target stays selectable even if fallback would be ambiguous."""
-
-    exact_heading = "## Release — Evidence"
-    colliding_heading = "## Release - Evidence"
-    first_body = "first source evidence " * 80
-    second_body = "second source evidence " * 80
-    replacement = "condensed first evidence " * 35
-    source = (
-        "# Bank\n\n"
-        + exact_heading
-        + "\n"
-        + first_body
-        + "\n"
-        + colliding_heading
-        + "\n"
-        + second_body
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=5_000,
-        plan=_plan(
-            "facts.md",
-            [
-                {
-                    "type": "replace_section",
-                    "heading": exact_heading,
-                    "content": replacement,
-                    "reason": "Compact only the exact source heading.",
-                }
-            ],
-        ),
-    )
-
-    assert error is None
-    assert candidate == (
-        "# Bank\n\n"
-        + exact_heading
-        + "\n"
-        + replacement
-        + "\n"
-        + colliding_heading
-        + "\n"
-        + second_body
-    )
-
-
-def test_strict_compaction_refuses_an_ambiguous_normalized_heading() -> None:
-    """Fallback never chooses a first section when distinct source headings collide."""
-
-    source = (
-        "# Bank\n\n"
-        "## Release — Evidence\n"
-        + "first source evidence " * 80
-        + "\n## Release - Evidence\n"
-        + "second source evidence " * 80
-    )
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=3_000,
-        plan=_plan(
-            "facts.md",
-            [
-                {
-                    "type": "replace_section",
-                    "heading": "## Release − Evidence",
-                    "content": "condensed evidence " * 35,
-                    "reason": "This visual spelling must remain ambiguous.",
-                }
-            ],
-        ),
-    )
-
-    assert candidate is None
-    assert error == "ambiguous_or_missing_compaction_target"
-
-
-def test_strict_compaction_rejects_two_normalized_aliases_for_one_target() -> None:
-    """Different model spellings cannot apply twice to the same raw section."""
-
-    source = (
-        "# Bank\n\n## Release — Evidence\n" + "obsolete evidence " * 160
-    )
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=_plan(
-            "facts.md",
-            [
-                {
-                    "type": "replace_section",
-                    "heading": "## Release - Evidence",
-                    "content": "condensed evidence " * 30,
-                    "reason": "First spelling.",
-                },
-                {
-                    "type": "delete_section",
-                    "heading": "## Release − Evidence",
-                    "reason": "Second spelling must not retarget the same source.",
-                },
-            ],
-        ),
-    )
-
-    assert candidate is None
-    assert error == "duplicate_compaction_target"
-
+    assert details == {"status": "error", "error": "invalid_compaction_utf8"}
+    assert len(completions_for(service).calls) == 2
 
 
 def test_compaction_failure_serializer_drops_malformed_or_unknown_target_fields() -> None:
@@ -1908,207 +1529,6 @@ def test_compaction_failure_serializer_drops_malformed_or_unknown_target_fields(
     assert marker not in json.dumps(safe)
 
 
-@pytest.mark.parametrize(
-    "operations",
-    [
-        [
-            {
-                "type": "replace_section",
-                "heading": "## A",
-                "content": "NEW",
-                "reason": "retain a compact placeholder",
-            },
-            {
-                "type": "delete_section",
-                "heading": "## B",
-                "reason": "remove obsolete sibling",
-            },
-        ],
-        [
-            {
-                "type": "delete_section",
-                "heading": "## B",
-                "reason": "remove obsolete sibling",
-            },
-            {
-                "type": "replace_section",
-                "heading": "## A",
-                "content": "NEW",
-                "reason": "retain a compact placeholder",
-            },
-        ],
-    ],
-)
-@pytest.mark.parametrize("eol", ["\n", "\r\n", "\r"])
-def test_empty_section_replace_and_adjacent_delete_are_order_independent(
-    operations: list[dict],
-    eol: str,
-) -> None:
-    source = (
-        f"# Bank{eol}## A{eol}## B{eol}"
-        + "b" * 200
-        + f"{eol}## Keep{eol}unchanged{eol}"
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=_plan("facts.md", operations),
-    )
-
-    assert error is None
-    assert candidate == f"# Bank{eol}## A{eol}NEW{eol}## Keep{eol}unchanged{eol}"
-
-
-def test_empty_child_replace_cannot_escape_a_parent_delete_scope() -> None:
-    source = (
-        "# Bank\n## Parent\n"
-        + "a" * 240
-        + "\n### Empty\n## Next\n"
-        + "b" * 300
-        + "\n"
-    )
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "delete_section",
-                "heading": "## Parent",
-                "reason": "remove obsolete parent",
-            },
-            {
-                "type": "replace_section",
-                "heading": "### Empty",
-                "content": "NEW",
-                "reason": "compact empty child",
-            },
-        ],
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert candidate is None
-    assert error == "overlapping_compaction_targets"
-
-
-def test_first_h1_body_can_be_compacted_without_changing_its_heading() -> None:
-    source = "# Bank\n" + "x" * 240 + "\n"
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": "# Bank",
-                "content": "condensed evidence",
-                "reason": "remove repetition from the root body",
-            }
-        ],
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate == "# Bank\ncondensed evidence\n"
-    assert candidate.split("\n", 1)[0] == source.split("\n", 1)[0]
-
-
-def test_first_h1_replace_preserves_every_child_section_byte_for_byte() -> None:
-    child_body = "keep this child evidence " * 12
-    nested_body = "keep nested evidence " * 12
-    source = (
-        "# Bank\n"
-        + "x" * 240
-        + "\n## Keep\n"
-        + child_body
-        + "\n### Evidence\n"
-        + nested_body
-        + "\n"
-    )
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": "# Bank",
-                "content": "condensed preamble",
-                "reason": "compact only root-level repetition",
-            }
-        ],
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate == (
-        "# Bank\ncondensed preamble\n## Keep\n"
-        + child_body
-        + "\n### Evidence\n"
-        + nested_body
-        + "\n"
-    )
-    assert candidate.split("## Keep", 1)[1] == source.split("## Keep", 1)[1]
-
-
-def test_first_h1_preamble_rejects_new_headings_that_reparent_children() -> None:
-    source = "# Bank\n" + "x" * 240 + "\n### Existing\nchild evidence\n"
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": "# Bank",
-                "content": "## Inserted\ncondensed preamble",
-                "reason": "attempt to add a preamble section",
-            }
-        ],
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert candidate is None
-    assert error == "invalid_compaction_replacement_structure"
-
-
-def test_replacement_structure_rejects_unbalanced_fences_and_peer_headings() -> None:
-    source = "# Bank\n\n## Details\n" + "x" * 240 + "\n"
-    invalid_replacements = [
-        "condensed\n```\nunclosed fence",
-        "condensed\n## manufactured peer",
-    ]
-
-    for replacement in invalid_replacements:
-        candidate, error = consolidator_module._strict_compaction_candidate(
-            filename="facts.md",
-            content=source,
-            max_size=1_000,
-            plan=_plan("facts.md", [_replace_details(replacement)]),
-        )
-
-        assert candidate is None
-        assert error == "invalid_compaction_replacement_structure"
-
-
 def test_strict_headings_ignore_unicode_and_nonclosing_fence_pseudo_lines() -> None:
     source = (
         "# Bank\n\n"
@@ -2128,246 +1548,30 @@ def test_strict_headings_ignore_unicode_and_nonclosing_fence_pseudo_lines() -> N
     ] == ["# Bank", "## Details", "## Tail"]
 
 
-def test_legacy_tab_fence_keeps_hidden_heading_out_of_compaction_targets() -> None:
-    """Keep the established compaction lexer from widening protected spans.
-
-    Normal consolidation rejects this tab-indented fence lookalike under its
-    stricter grammar.  Compaction must retain its historical parser, though:
-    changing it would turn the heading inside this protected legacy region
-    into a destructive replacement target.
-    """
-
-    source = (
-        "# Bank\n\n"
-        "\t```\n"
-        "# Hidden Heading\n"
-        + "protected legacy source evidence\n" * 8
-        + "\t```\n\n"
-        "## Tail\n\n"
-        + "tail bytes\n" * 3
-    )
-    plan = _plan(
-        "bank.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": "# Hidden Heading",
-                "content": "condensed replacement",
-                "reason": "Must not be targetable through a lexer change.",
-            }
-        ],
-    )
-
-    assert consolidator_module._strict_compaction_fences_balanced(source) is True
-    assert [
-        section.heading
-        for section in consolidator_module._strict_compaction_sections(source)
-    ] == ["# Bank", "## Tail"]
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="bank.md",
-        content=source,
-        max_size=10_000,
-        plan=plan,
-    )
-
-    assert candidate is None
-    assert error == "ambiguous_or_missing_compaction_target"
+def test_legacy_tab_fence_keeps_hidden_heading_out_of_compaction_roots():
+    source = "# Bank\n\n\t```\n# Hidden Heading\nprotected evidence\n\t```\n## Tail\ntail"
+    assert consolidator_module._strict_compaction_fences_balanced(source)
+    assert [h.heading for h in consolidator_module._strict_compaction_sections(source)] == ["# Bank", "## Tail"]
+    recent, history = consolidator_module._compaction_partition(source, 100)
+    assert not history
+    assert any("# Hidden Heading" in unit["body"] for unit in recent)
 
 
-async def test_unbalanced_source_fence_refuses_before_provider_egress() -> None:
-    source = (
-        "# Bank\n\n## Details\n"
-        + "x" * 240
-        + "\n```python\n``` not-a-close\n## Swallowed\n"
-        + "y" * 240
-        + "\n"
-    )
+async def test_unbalanced_source_fence_refuses_before_provider_egress():
     service = make_service()
-
-    candidate, details = await service._plan_single_file_compaction(
-        "facts.md", source, 1_000, "# Rules"
-    )
-
+    source = "# Bank\n\n## Details\n```python\n``` not-a-close\n## Swallowed\n"
+    candidate, details = await service._plan_single_file_compaction("facts.md", source, 100, "")
     assert candidate is None
     assert details == {"status": "error", "error": "invalid_compaction_source_structure"}
     assert completions_for(service).calls == []
 
-    direct_candidate, direct_error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=_plan("facts.md", [_replace_details("condensed")]),
-    )
-    assert direct_candidate is None
-    assert direct_error == "invalid_compaction_source_structure"
 
-
-def test_balanced_source_fence_with_a_pseudo_close_remains_valid() -> None:
-    source = (
-        "# Bank\n\n## Details\n"
-        "```python\n"
-        "``` not-a-close\n"
-        "real code\n"
-        "```\n"
-        + "x" * 240
-        + "\n"
-    )
-
-    assert consolidator_module._strict_compaction_fences_balanced(source) is True
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=_plan("facts.md", [_replace_details("condensed")]),
-    )
-    assert error is None
-    assert candidate is not None
-
-
-async def test_strict_plan_preserves_crlf_no_final_newline_and_untouched_bytes() -> None:
-    source = _source(eol="\r\n", final_newline=False)
+async def test_balanced_source_fence_with_a_pseudo_close_remains_valid():
+    source = "# Bank\n\n## Details\n```python\n``` not-a-close\nreal code\n```\n" + "x" * 240
     service = make_service()
-    completions_for(service).content = _plan_json(
-        "facts.md", [_replace_details("condensed ✅")]
-    )
-
-    candidate, details = await service._plan_single_file_compaction(
-        "facts.md", source, 10_000, "# Rules"
-    )
-
-    expected = source.replace("obsolete verbose detail " * 35, "condensed ✅", 1)
-    assert candidate == expected
-    assert candidate is not None
-    assert "\r\n" in candidate
-    assert not candidate.endswith("\n")
-    assert details["source_bytes"] > len(source)
-    assert details["candidate_bytes"] == len(candidate.encode("utf-8"))
-
-
-def test_replacement_preserves_final_eol_and_normalizes_model_line_endings() -> None:
-    source = "# Bank\r\n\r\n## Details\r\n" + "x" * 240 + "\r\n"
-    plan = _plan("facts.md", [_replace_details("summary\nsecond line")])
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate == "# Bank\r\n\r\n## Details\r\nsummary\r\nsecond line\r\n"
-    assert "\n" not in candidate.replace("\r\n", "")
-
-
-def test_final_replacement_cannot_add_a_new_terminal_line_ending() -> None:
-    source = "# Bank\r\n\r\n## Details\r\n" + "x" * 240
-    plan = _plan("facts.md", [_replace_details("summary\n")])
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate == "# Bank\r\n\r\n## Details\r\nsummary"
-    assert not candidate.endswith(("\n", "\r"))
-
-
-def test_final_replacement_retains_its_source_terminal_eol_variant() -> None:
-    source = "# Bank\n\n## Details\n" + "x" * 240 + "\r\n"
-    plan = _plan("facts.md", [_replace_details("summary")])
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate == "# Bank\n\n## Details\nsummary\r\n"
-
-
-@pytest.mark.parametrize("eol", ["\n", "\r\n", "\r"])
-def test_empty_final_section_preserves_its_heading_terminal_eol(eol: str) -> None:
-    source = f"# Bank{eol}## Obsolete{eol}" + "x" * 3_000 + f"{eol}## Empty{eol}"
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "delete_section",
-                "heading": "## Obsolete",
-                "reason": "remove obsolete evidence",
-            },
-            {
-                "type": "replace_section",
-                "heading": "## Empty",
-                "content": "z" * 200,
-                "reason": "retain a concise final section",
-            },
-        ],
-    )
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate == f"# Bank{eol}## Empty{eol}" + "z" * 200 + eol
-
-
-@pytest.mark.parametrize(
-    ("source", "max_size", "replacement", "expected_error"),
-    [
-        # Le plancher de RÉTENTION reste : un candidat qui détruit plus de 95 %
-        # du source est refusé, quelle que soit la limite visée.
-        (
-            "# Bank\n\n## Details\n" + "x" * 2_000,
-            10_000,
-            "y",
-            "compaction_retention_below_safety_floor",
-        ),
-        # Et un candidat qui ne réduit pas — ou grossit — reste refusé.
-        (
-            "# Bank\n\n## Details\n" + "x" * 2_000,
-            1_000,
-            "x" * 2_000,
-            "compaction_not_smaller",
-        ),
-        (
-            "# Bank\n\n## Details\n" + "x" * 2_000,
-            1_000,
-            "y" * 2_500,
-            "compaction_not_smaller",
-        ),
-    ],
-)
-async def test_retention_floor_and_strict_reduction_stay_fail_closed(
-    source: str, max_size: int, replacement: str, expected_error: str
-) -> None:
-    """L'enveloppe de sécurité conservée après #457 item 2.
-
-    Ce qui est retiré est le VETO d'idéal ; ce qui reste est le refus de vider
-    le fichier et le refus de ne pas réduire.
-    """
-    service = make_service()
-    completions_for(service).content = _plan_json(
-        "facts.md", [_replace_details(replacement)]
-    )
-
-    candidate, details = await service._plan_single_file_compaction(
-        "facts.md", source, max_size, "# Rules"
-    )
-
-    assert candidate is None
-    assert details["error"] == expected_error
+    completions_for(service).content = "Keep the relevant lesson."
+    candidate, details = await service._plan_single_file_compaction("facts.md", source, 100, "")
+    assert candidate is not None and details["status"] == "ok"
 
 
 @pytest.mark.parametrize(
@@ -2394,9 +1598,7 @@ async def test_a_real_reduction_is_accepted_even_when_the_ideal_is_out_of_reach(
     perfection était inatteignable en une passe.
     """
     service = make_service()
-    completions_for(service).content = _plan_json(
-        "facts.md", [_replace_details(replacement)]
-    )
+    completions_for(service).content = replacement
 
     candidate, details = await service._plan_single_file_compaction(
         "facts.md", source, max_size, "# Rules"
@@ -2407,38 +1609,6 @@ async def test_a_real_reduction_is_accepted_even_when_the_ideal_is_out_of_reach(
     # Strictement plus petit, et le H1 est préservé.
     assert len(candidate.encode("utf-8")) < len(source.encode("utf-8"))
     assert candidate.startswith("# Bank")
-
-
-def test_exact_utf8_reduction_retention_and_target_boundaries_are_accepted() -> None:
-    prefix = "# Bank\n\n## Details\n"
-    source = prefix + "x" * (2_000 - len(prefix.encode("utf-8")))
-    required_retention = len(source.encode("utf-8")) * 5 // 100
-    replacement = "y" * (required_retention - len(prefix.encode("utf-8")))
-    plan = _plan("facts.md", [_replace_details(replacement)])
-
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=10_000,
-        plan=plan,
-    )
-
-    assert error is None
-    assert candidate is not None
-    assert len(candidate.encode("utf-8")) * 100 == len(source.encode("utf-8")) * 5
-
-    target_replacement = "z" * (750 - len(prefix.encode("utf-8")))
-    target_plan = _plan("facts.md", [_replace_details(target_replacement)])
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=1_000,
-        plan=target_plan,
-    )
-
-    assert error is None
-    assert candidate is not None
-    assert len(candidate.encode("utf-8")) == 750
 
 
 async def test_context_exhaustion_refuses_before_provider_egress() -> None:
@@ -2479,9 +1649,7 @@ async def test_calibrated_context_admission_keeps_a_standard_profile_usable() ->
     source = "# Bank\n\n## Details\n" + "x" * 175_000
     rules = "# Rules\n" + "r" * 6_800
     service = make_service(max_size=300_000, context_window=131_072)
-    completions_for(service).content = _plan_json(
-        "facts.md", [_replace_details("y" * 9_000)]
-    )
+    completions_for(service).content = "y" * 9_000
 
     candidate, details = await service._plan_single_file_compaction(
         "facts.md", source, 300_000, rules
@@ -2663,10 +1831,10 @@ async def test_manual_compaction_preserves_content_and_safe_plan_error(
     assert storage.objects["space-a/bank/facts.md"] == "f" * 120
 
 
-async def test_manual_compaction_preserves_redacted_target_attribution(
+async def test_manual_compaction_rejects_legacy_plan_without_leaking_its_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The standalone tool carries the same closed preparation diagnostic."""
+    """Rejected model output never enters public diagnostics or storage."""
 
     marker_heading = "## MANUAL_COMPLETION_HEADING_SECRET_4f27"
     source = "# Bank\n\n## Details\n" + "obsolete detail " * 200
@@ -2701,18 +1869,7 @@ async def test_manual_compaction_preserves_redacted_target_attribution(
     assert result["status"] == "error"
     assert result["failed_phase"] == "prepare"
     assert result["rollback_outcome"] == "not_needed"
-    assert result["failures"] == [
-        {
-            "filename": "facts.md",
-            "error": "ambiguous_or_missing_compaction_target",
-            "operation_index": 1,
-            "target_resolution": "missing",
-            "target_match_count": 0,
-            "target_heading_sha256": hashlib.sha256(
-                marker_heading.encode("utf-8")
-            ).hexdigest(),
-        }
-    ]
+    assert result["failures"] == [{"filename": "facts.md", "error": "invalid_compaction_summary_format"}]
     assert marker_heading not in json.dumps(result)
     assert storage.objects == before
 
@@ -2814,25 +1971,18 @@ def test_a_result_above_the_limit_survives_preparation_and_apply_revalidation():
         # Egal en taille, puis plus gros : la reduction doit rester STRICTE.
         ("x" * 300, "x" * 300, "compaction_not_smaller"),
         ("x" * 300, "y" * 400, "compaction_not_smaller"),
-        # Sous le plancher de RETENTION. Le source doit etre assez grand pour
-        # que l'en-tete conserve (19 octets) represente moins de 5 % : avec un
-        # source de 319 octets, 20/319 fait 6,3 % et ne franchit pas le seuil.
-        ("x" * 2_000, "", "compaction_retention_below_safety_floor"),
+        # An actually empty result is still rejected before durable writes.
+        ("x" * 2_000, "", "empty_compaction_candidate"),
     ],
 )
 def test_preparation_still_refuses_what_the_envelope_forbids(
     source_body: str, result_body: str, expected_error: str
 ):
-    """L'enveloppe conservee tient AUSSI a la frontiere de preparation.
-
-    C'est la derniere avant les ecritures durables. L'item 2 y a retire le seul
-    garde de taille qui s'y trouvait, donc le plancher de retention doit y etre
-    explicitement present : sans lui, un candidat qui vide le fichier passerait.
-    """
+    """Empty or non-reducing output cannot cross the preparation boundary."""
     source = "# Bank\n\n## Details\n" + source_body
     result = "# Bank\n\n## Details\n" + result_body
-    if expected_error == "compaction_retention_below_safety_floor":
-        assert len(result.encode("utf-8")) * 100 < len(source.encode("utf-8")) * 5
+    if expected_error == "empty_compaction_candidate":
+        result = ""
     target, error = consolidator_module._materialize_prepared_compaction_target(
         space_id="s",
         source_key="s/bank/facts.md",
@@ -2847,107 +1997,143 @@ def test_preparation_still_refuses_what_the_envelope_forbids(
     assert error == expected_error
 
 
-def test_compaction_rejects_delete_section_on_any_h1_heading() -> None:
-    """Deleting ANY H1 heading (primary or secondary) is forbidden."""
-    source = (
-        "# Primary H1\n\n"
-        "primary preamble\n\n"
-        "## Section 1\n\n"
-        "content 1\n\n"
-        "# Secondary H1\n\n"
-        "secondary preamble\n\n"
-        "## Section 2\n\n"
-        "content 2\n"
+def _recovery_response(text: str, finish: str = "stop") -> ChatResult:
+    return ChatResult(
+        text=text, configured_model="test-model",
+        model_evidence="configured_only", finish_reason=finish,
     )
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "delete_section",
-                "heading": "# Secondary H1",
-                "reason": "Secondary H1 must not be deleted.",
-            }
-        ],
+
+
+def _recovery_provider_error(category="invalid_response", role="chat"):
+    return InferenceError(
+        category=category, role=role, provider_id="openai-compatible",
+        adapter_id="openai-compatible", retryable=False,
+        correlation_id="compaction-recovery-test",
     )
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=10_000,
-        plan=plan,
-    )
+
+
+@pytest.mark.parametrize("category,role", [
+    ("auth", "chat"), ("rate_limited", "chat"),
+    ("timeout", "chat"), ("content_rejected", "chat"),
+    ("unavailable", "chat"), ("quota_exhausted", "chat"), ("unsupported", "chat"), ("invalid_request", "chat"),
+    ("invalid_response", "embedding"),
+])
+async def test_compaction_recovery_keeps_other_provider_errors_terminal(category, role):
+    service = make_service()
+    service._complete_chat = AsyncMock(side_effect=_recovery_provider_error(category, role))
+    candidate, details = await service._plan_single_file_compaction("facts.md", _source(), 10_000, "")
     assert candidate is None
-    assert error == "protected_compaction_h1_target"
+    assert details == {"status": "error", "error": "compaction_provider_failure"}
+    assert service._complete_chat.await_count == 1
 
 
-def test_compaction_replace_section_on_secondary_h1_preamble_succeeds() -> None:
-    """Replacing preamble of a secondary H1 before its child section succeeds."""
-    source = (
-        "# Primary H1\n\n"
-        "primary preamble\n\n"
-        "## Section 1\n\n"
-        "content 1\n\n"
-        "# Secondary H1\n\n"
-        "long secondary preamble that needs compaction\n\n"
-        "## Section 2\n\n"
-        "content 2\n"
-    )
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": "# Secondary H1",
-                "content": "compact secondary preamble",
-                "reason": "Compact the secondary preamble.",
-            }
-        ],
-    )
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=10_000,
-        plan=plan,
-    )
-    assert error is None
-    assert candidate is not None
-    assert "# Primary H1" in candidate
-    assert "# Secondary H1" in candidate
-    assert "## Section 2" in candidate
-    assert "compact secondary preamble" in candidate
-
-
-def test_compaction_rejects_altered_or_reordered_h1_headings() -> None:
-    """If a replacement introduces or removes an H1 heading, candidate is rejected."""
-    source = (
-        "# First H1\n\n"
-        "content 1\n\n"
-        "## Section 1\n\n"
-        "body 1\n\n"
-        "# Second H1\n\n"
-        "content 2\n"
-    )
-    # Plan that injects an extra H1 inside a section replacement
-    plan = _plan(
-        "facts.md",
-        [
-            {
-                "type": "replace_section",
-                "heading": "## Section 1",
-                "content": "# Injected H1\n\ncorrupted",
-                "reason": "Attempt to inject an extra H1.",
-            }
-        ],
-    )
-    candidate, error = consolidator_module._strict_compaction_candidate(
-        filename="facts.md",
-        content=source,
-        max_size=10_000,
-        plan=plan,
-    )
-    assert candidate is None
-    # Either section heading nesting rejected or H1 tuple mismatch
-    assert error in {
-        "invalid_compaction_replacement_structure",
-        "compaction_replacement_heading_shallower",
-        "compaction_h1_not_preserved",
+@pytest.mark.parametrize("recover,invalid_response", [(False, False), (False, True), (True, False)])
+async def test_manual_compaction_recovery_preserves_transaction_boundary(recover, invalid_response, monkeypatch):
+    storage = CompactionStorage()
+    storage.objects = {
+        "space-a/_meta.json": "{}", "space-a/_rules.md": "# Rules",
+        "space-a/bank/facts.md": _source(), "space-a/live/untouched.md": "pending note",
     }
+    before = dict(storage.objects)
+    service = make_service(max_size=100)
+    valid = "condensed facts"
+    second = (_recovery_provider_error() if invalid_response else
+              _recovery_response(valid if recover else '{"PRIVATE_REJECTED_OUTPUT":true}'))
+    service._complete_chat = AsyncMock(side_effect=[_recovery_provider_error(), second])
+    monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
+    monkeypatch.setattr(consolidator_module, "assert_space_not_reserved", AsyncMock())
+    with consolidator_module._direct_local_compaction_authority(
+        consolidator_module._issue_direct_local_compaction_authority("space-a", DirectLocalWriteSink(storage))
+    ):
+        result = await service.compact_bank("space-a", dry_run=False)
+    assert service._complete_chat.await_count == 2
+    if not recover:
+        assert result["status"] == "error"
+        assert result["failed_phase"] == "prepare"
+        assert result["files"][0]["error"] == (
+            "compaction_provider_invalid_response" if invalid_response else "invalid_compaction_summary_format"
+        )
+        if invalid_response:
+            assert "bank_write" not in result["remediation"]
+            assert "provider" in result["remediation"]
+        assert storage.objects == before
+        assert storage.events == []
+    else:
+        assert result["status"] == "ok"
+        assert result["preimage_id"].startswith("space-a/")
+        expected = "# Bank\n\n" + valid + "\n"
+        assert storage.objects["space-a/bank/facts.md"] == expected
+        assert result["files"][0]["result_sha256"] == hashlib.sha256(expected.encode()).hexdigest()
+        assert storage.objects["space-a/live/untouched.md"] == "pending note"
+        assert any(key.startswith("_backups/") and value == _source() for key, value in storage.objects.items())
+
+
+async def test_compaction_correction_context_is_rechecked_before_egress():
+    service = make_service()
+    messages = service._build_compaction_plan_messages("facts.md", _source(), 10_000, "")
+    service._context_window = sum(consolidator_module._strict_compaction_input_tokens(m["content"]) for m in messages) + 16 * len(messages) + service._max_tokens
+    service._complete_chat = AsyncMock(side_effect=_recovery_provider_error())
+    candidate, details = await service._plan_single_file_compaction("facts.md", _source(), 10_000, "")
+    assert candidate is None
+    assert details["error"] == "compaction_context_exhausted"
+    assert service._complete_chat.await_count == 1
+
+
+async def test_compaction_cancellation_during_correction_propagates():
+    service = make_service()
+    service._complete_chat = AsyncMock(side_effect=[_recovery_provider_error(), asyncio.CancelledError()])
+    with pytest.raises(asyncio.CancelledError):
+        await service._plan_single_file_compaction("facts.md", _source(), 10_000, "")
+    assert service._complete_chat.await_count == 2
+
+
+@pytest.mark.parametrize("second", [
+    _recovery_provider_error(),
+    _recovery_response("PRIVATE_REJECTED_OUTPUT", "length"),
+    _recovery_response("PRIVATE_REJECTED_OUTPUT", "other"),
+    _recovery_response('{"file_edits":[]}'),
+])
+async def test_compaction_mixed_faults_never_buy_a_third_operation(second):
+    service = make_service()
+    valid = _recovery_response("condensed facts")
+    service._complete_chat = AsyncMock(side_effect=[_recovery_provider_error(), second, valid])
+    candidate, details = await service._plan_single_file_compaction("facts.md", _source(), 10_000, "")
+    assert candidate is None
+    assert details["status"] == "error"
+    assert service._complete_chat.await_count == 2
+
+
+async def test_compaction_unknown_candidate_failure_is_not_correctable(monkeypatch):
+    service = make_service()
+    service._complete_chat = AsyncMock(return_value=_recovery_response("{}"))
+    monkeypatch.setattr(consolidator_module, "_compaction_summary_text", lambda text: (None, "future_storage_or_authority_failure"))
+    candidate, details = await service._plan_single_file_compaction("facts.md", _source(), 10_000, "")
+    assert candidate is None
+    assert details["error"] == "future_storage_or_authority_failure"
+    assert service._complete_chat.await_count == 1
+
+
+async def test_compaction_correction_reaches_real_chatrequest_boundary(monkeypatch):
+    from live_mem.core import inference_runtime
+
+    service = make_service(max_tokens=200_000, context_window=500_000)
+    del service._complete_chat
+    requests = []
+
+    class Provider:
+        async def complete(self, request):
+            requests.append(request)
+            if len(requests) == 1:
+                raise _recovery_provider_error()
+            return _recovery_response("condensed facts")
+
+    class Runtime:
+        def chat_provider(self):
+            return Provider()
+
+    monkeypatch.setattr(inference_runtime, "get_inference_runtime", lambda: Runtime())
+    candidate, details = await service._plan_single_file_compaction("facts.md", _source(), 10_000, "")
+    assert candidate is not None
+    assert details["status"] == "ok"
+    assert len(requests) == 2
+    assert all(r.retry_policy == "none" and r.max_output_tokens == 200_000 and r.timeout_seconds == 1 for r in requests)

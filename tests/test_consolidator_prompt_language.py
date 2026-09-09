@@ -253,24 +253,7 @@ async def test_duplicate_section_merge_prompt_is_english() -> None:
 async def test_compaction_prompt_is_english() -> None:
     service = _service()
     source = "# Bank\n\n## Details\n" + "verbose detail " * 30
-    service._complete_chat.text = json.dumps(
-        {
-            "file_edits": [
-                {
-                    "filename": "activeContext.md",
-                    "action": "edit",
-                    "operations": [
-                        {
-                            "type": "replace_section",
-                            "heading": "## Details",
-                            "content": "condensed",
-                            "reason": "Remove repeated detail.",
-                        }
-                    ],
-                }
-            ]
-        }
-    )
+    service._complete_chat.text = "## Details\ncondensed"
 
     assert await service._compact_single_file(
         "activeContext.md", source, 100, "# Rules"
@@ -279,6 +262,6 @@ async def test_compaction_prompt_is_english() -> None:
         message["content"]
         for message in service._complete_chat.calls[0]["messages"]
     )
-    assert "Merge redundant information" in prompt
+    assert "Return concise English Markdown" in prompt
     assert "Fusionne les informations redondantes" not in prompt
     assert service._complete_chat.calls[0]["retry_policy"] == "none"

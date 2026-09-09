@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.5.0-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.5.1-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -541,7 +541,7 @@ en échec pour le diagnostic.
 | `CONSOLIDATION_COOLDOWN_SECONDS` | `60`      | Cooldown anti-spam par space pour `bank_consolidate` (`0` désactive) |
 | `CONSOLIDATION_VALIDATION_ENABLED` | `false` | Vérification optionnelle post-consolidation des claims non sourcés |
 | `CONSOLIDATION_VALIDATION_MAX_EXAMPLES` | `20` | Nombre max d'exemples retournés par la validation |
-| `BANK_FILE_MAX_SIZE`      | `35000`           | Seuil d'AVERTISSEMENT par fichier bank, en octets UTF-8 persistés, et seuil de candidature / cible de la compaction manuelle (outil bank compact, décision humaine). La consolidation ne compacte jamais : vous choisissez quand résumer davantage vos fichiers. Jamais un plafond dur |
+| `BANK_FILE_MAX_SIZE`      | `35000`           | Seuil d'AVERTISSEMENT par fichier bank, en octets UTF-8 persistés, et seuil de candidature et repère de la compaction manuelle (outil bank compact, décision humaine). La consolidation ne compacte jamais : vous choisissez quand résumer davantage vos fichiers. Jamais un plafond dur |
 | ~~`COMPACT_THRESHOLD`~~   | retiré            | N'admettait que l'auto-compaction, supprimée ; une valeur résiduelle est ignorée. Ancien texte : signal agrégé de pression de contexte ; nombre fini dans `(0, 1]` (0.6 = bank > 60% du budget). Les plans restent soumis aux gardes par fichier et de contexte |
 | `RESPONSE_MAX_BYTES`      | `524288`          | Taille max des réponses non-MCP avant troncature |
 | `API_TOOL_MAX_BODY_BYTES` | `1048576`         | Taille max du corps accepté par `/api/tool` |
@@ -733,13 +733,37 @@ grant concurrent ou ultérieur peut réintroduire la barrière fail-closed et do
 | `bank_write`                | `space_id`, `filename`, `content` | Écrit/remplace un fichier bank directement — contourne la consolidation LLM (**manage**)                         |
 | `bank_delete`               | `space_id`, `filename`, `confirm?=False` | Supprime un fichier bank et ses doublons Unicode (**manage**, irréversible) ; `confirm=True` est requis |
 
-`bank_compact --apply` ne peut écrire que sur une route DirectLocal. Une route
-Project Mesh partagée est refusée avant l'appel fournisseur, le préimage ou une
-écriture bank — sans repli local. Les documents surdimensionnés ou incompatibles
-avec le contexte échouent fermé au lieu d'être découpés. Ce chemin ne fournit
-pas de compaction multipart ni de reprise durable après crash. La récupération
-des réponses inutilisables de la compaction manuelle est prévue en v1.5.1 ;
-l’outil manuel existant reste disponible. Le contrat détaillé est dans la
+La compaction reste une décision humaine : la consolidation signale les fichiers
+au-dessus de `BANK_FILE_MAX_SIZE`, sans les compacter automatiquement. En 1.5.1,
+`bank_compact` résume la mémoire de moyen terme pour qu'une nouvelle conversation
+retrouve l'état utile, les décisions et le travail ouvert. Le programme prépare
+les passages récents et non datés ; le modèle extrait les enseignements de
+l'historique ancien, puis rédige le résumé en anglais. Les dates guident la
+lecture, sans prouver à elles seules qu'une affirmation est encore vraie.
+
+Le résultat doit être non vide et strictement plus petit ; aucun pourcentage
+minimal de rétention ni taille finale obligatoire ne s'applique. Le programme
+préserve les titres H1 et les chemins. Une seule génération corrective par
+fichier est partagée entre toutes les étapes ; les timeouts et autres erreurs
+du fournisseur restent terminaux. Les corps générés sont vérifiés avec la
+grammaire Markdown de l'éditeur de consolidation.
+
+`bank_compact --apply` ne peut écrire que sur une route DirectLocal. Tous les
+résultats sont préparés avant la sauvegarde vérifiée, les écritures et leur
+relecture ; le rollback existant reste borné. Une route Project Mesh partagée
+est refusée avant l'inférence ou l'écriture. Une requête incompatible avec le
+contexte est refusée avant son envoi. La compaction ne fournit pas de stockage
+multipart, de reprise durable après crash ni de transfert des détails écartés
+vers Graph.
+
+La séparation entre récent et historique conserve ensemble les passages d'une
+même date à la frontière, même au-delà du repère de volume ; la garde de contexte
+reste applicable.
+
+La mise à niveau depuis 1.5.0 ne demande ni nouvelle variable d'environnement
+ni migration de stockage. Un résumé peut désormais représenter moins de 5 %
+de son original : vérifier une copie représentative avant application sur une
+bank importante. Le contrat détaillé est dans la
 [spécification MCP](docs/MCP_TOOLS_SPEC.md).
 
 ### `long` — ontologie / graphe de connaissances (historiquement `graph_*`)

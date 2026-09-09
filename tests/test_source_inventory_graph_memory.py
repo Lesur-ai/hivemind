@@ -169,6 +169,41 @@ def test_graph_runtime_direct_dependencies_are_exact_pins():
     assert _mutable_requirement_lines(mutated) == ["mcp>=1.8.0"]
 
 
+def _direct_lock_mismatches(requirements: str, lock: str) -> list[str]:
+    """Compare normalized exact input pins with the installed resolution."""
+    pin = re.compile(r"^([A-Za-z0-9_.-]+)(?:\[[^]]+\])?==([^\s;]+)")
+
+    def pins(text):
+        result = {}
+        for line in text.splitlines():
+            match = pin.match(line)
+            if match:
+                name = re.sub(r"[-_.]+", "-", match[1]).lower()
+                result.setdefault(name, set()).add(match[2])
+        return result
+
+    installed = pins(lock)
+    return [
+        name for name, versions in pins(requirements).items()
+        if installed.get(name) != versions
+    ]
+
+
+def test_graph_runtime_lock_matches_every_direct_pin():
+    requirements = (_SVC / "requirements.txt").read_text(encoding="utf-8")
+    lock = (_SVC / "requirements.lock").read_text(encoding="utf-8")
+    assert not _direct_lock_mismatches(requirements, lock)
+
+    # Both input-only and lock-only updates must fail, including extras/casing.
+    for name, version in (("boto3", "1.43.88"), ("uvicorn[standard]", "0.51.0"), ("PyYAML", "6.0.3")):
+        mutated = requirements.replace(f"{name}=={version}", f"{name}==0.0.0", 1)
+        assert mutated != requirements
+        assert _direct_lock_mismatches(mutated, lock)
+    assert _direct_lock_mismatches("Py_Yaml[extra]==6.0.3", "py-yaml==0.0.0") == ["py-yaml"]
+    assert _direct_lock_mismatches("pypdf==6.17.0", "") == ["pypdf"]
+    assert _direct_lock_mismatches("pypdf==6.17.0", "pypdf==6.17.0\npypdf==0.0.0") == ["pypdf"]
+
+
 def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
     """The container must install the complete resolution with hashes only."""
     lock = (_SVC / "requirements.lock").read_text(encoding="utf-8")
@@ -185,8 +220,8 @@ def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
         "86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30"
     ) in dockerfile
     assert "aiohttp==3.14.3" in lock
-    assert "boto3==1.43.52" in lock
-    assert "botocore==1.43.52" in lock
+    assert "boto3==1.43.88" in lock
+    assert "botocore==1.43.88" in lock
     assert "--require-hashes -r requirements.lock" in dockerfile
     assert "pip install --no-cache-dir --upgrade pip" not in dockerfile
     assert "apt-get" not in dockerfile

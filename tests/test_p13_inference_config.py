@@ -1220,3 +1220,28 @@ class TestPortValidationNeverEchoesValues:
 # split deployment with legacy names) belongs to the consumer/runtime migration
 # that edits docker-compose.yml (#276). This foundation slice does not touch
 # compose, so asserting on it here would test an unshipped change.
+
+
+def test_dotenv_bom_and_process_precedence(tmp_path, monkeypatch):
+    from hivemind_inference.config import merged_environment
+
+    path = tmp_path / "bom.env"
+    path.write_text("\ufeffINFERENCE_CHAT_MODEL=file-model\n", encoding="utf-8")
+    monkeypatch.delenv("INFERENCE_CHAT_MODEL", raising=False)
+    assert merged_environment(str(path))["INFERENCE_CHAT_MODEL"] == "file-model"
+    monkeypatch.setenv("INFERENCE_CHAT_MODEL", "process-model")
+    assert merged_environment(str(path))["INFERENCE_CHAT_MODEL"] == "process-model"
+    monkeypatch.setenv("INFERENCE_CHAT_MODEL", "")
+    assert merged_environment(str(path))["INFERENCE_CHAT_MODEL"] == ""
+
+
+def test_dotenv_trailing_backslash_roundtrip(tmp_path, monkeypatch):
+    from dotenv import set_key
+    from hivemind_inference.config import merged_environment
+
+    path = tmp_path / "quoted.env"
+    path.touch()
+    monkeypatch.delenv("INFERENCE_CHAT_MODEL", raising=False)
+    value = "local\\model\\"
+    set_key(str(path), "INFERENCE_CHAT_MODEL", value)
+    assert merged_environment(str(path))["INFERENCE_CHAT_MODEL"] == value
