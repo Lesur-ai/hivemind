@@ -24,7 +24,71 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 
 ---
 
-## [1.5.0] — Unreleased
+## [1.5.1] — 2026-09-09
+
+Hivemind 1.5.1 improves manual compaction to help your next conversation start
+with a more concise working memory. It also improves PDF reading and includes
+a small set of maintenance updates.
+
+**Release identity.** Hivemind now reports runtime version `1.5.1`.
+
+### A clearer starting point for your next conversation
+
+- **Summaries focused on continuing the work.** Manual compaction brings recent
+  context and lessons from older history into a shorter Markdown handoff, aimed
+  at retaining useful decisions and open work. It preserves each file's title
+  and location while leaving out secondary detail.
+- **Fewer interruptions from unusable summaries.** Compaction can request one
+  corrective model generation per file, shared across its summarization stages.
+  Existing preparation, verified backup and write/readback checks are retained.
+- **You choose when to compact.** Normal consolidation continues to report large
+  files without compacting them automatically. Manual compaction remains
+  available on DirectLocal spaces with `manage` access.
+
+### Smoother document reading and configuration
+
+- **Improved PDF text extraction.** pypdf 6.17.0 adds font handling and parser
+  bounds. Documents already indexed stay unchanged; reindexing with the updated
+  parser may produce different text.
+- **More consistent `.env` reading.** python-dotenv 1.2.3 recognizes the first
+  variable in UTF-8 BOM-prefixed files. Explicit process environment values
+  retain precedence.
+- **Refreshed maintenance dependencies.** Pydantic 2.13.5 and boto3/botocore
+  1.43.88 ship with matching installation locks. Release builds also use updated,
+  SHA-pinned QEMU/Buildx 4.3.0 and artifact attestation 4.2.2 actions.
+
+### Upgrading from 1.5.0
+
+No storage migration or new environment variable is required. Keep your existing
+`.env` and one complete inference profile. The MCP tool surface is unchanged.
+
+To try the improved compaction, back up your memory and compact a representative
+copy first. Review whether its summary gives the next conversation the context
+it needs. The dry-run lists candidates and checks feasibility; it does not
+preview a generated summary. Compaction creates a selective summary, not an
+archive: it may retain less than 5% of the original text, preserves source H1
+headings, and writes new prose in English. Omitted detail is not transferred to
+Graph. Multipart storage and crash-durable compaction recovery are not added.
+Provider timeouts and other provider failures still stop manual compaction;
+`CONSOLIDATION_TRANSIENT_RETRIES` continues to apply to normal consolidation only.
+
+Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
+boundary. See [extension points](docs/EXTENSION_POINTS.md). Moving from separate
+Live Memory and Graph Memory services? Follow the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### Thanks
+
+Thanks to Dependabot for the original maintenance proposals:
+[pypdf #59](https://github.com/Lesur-ai/hivemind/pull/59),
+[Pydantic #65](https://github.com/Lesur-ai/hivemind/pull/65),
+[python-dotenv #57](https://github.com/Lesur-ai/hivemind/pull/57),
+[boto3 #64](https://github.com/Lesur-ai/hivemind/pull/64),
+[QEMU #63](https://github.com/Lesur-ai/hivemind/pull/63),
+[Buildx #55](https://github.com/Lesur-ai/hivemind/pull/55), and
+[artifact attestation #40](https://github.com/Lesur-ai/hivemind/pull/40).
+
+## [1.5.0] — 2026-09-08
 
 Hivemind 1.5.0 makes consolidation easier to operate: fewer interruptions after
 unusable model responses, visible progress when a provider is slow, and explicit
@@ -74,7 +138,7 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 - **Compaction is manual.** Consolidation no longer compacts the bank
   automatically. Files above `BANK_FILE_MAX_SIZE` generate a
   `bank_size_advisory`, not an automatic rewrite or refusal. Use `bank_compact`
-  with `manage` access on DirectLocal spaces: inspect a dry-run and back up
+  with `manage` access on DirectLocal spaces: inspect the dry-run inventory and back up
   before explicitly applying. A valid reduction may remain above the target;
   it must be strictly smaller and retain at least 5% of the source size.
   Multipart compaction and crash-durable recovery are not included.

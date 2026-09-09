@@ -1113,27 +1113,43 @@ async def bank_delete(
 
 ### `bank_compact` 🛠️ (manage) — → no tiered alias (internal/ops)
 
-Compacts oversized bank files via LLM — the **only** compaction path: compaction is
-a human decision, a consolidation never compacts and only reports the
-files above the threshold as `bank_size_advisory`. Files exceeding the universal
-advisory threshold (`BANK_FILE_MAX_SIZE`, default 35 000 bytes) are candidates,
-summarized/cleaned using the space rules to understand each file's role. Default
-`dry_run=True` scans and reports without modifying. The per-file value is the
-candidate threshold and the model's target, not a hard cap on the persisted
-result: a strictly smaller result that retains at least 5% of its source is
-accepted even when it still exceeds the target, and successive passes converge.
-When `dry_run=False`, the operation is protected by the per-space consolidation
-lock and returns `conflict` if a consolidation is in progress.
+Refines oversized bank files into selective medium-term memory for a new chat.
+This is the **only** compaction path: a human initiates it, while
+consolidation only reports `bank_size_advisory`. `BANK_FILE_MAX_SIZE` (default
+35 000 UTF-8 bytes) selects candidate files. `dry_run=True` scans and reports
+without inference or writes. With `dry_run=False`, the per-space consolidation
+lock covers preparation and apply; an active consolidation returns `conflict`.
 
-All historical size fields — `size`, `max_size`, `total_size_before`,
-`total_size_after`, and `compacted_size` — are persisted UTF-8 byte counts, not
-characters. `BANK_FILE_MAX_SIZE` must be a positive byte value; it is an advisory
-threshold for consolidation and the candidate threshold for this tool, never a
-hard gate on persisted size. An oversized or context-incompatible source
-fails closed rather than being split. Multipart compaction and crash-durable
-recovery are not provided by this path in v1.5.0. Recovery of unusable
-manual-compaction responses is planned separately for v1.5.1; it is not part
-of the normal-consolidation recovery described above.
+Starting in v1.5.1, the program inventories physical Markdown headings and
+unindented list entries, respecting fenced blocks. ISO dates in headings or
+entry first lines are reading hints. For each source H1 body, roughly half the
+configured byte threshold selects the newest dated passages. Units of a date
+are considered in source order; the entire boundary date stays in recent input,
+even if its passages exceed this marker. Context admission still applies and
+can refuse before inference. Undated context is always retained as input.
+Older dated passages first yield reusable historical lessons. Recent passages,
+undated context and those lessons then yield one Markdown handoff. The prompt
+warns against reviving obsolete tasks and treats rules/context as reference
+data. Unchecked undated tasks do not establish current priorities. Dates do not
+prove truth and omission does not prove task completion.
+
+The program groups adjacent passages sharing their heading/date to reduce
+prompt overhead. It owns reconstruction, exact source H1 headings and target
+paths; the model returns Markdown, with no edit-address JSON. One final-summary
+call per non-empty H1 body, plus one historical-lessons call when needed, runs
+sequentially. There is no fixed aggregate deadline. The resulting file must be
+non-empty and strictly smaller; no 5% retention floor, mandatory reduction ratio
+or hard output-size target applies. Summary quality is lossy and requires
+functional evaluation; byte/hash validation alone cannot establish it.
+
+All historical size fields are persisted UTF-8 byte counts. The existing
+threshold also guides input partition and visible-output reservation, while the
+resolved profile retains its reasoning/generation budget subject to remaining
+context. Every known stage input is preflighted; generated lessons and correction
+feedback are checked again before the next request. Context-incompatible inputs
+are refused without sending that request. No new configuration is introduced.
+The existing whole-file transaction is unchanged: no multipart persistence,
+crash-durable resume, or transfer of discarded detail to Graph is provided.
 
 ```python
 @mcp.tool()
@@ -1142,6 +1158,23 @@ async def bank_compact(
     dry_run: bool = True     # True = scan/report only, False = compact via LLM
 ) -> dict:
 ```
+
+A file has **one corrective generation budget shared across all stages and H1
+bodies**. Correctable faults are normalized chat `invalid_response`, terminal
+`length`/`other`, blank text, invalid UTF-8, an invalid summary envelope or
+Markdown rejected by the normal editor's body grammar (including unbalanced
+fences, setext/indented headings and opaque regions). The body check follows
+generated H1 demotion to support subsequent normal edits. It checks generated
+bodies, not every composition with an arbitrary pre-H1 source preamble. Correction
+repeats that stage's frozen inputs and
+adds a safe reason code; rejected output and reasoning are never reused as
+memory or applied. Generated H1 headings are demoted to H2 by code. Context fit
+is recomputed and adapter retries stay disabled. A second model fault, an unknown
+finish reason, non-string completion text, content rejection, timeout, other
+inference error, invalid source, cancellation or persistence/recovery failure
+remains terminal. A final non-reducing candidate is refused without another
+correction. Logs identify stages and correction; rejected-response usage may be
+unavailable. Intermediate summaries are never written to the bank.
 
 The scan validates the coherent bank snapshot and every provider-free planner
 precondition for each candidate above its individual byte limit too: a

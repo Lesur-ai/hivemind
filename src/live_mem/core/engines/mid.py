@@ -99,7 +99,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/bank/<unicode-dup>",
-        "line_hint": 6587,
+        "line_hint": 6432,
         "description": (
             "Unicode-duplicate bank cleanup DELETE after every canonical bank "
             "write readback succeeds."
@@ -112,7 +112,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/bank/{filename}",
-        "line_hint": 6561,
+        "line_hint": 6406,
         "description": (
             "Prepared normal bank-file PUT for every validated create, edit, or "
             "rewrite candidate."
@@ -125,7 +125,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/_synthesis.md",
-        "line_hint": 6619,
+        "line_hint": 6464,
         "description": "Prepared normal synthesis markdown PUT (_synthesis.md).",
     },
     {
@@ -135,7 +135,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._apply_prepared_normal_batch",
         "key_pattern": "{space_id}/_meta.json",
-        "line_hint": 6633,
+        "line_hint": 6478,
         "description": (
             "Private direct-application metadata JSON PUT when ``skip_meta`` is "
             "false."
@@ -148,7 +148,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService._delete_notes_reporting",
         "key_pattern": "{space_id}/live/* (consumed notes)",
-        "line_hint": 6461,
+        "line_hint": 6306,
         "description": (
             "Consumed-note DELETE, one key at a time. Reached from "
             "the private direct application when ``defer_note_finalization`` is "
@@ -165,7 +165,7 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "module": "live_mem.core.consolidator",
         "method": "ConsolidatorService.consolidate",
         "key_pattern": "{space_id}/_meta.json",
-        "line_hint": 5075,
+        "line_hint": 4920,
         "description": (
             "Run-level metadata JSON PUT after all completed prepared batches "
             "are verified."
