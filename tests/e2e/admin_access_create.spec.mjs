@@ -159,3 +159,27 @@ test('real shell: navigating while the create is in flight reverts the route, an
     await expect(page.locator('#ctSecret')).toHaveText('IN-CONTEXT-SECRET');
     expect(new URL(page.url()).hash).toBe(LOCKED_HASH);
 });
+
+
+test('accessibility: pending token creation and replacement dialog retain focus and secret cleanup', async ({ page }) => {
+    const s = await startPendingCreate(page);
+    // Request locks disable dismissal and confirmation; Tab cannot escape even
+    // if disabling the focused button caused Chromium to focus BODY.
+    for (let i = 0; i < 12; i++) {
+        await page.keyboard.press(i % 2 ? 'Shift+Tab' : 'Tab');
+        expect(await page.evaluate(() => !!document.activeElement.closest('#adminModal'))).toBe(true);
+    }
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#adminModal')).toBeVisible();
+    expect(s.tools.filter(t => t === 'admin_create_token')).toHaveLength(1);
+    await s.createRoute.fulfill(createdBody('FOCUS-ONE-TIME-SECRET'));
+    await expect(page.locator('#ctSecret')).toHaveText('FOCUS-ONE-TIME-SECRET');
+    await page.locator('#modalConfirmBtn').focus();
+    await page.keyboard.press('Tab');
+    await expect(page.locator('#adminModal .modal-close')).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#adminModal')).toBeHidden();
+    expect(await page.locator('body').textContent()).not.toContain('FOCUS-ONE-TIME-SECRET');
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false);
+    expect(s.tools.filter(t => t === 'admin_create_token')).toHaveLength(1);
+});

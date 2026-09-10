@@ -1070,7 +1070,7 @@ async function scenarioW() {
     detail.renderDetail('demo');
     await flushTasks();
     html = detail.contentEl.innerHTML;
-    assert.ok(html.includes('LOADED PAIRING SESSIONS'));
+    assert.ok(html.includes('Loaded pairing sessions'));
     assert.ok(html.includes('No session for this space in the loaded slice'));
     detail.act('mesh-detail-tab', { tab: 'members' });
     html = detail.contentEl.innerHTML;

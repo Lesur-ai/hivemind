@@ -650,9 +650,9 @@ test('real shell: #/mesh/<space-id> detail route renders real numeric fields (me
     page.on('pageerror', err => errors.push(err));
     await page.goto(`${ORIGIN}/admin.html#/mesh/demo`);
     await expect(page.getByRole('heading', { name: 'demo' })).toBeVisible();
-    await expect(page.getByText('MEMBERSHIP EPOCH')).toBeVisible();
-    await expect(page.locator('.sd-kv', { hasText: 'MEMBERSHIP EPOCH' })).toContainText('4');
-    await expect(page.locator('.sd-kv', { hasText: 'ACTIVE MEMBERS' })).toContainText('1');
+    await expect(page.getByText('Membership epoch')).toBeVisible();
+    await expect(page.locator('.sd-kv', { hasText: 'Membership epoch' })).toContainText('4');
+    await expect(page.locator('.sd-kv', { hasText: 'Active members' })).toContainText('1');
 
     // Members tab, joined enrichment fields.
     await page.getByRole('tab', { name: 'Members' }).click();
@@ -678,7 +678,7 @@ test('real shell: bounded Mesh diagnostics are visibly partial and never fabrica
     await expect(page.getByText('No pairings yet')).toHaveCount(0);
 
     await page.goto(`${ORIGIN}/admin.html#/mesh/demo`);
-    await expect(page.getByText('LOADED PAIRING SESSIONS')).toBeVisible();
+    await expect(page.getByText('Loaded pairing sessions')).toBeVisible();
     await expect(page.getByText('No session for this space in the loaded slice')).toBeVisible();
     await page.getByRole('tab', { name: 'Members' }).click();
     await expect(page.getByText('Pairing metadata is truncated')).toBeVisible();

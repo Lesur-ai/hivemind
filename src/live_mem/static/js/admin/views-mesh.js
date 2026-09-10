@@ -477,23 +477,23 @@
 
     function renderDiagnostics(pairing) {
         const rows = [
-            ['pair_id', pairing.pair_id],
-            ['base epoch', pairing.base_epoch],
-            ['source fingerprint', pairing.source_fingerprint],
-            ['source endpoint', pairing.source_endpoint],
-            ['target fingerprint', pairing.target_fingerprint],
-            ['target endpoint', pairing.target_endpoint],
-            ['granted scopes', (pairing.granted_scopes || []).join(', ')],
-            ['invitation digest', pairing.invitation_digest],
-            ['claim digest', pairing.claim_digest],
-            ['approval digest', pairing.approval_digest],
-            ['bootstrap manifest digest', pairing.bootstrap_manifest_digest],
-            ['activation event id', pairing.activation_event_id],
-            ['last error', pairing.last_error],
+            ['Pair ID', pairing.pair_id],
+            ['Base epoch', pairing.base_epoch],
+            ['Source fingerprint', pairing.source_fingerprint],
+            ['Source endpoint', pairing.source_endpoint],
+            ['Target fingerprint', pairing.target_fingerprint],
+            ['Target endpoint', pairing.target_endpoint],
+            ['Granted scopes', (pairing.granted_scopes || []).join(', ')],
+            ['Invitation digest', pairing.invitation_digest],
+            ['Claim digest', pairing.claim_digest],
+            ['Approval digest', pairing.approval_digest],
+            ['Bootstrap manifest digest', pairing.bootstrap_manifest_digest],
+            ['Activation event ID', pairing.activation_event_id],
+            ['Last error', pairing.last_error],
         ];
         if (pairing.state === 'blocked_recovery') {
-            rows.push(['recorded next action', pairing.next_action || 'unavailable']);
-            rows.push(['blocked phase', pairing.phase || 'unavailable']);
+            rows.push(['Recorded next action', pairing.next_action || 'unavailable']);
+            rows.push(['Blocked phase', pairing.phase || 'unavailable']);
         }
         const body = rows.map(([label, value]) =>
             `<div class="sd-kv"><span class="micro-label">${esc(label)}</span>${value ? `<span class="mono-data">${esc(String(value))}</span>` : '<span class="text-faint">—</span>'}</div>`
@@ -623,9 +623,9 @@
                 : 'Signed in as an admin session — every Mesh action below is available.';
         return `<div class="panel-header"><h2>This instance</h2>${statusDot(s.healthy ? 'ok' : 'error', s.healthy ? 'healthy' : 'unhealthy')}</div>
             <div class="sd-meta-row">
-                <div class="sd-kv"><span class="micro-label">DISPLAY NAME</span><span class="mono-data">${esc(s.display_name || '—')}</span></div>
-                <div class="sd-kv"><span class="micro-label">FINGERPRINT</span>${copyable(s.fingerprint || '')}</div>
-                <div class="sd-kv"><span class="micro-label">PUBLIC URL</span><span class="mono-data">${esc(s.public_url || '—')}</span></div>
+                <div class="sd-kv"><span class="micro-label">Display name</span><span class="mono-data">${esc(s.display_name || '—')}</span></div>
+                <div class="sd-kv"><span class="micro-label">Fingerprint</span>${copyable(s.fingerprint || '')}</div>
+                <div class="sd-kv"><span class="micro-label">Public URL</span><span class="mono-data">${esc(s.public_url || '—')}</span></div>
             </div>
             <p class="body-small">${esc(note)}</p>`;
     }
@@ -745,9 +745,9 @@
         return `<div class="panel-header"><h2>Overview</h2></div>
             ${historyTruncated ? pairingHistoryTruncatedBanner() : ''}
             <div class="sd-meta-row">
-                <div class="sd-kv"><span class="micro-label">MEMBERSHIP EPOCH</span><span class="mono-data">${epochKnown ? esc(String(members.membership_epoch)) : '—'}</span></div>
-                <div class="sd-kv"><span class="micro-label">ACTIVE MEMBERS</span><span class="mono-data">${memberCount === null ? '—' : esc(String(memberCount))}</span></div>
-                <div class="sd-kv"><span class="micro-label">${historyTruncated ? 'LOADED PAIRING SESSIONS' : 'PAIRING SESSIONS'}</span><span class="mono-data">${esc(String(pairings.length))}</span></div>
+                <div class="sd-kv"><span class="micro-label">Membership epoch</span><span class="mono-data">${epochKnown ? esc(String(members.membership_epoch)) : '—'}</span></div>
+                <div class="sd-kv"><span class="micro-label">Active members</span><span class="mono-data">${memberCount === null ? '—' : esc(String(memberCount))}</span></div>
+                <div class="sd-kv"><span class="micro-label">${historyTruncated ? 'Loaded pairing sessions' : 'Pairing sessions'}</span><span class="mono-data">${esc(String(pairings.length))}</span></div>
             </div>
             ${pairings.length
                 ? dataTable(['Role', 'State', 'Updated', 'Action'], pairings.map(p => renderPairingRow(p, { hideSpace: true, available })).join(''))

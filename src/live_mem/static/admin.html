@@ -11,7 +11,7 @@
 
 <!-- LOGIN -->
 <div class="login-overlay" id="loginOverlay">
-    <div class="login-card">
+    <div class="login-card" tabindex="-1">
         <img src="/static/img/hivemind-mark-dark.svg" alt="" class="login-logo" height="64">
         <div class="brand-wordmark login-wordmark">hivemind</div>
         <h2 class="login-title">Admin console</h2>
@@ -27,9 +27,9 @@
 </div>
 
 <!-- APP SHELL -->
-<div class="app">
+<div class="app" inert>
     <nav id="sidebar" class="sidebar" aria-label="Primary">
-        <button type="button" id="sidebarMenuToggle" class="sidebar-menu-toggle" aria-label="Menu" aria-expanded="false">
+        <button type="button" id="sidebarMenuToggle" aria-controls="sidebar" class="sidebar-menu-toggle" aria-label="Menu" aria-expanded="false">
             <span class="menu-icon-slot"></span>
         </button>
         <a class="sidebar-brand" href="#/dashboard">

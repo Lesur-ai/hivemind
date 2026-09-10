@@ -277,8 +277,9 @@ async function proveRowMenuTargetsExactTokenAndGuidesReplacement() {
     assert.doesNotMatch(h.content.innerHTML, /access-open-edit/);
     assert.match(tableHtml, /Edit token/);
     assert.match(tableHtml, /Create replacement/);
-    assert.match(tableHtml, /Disable token/);
-    assert.match(tableHtml, /Reactivate token/);
+    assert.match(tableHtml, /Revoke token…/);
+    assert.match(tableHtml, /Revoked permanently/);
+    assert.doesNotMatch(tableHtml, /Reactivate token|Permanent soft revoke/);
     assert.match(tableHtml, /Delete permanently/);
 
     h.actions['access-edit']({ hash: selectedHash });
@@ -289,8 +290,8 @@ async function proveRowMenuTargetsExactTokenAndGuidesReplacement() {
 
     h.actions['access-replace']({ hash: selectedHash });
     assert.equal(h.modal.title, 'Replace token safely');
-    assert.match(h.modal.body, /does not expose an atomic regenerate-or-replace operation/);
-    assert.match(h.modal.body, /old token stays active/i);
+    assert.match(h.modal.body, /Create a new token with the same access profile/);
+    assert.match(h.modal.body, /Creating a replacement does not revoke the old token/);
     assert.equal(await h.modal.onConfirm(), false);
     assert.equal(h.modal.title, 'Create replacement token');
     assert.match(h.modal.body, /value="duplicate-name-replacement"/);
@@ -312,6 +313,13 @@ async function proveRowMenuTargetsExactTokenAndGuidesReplacement() {
     assert.equal(h.calls.length, beforeUnavailableSubmit, 'unavailable permissions must fail before the network');
     assert.equal(h.elements.get('ctPermsErr').hidden, false);
     assert.match(h.elements.get('ctPermsErr').textContent, /Select a permission profile/);
+
+    h.actions['access-replace']({ hash: 'sha256:' + 'a'.repeat(64) });
+    assert.match(h.modal.body, /The old token remains revoked/);
+    assert.doesNotMatch(h.modal.body, /old token stays active|revoke or delete/);
+    assert.equal(await h.modal.onConfirm(), false);
+    assert.match(h.modal.body, /The old token remains revoked/);
+    assert.doesNotMatch(h.modal.body, /old token stays active/);
 
     h.actions['access-delete']({ hash: firstHash });
     assert.equal(h.modal.title, 'Delete token permanently');
@@ -450,6 +458,8 @@ function spacesHarness(identity, overrides = {}) {
         AdminRouter: { epoch: 1, refresh() {} },
         AdminViews: { register(name, fn) { assert.equal(name, 'spaces'); render = fn; } },
         _ctx: () => ({ identity }),
+        currentSessionGeneration: () => 1,
+        sessionGenerationIsCurrent: generation => generation === 1,
         registerAction(name, fn) { actions[name] = fn; },
         callTool: async (tool, args) => {
             calls.push({ tool, args });

@@ -66,6 +66,7 @@ function element(extra = {}) {
         textContent: '',
         value: '',
         disabled: false,
+        style: {},
         isConnected: true,
         classList: classList(),
         focus() {},

@@ -1400,6 +1400,14 @@ class TestP81RouteMatcher:
                 return {"view": "spaces", "params": {}}
             if raw == "/consolidation":
                 return {"view": "consolidation", "params": {}}
+            if len(segments) == 2 and segments[0] == "consolidation" and segments[1]:
+                if _MALFORMED_PERCENT_RE.search(segments[1]):
+                    return {"view": None, "params": {}}
+                try:
+                    space_id = unquote(segments[1], errors="strict")
+                except UnicodeDecodeError:
+                    return {"view": None, "params": {}}
+                return {"view": "consolidation", "params": {"spaceId": space_id}}
             if raw == "/audit":
                 return {"view": "audit", "params": {}}
             if raw == "/access":

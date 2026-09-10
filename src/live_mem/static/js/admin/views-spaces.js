@@ -1,29 +1,27 @@
 /**
- * Spaces index view (P8-2, issue #140).
- * Contract: DESIGN/hivemind/ADMIN_CONSOLE_DESIGN.md §4.3 (parity), §5.3
- * (data matrix). One `space_list` call + one `bank_consolidation_queues`
- * call on load (no per-row N+1); the Attention filter's `bank_stale_spaces`
- * call is on-demand only, never on load. Row navigation is a real anchor
- * (§3.3.2 rule 1) — no `data-action`, no `AdminRouter.go()` for that case.
+ * Spaces inventory (§5.3, v1.5.2): one aggregate inventory and queues load.
+ * Consolidation activity refreshes only for painted, known-active spaces.
+ * Creation/recovery contracts and real-anchor navigation remain unchanged.
  */
 (function () {
     const SPACE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
     const MAX_DESCRIPTION = 500;
     const MAX_RULES = 50000;
+    const LIVE_REFRESH_MS = 60000;
     const BEST_EFFORT_TOOLTIP = 'Job state lives in server memory: it does not survive a restart and history is trimmed.';
-
     let _epoch = -1;
     let _identity = {};
+    let _sessionGeneration = -1;
     let _spacesData = null;
-    let _lanesById = null; // null = queues call failed/unavailable
-    let _activeFilter = 'all'; // 'all' | 'consolidating' | 'attention'
-    let _staleData = null;
-    let _staleLoading = false;
-    let _staleError = null;
-    let _staleSeq = 0;
+    let _lanesById = null;
+    let _query = '';
+    let _liveTimer = null;
+    let _pending = null;
     let _tableSeq = 0;
-    let _lastMinNotes = 5;
-    let _lastMinAge = 5;
+    let _updatedAt = null;
+    let _queueError = false;
+    let _liveStopped = false;
+    let _queueDenied = [];
 
     function _isAdmin(identity) {
         return !!(identity && Array.isArray(identity.permissions) && identity.permissions.includes('admin'));
@@ -38,203 +36,156 @@
         return (typeof _ctx === 'function' && _ctx().identity) || {};
     }
 
-    // ═══════════════ Table rows ═══════════════
+    function _current(epoch, generation = _sessionGeneration) {
+        return AdminRouter.epoch === epoch && sessionGenerationIsCurrent(generation);
+    }
+
+    function _clearLive() {
+        if (_liveTimer !== null) clearTimeout(_liveTimer);
+        _liveTimer = null;
+    }
+
+    function _laneActive(lane) {
+        return !!(lane && (lane.running_job || (typeof lane.queued_count === 'number' && lane.queued_count > 0)));
+    }
+
+    function _scheduleLive(epoch) {
+        if (_liveStopped) { _clearLive(); return; }
+        const rows = _computeRows();
+        if (!_current(epoch) || !rows.some(s => _laneActive(_lanesById && _lanesById[s.space_id]))) {
+            _clearLive();
+            return;
+        }
+        // Search changes the IDs read at the tick, not its existing deadline.
+        if (_liveTimer !== null) return;
+        const generation = _sessionGeneration;
+        _liveTimer = setTimeout(() => {
+            _liveTimer = null;
+            if (!_current(epoch, generation)) return;
+            if (document.hidden) { _scheduleLive(epoch); return; }
+            _refreshActivity(epoch);
+        }, LIVE_REFRESH_MS);
+    }
 
     function _idCellHtml(id) {
         const href = `#/spaces/${encodeURIComponent(id)}`;
         const payload = esc(JSON.stringify(id));
-        return `<a href="${esc(href)}" class="mono-data spaces-id-link" title="${esc(id)}">${esc(truncateMiddle(id, 10, 6))}</a>
+        return `<a href="${esc(href)}" class="spaces-id-link">${esc(id)}</a>
             <button type="button" class="copy-btn" data-action="copy-value" data-value="${payload}" aria-label="Copy ${esc(id)}">${icon('copy')}</button>`;
     }
 
-    function _laneChip(lane) {
-        // §5(d): the in_memory_best_effort guarantee is surfaced verbatim as
-        // a tooltip on every job-bearing widget, explicitly including
-        // "Spaces lane chips' tooltip".
-        if (_lanesById === null) return `<span title="${esc(BEST_EFFORT_TOOLTIP)}">${statusDot('neutral', 'unknown')}</span>`;
-        const dot = !lane ? statusDot('neutral', 'idle')
-            : lane.lane_state === 'failed' ? statusDot('error', 'failed')
-            : (lane.lane_state === 'running' || lane.lane_state === 'queued') ? statusDot('warn', lane.lane_state)
-            : statusDot('neutral', 'idle');
-        return `<span title="${esc(BEST_EFFORT_TOOLTIP)}">${dot}</span>`;
+    function _terminalJobs(lane) {
+        const jobs = lane && Array.isArray(lane.latest_jobs) ? lane.latest_jobs : [];
+        const activeIds = new Set([
+            lane && lane.running_job && lane.running_job.job_id,
+            ...(lane && Array.isArray(lane.queued_jobs) ? lane.queued_jobs.map(j => j && j.job_id) : []),
+            ...(lane && Array.isArray(lane.queued_job_ids) ? lane.queued_job_ids : []),
+        ].filter(Boolean));
+        return jobs.filter(j => j && ['succeeded', 'failed'].includes(j.status) && !activeIds.has(j.job_id));
     }
 
-    // staleById: when set (Attention filter active with data), an extra
-    // "Oldest note" column renders per-space `oldest_note_age_days` from
-    // bank_stale_spaces (§5.3) — the full metadata, not just membership.
-    function _tableRowsHtml(rows, staleById) {
-        return rows.map(space => {
-            const lane = _lanesById && _lanesById[space.space_id];
-            const created = fmtTimestamp(space.created_at);
-            const stale = staleById && staleById[space.space_id];
-            const staleCell = staleById
-                ? `<td class="num" title="${stale && stale.oldest_note_timestamp ? esc(stale.oldest_note_timestamp) : ''}">${stale && typeof stale.oldest_note_age_days === 'number' ? esc(stale.oldest_note_age_days + 'd') : '—'}</td>`
-                : '';
-            // §5.3: when the Attention scan has its own live_notes_count for
-            // this space, prefer it over the separately-fetched space_list
-            // count — the scan's is_stale/age fields were derived from that
-            // exact count, so showing a different (possibly older) number
-            // next to them would be internally inconsistent.
-            const shortCount = (stale && typeof stale.live_notes_count === 'number') ? stale.live_notes_count : space.live_notes_count;
-            return `<tr>
-                <td>${_idCellHtml(space.space_id)}</td>
-                <td>${esc(space.description || '—')}</td>
-                <td>${esc(space.owner || '—')}</td>
-                <td class="mono-data" title="${esc(created.title)}">${esc(created.text || '—')}</td>
-                <td class="num">${esc(String(shortCount ?? '—'))}</td>
-                <td class="num">${esc(String(space.bank_files_count ?? '—'))}</td>
-                <td class="num" title="Long tier state is shown in Space Detail">—</td>
-                ${staleCell}
-                <td>${_laneChip(lane)}</td>
-            </tr>`;
-        }).join('');
+    function _latestFinished(lane) {
+        const seen = new Set();
+        return _terminalJobs(lane).filter(j => typeof j.finished_at === 'string' && Number.isFinite(Date.parse(j.finished_at)))
+            .slice().sort((a, b) => Date.parse(b.finished_at) - Date.parse(a.finished_at))
+            .filter(j => { if (j.job_id && seen.has(j.job_id)) return false; if (j.job_id) seen.add(j.job_id); return true; })[0] || null;
     }
 
-    // ═══════════════ Filters ═══════════════
+    function _number(value) {
+        return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+    }
+
+    function _progressText(progress) {
+        if (!progress) return '';
+        const done = _number(progress.notes_done);
+        const total = _number(progress.notes_total);
+        if (done !== null && total !== null) return `${done} / ${total} notes`;
+        if (done !== null) return `${done} notes processed`;
+        const batches = _number(progress.batches_done);
+        const batchTotal = _number(progress.batches_total);
+        if (batches !== null && batchTotal !== null) return `${batches} / ${batchTotal} batches`;
+        return progress.phase ? String(progress.phase) : '';
+    }
+
+    function _partialResult(job) {
+        const result = job && job.result;
+        return !!(result && (result.status === 'partial' || result.partial === true
+            || (Number.isFinite(result.batches_completed) && Number.isFinite(result.batches_total)
+                && result.batches_completed < result.batches_total)));
+    }
+
+    function _activityHtml(lane) {
+        if (!lane) return statusDot('neutral', 'Unavailable');
+        const queue = _number(lane.queued_count);
+        const job = lane.running_job;
+        if (job || (queue !== null && queue > 0)) {
+            const label = job ? (job.status === 'running' ? 'Running' : 'Status unavailable') : 'Queued';
+            const progress = job ? _progressText(job.progress) : '';
+            const firstQueued = Array.isArray(lane.queued_jobs) ? lane.queued_jobs[0] : null;
+            const scope = (job || firstQueued || {}).scope_label;
+            const meta = [scope, queue === null ? 'Queue unavailable' : queue > 0 ? `${queue} queued` : ''].filter(Boolean);
+            return `${statusDot('warn', label)}${progress ? ` <span>${esc(progress)}</span>` : ''}
+                <span class="spaces-activity-meta">${meta.map(esc).join(' · ')}</span>`;
+        }
+        const latest = _latestFinished(lane);
+        if (latest) {
+            const partial = _partialResult(latest);
+            const label = partial ? 'Partial' : latest.status === 'succeeded' ? 'Completed' : 'Failed';
+            return `${statusDot(partial ? 'warn' : latest.status === 'succeeded' ? 'ok' : 'error', label)}
+                <span class="spaces-activity-meta">${renderTimestamp(latest.finished_at)}</span>`;
+        }
+        const undated = _terminalJobs(lane)[0];
+        if (undated) {
+            const partial = _partialResult(undated);
+            const label = partial ? 'Partial result' : undated.status === 'failed' ? 'Failed result' : 'Completed result';
+            return `${statusDot(partial ? 'warn' : undated.status === 'failed' ? 'error' : 'neutral', label)}<span class="spaces-activity-meta">Result date unavailable</span>`;
+        }
+        if (lane.lane_state === 'failed') return statusDot('error', 'Last run failed');
+        return statusDot('neutral', lane.lane_state === 'idle' && queue === 0 ? 'No recent history' : 'Unavailable');
+    }
+
+    function _tableRowsHtml(rows) {
+        return rows.map(space => `<tr>
+            <td data-label="Space"><div class="spaces-identity">${_idCellHtml(space.space_id)}</div>
+                <p class="spaces-description" title="${esc(space.description || '')}">${esc(space.description || 'No description')}</p>
+                <p class="spaces-owner">${esc(space.owner || 'Owner not specified')}</p></td>
+            <td data-label="Memory"><div class="spaces-memory">
+                <span class="spaces-memory-line">${esc(String(_number(space.live_notes_count) ?? '—'))} notes <span class="text-faint">SHORT</span></span>
+                <span class="spaces-memory-line">${esc(String(_number(space.bank_files_count) ?? '—'))} bank files <span class="text-faint">MID</span></span></div></td>
+            <td data-label="Consolidation" class="spaces-activity-cell" data-space="${esc(space.space_id)}">
+                <a class="spaces-activity-link" href="${esc('#/consolidation/' + encodeURIComponent(space.space_id))}" title="${esc(BEST_EFFORT_TOOLTIP)}">${_activityHtml(_lanesById && _lanesById[space.space_id])}</a></td>
+        </tr>`).join('');
+    }
 
     function _computeRows() {
-        const spaces = (_spacesData && _spacesData.spaces) || [];
-        if (_activeFilter === 'consolidating') {
-            // Degrade gracefully (§5.3): if lane data is unavailable the
-            // Consolidating predicate cannot be computed — show every row
-            // (usable, neutral "unknown" lane chips) rather than filtering
-            // them all out. _loadTable also resets the active filter to All
-            // on this transition, so this is a defensive backstop.
-            if (_lanesById === null) return spaces;
-            return spaces.filter(s => {
-                const lane = _lanesById[s.space_id];
-                return !!lane && (lane.lane_state === 'running' || (lane.queued_count || 0) > 0);
-            });
-        }
-        if (_activeFilter === 'attention') {
-            if (!_staleData) return [];
-            const staleIds = new Set((_staleData.spaces || []).map(s => s.space_id));
-            return spaces.filter(s => staleIds.has(s.space_id));
-        }
-        return spaces;
-    }
-
-    // Filter toggle group (§2.8). These are mutually-exclusive filter
-    // toggles over one table, not tabs that swap panels — so they use a
-    // labeled group + per-button aria-pressed (a complete, correct pattern)
-    // rather than a half-implemented tab widget, which would also demand
-    // roving tabindex, aria-controls, and arrow-key handling.
-    function _filterBtn(filter, label, extraAttrs = '') {
-        const active = _activeFilter === filter;
-        return `<button type="button" class="spaces-filter-tab${active ? ' active' : ''}" aria-pressed="${active ? 'true' : 'false'}" data-action="spaces-filter-tab" data-filter="${esc(filter)}"${extraAttrs}>${esc(label)}</button>`;
-    }
-
-    function _filterTabsHtml() {
-        const consolidatingAttrs = _lanesById === null ? ' disabled title="Lane data is unavailable"' : '';
-        return `<div class="spaces-filter-tabs" role="group" aria-label="Filter spaces">
-            ${_filterBtn('all', 'All')}
-            ${_filterBtn('consolidating', 'Consolidating', consolidatingAttrs)}
-            ${_filterBtn('attention', 'Attention')}
-        </div>`;
-    }
-
-    function _staleControlsHtml() {
-        return `<div class="spaces-stale-controls">
-            <label class="form-label" for="staleMinNotes">Min notes</label>
-            <input type="number" min="1" id="staleMinNotes" class="form-input mono spaces-stale-input" value="${esc(String(_lastMinNotes))}">
-            <label class="form-label" for="staleMinAge">Min age (days)</label>
-            <input type="number" min="0" id="staleMinAge" class="form-input mono spaces-stale-input" value="${esc(String(_lastMinAge))}">
-            <button type="button" class="btn btn-secondary btn-sm" data-action="spaces-apply-stale">Apply</button>
-        </div>`;
+        const spaces = _spacesData && Array.isArray(_spacesData.spaces) ? _spacesData.spaces : [];
+        const query = _query.trim().toLocaleLowerCase();
+        return spaces.filter(s => [s.space_id, s.description, s.owner].some(v => String(v || '').toLocaleLowerCase().includes(query)))
+            .slice().sort((a, b) => String(a.space_id).localeCompare(String(b.space_id), 'en'));
     }
 
     function _renderToolbar() {
         const el = document.getElementById('spacesToolbar');
         if (!el) return;
-        el.innerHTML = `${_filterTabsHtml()}${_activeFilter === 'attention' ? _staleControlsHtml() : ''}`;
-    }
-
-    registerAction('spaces-filter-tab', (data) => {
-        const filter = data.filter;
-        if (filter === _activeFilter) return;
-        if (filter === 'consolidating' && _lanesById === null) return;
-        _activeFilter = filter;
-        _renderToolbar();
-        // §5.3: "Filter activation + manual" are the Attention refresh
-        // triggers — re-scan on every transition into Attention, not only
-        // the first. The _staleSeq/epoch guards in _runStaleQuery make a
-        // rapid re-activation safe (only the latest scan is applied).
-        if (filter === 'attention') {
-            _runStaleQuery(AdminRouter.epoch, _lastMinNotes, _lastMinAge);
-        } else {
+        el.innerHTML = `<div class="spaces-search"><label for="spacesSearch" class="form-label">Search spaces</label>
+            <input type="search" id="spacesSearch" class="form-input" placeholder="Name, description or owner" value="${esc(_query)}"></div>`;
+        const input = document.getElementById('spacesSearch');
+        if (input) input.oninput = () => {
+            _query = input.value;
             _renderBody();
-        }
-    });
-
-    registerAction('spaces-apply-stale', () => {
-        const notesInput = document.getElementById('staleMinNotes');
-        const ageInput = document.getElementById('staleMinAge');
-        _lastMinNotes = Math.max(1, parseInt((notesInput && notesInput.value) || '5', 10) || 1);
-        _lastMinAge = Math.max(0, parseInt((ageInput && ageInput.value) || '5', 10) || 0);
-        _runStaleQuery(AdminRouter.epoch, _lastMinNotes, _lastMinAge);
-    });
-
-    registerAction('spaces-retry-stale', () => {
-        _runStaleQuery(AdminRouter.epoch, _lastMinNotes, _lastMinAge);
-    });
-
-    registerAction('spaces-refresh', () => {
-        const btn = document.getElementById('spacesRefreshBtn');
-        if (btn) btn.disabled = true;
-        _loadTable(AdminRouter.epoch).finally(() => {
-            if (btn && btn.isConnected) btn.disabled = false;
-        });
-    });
-
-    // Attention filter's on-demand bank_stale_spaces call. Guarded by both
-    // the router epoch (dropped if the operator navigates away — stale-
-    // response proof) and a local monotonic sequence number, so re-applying
-    // the filter with new thresholds before an older scan resolves can never
-    // let the older, now-superseded scan overwrite the newer one.
-    async function _runStaleQuery(epochAtCall, minNotes, minAgeDays) {
-        const seq = ++_staleSeq;
-        _staleLoading = true;
-        _staleError = null;
-        _renderBody();
-        let resp;
-        try {
-            resp = await callTool('bank_stale_spaces', { min_notes: minNotes, min_age_days: minAgeDays });
-        } catch {
-            resp = { status: 'error', message: 'Request failed' };
-        }
-        if (seq !== _staleSeq || AdminRouter.epoch !== epochAtCall) return;
-        _staleLoading = false;
-        if (resp && resp.status === 'ok') {
-            _staleData = resp;
-            _staleError = null;
-        } else {
-            _staleData = null;
-            _staleError = (resp && resp.message) || 'Request failed';
-        }
-        _renderBody();
+            _scheduleLive(_epoch);
+        };
     }
 
-    function _staleById() {
-        if (!_staleData) return null;
-        const map = {};
-        (_staleData.spaces || []).forEach(s => { map[s.space_id] = s; });
-        return map;
+    function _renderFreshness() {
+        const el = document.getElementById('spacesFreshness');
+        if (el) el.dataset.stale = String(_queueError);
+        if (el) el.innerHTML = _updatedAt
+            ? `Consolidation updated ${renderTimestamp(_updatedAt)}. ${_queueError ? 'Update failed — showing last successful data.' : 'Refreshes every 60 s while shown jobs are active.'}${_liveStopped ? ' Automatic refresh stopped; use Refresh to try again.' : ''}`
+            : (_queueError ? 'Consolidation data unavailable. Refresh to try again.' : 'Loading consolidation data…');
+        const warnings = document.getElementById('spacesQueueWarnings');
+        if (warnings) warnings.innerHTML = _queueDenied.map(d => serverMessage(`${d.space_id}: ${d.message || 'Access denied'}`)).join('');
     }
-
-    // §5.3: the Attention widget's full response — total_stale, echoed
-    // thresholds, and denied_spaces — not just space-id membership.
-    function _staleSummaryHtml() {
-        if (!_staleData) return '';
-        const total = _staleData.total_stale ?? 0;
-        const denied = _staleData.denied_spaces || [];
-        const summary = `<p class="body-small spaces-meta">${esc(String(total))} stale space${total === 1 ? '' : 's'} (≥ ${esc(String(_staleData.min_notes))} notes, ≥ ${esc(String(_staleData.min_age_days))} days)</p>`;
-        const deniedHtml = denied.length
-            ? `<div class="spaces-stale-denied">${denied.map(d => serverMessage(`${d.space_id}: ${d.message}`)).join('')}</div>`
-            : '';
-        return summary + deniedHtml;
-    }
-
-    // ═══════════════ Table body render ═══════════════
 
     function _renderBody() {
         const wrap = document.getElementById('spacesTableWrap');
@@ -244,74 +195,91 @@
             wrap.innerHTML = stateError({ title: "Couldn't load spaces", message: _spacesData.message, retryAction: 'spaces-refresh' });
             return;
         }
-        if (_activeFilter === 'attention' && _staleLoading) {
-            wrap.innerHTML = stateLoading('Scanning for stale spaces…');
-            return;
-        }
-        if (_activeFilter === 'attention' && _staleError) {
-            wrap.innerHTML = stateError({ title: "Couldn't scan for stale spaces", message: _staleError, retryAction: 'spaces-retry-stale' });
-            return;
-        }
-        const staleActive = _activeFilter === 'attention' && !!_staleData;
-        const staleSummary = staleActive ? _staleSummaryHtml() : '';
-        const staleById = staleActive ? _staleById() : null;
         const rows = _computeRows();
         if (!rows.length) {
-            if (staleActive) {
-                wrap.innerHTML = staleSummary + stateEmpty({ title: 'No stale banks at the current thresholds' });
-                return;
-            }
-            if (_activeFilter === 'all') {
-                const canCreate = _hasManage(_identity);
-                wrap.innerHTML = stateEmpty({
-                    title: 'No spaces yet',
-                    hint: canCreate ? 'Create your first space to get started.' : 'A manager can create the first space.',
-                    actionHtml: canCreate
-                        ? '<button type="button" class="btn btn-primary btn-sm" data-action="spaces-open-create">Create space</button>'
-                        : '',
-                });
-                return;
-            }
-            wrap.innerHTML = stateEmpty({ title: 'No spaces match this filter' });
+            const anySpaces = Array.isArray(_spacesData.spaces) && _spacesData.spaces.length > 0;
+            const canCreate = _hasManage(_identity);
+            wrap.innerHTML = stateEmpty({
+                title: anySpaces ? 'No spaces match your search' : 'No spaces yet',
+                hint: anySpaces ? 'Try a different name, description or owner.' : canCreate ? 'Create your first space to get started.' : 'A manager can create the first space.',
+                actionHtml: !anySpaces && canCreate ? '<button type="button" class="btn btn-primary btn-sm" data-action="spaces-open-create">Create space</button>' : '',
+            });
             return;
         }
-        const headers = ['Space', 'Description', 'Owner', 'Created', 'Short', 'Mid', 'Long']
-            .concat(staleActive ? ['Oldest note'] : [])
-            .concat(['Lane']);
-        wrap.innerHTML = staleSummary + dataTable(headers, _tableRowsHtml(rows, staleById));
+        wrap.innerHTML = dataTable(['Space', 'Memory', 'Consolidation'], _tableRowsHtml(rows));
     }
 
-    // ═══════════════ Route-entry load ═══════════════
+    function _applyQueues(resp, requestedIds) {
+        if (resp && resp.status === 'ok' && Array.isArray(resp.lanes)) {
+            if (!Array.isArray(requestedIds) || _lanesById === null) _lanesById = Object.create(null);
+            if (Array.isArray(requestedIds)) requestedIds.forEach(id => { delete _lanesById[id]; });
+            resp.lanes.forEach(lane => { if (lane && lane.space_id) _lanesById[lane.space_id] = lane; });
+            const retainedDenied = Array.isArray(requestedIds)
+                ? _queueDenied.filter(d => !requestedIds.includes(d.space_id)) : [];
+            _queueDenied = retainedDenied.concat(Array.isArray(resp.denied_spaces) ? resp.denied_spaces : []);
+            _updatedAt = new Date().toISOString();
+            _queueError = false;
+            _liveStopped = false;
+        } else {
+            // A failed read cannot turn a known running job into an idle one.
+            _queueError = true;
+            if (resp && ['rate_limited', 'truncated', 'read_only'].includes(resp.status)) _liveStopped = true;
+        }
+        _renderFreshness();
+    }
 
-    // Sequence-guarded like _runStaleQuery: a route-entry load racing a
-    // fast manual-refresh click (or two refresh clicks) can resolve out of
-    // order — only the most recently issued call is ever applied.
+    function _setRefreshing(value) {
+        const btn = document.getElementById('spacesRefreshBtn');
+        if (btn) btn.disabled = value;
+    }
+
     async function _loadTable(epochAtCall) {
+        if (_pending || !_current(epochAtCall)) return;
+        _clearLive();
         const seq = ++_tableSeq;
+        const generation = _sessionGeneration;
+        const request = {};
+        _pending = request;
+        _setRefreshing(true);
         const [spacesResp, queuesResp] = await Promise.all([
             callTool('space_list', {}).catch(() => ({ status: 'error', message: 'Request failed' })),
             callTool('bank_consolidation_queues', { space_ids: '' }).catch(() => ({ status: 'error' })),
         ]);
-        if (seq !== _tableSeq || AdminRouter.epoch !== epochAtCall) return;
+        if (_pending === request) _pending = null;
+        if (seq !== _tableSeq || !_current(epochAtCall, generation)) return;
         _spacesData = spacesResp;
         if (spacesResp && spacesResp.status === 'ok') cache.spaces = spacesResp.spaces || [];
-        if (queuesResp && queuesResp.status === 'ok') {
-            _lanesById = {};
-            (queuesResp.lanes || []).forEach(lane => { _lanesById[lane.space_id] = lane; });
-        } else {
-            _lanesById = null;
-            // §5.3: the Consolidating filter cannot be computed without lane
-            // data. If the operator was already on it when the queues call
-            // failed, fall back to All so the table stays usable (the tab is
-            // also disabled by _filterTabsHtml while lanes are null).
-            if (_activeFilter === 'consolidating') {
-                _activeFilter = 'all';
-                showToast('warn', 'Lane data unavailable — showing all spaces');
-            }
-        }
-        _renderToolbar();
+        _applyQueues(queuesResp);
         _renderBody();
+        _setRefreshing(false);
+        _scheduleLive(epochAtCall);
     }
+
+    async function _refreshActivity(epochAtCall) {
+        if (_pending || !_current(epochAtCall) || document.hidden) return;
+        const ids = _computeRows().map(s => s.space_id);
+        if (!ids.length || !ids.some(id => _laneActive(_lanesById && _lanesById[id]))) return;
+        const generation = _sessionGeneration;
+        const request = {};
+        _pending = request;
+        _setRefreshing(true);
+        const resp = await callTool('bank_consolidation_queues', { space_ids: ids.join(',') }).catch(() => ({ status: 'error' }));
+        if (_pending === request) _pending = null;
+        if (!_current(epochAtCall, generation)) return;
+        _applyQueues(resp, ids);
+        // Preserve the table, search input and the focused anchor. Only its
+        // non-interactive children change, so live updates never steal focus.
+        document.querySelectorAll('#spacesTableWrap .spaces-activity-cell').forEach(cell => {
+            const link = cell.querySelector('.spaces-activity-link');
+            if (link) link.innerHTML = _activityHtml(_lanesById && _lanesById[cell.dataset.space]);
+        });
+        _setRefreshing(false);
+        _scheduleLive(epochAtCall);
+    }
+
+    registerAction('spaces-refresh', () => {
+        _loadTable(AdminRouter.epoch);
+    });
 
     // ═══════════════ Create-space form ═══════════════
 
@@ -514,30 +482,32 @@
     });
 
     function render(contentEl, params, ctx) {
+        _clearLive();
         _epoch = ctx.epoch;
         _identity = ctx.identity || {};
+        _sessionGeneration = ctx.sessionGeneration ?? currentSessionGeneration();
+        _pending = null;
         _spacesData = null;
         _lanesById = null;
-        _activeFilter = 'all';
-        _staleData = null;
-        _staleLoading = false;
-        _staleError = null;
-
+        _query = '';
+        _updatedAt = null;
+        _queueError = false;
+        _liveStopped = false;
+        _queueDenied = [];
         const createAction = _hasManage(_identity)
-            ? `<button type="button" class="btn btn-primary btn-sm" data-action="spaces-open-create">${icon('plus')} Create space</button>`
-            : '';
-
-        contentEl.innerHTML = `<div class="page">
+            ? `<button type="button" class="btn btn-primary btn-sm" data-action="spaces-open-create">${icon('plus')} Create space</button>` : '';
+        contentEl.innerHTML = `<div class="page spaces-index">
             ${pageHeader('Spaces', `
                 <button type="button" class="btn btn-secondary btn-sm" id="spacesRefreshBtn" data-action="spaces-refresh">${icon('refresh')} Refresh</button>
                 ${createAction}
             `)}
             <div class="panel">
                 <div id="spacesToolbar"></div>
-                <div id="spacesTableWrap">${stateLoading('Loading spaces…')}</div>
+                <div id="spacesTableWrap" class="spaces-table">${stateLoading('Loading spaces…')}</div>
             </div>
+            <p id="spacesFreshness" class="spaces-freshness body-small"></p>
+            <div id="spacesQueueWarnings"></div>
         </div>`;
-
         _renderToolbar();
         _loadTable(_epoch);
     }

@@ -20,6 +20,7 @@ API_PATH = ROOT / "src/live_mem/static/js/admin-api.js"
 HTML_PATH = ROOT / "src/live_mem/static/admin.html"
 DELETE_RUNTIME_PATH = ROOT / "tests/js/admin_space_delete_runtime.mjs"
 PRELOAD_RUNTIME_PATH = ROOT / "tests/js/admin_space_detail_preload_runtime.mjs"
+COMPACTION_RUNTIME_PATH = ROOT / "tests/js/admin_space_detail_compaction_runtime.mjs"
 MESH_RUNTIME_PATH = ROOT / "tests/js/admin_space_detail_mesh_runtime.mjs"
 
 
@@ -291,6 +292,86 @@ def test_preload_and_tier_actions_runtime_are_single_flight_and_confirmed() -> N
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "admin space detail preload runtime: ok" in completed.stdout
+
+
+def test_manual_compaction_is_mid_only_manage_gated_two_step_and_bound() -> None:
+    source = _source()
+    mid = _function("renderMid", source)
+    short = _function("renderShort", source)
+    action = _function("renderCompactionAction", source)
+    run = _function("runCompaction", source)
+    confirm = _function("confirmCompact", source)
+
+    assert "renderCompactionAction(view)" in mid
+    assert 'data-action="sd-compact-dry"' in action
+    assert 'data-action="sd-compact-dry"' not in short
+    assert "if (!hasPermission(view, 'manage')) return '';" in action
+    assert "if (!hasPermission(view, 'manage') || view.compacting) return false;" in run
+    assert "callTool('bank_compact', { space_id: view.spaceId, dry_run: dryRun })" in run
+    assert "result.space_id !== view.spaceId" in run
+    assert "view.compactDry === data" in _function("renderCompactionReport", source)
+    assert "view.compactResult !== view.compactDry" in confirm
+    assert "view.compactApplying" in run
+    assert "view.compactApplying) return;" in _function("invalidateCompaction", source)
+    assert "compactApplySeq" in run
+    assert "Compaction recovery required" in _function("compactFailureMarkup", source)
+    assert "Target resolution" in _function("compactFailureMarkup", source)
+    assert "showModal(" in confirm
+    assert "view.spaceId !== captured" in confirm
+    assert "await loadMid(view, { preserveCompaction: true })" in run
+    assert "result.status === 'ok' || result.status === 'partial'" in run
+    assert "setInterval(" not in run
+
+
+def test_manual_compaction_runtime_and_mutation_guards(tmp_path: Path) -> None:
+    node = shutil.which("node") or shutil.which("nodejs")
+    if node is None:
+        pytest.skip("Node.js runtime unavailable; source contract remains pinned")
+
+    def run(candidate: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [node, str(COMPACTION_RUNTIME_PATH), str(candidate)],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    source = _source()
+    completed = run(VIEW_PATH)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "admin space detail compaction runtime: ok" in completed.stdout
+
+    gate = "        if (!hasPermission(view, 'manage') || view.compacting) return false;\n"
+    assert source.count(gate) == 1
+    gate_mutant = tmp_path / "views-space-detail-without-compaction-gate.js"
+    gate_mutant.write_text(source.replace(gate, "", 1), encoding="utf-8")
+    mutant = run(gate_mutant)
+    assert mutant.returncode != 0, "runtime must kill removal of the manage gate"
+
+    revoke = "        view.compacting = true;\n        view.compactApplying = !dryRun;\n        view.compactDry = null;\n"
+    assert source.count(revoke) == 1
+    binding_mutant = tmp_path / "views-space-detail-without-dry-run-binding.js"
+    binding_mutant.write_text(
+        source.replace(revoke, "        view.compacting = true;\n        view.compactApplying = !dryRun;\n", 1),
+        encoding="utf-8",
+    )
+    mutant = run(binding_mutant)
+    assert mutant.returncode != 0, "runtime must kill Apply without the successful dry-run binding"
+
+    target_guard = "        if (result && result.status === 'ok' && result.space_id !== view.spaceId) {\n            result = { status: 'error', message: 'Compaction target did not match this space.' };\n        }\n"
+    assert source.count(target_guard) == 1
+    target_mutant = tmp_path / "views-space-detail-without-target-guard.js"
+    target_mutant.write_text(source.replace(target_guard, "", 1), encoding="utf-8")
+    mutant = run(target_mutant)
+    assert mutant.returncode != 0, "runtime must kill an out-of-scope compaction result"
+
+    apply_refresh_guard = "        if (view.compactApplying) return;\n"
+    assert source.count(apply_refresh_guard) == 1
+    apply_refresh_mutant = tmp_path / "views-space-detail-without-apply-refresh-guard.js"
+    apply_refresh_mutant.write_text(source.replace(apply_refresh_guard, "", 1), encoding="utf-8")
+    mutant = run(apply_refresh_mutant)
+    assert mutant.returncode != 0, "runtime must kill a concurrent dry run during Apply"
 
 
 def test_destructive_calls_use_typed_exact_identifiers_and_server_confirm() -> None:
@@ -646,7 +727,7 @@ def test_job_inspector_reports_the_bank_size_advisory_only() -> None:
     assert "Number.isSafeInteger(item.utf8_bytes)" in fn and "Number.isSafeInteger(item.max_size)" in fn
     assert "safe(item.filename)" in fn and "safe(item.utf8_bytes)" in fn
     assert "if (!valid.length) return '';" in fn
-    assert "compaction is a human decision" in fn
+    assert "Compaction is optional" in fn
     assert "renderBankSizeAdvisory(job.result)" in _function("renderJobInspector", source) or "renderBankSizeAdvisory(job.result)" in source
     for banned in ("renderCompactionAdvisory", "renderSafeCompactionFailures", "compaction_advisory", "compaction_failures"):
         assert banned not in source, banned

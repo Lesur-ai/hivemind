@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import vm from 'node:vm';
 
 const viewPath = process.argv[2];
 assert.ok(viewPath, 'views-operator.js path is required');
 const source = fs.readFileSync(viewPath, 'utf8');
+// Exercise the shipped string-only escaping contract; coercing in this double
+// would hide numeric rendering errors in real Maintenance reports.
+const shellSource = fs.readFileSync(path.join(path.dirname(viewPath), '../admin-app.js'), 'utf8');
+const escDeclaration = shellSource.match(/^const esc = .*;$/m);
+assert.ok(escDeclaration, 'the shared esc declaration must be available');
+const shellEsc = vm.runInNewContext(`${escDeclaration[0]}\nesc;`);
 
 function deferred() {
     let resolve;
@@ -155,7 +162,7 @@ function createHarness() {
             modals.push({ kind: 'destructive', ...opts });
         },
         showToast(kind, text) { toasts.push({ kind, text }); },
-        esc: escapeHtml,
+        esc: shellEsc,
         icon: name => `ICON:${name}`,
         pageHeader: title => `HEADER:${title}`,
         panel: body => `PANEL:${body}`,
@@ -167,6 +174,7 @@ function createHarness() {
             serverMessages.push(String(message));
             return `<SERVER>${escapeHtml(message)}</SERVER>`;
         },
+        copyable: value => `<COPY>${escapeHtml(value)}</COPY>`,
         fmtSize: value => `${String(value ?? '—')}B`,
         statusDot: (_kind, label) => `<STATUS>${escapeHtml(label)}</STATUS>`,
     };
@@ -549,7 +557,7 @@ async function compactEvidenceAndTargetInvalidation() {
     await flushTasks();
     assert.doesNotMatch(stale.elements.opCompactResults.innerHTML, /facts\.md/);
     stale.action('op-compact-apply');
-    assert.match(stale.elements.opCompactResults.innerHTML, /Run a dry run/);
+    assert.match(stale.elements.opCompactResults.innerHTML, /Check files for/);
 
     // An apply's verified hashes/preimage remain visible both while and after
     // the mandatory re-scan, even when that re-scan itself fails in transport.
@@ -561,7 +569,7 @@ async function compactEvidenceAndTargetInvalidation() {
     await flushTasks();
     applied.action('op-compact-apply');
     const confirmation = applied.lastModal('neutral');
-    assert.equal(confirmation.title, 'Apply compaction');
+    assert.equal(confirmation.title, 'Compact files');
     await confirmation.onConfirm();
     await flushTasks();
     assert.deepEqual(plain(applied.compactCalls()[1].args), {
@@ -571,13 +579,13 @@ async function compactEvidenceAndTargetInvalidation() {
     await flushTasks();
     assert.equal(applied.pendingCompact.length, 3, 'apply must trigger its required re-scan');
     const whileRescanning = applied.elements.opCompactResults.innerHTML;
-    assert.match(whileRescanning, /Verified compaction apply evidence/);
+    assert.match(whileRescanning, /Compaction applied/);
     assert.match(whileRescanning, /alpha\/2026-08-18T12-00-00-deadbeef/);
     assert.match(whileRescanning, /bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/);
     applied.pendingCompact[2].reject(new Error('transport failure'));
     await flushTasks();
     const afterTransportFailure = applied.elements.opCompactResults.innerHTML;
-    assert.match(afterTransportFailure, /Verified compaction apply evidence/);
+    assert.match(afterTransportFailure, /Compaction applied/);
     assert.match(afterTransportFailure, /Result SHA-256/);
     assert.match(afterTransportFailure, /ERROR:Compact failed/);
 
@@ -593,18 +601,56 @@ async function compactEvidenceAndTargetInvalidation() {
     assert.match(recoveryHtml, /state-degraded/);
     assert.match(recoveryHtml, /role="status"/);
     assert.match(recoveryHtml, /Compaction recovery required/);
-    assert.match(recoveryHtml, /failure_reason:<\/strong> compaction_apply_recovery_unverified/);
-    assert.match(recoveryHtml, /failed_phase:<\/strong> apply/);
-    assert.match(recoveryHtml, /rollback_outcome:<\/strong> unverified/);
+    assert.match(recoveryHtml, /Failure reason:<\/strong> compaction_apply_recovery_unverified/);
+    assert.match(recoveryHtml, /Failed during:<\/strong> apply/);
+    assert.match(recoveryHtml, /Rollback result:<\/strong> unverified/);
     assert.match(recoveryHtml, /unknown \/ not asserted/);
     assert.match(recoveryHtml, /alpha\/2026-08-18T12-00-00-deadbeef/);
     assert.match(recoveryHtml, /c{64}/);
     assert.match(recoveryHtml, /d{64}/);
     assert.match(recoveryHtml, /recovery &lt;server-message&gt;/);
     assert.doesNotMatch(recoveryHtml, /recovery <server-message>/);
-    assert.match(recoveryHtml, /No automatic retry or restore was performed/);
+    assert.match(recoveryHtml, /No automatic retry was attempted/);
+    const visible = recoveryHtml.replace(/<details\b[\s\S]*?<\/details>/g, '');
+    assert.match(visible, /Bank content may have changed/);
+    assert.match(visible, /Final size could not be verified/);
+    assert.match(visible, /Rollback result:<\/strong> unverified/);
+    assert.match(visible, /Inspect the retained preimage/);
+    assert.match(visible, /facts\.md/);
     assert.equal(recovery.toasts.length, 0);
     assert.equal(recovery.compactCalls().length, 1);
+}
+
+async function compactMalformedDiagnosticsRemainVisible() {
+    const cases = [];
+    for (const field of ['status', 'failure_reason', 'failed_phase', 'rollback_outcome', 'remediation']) {
+        for (const value of [7, true, { diagnostic: 'unexpected' }, ['<server-value>']]) {
+            cases.push({ field, response: { ...compactRecoveryResponse(), [field]: value } });
+        }
+    }
+    for (const field of ['filename', 'error']) {
+        for (const value of [7, true, { diagnostic: 'unexpected' }, ['<server-value>']]) {
+            cases.push({ field: `file.${field}`, response: {
+                ...compactRecoveryResponse(),
+                files: [{ filename: 'facts.md', error: 'failed', [field]: value }],
+            } });
+        }
+    }
+    for (const { field, response } of cases) {
+        const h = createHarness();
+        await h.render(80);
+        h.target('alpha');
+        h.action('op-compact-dry');
+        h.pendingCompact[0].resolve(response);
+        await flushTasks();
+        const html = h.elements.opCompactResults.innerHTML;
+        const visible = html.replace(/<details\b[\s\S]*?<\/details>/g, '');
+        assert.match(visible, /Compaction recovery required/, `${field} must not blank the recovery result`);
+        assert.match(visible, /Bank content may have changed/);
+        assert.match(visible, /Final size could not be verified/);
+        assert.doesNotMatch(html, /<server-value>/);
+        assert.equal(h.compactCalls().length, 1, 'malformed diagnostics must not trigger a retry');
+    }
 }
 
 async function compactTargetResolutionDiagnosticIsContentFree() {
@@ -648,5 +694,6 @@ await sessionGenerationOwnsProofAndContinuations();
 await invalidThresholdsNeverReachTheServer();
 await compactEvidenceAndTargetInvalidation();
 await compactTargetResolutionDiagnosticIsContentFree();
+await compactMalformedDiagnosticsRemainVisible();
 
 console.log('admin GC runtime: ok');

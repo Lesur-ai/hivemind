@@ -66,8 +66,8 @@ def test_live_refresh_drops_on_epoch_change_is_mutation_proven(tmp_path: Path) -
     """A tick surviving navigation would repaint a foreign route (§3.3.2 rule 3)."""
     mutant = _mutant(
         tmp_path,
-        "            if (AdminRouter.epoch !== epoch || !sessionActive()) return;\n            if (document.hidden) { scheduleLive(epoch, data); return; }",
-        "            if (!sessionActive()) return;\n            if (document.hidden) { scheduleLive(epoch, data); return; }",
+        "            if (AdminRouter.epoch !== epoch || !sessionActive() || !sessionGenerationIsCurrent(generation) || seq !== state.renderSeq) return;\n            if (document.hidden) { scheduleLive(epoch, data); return; }",
+        "            if (!sessionActive() || !sessionGenerationIsCurrent(generation) || seq !== state.renderSeq) return;\n            if (document.hidden) { scheduleLive(epoch, data); return; }",
     )
     completed = _run(mutant)
     assert completed.returncode != 0, "the runtime must refuse a tick that ignores the route epoch"
@@ -89,7 +89,7 @@ def test_job_inspector_keeps_snapshot_on_typed_error_is_mutation_proven(tmp_path
     """Repainting any payload would replace a running job by an error state."""
     mutant = _mutant(
         tmp_path,
-        "            if (!['running', 'queued', 'succeeded', 'failed', 'not_found'].includes(nextStatus)) {\n                scheduleJobLive(jobId, op, epoch, data);\n                return;\n            }\n",
+        "            if (!['running', 'queued', 'succeeded', 'failed', 'not_found'].includes(nextStatus)) {\n                paintJobStale(next);\n                scheduleJobLive(jobId, op, epoch, data);\n                return;\n            }\n",
         "",
     )
     completed = _run(mutant)
@@ -104,3 +104,72 @@ def test_job_inspector_stops_on_closed_modal_is_mutation_proven(tmp_path: Path) 
     )
     completed = _run(mutant)
     assert completed.returncode != 0, "the runtime must refuse re-reading a job behind a closed modal"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "failure"),
+    [
+        (
+            "        if (state.request) { state.pendingLoad = { epoch, liveIds, generation, seq }; return; }\n",
+            "",
+            "overlapping lane requests",
+        ),
+        (
+            "            && sessionGenerationIsCurrent(generation) && seq === state.renderSeq;",
+            "            && seq === state.renderSeq;",
+            "a response from a prior login",
+        ),
+        (
+            "            if (id && seen.has(key)) return;\n",
+            "",
+            "duplicate active or history jobs",
+        ),
+        (
+            "        history.sort((a, b) => Date.parse(b.finished_at) - Date.parse(a.finished_at));",
+            "        history.sort((a, b) => Date.parse(a.finished_at) - Date.parse(b.finished_at));",
+            "oldest-first history",
+        ),
+        (
+            "        const captured = scopedItems(scan.spaces).map(s => String(s.space_id || '')).filter(Boolean);",
+            "        const captured = scan.spaces.map(s => String(s.space_id || '')).filter(Boolean);",
+            "scope expansion in stale bulk confirmation",
+        ),
+    ],
+)
+def test_jobs_view_guards_are_mutation_proven(tmp_path: Path, old: str, new: str, failure: str) -> None:
+    completed = _run(_mutant(tmp_path, old, new))
+    assert completed.returncode != 0, f"the runtime must reject {failure}"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "finding"),
+    [
+        (
+            "            const retainedDenials = Array.isArray(liveIds) && state.data\n"
+            "                ? scopedItems(state.data.denied_spaces).filter(item => !liveIds.includes(item.space_id)) : [];",
+            "            const retainedDenials = [];",
+            "F4: unrequested denied spaces disappear during a live tick",
+        ),
+        (
+            "        if (!lanes.length) {\n"
+            "            el.innerHTML = panel(stateEmpty({ title: 'No spaces visible', hint: 'This token cannot see any consolidation lanes.' }));\n"
+            "            return;\n"
+            "        }\n",
+            "",
+            "F5: missing lane visibility is presented as quiet activity",
+        ),
+        (
+            '                <button type="button" class="btn btn-secondary btn-sm" data-action="consol-stale-toggle" aria-expanded="true">Hide notes</button>',
+            "",
+            "F6: expanded notes panel has no collapse control",
+        ),
+        (
+            "        else _staleGen += 1; // A late scan must not repaint or refill the collapsed panel.\n",
+            "",
+            "F6: a late scan repopulates the collapsed panel",
+        ),
+    ],
+)
+def test_round_one_consolidation_fixes_are_mutation_proven(tmp_path: Path, old: str, new: str, finding: str) -> None:
+    completed = _run(_mutant(tmp_path, old, new))
+    assert completed.returncode != 0, f"the runtime must reject {finding}"
