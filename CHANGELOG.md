@@ -26,12 +26,12 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 
 ## [1.5.2] — 2026-09-09
 
-Hivemind 1.5.2 adds a contextual manual compaction shortcut and improves the
-admin console's readability, action wording, and keyboard navigation.
+Hivemind 1.5.2 adds a contextual manual compaction shortcut and reshapes the
+admin console around clearer, job-focused operator views.
 
 **Release identity.** Hivemind now reports runtime version `1.5.2`.
 
-### Admin console
+### Changed
 
 - **Compact a space from its Memory Bank.** Managers can run the existing
   `bank_compact` dry run from the MID panel, review candidates and limits, then
@@ -40,8 +40,8 @@ admin console's readability, action wording, and keyboard navigation.
   reports conflicts or recovery-required failures without automatic retries.
 - **Bring memory content into view.** Space Detail uses a compact summary and
   places the memory tiers before the consolidation lane. Dashboard identity
-  and Consolidation metrics take less space, while ordinary labels and empty
-  states are easier to read.
+  remains available in the sidebar, while the main views use clearer labels,
+  focused summaries, and job-oriented consolidation surfaces.
 - **Make operator actions explicit.** Compaction distinguishes checking
   eligible files from generating and writing summaries. Results retain
   diagnostics in technical details while failures and recovery instructions
@@ -52,6 +52,20 @@ admin console's readability, action wording, and keyboard navigation.
   support manual keyboard activation and preserve focus after rendering.
   Mobile menu and filter targets meet the 44px minimum, and amber status text
   has stronger contrast.
+
+### Removed
+
+- **Dashboard identity card.** The dedicated Dashboard card is removed; the
+  identity information remains available from the sidebar.
+- **Spaces filter and stale-scan controls.** The `All`, `Consolidating`, and
+  `Attention` filter group and the per-threshold stale-scan controls are
+  removed. The table now presents Space, Memory, and Consolidation, with
+  description and owner kept as Space details rather than dedicated columns;
+  the Created and Long columns are no longer shown separately.
+- **Consolidation overview table and aggregate cards.** The lanes table and
+  Total spaces, Active, Running, Queued jobs, and Failed recent cards are
+  removed. Per-lane actions remain available through the consolidation picker,
+  and `Stale banks` is now labelled `Notes to consolidate`.
 
 ### Upgrading from 1.5.1
 
