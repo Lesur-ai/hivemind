@@ -29,7 +29,7 @@
         const rows = valid.map(item =>
             `<div class="kv"><span class="kv-key mono-data">${safe(item.filename)}</span><span class="kv-value">${safe(item.utf8_bytes)} UTF-8 bytes (advisory threshold ${safe(item.max_size)})</span></div>`
         ).join('');
-        return `<div class="sd-size-advisory"><h4>Bank size advisory — compaction is a human decision: bank_compact (MCP tool, manage)</h4><div class="kv-grid">${rows}</div></div>`;
+        return `<div class="sd-size-advisory"><h4>Some bank files exceed the advisory size</h4><p class="body-small">Compaction is optional. Open the Memory Bank to check files for compaction.</p><div class="kv-grid">${rows}</div></div>`;
     }
 
     function guaranteeBadge(value) {
@@ -170,30 +170,37 @@
         const info = view.info;
         const status = hiveStatus(info.hive_status_label);
         const helper = status.helper ? `<p class="form-hint">${safe(status.helper)}</p>` : '';
+        const size = value => value == null ? 'not recorded' : safe(fmtSize(value));
+        const count = value => safe(value ?? '—');
         return `${status.banner}
-            <div class="sd-summary">
-                <div class="sd-summary__identity">
-                    <span class="micro-label">SPACE ID</span>
-                    ${copyable(info.space_id || view.spaceId)}
-                    <p>${info.description ? safe(info.description) : '<span class="text-faint">No description</span>'}</p>
+            <section class="sd-overview" aria-label="Space overview">
+                <div class="sd-summary">
+                    <div class="sd-summary__identity">
+                        ${copyable(info.space_id || view.spaceId)}
+                        <p>${info.description ? safe(info.description) : '<span class="text-faint">No description</span>'}</p>
+                    </div>
+                    <div class="sd-summary__status">
+                        ${status.marker}
+                        ${helper}
+                        <div id="sdMeshReadiness">${renderMeshReadiness(view)}</div>
+                    </div>
                 </div>
-                <div class="sd-summary__status">
-                    ${status.marker}
-                    <span class="mono-data">${safe(status.raw || 'missing')}</span>
-                    ${helper}
-                    <div id="sdMeshReadiness">${renderMeshReadiness(view)}</div>
-                </div>
-            </div>
-            <div class="metric-grid sd-metrics">
-                <div class="metric-card"><span class="micro-label">SHORT NOTES</span><div class="metric-value">${safe(info.live && info.live.notes_count)}</div><span class="body-small">${safe(fmtSize(info.live && info.live.total_size))}</span></div>
-                <div class="metric-card"><span class="micro-label">MID FILES</span><div class="metric-value">${safe(info.bank && info.bank.files_count)}</div><span class="body-small">${safe(fmtSize(info.bank && info.bank.total_size))}</span></div>
-                <div class="metric-card"><span class="micro-label">CONSOLIDATIONS</span><div class="metric-value">${safe(info.consolidation_count)}</div><span class="body-small">${info.last_consolidation ? renderTimestamp(info.last_consolidation) : 'not recorded'}</span></div>
-                <div class="metric-card"><span class="micro-label">SYNTHESIS</span><div class="metric-value sd-metric-word">${info.synthesis_exists ? 'Ready' : 'Absent'}</div><span class="body-small">Owner: ${safe(info.owner || 'not recorded')}</span></div>
-            </div>
-            <div class="sd-meta-row">
-                ${keyValue('created', info.created_at, { timestamp: true })}
-                ${keyValue('owner', info.owner)}
-            </div>`;
+                <dl class="summary-stats sd-metrics">
+                    <div><dt>Short notes</dt><dd><span class="summary-stats__value">${count(info.live && info.live.notes_count)}</span><span class="body-small">${size(info.live && info.live.total_size)}</span></dd></div>
+                    <div><dt>Bank files</dt><dd><span class="summary-stats__value">${count(info.bank && info.bank.files_count)}</span><span class="body-small">${size(info.bank && info.bank.total_size)}</span></dd></div>
+                    <div><dt>Consolidations</dt><dd><span class="summary-stats__value">${count(info.consolidation_count)}</span></dd></div>
+                    <div><dt>Synthesis</dt><dd>${info.synthesis_exists == null ? 'not recorded' : info.synthesis_exists ? 'Ready' : 'Absent'}</dd></div>
+                </dl>
+                <details class="sd-metadata">
+                    <summary>Space details</summary>
+                    <div class="sd-meta-row">
+                        ${keyValue('Created', info.created_at, { timestamp: true })}
+                        ${keyValue('Owner', info.owner)}
+                        ${keyValue('Last consolidation', info.last_consolidation, { timestamp: true })}
+                        ${keyValue('Mesh state code', status.raw)}
+                    </div>
+                </details>
+            </section>`;
     }
 
     function laneSeverity(value) {
@@ -208,23 +215,27 @@
         const latest = Array.isArray(queue.latest_jobs) ? queue.latest_jobs.slice(0, 10) : [];
         const queued = Array.isArray(queue.queued_job_ids) ? queue.queued_job_ids : [];
         const running = queue.running_job || null;
-        const activity = !running && !latest.length && (queue.lane_state || 'idle') === 'idle'
-            ? stateEmpty({ title: 'No consolidation activity', hint: 'This lane is idle.' })
+        const progress = running && running.progress;
+        const notes = progress && Number.isFinite(progress.notes_done) && Number.isFinite(progress.notes_total)
+            ? `${progress.notes_done} / ${progress.notes_total}` : null;
+        const href = '#/consolidation/' + encodeURIComponent(view.spaceId || view.info.space_id || '');
+        const idle = !running && !latest.length && !queued.length && !(queue.queued_count > 0) && queue.lane_state === 'idle';
+        const activity = idle
+            ? stateEmpty({ title: 'No consolidation activity', compact: true })
             : `<div class="sd-lane-grid">
-                ${keyValue('running job', running && (running.job_id || running))}
-                ${keyValue('queued', queue.queued_count ?? queued.length)}
-                ${keyValue('batch size', queue.service_config && queue.service_config.batch_size)}
-                ${keyValue('guarantee', queue.guarantee)}
+                ${keyValue('Scope', running && running.scope_label)}
+                ${keyValue('Notes processed', notes)}
+                ${keyValue('Queued', queue.queued_count ?? (Array.isArray(queue.queued_job_ids) ? queued.length : null))}
             </div>`;
-        return `<div class="panel sd-section">
-            <div class="panel-header"><div><h2>Consolidation lane</h2><div class="sd-inline">${statusDot(laneSeverity(queue.lane_state), queue.lane_state || 'idle')} ${guaranteeBadge(queue.guarantee)}</div></div><a class="sd-link" href="#/consolidation">Open consolidation</a></div>
+        return `<div class="panel sd-section${idle ? ' sd-lane--idle' : ''}">
+            <div class="panel-header"><div><h2>Consolidation</h2><div class="sd-inline">${statusDot(laneSeverity(queue.lane_state), queue.lane_state || 'not recorded')} ${guaranteeBadge(queue.guarantee)}</div></div><a class="sd-link" href="${safe(href)}">Follow consolidation</a></div>
             ${activity}
         </div>`;
     }
 
     function tierButtons(view) {
         return `<div class="sd-tier-tabs" role="tablist" aria-label="Memory tier">
-            ${['short', 'mid', 'long'].map(tier => `<button type="button" class="sd-tier-tab${view.tier === tier ? ' active' : ''}" role="tab" aria-selected="${view.tier === tier ? 'true' : 'false'}" data-action="sd-select-tier" data-tier="${tier}">${safe(tier)}</button>`).join('')}
+            ${['short', 'mid', 'long'].map(tier => `<button type="button" class="sd-tier-tab${view.tier === tier ? ' active' : ''}" role="tab" id="sdTierTab-${tier}" aria-controls="sdTierPanel" tabindex="${view.tier === tier ? '0' : '-1'}" aria-selected="${view.tier === tier ? 'true' : 'false'}" data-action="sd-select-tier" data-tier="${tier}">${safe(tier)}</button>`).join('')}
         </div>`;
     }
 
@@ -246,7 +257,7 @@
         if (view.shortLoading) body = stateLoading('Loading recent notes…');
         else if (data) body = renderShortData(view, data);
         return `<div class="item-card tier-short sd-tier-card">
-            <div class="panel-header"><div><span class="micro-label">SHORT</span><h2>Live notes</h2></div><div class="sd-tier-actions">${data ? `<span class="count-pill">Showing ${safe(Array.isArray(data.notes) ? data.notes.length : 0)} notes</span>` : ''}${renderConsolidateAction(view)}</div></div>
+            <div class="panel-header"><div><span class="micro-label mono-data">SHORT</span><h2>Live notes</h2></div><div class="sd-tier-actions">${data ? `<span class="count-pill">Showing ${safe(Array.isArray(data.notes) ? data.notes.length : 0)} notes</span>` : ''}${renderConsolidateAction(view)}</div></div>
             <div class="sd-filter-grid">
                 <div><label class="form-label" for="sdShortLimit">Limit</label><input id="sdShortLimit" class="form-input mono" type="number" min="1" max="500" value="${safe(view.shortFilters.limit)}"></div>
                 <div><label class="form-label" for="sdShortCategory">Category</label><select id="sdShortCategory" class="form-input">${categoryOptions}</select></div>
@@ -280,8 +291,9 @@
         if (view.midLoading) body = stateLoading('Loading bank files…');
         else if (data) body = renderMidData(view, data);
         return `<div class="item-card tier-mid sd-tier-card">
-            <div class="panel-header"><div><span class="micro-label">MID</span><h2>Memory Bank</h2></div><div class="sd-tier-actions">${data && data.status === 'ok' ? `<span class="count-pill">${safe(data.file_count)} files</span>` : ''}${renderGraphPushAction(view)}</div></div>
+            <div class="panel-header"><div><span class="micro-label mono-data">MID</span><h2>Memory Bank</h2></div><div class="sd-tier-actions">${data && data.status === 'ok' ? `<span class="count-pill">${safe(data.file_count)} files</span>` : ''}${renderCompactionAction(view)}${renderGraphPushAction(view)}</div></div>
             <div id="sdMidBody">${body}</div>
+            ${renderCompactionReport(view)}
         </div>`;
     }
 
@@ -296,12 +308,150 @@
         return `<div class="sd-split sd-mid-reader"><div>${dataTable(['File', 'Size', 'Last modified'], rows)}</div><article id="sdBankPreview" class="sd-reader">${preview}</article></div>`;
     }
 
+    function compactByteText(value) {
+        return (typeof value === 'number' && Number.isFinite(value) && value >= 0)
+            ? `${value} UTF-8 bytes`
+            : 'unknown / not asserted';
+    }
+
+    function compactTargetDetail(failure) {
+        if (!failure || typeof failure !== 'object'
+            || failure.error !== 'ambiguous_or_missing_compaction_target') return '';
+        const index = failure.operation_index;
+        const resolution = failure.target_resolution;
+        const count = failure.target_match_count;
+        const sha256 = failure.target_heading_sha256;
+        if (!Number.isSafeInteger(index) || index < 0
+            || (resolution !== 'missing' && resolution !== 'ambiguous')
+            || !Number.isSafeInteger(count) || count < 0
+            || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)
+            || (resolution === 'missing' && count !== 0)
+            || (resolution === 'ambiguous' && count < 2)) return '';
+        return `operation_index=${index}; target_resolution=${resolution}; target_match_count=${count}; target_heading_sha256=${sha256}`;
+    }
+
+    function compactFailureRows(failures) {
+        if (!Array.isArray(failures)) return '';
+        return failures.map(f => {
+            if (!f || typeof f !== 'object'
+                || typeof f.filename !== 'string' || typeof f.error !== 'string') return '';
+            const detail = compactTargetDetail(f);
+            return `<tr><td class="mono">${safe(f.filename)}</td><td class="mono">${safe(f.error)}</td><td class="mono">${safe(detail || '—')}${detail ? copyable(f.target_heading_sha256, 'Target fingerprint') : ''}</td></tr>`;
+        }).join('');
+    }
+
+    function compactSize(value) {
+        return typeof value === 'number' && Number.isFinite(value) && value >= 0
+            ? fmtSize(value) : 'Unknown';
+    }
+
+    function compactEvidence(data) {
+        const files = Array.isArray(data.files) ? data.files : [];
+        const id = data.preimage_id ? `<p class="body-small"><strong>Preimage reference:</strong> ${copyable(String(data.preimage_id))}</p>` : '';
+        const rows = files.filter(file => file && typeof file === 'object').map(file => {
+            const hash = value => typeof value === 'string' && value
+                ? copyable(value, value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value) : '—';
+            const values = [
+                ['Source SHA-256', hash(file.source_sha256)],
+                ['Result SHA-256', hash(file.result_sha256)],
+                ['Original UTF-8 bytes', safe(compactByteText(file.size))],
+                ['Advisory UTF-8 bytes', safe(compactByteText(file.max_size))],
+                ['Size / advisory ratio', safe(file.ratio ?? '—')],
+                ['Compacted UTF-8 bytes', safe(compactByteText(file.compacted_size))],
+                ['Reduction', safe(typeof file.reduction_pct === 'number' ? `${file.reduction_pct}%` : '—')],
+                ['File failure', safe(file.error || '—')],
+            ];
+            return `<div class="compaction-file-evidence"><h4>${safe(file.filename || '')}</h4><dl>${values.map(([label, value]) => `<dt>${safe(label)}</dt><dd>${value}</dd>`).join('')}</dl></div>`;
+        }).join('');
+        return `${id}<p class="body-small">Report status: ${safe(data.status || 'unknown')} · ${safe(data.files_total ?? '—')} files checked · ${safe(data.files_over_limit ?? '—')} above advisory size.</p><p class="body-small">Total before: ${safe(compactByteText(data.total_size_before))} · Total after: ${safe(compactByteText(data.total_size_after))}</p>${rows}`;
+    }
+
+    function compactSuccessMarkup(data) {
+        const applied = data.dry_run === false;
+        const files = Array.isArray(data.files) ? data.files : [];
+        const finalKnown = typeof data.total_size_after === 'number' && Number.isFinite(data.total_size_after) && data.total_size_after >= 0;
+        const summary = applied
+            ? `<p class="body-small">${safe(data.files_total ?? '—')} files · ${safe(compactSize(data.total_size_before))} before · ${safe(compactSize(data.total_size_after))} after.</p>${finalKnown ? '' : '<p class="form-error">Final size could not be verified.</p>'}`
+            : `<p class="body-small">${safe(data.files_over_limit ?? '—')} of ${safe(data.files_total ?? '—')} files exceed the advisory size. <strong>No changes made.</strong></p><p class="form-hint">This check lists eligible files; it does not generate rewritten content.</p>`;
+        const rows = files.filter(file => file && typeof file === 'object').map(file => {
+            let outcome = file.over_limit === false ? 'Within advisory size' : file.over_limit === true ? 'Eligible' : 'Eligibility unknown';
+            if (applied && file.over_limit !== false) outcome = typeof file.reduction_pct === 'number' ? `Reduced ${file.reduction_pct}%` : 'Result unavailable';
+            if (file.error) outcome = String(file.error);
+            return `<tr><td class="mono">${safe(file.filename || '')}</td><td class="num">${safe(compactSize(file.size))}</td><td class="num">${safe(compactSize(file.max_size))}</td>${applied ? `<td class="num">${safe(compactSize(file.compacted_size))}</td>` : ''}<td>${safe(outcome)}</td></tr>`;
+        }).join('');
+        const headers = applied ? ['File', 'Before', 'Advisory size', 'After', 'Result'] : ['File', 'Size', 'Advisory size', 'Result'];
+        const table = rows ? `<div class="table-scroll"><table class="data-table"><thead><tr>${headers.map(header => `<th scope="col">${safe(header)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>` : stateEmpty({ title: 'No bank files' });
+        return summary + table + `<details class="compaction-details"><summary>Technical details</summary>${compactEvidence(data)}</details>`;
+    }
+
+    function compactFailureMarkup(data) {
+        if (data && data.status === 'conflict') {
+            return `<div class="state state-degraded" role="status">${icon('alert')}<div><h3>Consolidation in progress</h3><p class="body-small">Consolidation is running for this space — retry when the lane is idle.</p>${data.message ? serverMessage(data.message) : ''}</div></div>`;
+        }
+        const status = safe(data && data.status || 'error');
+        const recoveryRequired = data && (data.recovery_required === true || data.apply_may_have_mutated === true);
+        const heading = recoveryRequired ? 'Compaction recovery required' : `Compaction refused or failed (${status})`;
+        const reason = data && data.failure_reason ? `<p class="body-small"><strong>Failure reason:</strong> ${safe(data.failure_reason)}</p>` : '';
+        const message = data && data.message ? serverMessage(data.message) : '';
+        const remediation = data && data.remediation ? `<p class="body-small"><strong>Next step:</strong> ${safe(data.remediation)}</p>` : '';
+        const finalSize = data && data.total_size_after;
+        const after = typeof finalSize === 'number' && Number.isFinite(finalSize) && finalSize >= 0
+            ? `<p class="body-small"><strong>Final size:</strong> ${safe(compactSize(finalSize))}</p>`
+            : '<p class="form-error">Final size could not be verified.</p>';
+        const applied = data && typeof data.files_applied_before_failure === 'number'
+            ? `<p class="body-small"><strong>Files changed before failure:</strong> ${safe(data.files_applied_before_failure)}</p>` : '';
+        const phase = data && data.failed_phase ? `<p class="body-small"><strong>Failed during:</strong> ${safe(data.failed_phase)}</p>` : '';
+        const rollback = data && data.rollback_outcome ? `<p class="body-small"><strong>Rollback result:</strong> ${safe(data.rollback_outcome)}</p>` : '';
+        const mutation = data && data.apply_may_have_mutated === true
+            ? '<p class="form-error"><strong>Bank content may have changed.</strong></p>' : '';
+        const failures = data && Array.isArray(data.failures) ? data.failures : [];
+        const rows = compactFailureRows(failures);
+        const failureTable = rows ? `<div class="table-scroll"><table class="data-table"><thead><tr><th scope="col">File</th><th scope="col">Safe failure</th><th scope="col">Target resolution</th></tr></thead><tbody>${rows}</tbody></table></div>` : '';
+        const seenFailures = new Set();
+        const fileReports = data && Array.isArray(data.files) ? data.files : [];
+        const visibleFailures = [...failures, ...fileReports].filter(file => {
+            if (!file || typeof file.filename !== 'string' || typeof file.error !== 'string') return false;
+            const key = JSON.stringify([file.filename, file.error]);
+            if (seenFailures.has(key)) return false;
+            seenFailures.add(key);
+            return true;
+        }).map(file => `<li><strong>${safe(file.filename)}</strong>: ${safe(file.error)}</li>`).join('');
+        const fileSummary = visibleFailures ? `<ul class="compaction-failures">${visibleFailures}</ul>` : '';
+        const details = `<details class="compaction-details"><summary>Technical details</summary>${failureTable}${compactEvidence(data || {})}</details>`;
+        const recovery = recoveryRequired ? '<p class="form-hint">Recovery is required. No automatic retry was attempted.</p>' : '';
+        return `<div class="state ${recoveryRequired ? 'state-degraded' : 'state-error'}" role="${recoveryRequired ? 'status' : 'alert'}">${icon('alert')}<div><h3>${heading}</h3>${reason}${after}${phase}${rollback}${applied}${mutation}${message}${remediation}${fileSummary}${recovery}${details}</div></div>`;
+    }
+
+    function renderCompactionAction(view) {
+        if (!hasPermission(view, 'manage')) return '';
+        const disabled = view.compacting || view.midLoading;
+        const label = view.compacting ? (view.compactApplying ? 'Compacting files…' : 'Checking bank files…') : 'Check files for compaction';
+        const title = view.midLoading ? 'Wait for the Memory Bank to finish loading' : 'Check file sizes without changing bank content';
+        return `<button type="button" class="btn btn-secondary btn-sm" data-action="sd-compact-dry"${disabled ? ' disabled' : ''} title="${safe(title)}">${icon('maintenance')}${safe(label)}</button>`;
+    }
+
+    function renderCompactionReport(view) {
+        const data = view.compactResult;
+        if (!data) return '';
+        if (data.status === 'loading') {
+            return `<div id="sdCompactionResults" class="sd-compaction-results">${panel(stateLoading(view.compactApplying ? 'Compacting files…' : 'Checking bank files…'))}</div>`;
+        }
+        const applied = data.status === 'ok' && data.dry_run === false;
+        const ready = data.status === 'ok' && data.dry_run !== false && view.compactDry === data && !view.compacting;
+        const heading = applied ? 'Compaction applied' : data.status === 'ok' ? 'Files eligible for compaction' : 'Compaction result';
+        const apply = ready
+            ? `<button type="button" class="btn btn-primary btn-sm" data-action="sd-confirm-compact">Compact files…</button>`
+            : '';
+        const body = data.status === 'ok' ? compactSuccessMarkup(data) : compactFailureMarkup(data);
+        return `<div id="sdCompactionResults" class="sd-compaction-results"><div class="sd-compaction-header"><div><span class="micro-label">Manual maintenance</span><h3>${heading}</h3></div>${apply}</div>${body}</div>`;
+    }
+
     function graphStatsSection(graphStats) {
         if (!graphStats) return stateUnavailable('Long statistics are unavailable.');
         return `<div class="metric-grid sd-long-metrics">
-            <div class="metric-card"><span class="micro-label">DOCUMENTS</span><div class="metric-value">${safe(graphStats.document_count)}</div></div>
-            <div class="metric-card"><span class="micro-label">ENTITIES</span><div class="metric-value">${safe(graphStats.entity_count)}</div></div>
-            <div class="metric-card"><span class="micro-label">RELATIONS</span><div class="metric-value">${safe(graphStats.relation_count)}</div></div>
+            <div class="metric-card"><span class="micro-label">Documents</span><div class="metric-value">${safe(graphStats.document_count)}</div></div>
+            <div class="metric-card"><span class="micro-label">Entities</span><div class="metric-value">${safe(graphStats.entity_count)}</div></div>
+            <div class="metric-card"><span class="micro-label">Relations</span><div class="metric-value">${safe(graphStats.relation_count)}</div></div>
         </div>`;
     }
 
@@ -320,7 +470,7 @@
                 <button type="button" class="btn btn-secondary btn-sm" id="sdGraphFit">Fit graph</button>
             </div></div>
             ${truncated}
-            <div class="sd-graph-stage"><svg id="sdGraphCanvas" viewBox="0 0 960 520" role="img" aria-label="Knowledge graph"><g id="sdGraphViewport"></g></svg><aside id="sdGraphDetails" class="sd-graph-details" aria-live="polite"><span class="micro-label">NODE DETAILS</span><p>Select a node to inspect it.</p></aside></div>
+            <div class="sd-graph-stage"><svg id="sdGraphCanvas" viewBox="0 0 960 520" role="img" aria-label="Knowledge graph"><g id="sdGraphViewport"></g></svg><aside id="sdGraphDetails" class="sd-graph-details" aria-live="polite"><span class="micro-label">Node details</span><p>Select a node to inspect it.</p></aside></div>
         </section>`;
     }
 
@@ -366,7 +516,7 @@
             if (!details) return;
             details.textContent = '';
             const marker = document.createElement('span');
-            marker.className = 'micro-label';
+            marker.className = 'mono-data';
             marker.textContent = node.node_type === 'document' ? 'DOCUMENT' : String(node.type || 'ENTITY').toUpperCase();
             const title = document.createElement('h4');
             title.textContent = node.filename || node.label || 'Untitled';
@@ -456,7 +606,7 @@
         if (view.longLoading) body = stateLoading('Checking the embedded long runtime…');
         else if (data) body = renderLongData(view, data);
         return `<div class="item-card tier-long sd-tier-card">
-            <div class="panel-header"><div><span class="micro-label">LONG</span><h2>Knowledge graph</h2></div></div>
+            <div class="panel-header"><div><span class="micro-label mono-data">LONG</span><h2>Knowledge graph</h2></div></div>
             <div id="sdLongBody">${body}</div>
         </div>`;
     }
@@ -489,7 +639,7 @@
             ${graphStatsSection(data.graph_stats)}
             ${renderGraphViewer(data.graph_view)}
             ${renderWatermark(data.watermark)}
-            <div class="sd-meta-row">${keyValue('last push', data.last_push, { timestamp: true })}${keyValue('push count', data.push_count)}${keyValue('files pushed', data.files_pushed)}</div>
+            <div class="sd-meta-row">${keyValue('Last push', data.last_push, { timestamp: true })}${keyValue('Push count', data.push_count)}${keyValue('Files pushed', data.files_pushed)}</div>
             ${renderLongActions(view)}
         </div>`;
     }
@@ -500,7 +650,7 @@
         }
         if (data.binding === 'explicit') {
             const config = data.config || {};
-            return `<div class="sd-binding sd-meta-row">${keyValue('URL', config.url)}${keyValue('memory id', config.memory_id)}${keyValue('ontology', config.ontology)}</div>`;
+            return `<div class="sd-binding sd-meta-row">${keyValue('URL', config.url)}${keyValue('Memory ID', config.memory_id)}${keyValue('Ontology', config.ontology)}</div>`;
         }
         return failClosedBanner('Unknown long binding — fail-closed', 'The bound runtime did not report a recognized binding classification.');
     }
@@ -510,7 +660,7 @@
         const flagged = watermark.flagged === true
             ? attentionBanner('High-water mark preserved', 'Push observed a bank_version regression (possible rollback/split-brain) — high-water mark preserved.') : '';
         return `<section class="sd-watermark"><h3>Derived watermark</h3>${flagged}<div class="sd-meta-row">
-            ${keyValue('bank version', watermark.bank_version)}${keyValue('commit id', watermark.commit_id)}${keyValue('term', watermark.term)}${keyValue('provenance', watermark.provenance)}${keyValue('recorded', watermark.recorded_at, { timestamp: true })}${keyValue('flagged', watermark.flagged === true ? 'yes' : 'no')}
+            ${keyValue('Bank version', watermark.bank_version)}${keyValue('Commit ID', watermark.commit_id)}${keyValue('Term', watermark.term)}${keyValue('Provenance', watermark.provenance)}${keyValue('Recorded', watermark.recorded_at, { timestamp: true })}${keyValue('Flagged', watermark.flagged === true ? 'yes' : 'no')}
         </div><p class="form-hint">This watermark reports projection history only; it never decides mesh state.</p></section>`;
     }
 
@@ -581,14 +731,14 @@
         const progress = job.progress && typeof job.progress === 'object' ? job.progress : {};
         const position = Number(job.queue_position);
         const positionHtml = position === 1
-            ? keyValue('queue position', 'running')
-            : position >= 2 ? keyValue('queue position', `position ${position} in queue`) : '';
+            ? keyValue('Queue position', 'running')
+            : position >= 2 ? keyValue('Queue position', `position ${position} in queue`) : '';
         return `<div class="sd-meta-row">
-            ${keyValue('phase', progress.phase)}
-            ${keyValue('notes', progress.notes_total === null || progress.notes_total === undefined ? null : `${progress.notes_done ?? 0} / ${progress.notes_total}`)}
-            ${keyValue('batches', progress.batches_total === null || progress.batches_total === undefined ? null : `${progress.batches_done ?? 0} / ${progress.batches_total}`)}
-            ${keyValue('current batch', progress.current_batch)}
-            ${keyValue('batch size', progress.batch_size)}
+            ${keyValue('Phase', progress.phase)}
+            ${keyValue('Notes', progress.notes_total === null || progress.notes_total === undefined ? null : `${progress.notes_done ?? 0} / ${progress.notes_total}`)}
+            ${keyValue('Batches', progress.batches_total === null || progress.batches_total === undefined ? null : `${progress.batches_done ?? 0} / ${progress.batches_total}`)}
+            ${keyValue('Current batch', progress.current_batch)}
+            ${keyValue('Batch size', progress.batch_size)}
             ${positionHtml}
         </div>`;
     }
@@ -600,29 +750,29 @@
         // A run that processed zero notes because it stopped at its first batch
         // is a failure with counters, never "nothing to do".
         if (Number(result.notes_total) === 0) {
-            return `<div class="sd-job-result"><h4>Nothing to consolidate</h4>${keyValue('notes processed', 0)}${result.message ? serverMessage(result.message) : ''}</div>`;
+            return `<div class="sd-job-result"><h4>Nothing to consolidate</h4>${keyValue('Notes processed', 0)}${result.message ? serverMessage(result.message) : ''}</div>`;
         }
         const metrics = [
-            ['notes total', result.notes_total],
-            ['notes processed', result.notes_processed],
-            ['notes declared useless', result.notes_discarded_count],
-            ['notes deleted', result.notes_deleted],
-            ['notes remaining', result.notes_remaining],
-            ...(result.failed_batch === undefined ? [] : [['failed batch', result.failed_batch]]),
-            ...(result.failure_reason === undefined ? [] : [['failure reason', result.failure_reason]]),
-            ['bank files updated', result.bank_files_updated],
-            ['bank files created', result.bank_files_created],
-            ['bank files unchanged', result.bank_files_unchanged],
-            ['operations applied', result.operations_applied],
-            ['operations failed', result.operations_failed],
-            ['synthesis size', result.synthesis_size],
+            ['Notes total', result.notes_total],
+            ['Notes processed', result.notes_processed],
+            ['Notes declared useless', result.notes_discarded_count],
+            ['Notes deleted', result.notes_deleted],
+            ['Notes remaining', result.notes_remaining],
+            ...(result.failed_batch === undefined ? [] : [['Failed batch', result.failed_batch]]),
+            ...(result.failure_reason === undefined ? [] : [['Failure reason', result.failure_reason]]),
+            ['Bank files updated', result.bank_files_updated],
+            ['Bank files created', result.bank_files_created],
+            ['Bank files unchanged', result.bank_files_unchanged],
+            ['Operations applied', result.operations_applied],
+            ['Operations failed', result.operations_failed],
+            ['Synthesis size', result.synthesis_size],
             ['LLM tokens used', result.llm_tokens_used],
             ['LLM prompt tokens', result.llm_prompt_tokens],
             ['LLM completion tokens', result.llm_completion_tokens],
-            ['batches completed', result.batches_completed],
-            ['batches total', result.batches_total],
-            ['batch size', result.batch_size],
-            ['duration seconds', result.duration_seconds],
+            ['Batches completed', result.batches_completed],
+            ['Batches total', result.batches_total],
+            ['Batch size', result.batch_size],
+            ['Duration seconds', result.duration_seconds],
         ];
         const partial = job.status === 'succeeded'
             && Number.isFinite(Number(result.batches_completed))
@@ -647,17 +797,17 @@
         const sizeAdvisory = renderBankSizeAdvisory(job.result);
         const message = job.message ? serverMessage(job.message) : '';
         return `<div class="item-card sd-job-inspector">
-            <div class="panel-header"><div><span class="micro-label">JOB INSPECTOR</span><h3>${safe(job.scope_label || 'Consolidation job')}</h3></div><div class="sd-inline">${statusDot(laneSeverity(job.status), job.status)} ${guaranteeBadge(job.guarantee)}</div></div>
+            <div class="panel-header"><div><span class="micro-label">Job inspector</span><h3>${safe(job.scope_label || 'Consolidation job')}</h3></div><div class="sd-inline">${statusDot(laneSeverity(job.status), job.status)} ${guaranteeBadge(job.guarantee)}</div></div>
             <div class="sd-meta-row">
-                ${keyValue('job id', job.job_id)}
-                ${keyValue('space', job.space_id)}
-                ${keyValue('scope', job.scope)}
-                ${keyValue('agent', job.agent)}
-                ${keyValue('requested by', job.requested_by)}
-                ${keyValue('requested', job.requested_at, { timestamp: true })}
-                ${keyValue('queued', job.queued_at, { timestamp: true })}
-                ${keyValue('started', job.started_at, { timestamp: true })}
-                ${keyValue('finished', job.finished_at, { timestamp: true })}
+                ${keyValue('Job ID', job.job_id)}
+                ${keyValue('Space', job.space_id)}
+                ${keyValue('Scope', job.scope)}
+                ${keyValue('Agent', job.agent)}
+                ${keyValue('Requested by', job.requested_by)}
+                ${keyValue('Requested', job.requested_at, { timestamp: true })}
+                ${keyValue('Queued', job.queued_at, { timestamp: true })}
+                ${keyValue('Started', job.started_at, { timestamp: true })}
+                ${keyValue('Finished', job.finished_at, { timestamp: true })}
             </div>
             ${renderJobProgress(job)}${message}${failure}${sizeAdvisory}${['succeeded', 'failed'].includes(job.status) ? renderJobResult(job) : ''}
             <button type="button" class="btn btn-secondary" data-action="sd-load-job" data-job-id="${safe(view.jobId)}">Refresh job</button>
@@ -669,7 +819,7 @@
         const jobs = Array.isArray(queue.latest_jobs) ? queue.latest_jobs.slice(0, 10) : [];
         if (!jobs.length) return stateEmpty({ title: 'No recorded activity', hint: 'In-memory history, since restart.' });
         const rows = jobs.map(job => `<tr><td>${statusDot(laneSeverity(job.status), job.status || 'unknown')}</td><td>${safe(job.scope_label)}</td><td>${renderTimestamp(job.finished_at)}</td><td>${copyable(job.job_id)}</td><td><button type="button" class="btn btn-ghost btn-sm" data-action="sd-load-job" data-job-id="${safe(job.job_id)}" aria-label="Inspect job ${safe(job.job_id)}">Inspect</button></td></tr>`).join('');
-        return `${dataTable(['Status', 'Scope', 'Finished', 'Job id', ''], rows)}<p class="form-hint">Last 10 jobs for this space, since restart. Select a job for an explicit manual status check.</p><div id="sdJobInspector">${renderJobInspector(view)}</div>`;
+        return `${dataTable(['Status', 'Scope', 'Finished', 'Job ID', ''], rows)}<p class="form-hint">Last 10 jobs for this space, since restart. Select a job for an explicit manual status check.</p><div id="sdJobInspector">${renderJobInspector(view)}</div>`;
     }
 
     function renderBackups(view) {
@@ -709,10 +859,10 @@
 
     function renderLoadedView(view) {
         view.contentEl.innerHTML = `<div class="page sd-page">
-            ${pageHeader(`Space: ${view.spaceId}`, '<a class="btn btn-secondary" href="#/spaces">Back to spaces</a>')}
+            ${pageHeader('Space', '<a class="btn btn-secondary" href="#/spaces">Back to spaces</a>', `Space ${view.spaceId}`)}
             ${renderHeader(view)}
+            <section class="sd-section">${tierButtons(view)}<div id="sdTierPanel" role="tabpanel" tabindex="0" aria-labelledby="sdTierTab-${view.tier}"></div></section>
             ${renderLane(view)}
-            <section class="sd-section">${tierButtons(view)}<div id="sdTierPanel"></div></section>
             <div id="sdAuxiliary"></div>
         </div>`;
         renderTier(view);
@@ -752,6 +902,7 @@
     }
 
     async function loadSpace(view) {
+        if (view.info) invalidateCompaction(view);
         const epochAtCall = view.ctx.epoch;
         let result;
         try {
@@ -818,7 +969,8 @@
         renderAuxiliary(view);
     }
 
-    async function loadMid(view) {
+    async function loadMid(view, options = {}) {
+        if (!options.preserveCompaction) invalidateCompaction(view);
         const seqAtCall = ++view.midSeq;
         view.midReadSeq += 1;
         view.midLoading = true;
@@ -839,6 +991,67 @@
         renderTier(view);
         const files = result && result.status === 'ok' && Array.isArray(result.files) ? result.files : [];
         if (files.length) void readBankFile(view, 0);
+    }
+
+    function invalidateCompaction(view) {
+        view.compactSeq += 1;
+        if (view.compactApplying) return;
+        view.compactDry = null;
+        view.compactResult = null;
+        view.compacting = false;
+    }
+
+    async function runCompaction(view, dryRun, epochAtCallOverride) {
+        if (!hasPermission(view, 'manage') || view.compacting) return false;
+        if (!dryRun && (!view.compactDry || view.compactDry.status !== 'ok' || view.compactResult !== view.compactDry)) return false;
+        const laneSeq = dryRun ? ++view.compactSeq : ++view.compactApplySeq;
+        view.compacting = true;
+        view.compactApplying = !dryRun;
+        view.compactDry = null;
+        view.compactResult = { status: 'loading' };
+        renderTier(view);
+        const epochAtCall = epochAtCallOverride ?? view.ctx.epoch;
+        let result;
+        try {
+            result = await callTool('bank_compact', { space_id: view.spaceId, dry_run: dryRun });
+        } catch {
+            result = { status: 'error', message: 'Request failed.' };
+        }
+        if (!guarded(view, epochAtCall)) return false;
+        if ((dryRun && laneSeq !== view.compactSeq) || (!dryRun && laneSeq !== view.compactApplySeq)) return false;
+        if (result && result.status === 'ok' && result.space_id !== view.spaceId) {
+            result = { status: 'error', message: 'Compaction target did not match this space.' };
+        }
+        view.compacting = false;
+        view.compactApplying = false;
+        view.compactResult = result;
+        if (dryRun && result && result.status === 'ok') view.compactDry = result;
+        renderTier(view);
+        if (!dryRun && result && (result.status === 'ok' || result.status === 'partial')) {
+            if (result.status === 'ok') showToast('ok', 'Compaction applied.');
+            await loadMid(view, { preserveCompaction: true });
+            if (!guarded(view, epochAtCall)) return false;
+        }
+        return true;
+    }
+
+    function confirmCompact(view) {
+        if (!hasPermission(view, 'manage') || view.compacting) return;
+        if (!view.compactDry || view.compactDry.status !== 'ok' || view.compactResult !== view.compactDry) {
+            showToast('error', 'Run a successful compaction dry run first.');
+            return;
+        }
+        const captured = view.spaceId;
+        const epochAtOpen = view.ctx.epoch;
+        showModal(
+            'Compact files',
+            `<p class="body-small">Rewrite oversized Memory Bank files in <code>${safe(captured)}</code> using the configured language model. Older material is summarized; secondary detail may be lost.</p><p class="body-small">A preimage is saved before changes are applied. Shared Project Mesh spaces cannot be compacted.</p>`,
+            'Compact files',
+            async () => {
+                if (!guarded(view, epochAtOpen) || view.spaceId !== captured) return false;
+                return runCompaction(view, false, epochAtOpen);
+            },
+        );
     }
 
     async function loadLong(view, includeGraph = false) {
@@ -1098,7 +1311,7 @@
         const epochAtOpen = view.ctx.epoch;
         showModal(
             'Consolidate live notes',
-            `<p class="body-small">${scopeCopy}</p><p class="body-small">Consolidation is asynchronous and no status polling will be started.</p>`,
+            `<p class="body-small">${scopeCopy}</p><p class="body-small">Runs in the background. Refresh this space to check progress, or open Consolidation for automatic updates.</p>`,
             'Consolidate',
             async () => {
                 if (!guarded(view, epochAtOpen)) return false;
@@ -1142,7 +1355,7 @@
         const retrySafe = recovery.retry_safe === null ? 'null' : String(recovery.retry_safe);
         const accessPending = Object.hasOwn(result, 'access_grants_pending')
             ? keyValue(
-                'access_grants_pending',
+                'Access grants pending',
                 result.access_grants_pending === null ? 'null' : result.access_grants_pending,
             )
             : '';
@@ -1155,14 +1368,14 @@
                 <p>${safe(result.message)}</p>
             </div></div>
             <div class="sd-meta-row">
-                ${keyValue('files_total', result.files_total)}
-                ${keyValue('files_deleted', result.files_deleted)}
-                ${keyValue('marker_preserved', markerPreserved)}
+                ${keyValue('Files total', result.files_total)}
+                ${keyValue('Files deleted', result.files_deleted)}
+                ${keyValue('Marker preserved', markerPreserved)}
                 ${accessPending}
-                ${keyValue('recovery.retry_safe', retrySafe)}
+                ${keyValue('Recovery retry safe', retrySafe)}
             </div>
-            <div class="form-group"><span class="micro-label">failed_keys</span>${failedKeysHtml}</div>
-            <div class="form-group"><span class="micro-label">recovery.action</span><p>${safe(recovery.action)}</p></div>
+            <div class="form-group"><span class="micro-label">Failed keys</span>${failedKeysHtml}</div>
+            <div class="form-group"><span class="micro-label">Recovery action</span><p>${safe(recovery.action)}</p></div>
             ${accessRecoveryBoundary}
             <p class="form-hint">No automatic retry, cleanup, success toast, or navigation was performed.</p>
         </div>`;
@@ -1225,8 +1438,14 @@
         if (!view || !TIERS.has(data.tier)) return;
         view.tier = data.tier;
         history.replaceState(null, '', `#/spaces/${encodeURIComponent(view.spaceId)}/${data.tier}`);
-        const tabs = document.querySelector('.sd-tier-tabs');
-        if (tabs) tabs.outerHTML = tierButtons(view);
+        document.querySelectorAll('.sd-tier-tab').forEach(tab => {
+            const selected = tab.dataset.tier === view.tier;
+            tab.setAttribute('aria-selected', String(selected));
+            tab.classList.toggle('active', selected);
+            tab.tabIndex = selected ? 0 : -1;
+        });
+        const tierPanel = document.getElementById('sdTierPanel');
+        if (tierPanel) tierPanel.setAttribute('aria-labelledby', `sdTierTab-${view.tier}`);
         renderTier(view);
         if (data.tier === 'long' && !view.longLoading && !view.longGraphLoaded) void loadLong(view, true);
     });
@@ -1252,6 +1471,8 @@
     registerAction('sd-edit-rules', () => { const view = getView(); if (view) openRulesEditor(view); });
     registerAction('sd-create-backup', () => { const view = getView(); if (view) createBackup(view); });
     registerAction('sd-confirm-consolidate', () => { const view = getView(); if (view) confirmConsolidate(view); });
+    registerAction('sd-compact-dry', () => { const view = getView(); if (view) void runCompaction(view, true); });
+    registerAction('sd-confirm-compact', () => { const view = getView(); if (view) confirmCompact(view); });
     registerAction('sd-confirm-graph-push', () => { const view = getView(); if (view) confirmGraphPush(view); });
     registerAction('sd-confirm-space-delete', () => { const view = getView(); if (view) confirmSpaceDelete(view); });
 
@@ -1263,6 +1484,17 @@
     });
 
     document.addEventListener('keydown', event => {
+        const tab = event.target.closest && event.target.closest('.sd-tier-tab');
+        if (tab && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+            const tabs = [...document.querySelectorAll('.sd-tier-tab')];
+            const index = tabs.indexOf(tab);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+                : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+            event.preventDefault();
+            tabs.forEach((item, i) => { item.tabIndex = i === next ? 0 : -1; });
+            tabs[next].focus();
+            return; // Manual activation: only Enter/Space/click may load Long.
+        }
         const row = event.target.closest && event.target.closest('.sd-file-row');
         if (!row || (event.key !== 'Enter' && event.key !== ' ')) return;
         event.preventDefault();
@@ -1297,6 +1529,8 @@
             meshReadiness: null, meshReadinessLoading: false,
             meshReadinessError: '', meshReadinessStarted: false, meshReadinessSeq: 0,
             preloadStarted: false, consolidating: false,
+            compacting: false, compactApplying: false, compactSeq: 0, compactApplySeq: 0,
+            compactDry: null, compactResult: null,
             jobId: '', jobData: null, jobLoading: false, jobSeq: 0,
         };
         currentView = view;

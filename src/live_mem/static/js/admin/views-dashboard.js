@@ -43,26 +43,6 @@
         return `${mins}m`;
     }
 
-    // ═══════════════ Identity card (zero request — ctx.identity is cached shell state) ═══════════════
-
-    function _identityCardBody(identity) {
-        if (!identity || !identity.client_name) {
-            return `<span class="micro-label">Identity</span>${stateUnavailable('Identity unavailable.')}`;
-        }
-        const perms = (identity.permissions || []).map(p => pill('neutral', String(p))).join('');
-        // §5.1/§5.2 D7: same fields as the sidebar identity block, including
-        // the conditional expiry chip — this card is fed from the same
-        // cached identity, zero extra request either way.
-        const expiresChip = identity.expires_at
-            ? `<span title="${esc(fmtTimestamp(identity.expires_at).title)}">${pill('neutral', `expires ${fmtTimestamp(identity.expires_at).text} UTC`)}</span>`
-            : '';
-        return `<div class="dash-card-body">
-            <span class="micro-label">Identity</span>
-            <span class="dash-identity-name" title="${esc(identity.client_name)}">${esc(identity.client_name)}</span>
-            <div class="dash-identity-chips">${pill('neutral', identity.auth_type || 'unknown')}${perms}${expiresChip}</div>
-        </div>`;
-    }
-
     // ═══════════════ Health card + drill-down (system_health) ═══════════════
 
     // Success state: the whole card body is a single full-bleed <button>
@@ -126,7 +106,7 @@
                 ${typeof llm.latency_ms === 'number' ? `<p class="body-small">Latency: ${esc(String(llm.latency_ms))} ms</p>` : ''}
                 ${llm.message ? serverMessage(llm.message) : ''}
             </div>
-            <button type="button" class="btn btn-secondary btn-sm" id="dashHealthModalRefreshBtn" data-action="dash-refresh-health-modal">${icon('refresh')} Refresh</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="dashHealthModalRefreshBtn" data-action="dash-refresh-health-modal">${icon('refresh')} Check services</button>
         </div>`;
     }
 
@@ -134,14 +114,14 @@
         const btn = document.getElementById('dashHealthRefreshBtn');
         if (!btn) return;
         btn.disabled = inFlight;
-        btn.innerHTML = inFlight ? 'Checking…' : `${icon('refresh')} Refresh health`;
+        btn.innerHTML = inFlight ? 'Checking…' : `${icon('refresh')} Check services`;
     }
 
     function _setHealthModalRefreshButton(inFlight) {
         const btn = document.getElementById('dashHealthModalRefreshBtn');
         if (!btn) return;
         btn.disabled = inFlight;
-        btn.innerHTML = inFlight ? 'Checking…' : `${icon('refresh')} Refresh`;
+        btn.innerHTML = inFlight ? 'Checking…' : `${icon('refresh')} Check services`;
     }
 
     // Load/refresh system_health (D8: load + manual refresh only, never polled,
@@ -233,7 +213,7 @@
         return `<a class="dash-tile-link" href="#/spaces">
             <span class="micro-label">Spaces</span>
             <span class="metric-value">${esc(String(total))}</span>
-            <span class="body-small dash-meta">${esc(String(shortSum ?? '—'))} short · ${esc(String(midSum ?? '—'))} mid</span>
+            <span class="body-small dash-meta">${esc(String(shortSum ?? '—'))} notes · ${esc(String(midSum ?? '—'))} bank files</span>
         </a>`;
     }
 
@@ -253,7 +233,7 @@
         const now = Date.now();
         const active = list.filter(t => !t.revoked && (!t.expires_at || Date.parse(t.expires_at) > now)).length;
         return `<div class="dash-card-body">
-            <span class="micro-label">Tokens</span>
+            <span class="micro-label">Active tokens</span>
             <span class="metric-value">${esc(String(active))}</span>
             <span class="body-small dash-meta">${esc(String(total))} tokens · ${esc(String(revoked))} revoked</span>
         </div>`;
@@ -272,14 +252,16 @@
         }
         const denied = resp.denied_spaces || [];
         const batchSize = (resp.service_config || {}).batch_size;
+        const workerModel = resp.parallelism_model === 'one_worker_per_space' ? '1 worker per space' : 'Worker configuration unavailable';
         return `
             <div class="dash-lanes-metrics">
-                ${_metricBlock('Active', resp.active_spaces)}
-                ${_metricBlock('Running', resp.running_spaces)}
-                ${_metricBlock('Queued', resp.queued_jobs)}
-                ${_metricBlock('Failed recent', resp.failed_recent)}
+                ${_metricBlock('Active spaces', resp.active_spaces)}
+                ${_metricBlock('Running spaces', resp.running_spaces)}
+                ${_metricBlock('Queued jobs', resp.queued_jobs)}
+                ${_metricBlock('Recent failed jobs', resp.failed_recent)}
             </div>
-            <p class="body-small dash-meta">${esc(String(resp.total_spaces ?? '—'))} spaces total · model: ${esc(String(resp.parallelism_model || '—'))}${batchSize !== undefined ? ` · batch ${esc(String(batchSize))}` : ''}</p>
+            <p class="body-small dash-meta">${esc(String(resp.total_spaces ?? '—'))} spaces total · <span>${workerModel}</span>${batchSize !== undefined ? ` · batch size: ${esc(String(batchSize))} notes` : ''}</p>
+            <details class="diagnostic-details body-small"><summary>Technical details</summary><p>Worker configuration code: <code>${esc(String(resp.parallelism_model ?? 'Not reported'))}</code></p></details>
             ${denied.length ? `<div class="dash-denied">${denied.map(d => serverMessage(`${d.space_id}: ${d.message}`)).join('')}</div>` : ''}
             <a class="btn btn-ghost btn-sm" href="#/consolidation">View consolidation</a>
         `;
@@ -299,7 +281,7 @@
         jobs.sort((a, b) => (a.finished_at < b.finished_at ? 1 : a.finished_at > b.finished_at ? -1 : 0));
         const top = jobs.slice(0, 10);
         if (!top.length) {
-            return stateEmpty({ title: 'No consolidation activity recorded since last restart' });
+            return stateEmpty({ title: 'No consolidation activity recorded since last restart', compact: true });
         }
         const rows = top.map(job => {
             const sev = job.status === 'succeeded' ? 'ok' : job.status === 'failed' ? 'error' : 'neutral';
@@ -314,7 +296,8 @@
             </div>`;
         }).join('');
         return `<div class="dash-activity-list">${rows}</div>
-            <p class="body-small dash-meta"><span title="${esc(BEST_EFFORT_TOOLTIP)}">${pill('neutral', 'in_memory_best_effort')}</span> job history — since restart, last 10 per space</p>`;
+            <p class="body-small dash-meta">Temporary history · up to 10 recent jobs. History is limited and cleared when the server restarts.</p>
+            <details class="diagnostic-details body-small"><summary>Technical details</summary><p>History guarantee: <code>in_memory_best_effort</code></p><p>${esc(BEST_EFFORT_TOOLTIP)}</p></details>`;
     }
 
     // ═══════════════ Route-entry loads ═══════════════
@@ -376,20 +359,19 @@
         const identity = ctx.identity || {};
         const admin = _isAdmin(identity);
 
-        contentEl.innerHTML = `<div class="page">
+        contentEl.innerHTML = `<div class="page dash-page">
             ${pageHeader('Dashboard', `
-                <button type="button" class="btn btn-secondary btn-sm" id="dashHealthRefreshBtn" data-action="dash-refresh-health" title="Runs a live LLM probe">${icon('refresh')} Refresh health</button>
-                <button type="button" class="btn btn-secondary btn-sm" id="dashRestRefreshBtn" data-action="dash-refresh-rest">${icon('refresh')} Refresh</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="dashHealthRefreshBtn" data-action="dash-refresh-health" title="Checks storage and sends a request to the language model">${icon('refresh')} Check services</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="dashRestRefreshBtn" data-action="dash-refresh-rest">${icon('refresh')} Refresh overview</button>
             `)}
             <div class="metric-grid">
                 <div class="metric-card" id="dashHealthCard">${stateLoading('')}</div>
-                <div class="metric-card" id="dashIdentityCard">${_identityCardBody(identity)}</div>
                 <div class="metric-card" id="dashSpacesTile">${stateLoading('')}</div>
                 <a class="metric-card" href="#/access" id="dashTokensTile">${admin ? stateLoading('') : _tokensTileBody(false, null)}</a>
             </div>
             <div class="grid-2">
                 ${panel(`<div class="panel-header"><h2>Consolidation</h2></div><div id="dashLanesPanel">${stateLoading('')}</div>`)}
-                ${panel(`<div class="panel-header"><h2>Recent memory activity</h2></div><div id="dashActivityPanel">${stateLoading('')}</div>`)}
+                ${panel(`<div class="panel-header"><h2>Recent consolidation jobs</h2></div><div id="dashActivityPanel">${stateLoading('')}</div>`)}
             </div>
         </div>`;
 

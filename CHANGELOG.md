@@ -24,6 +24,49 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 
 ---
 
+## [1.5.2] — 2026-09-09
+
+Hivemind 1.5.2 adds a contextual manual compaction shortcut and improves the
+admin console's readability, action wording, and keyboard navigation.
+
+**Release identity.** Hivemind now reports runtime version `1.5.2`.
+
+### Admin console
+
+- **Compact a space from its Memory Bank.** Managers can run the existing
+  `bank_compact` dry run from the MID panel, review candidates and limits, then
+  explicitly confirm compaction. The action remains bound to the displayed space
+  and `manage` permission, refreshes the bank after a successful apply, and
+  reports conflicts or recovery-required failures without automatic retries.
+- **Bring memory content into view.** Space Detail uses a compact summary and
+  places the memory tiers before the consolidation lane. Dashboard identity
+  and Consolidation metrics take less space, while ordinary labels and empty
+  states are easier to read.
+- **Make operator actions explicit.** Compaction distinguishes checking
+  eligible files from generating and writing summaries. Results retain
+  diagnostics in technical details while failures and recovery instructions
+  remain visible. Token revocation, temporary job history, and service checks
+  use wording that describes their actual behavior.
+- **Keep keyboard focus and mobile controls usable.** Dialogs, login, and the
+  mobile navigation drawer contain focus on the active surface. Memory tabs
+  support manual keyboard activation and preserve focus after rendering.
+  Mobile menu and filter targets meet the 44px minimum, and amber status text
+  has stronger contrast.
+
+### Upgrading from 1.5.1
+
+No storage migration, new environment variable, or MCP tool is required. The
+shortcut uses the existing manual-compaction contract and remains available
+only where the server authorizes the operation. Review the dry-run output and
+back up important memory before applying a compaction.
+
+Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
+boundary. See [extension points](docs/EXTENSION_POINTS.md). Moving from
+separate Live Memory and Graph Memory services? Follow the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+---
+
 ## [1.5.1] — 2026-09-09
 
 Hivemind 1.5.1 improves manual compaction to help your next conversation start

@@ -250,6 +250,13 @@ function _matchRoute(hash) {
     if (raw === '/dashboard') return { view: 'dashboard', params: {}, raw };
     if (raw === '/spaces') return { view: 'spaces', params: {}, raw };
     if (raw === '/consolidation') return { view: 'consolidation', params: {}, raw };
+    if (segments.length === 2 && segments[0] === 'consolidation' && segments[1] !== '') {
+        try {
+            return { view: 'consolidation', params: { spaceId: decodeURIComponent(segments[1]) }, raw };
+        } catch {
+            return { view: null, params: {}, raw };
+        }
+    }
     if (raw === '/audit') return { view: 'audit', params: {}, raw };
     if (raw === '/access') return { view: 'access', params: {}, raw };
     if (raw === '/operator/backups') return { view: 'operator', params: { tab: 'backups' }, raw };
@@ -386,6 +393,7 @@ function stateEmpty(opts = {}) {
     const safeTitle = esc(opts.title || 'Nothing here yet');
     const hint = opts.hint ? `<p class="state-hint">${esc(opts.hint)}</p>` : '';
     const action = opts.actionHtml || '';
+    if (opts.compact) return `<div class="state state-empty state-empty--compact"><p>${safeTitle}</p>${hint}${action}</div>`;
     return `<div class="state state-empty">${icon('spaces')}<h3>${safeTitle}</h3>${hint}${action}</div>`;
 }
 
@@ -404,20 +412,21 @@ function stateError(opts = {}) {
 
 function stateUnavailable(reason) {
     const text = esc(reason || 'This data is not available.');
-    return `<div class="state state-unavailable"><span class="micro-label">NOT AVAILABLE</span><p>${text}</p></div>`;
+    return `<div class="state state-unavailable"><span class="micro-label">Not available</span><p>${text}</p></div>`;
 }
 
 // Verbatim server text — never parsed, never rendered as
 // HTML/markdown (R4). msg is escaped once here at the sink.
 function serverMessage(msg) {
     if (!msg) return '';
-    return `<div class="server-msg"><span class="server-msg-label">SERVER MESSAGE</span><span class="server-msg-text" lang="en">${esc(String(msg))}</span></div>`;
+    return `<div class="server-msg"><span class="server-msg-label">Server message</span><span class="server-msg-text" lang="en">${esc(String(msg))}</span></div>`;
 }
 
 // ═══════════════ SHELL LAYOUT COMPONENTS (contract §2.3.4) ═══════════════
 
-function pageHeader(title, actionsHtml = '') {
-    return `<div class="page-header"><h1>${esc(title)}</h1><div class="page-header-actions">${actionsHtml}</div></div>`;
+function pageHeader(title, actionsHtml = '', accessibleTitle = '') {
+    const label = accessibleTitle ? ` aria-label="${esc(String(accessibleTitle))}"` : '';
+    return `<div class="page-header"><h1${label}>${esc(title)}</h1><div class="page-header-actions">${actionsHtml}</div></div>`;
 }
 
 function panel(bodyHtml) {
@@ -596,6 +605,58 @@ document.addEventListener('click', e => {
 // the flow.  Capture it only when a previously closed dialog is opened.
 let _modalReturnFocus = null;
 
+function _activeFocusSurface() {
+    const login = document.getElementById('loginOverlay');
+    if (login && !login.classList.contains('hidden')) return login;
+    const modal = document.getElementById('adminModal');
+    if (modal && modal.style.display === 'flex') return modal;
+    const sidebar = document.getElementById('sidebar');
+    return sidebar && sidebar.classList.contains('sidebar--drawer-open') ? sidebar : null;
+}
+
+function _syncInteractionSurfaces() {
+    const login = document.getElementById('loginOverlay');
+    const loginVisible = !!login && !login.classList.contains('hidden');
+    const modal = document.getElementById('adminModal');
+    const modalVisible = !!modal && modal.style.display === 'flex';
+    const app = document.querySelector('.app');
+    const content = document.getElementById('content');
+    const sidebar = document.getElementById('sidebar');
+    if (login) login.inert = !loginVisible;
+    if (modal) modal.inert = loginVisible || !modalVisible;
+    if (app) app.inert = loginVisible || modalVisible;
+    if (content) content.inert = !!sidebar && sidebar.classList.contains('sidebar--drawer-open');
+}
+
+function _visibleFocusTarget(element) {
+    return element instanceof HTMLElement && element.isConnected
+        && !element.closest('[inert]') && !element.disabled
+        && element.getClientRects().length > 0
+        && getComputedStyle(element).visibility !== 'hidden';
+}
+
+function _wireFocusContainment() {
+    // Recompute on every Tab: a pending request may disable or replace every
+    // control. A document listener also handles focus falling back to BODY.
+    document.addEventListener('keydown', event => {
+        if (event.key !== 'Tab') return;
+        const surface = _activeFocusSurface();
+        if (!surface) return;
+        const controls = [...surface.querySelectorAll('a[href], button, input, textarea, select, summary, [tabindex], [contenteditable="true"]')]
+            .filter(element => element.tabIndex >= 0 && _visibleFocusTarget(element));
+        event.preventDefault();
+        if (!controls.length) {
+            const fallback = surface.querySelector('.modal-card, .login-card') || surface;
+            fallback.focus();
+            return;
+        }
+        const index = controls.indexOf(document.activeElement);
+        const next = index < 0 ? (event.shiftKey ? controls.length - 1 : 0)
+            : (index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
+        controls[next].focus();
+    });
+}
+
 function showModal(title, bodyHTML, btnLabel, onConfirm) {
     let m = document.getElementById('adminModal');
     if (!m) {
@@ -610,14 +671,15 @@ function showModal(title, bodyHTML, btnLabel, onConfirm) {
     const footer = btnLabel
         ? `<div class="modal-footer"><button class="btn btn-secondary" data-action="close-modal">Cancel</button><button class="btn btn-primary" id="modalConfirmBtn">${esc(btnLabel)}</button></div>`
         : '';
-    m.innerHTML = `<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    m.innerHTML = `<div class="modal-card" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
         <div class="modal-header"><h3 id="modalTitle">${esc(title)}</h3><button class="modal-close" type="button" data-action="close-modal" aria-label="Close">${icon('close')}</button></div>
         <div class="modal-body">${bodyHTML}</div>
         ${footer}
     </div>`;
     m.style.display = 'flex';
+    _syncInteractionSurfaces();
     const firstFocusable = m.querySelector('input, textarea, select, button');
-    if (firstFocusable) firstFocusable.focus();
+    if (firstFocusable && _activeFocusSurface() === m) firstFocusable.focus();
 
     // The close action is the single cleanup path.  In particular, Mesh's
     // one-time invitation display attaches its secret-destruction handler to
@@ -653,9 +715,15 @@ function showModal(title, bodyHTML, btnLabel, onConfirm) {
 function closeModal() {
     const m = document.getElementById('adminModal');
     if (m) m.style.display = 'none';
+    _syncInteractionSurfaces();
     const returnFocus = _modalReturnFocus;
     _modalReturnFocus = null;
-    if (returnFocus && returnFocus.isConnected) returnFocus.focus();
+    if (_visibleFocusTarget(returnFocus)) returnFocus.focus();
+    else {
+        const surface = _activeFocusSurface();
+        const fallback = surface ? surface.querySelector('input, button, a[href]') : document.getElementById('content');
+        if (fallback) fallback.focus();
+    }
 }
 
 // showDestructiveModal({title, bodyHtml, verb, danger, typedConfirmation})
@@ -727,6 +795,7 @@ function showLogin(msg = '') {
     const overlay = document.getElementById('loginOverlay');
     const err = document.getElementById('loginError');
     overlay.classList.remove('hidden');
+    _syncInteractionSurfaces();
     err.textContent = msg || '';
     document.getElementById('loginToken').focus();
     const btn = document.getElementById('loginBtn');
@@ -740,6 +809,7 @@ function showLogin(msg = '') {
 
 function hideLogin() {
     document.getElementById('loginOverlay').classList.add('hidden');
+    _syncInteractionSurfaces();
 }
 
 // Logout / session-expiry content-wipe rule (contract §3.1.4, exact 5-item
@@ -747,6 +817,8 @@ function hideLogin() {
 // any current-generation 401 from /api/tool. The hash is deliberately NOT
 // touched here; stale 401 responses reject only their original caller.
 function wipeSession() {
+    _closeDrawer(false);
+    _modalReturnFocus = null;
     const content = document.getElementById('content');
     if (content) content.innerHTML = stateLoading('');
 
@@ -922,36 +994,50 @@ function _wireLogoutButton() {
 
 // ═══════════════ NARROW DRAWER (contract §2.6) ═══════════════
 
+function _closeDrawer(restoreFocus = true) {
+    const toggle = document.getElementById('sidebarMenuToggle');
+    const sidebar = document.getElementById('sidebar');
+    const scrim = document.getElementById('sidebarScrim');
+    if (!toggle || !sidebar || !scrim) return false;
+    const wasOpen = sidebar.classList.contains('sidebar--drawer-open');
+    sidebar.classList.remove('sidebar--drawer-open');
+    scrim.classList.remove('visible');
+    toggle.setAttribute('aria-expanded', 'false');
+    _syncInteractionSurfaces();
+    if (wasOpen && restoreFocus && _visibleFocusTarget(toggle)) toggle.focus();
+    return wasOpen;
+}
+
 function _wireDrawer() {
     const toggle = document.getElementById('sidebarMenuToggle');
     const sidebar = document.getElementById('sidebar');
     const scrim = document.getElementById('sidebarScrim');
     if (!toggle || !sidebar || !scrim) return;
+    const narrow = window.matchMedia('(max-width: 1023px)');
 
-    function openDrawer() {
+    toggle.addEventListener('click', () => {
+        if (sidebar.classList.contains('sidebar--drawer-open')) { _closeDrawer(); return; }
+        if (!narrow.matches || _activeFocusSurface()) return;
         sidebar.classList.add('sidebar--drawer-open');
         scrim.classList.add('visible');
         toggle.setAttribute('aria-expanded', 'true');
+        _syncInteractionSurfaces();
         const firstLink = sidebar.querySelector('a.nav-item');
         if (firstLink) firstLink.focus();
-    }
-    function closeDrawer() {
-        const wasOpen = sidebar.classList.contains('sidebar--drawer-open');
-        sidebar.classList.remove('sidebar--drawer-open');
-        scrim.classList.remove('visible');
-        toggle.setAttribute('aria-expanded', 'false');
-        if (wasOpen) toggle.focus();
-    }
-
-    toggle.addEventListener('click', () => {
-        if (sidebar.classList.contains('sidebar--drawer-open')) closeDrawer();
-        else openDrawer();
     });
-    scrim.addEventListener('click', closeDrawer);
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && sidebar.classList.contains('sidebar--drawer-open')) closeDrawer();
+    scrim.addEventListener('click', () => _closeDrawer());
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && _activeFocusSurface() === sidebar) _closeDrawer();
     });
-    window.addEventListener('hashchange', closeDrawer);
+    window.addEventListener('hashchange', () => {
+        if (_closeDrawer(false) && !_activeFocusSurface()) document.getElementById('content').focus();
+    });
+    narrow.addEventListener('change', () => {
+        if (!narrow.matches && _closeDrawer(false) && !_activeFocusSurface()) {
+            const current = sidebar.querySelector('a[aria-current="page"]');
+            if (current) current.focus();
+        }
+    });
 }
 
 // ═══════════════ BOOT SEQUENCE ═══════════════
@@ -985,15 +1071,20 @@ async function _bootAuthenticated() {
         if (contentEl) {
             contentEl.innerHTML = `<div class="page">${pageHeader('Access blocked')}${panel(stateUnavailable(whoami.message))}</div>`;
         }
-        return;
+    } else {
+        _currentIdentity = whoami && whoami.client_name ? whoami : {};
+        renderIdentityBlock(_currentIdentity);
+        // Fire-and-forget: the nav item appears as soon as the probe resolves,
+        // never blocking the first route dispatch.
+        _refreshMeshNav(sessionGeneration);
+        AdminRouter._dispatch();
     }
 
-    _currentIdentity = whoami && whoami.client_name ? whoami : {};
-    renderIdentityBlock(_currentIdentity);
-    // Fire-and-forget: the nav item appears as soon as the probe resolves,
-    // never blocking the first route dispatch.
-    _refreshMeshNav(sessionGeneration);
-    AdminRouter._dispatch();
+    // Complete both manual and cookie-restored sign-in, including the blocked
+    // state that does not dispatch a route. A login, modal or drawer opened
+    // during initialization still owns focus and keeps the background inert.
+    const contentEl = document.getElementById('content');
+    if (contentEl && !_activeFocusSurface()) contentEl.focus({ preventScroll: true });
 }
 
 window.addEventListener('hashchange', () => AdminRouter._dispatch());
@@ -1004,6 +1095,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') doLogin();
     });
     _wireDrawer();
+    _wireFocusContainment();
+    _syncInteractionSurfaces();
 
     adminHealth().then(h => {
         if (!h.version) return;

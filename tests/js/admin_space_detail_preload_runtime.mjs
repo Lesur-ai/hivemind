@@ -104,7 +104,7 @@ vm.createContext(context);
 const original = fs.readFileSync(viewPath, 'utf8');
 const instrumented = original.replace(
     "AdminViews.register('space-detail', render);",
-    'globalThis.__spaceDetail = { render, renderTier, confirmConsolidate, confirmGraphPush, currentView: () => currentView };',
+    'globalThis.__spaceDetail = { render, renderTier, renderLane, confirmConsolidate, confirmGraphPush, currentView: () => currentView };',
 );
 vm.runInContext(instrumented, context, { filename: viewPath });
 assert.ok(context.__spaceDetail, 'space-detail instrumentation failed');
@@ -121,6 +121,23 @@ context.__spaceDetail.render(content, { spaceId: 'demo-space', tier: 'short' }, 
     identity: { permissions: ['read', 'write', 'manage', 'admin'] },
 });
 await settle();
+
+// Ordinary inactivity must never mask pending work or an unknown queue state.
+const lane = queue => context.__spaceDetail.renderLane({ info: { consolidation_queue: queue } });
+assert.ok(lane({ lane_state: 'idle', latest_jobs: [], queued_job_ids: [] }).includes('<empty>'));
+assert.equal(lane({ lane_state: 'idle', queued_job_ids: ['job-queued'] }).includes('<empty>'), false,
+    'a queued job ID must keep queue activity visible');
+assert.equal(lane({ lane_state: 'idle', queued_count: 1 }).includes('<empty>'), false,
+    'a positive queued count must keep queue activity visible');
+assert.equal(lane({}).includes('<empty>'), false, 'missing lane state must not claim idle');
+assert.ok(lane({}).includes('not recorded'), 'unknown queue state remains explicit');
+const contextual = context.__spaceDetail.renderLane({ spaceId: 'demo', info: { consolidation_queue: {
+    lane_state: 'running', running_job: { job_id: 'job-1', scope_label: 'My notes', progress: { notes_done: 3, notes_total: 8 } }, queued_count: 2,
+} } });
+assert.ok(contextual.includes('href="#/consolidation/demo"'), 'consolidation link carries the space');
+assert.ok(contextual.includes('3 / 8'), 'contextual summary exposes real progress');
+assert.ok(contextual.includes('My notes'), 'contextual summary exposes real scope');
+
 
 const preloadTools = calls.map(call => call.tool);
 assert.deepEqual(preloadTools.slice(0, 7), [
@@ -171,5 +188,14 @@ assert.deepEqual(Object.keys(graphCalls[0].args), ['space_id']);
 assert.equal(Object.hasOwn(graphCalls[0].args, 'include_volatile'), false);
 assert.ok(toasts.some(toast => toast.kind === 'ok' && toast.message.includes('Consolidation queued')));
 assert.ok(toasts.some(toast => toast.kind === 'ok' && toast.message.includes('Mid-to-long push finished')));
+
+// A failed initial load has no overview, so the page still identifies its target.
+context.callTool = async () => ({ status: 'error', message: 'Unavailable' });
+context.__spaceDetail.render(content, { spaceId: 'unavailable-space', tier: 'mid' }, {
+    epoch: 19, identity: { permissions: ['read'] },
+});
+await settle();
+assert.ok(content.innerHTML.includes('Space: unavailable-space'));
+assert.ok(content.innerHTML.includes('<error>'));
 
 console.log('admin space detail preload runtime: ok');

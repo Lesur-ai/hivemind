@@ -220,10 +220,10 @@ class TestConsolidateScope:
         submit = _extract_fn(consol, "async function submitAllStale(")
         assert "bank_stale_spaces" not in submit, "submission must not re-scan (uses captured set)"
 
-    def test_fifo_queue_jobs_rendered_as_inspectable_chips(self, consol):
+    def test_fifo_queue_jobs_rendered_as_inspectable_rows(self, consol):
         # MEDIUM fix: the FIFO queue payload (queued_jobs[]) renders as position +
         # scope chips that open the job inspector — not just a bare queued_count.
-        body = _extract_fn(consol, "function queuedCell(")
+        body = _extract_fn(consol, "function collectJobs(") + _extract_fn(consol, "function jobRow(")
         assert "queued_jobs" in body
         assert "consol-job" in body
         assert "queue_position" in body
@@ -436,17 +436,19 @@ class TestCompactionDiagnostics:
     def test_compact_result_uses_utf8_bytes_and_never_fabricates_null_post_size(
         self, oper
     ):
-        result = _extract_fn(oper, "function paintCompact(")
+        result = _extract_fn(oper, "function compactFailureMarkup(")
         success = _extract_fn(oper, "function compactSuccessMarkup(")
-        assert "UTF-8 bytes" in success
-        assert "total_size_after === null" in success
+        assert "UTF-8 bytes" in _extract_fn(oper, "function compactByteText(")
+        assert "Number.isFinite(data.total_size_after)" in success
+        assert "Final size could not be verified" in success
         assert "numOr(data.total_size_after)" not in success
         # The non-success branch follows the same null-is-unknown rule.
-        assert "total_size_after === null" in result
+        assert "Number.isFinite(finalSize)" in result
+        assert "Final size could not be verified" in result
 
     def test_compact_partial_and_error_preserve_typed_safe_diagnostics(self, oper):
-        result = _extract_fn(oper, "function paintCompact(")
-        assert "status === 'partial' && data.recovery_required === true" in result
+        result = _extract_fn(oper, "function compactFailureMarkup(")
+        assert "data.recovery_required === true || data.apply_may_have_mutated === true" in result
         for field in (
             "failure_reason",
             "failed_phase",
@@ -457,14 +459,14 @@ class TestCompactionDiagnostics:
             "source_sha256",
             "result_sha256",
         ):
-            assert field in result
+            assert field in result + _extract_fn(oper, "function compactEvidence(")
         assert "const message = data && data.message ? serverMessage(data.message) : '';" in result
-        assert "No automatic retry or restore was performed." in result
+        assert "No automatic retry was attempted." in result
 
     def test_compact_target_diagnostic_is_closed_and_content_free(self, oper):
         detail = _extract_fn(oper, "function safeCompactionTargetDetail(")
         rows = _extract_fn(oper, "function safeCompactionFailureRows(")
-        paint = _extract_fn(oper, "function paintCompact(")
+        paint = _extract_fn(oper, "function compactFailureMarkup(")
         for field in (
             "operation_index",
             "target_resolution",
@@ -487,7 +489,7 @@ class TestCompactionDiagnostics:
         assert "result.bank_size_advisory" in render
         assert "Number.isSafeInteger(item.utf8_bytes)" in render and "Number.isSafeInteger(item.max_size)" in render
         assert "esc(item.filename)" in render and "esc(String(item.utf8_bytes))" in render
-        assert "compaction is a human decision" in render
+        assert "Compaction is optional" in render
         assert job.count("renderBankSizeAdvisory(job.result)") == 2
         for banned in ("renderCompactionAdvisory", "renderSafeCompactionFailures", "compaction_advisory", "compaction_failures"):
             assert banned not in consol, banned
@@ -503,9 +505,9 @@ class TestCompactionDiagnostics:
         assert "runCompact(true, sid, true)" in run
         assert "compactApplyEvidenceMarkup(state.compactApplyEvidence)" in run
         assert "evidence + stateError({ title: 'Compact failed' })" in run
-        assert "applyEvidence + compactSuccessMarkup(data)" in paint
-        assert "Verified compaction apply evidence" in oper
-        assert "Result SHA-256" in success
+        assert "applyEvidence +" in paint and "compactSuccessMarkup(data)" in paint
+        assert "Compaction applied" in oper
+        assert "Result SHA-256" in _extract_fn(oper, "function compactEvidence(")
 
     def test_target_change_invalidates_every_maintenance_lane(self, oper):
         picker = _extract_fn(oper, "function paintMaintPicker(")
@@ -596,7 +598,7 @@ class TestRoundThreeFixes:
     def test_absent_metrics_use_dash_not_fabricated_zero(self, oper):
         # numOr renders a real number (incl. 0) but "—" for an ABSENT field.
         assert "function numOr(" in oper
-        for metric in ("numOr(data.files_total)", "numOr(data.spaces_backed_up)", "numOr(data.files_scanned)"):
+        for metric in ("data.files_total ?? '—'", "numOr(data.spaces_backed_up)", "numOr(data.files_scanned)"):
             assert metric in oper, f"missing {metric} — a required metric may fabricate 0"
 
     def test_same_route_modal_instance_token_present(self, consol, oper):

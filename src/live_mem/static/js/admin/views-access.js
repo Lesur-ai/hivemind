@@ -527,11 +527,10 @@
             ? ' disabled aria-disabled="true" title="Revoked tokens cannot be edited"'
             : '';
         var lifecycleItem = t.revoked
-            ? '<button type="button" class="row-action-item" disabled aria-disabled="true"' +
-              ' title="Revocation is permanent; create a replacement token instead">' +
-              '<span>Reactivate token</span><small>Revocation is permanent</small></button>'
+            ? '<div class="row-action-item"><span>Revoked permanently</span>' +
+              '<small>Create a replacement to restore access</small></div>'
             : '<button type="button" class="row-action-item row-action-danger"' +
-              ' data-action="access-revoke"><span>Disable token</span><small>Permanent soft revoke</small></button>';
+              ' data-action="access-revoke"><span>Revoke token…</span><small>Permanently stops this token’s access</small></button>';
         var actions =
             '<details class="row-action-menu" name="token-actions" data-hash="' + esc(t.hash) + '">' +
             '<summary class="row-action-trigger" aria-label="Actions for token ' +
@@ -540,7 +539,7 @@
             '<button type="button" class="row-action-item" data-action="access-edit"' +
             editDisabled + '><span>Edit token</span><small>Permissions, spaces, owner</small></button>' +
             '<button type="button" class="row-action-item" data-action="access-replace">' +
-            '<span>Create replacement…</span><small>Old token stays active</small></button>' +
+            '<span>Create replacement…</span><small>' + (t.revoked ? 'Creates a new credential' : 'Old token is unchanged') + '</small></button>' +
             lifecycleItem +
             '<div class="row-action-separator" role="separator"></div>' +
             '<button type="button" class="row-action-item row-action-danger"' +
@@ -579,6 +578,7 @@
             });
         return {
             replacementFor: String(token.name || 'unnamed token'),
+            replacementRevoked: token.revoked === true,
             name: String(token.name || 'token') + '-replacement',
             permissions: permissionsAvailable ? token.permissions.join(',') : '',
             permissionsUnavailable: !permissionsAvailable,
@@ -644,7 +644,9 @@
 
         var replacementNotice = replacementFor
             ? '<div class="access-banner replacement-banner">' + icon('refresh') + '<span>Creating a replacement for <strong>' +
-              esc(replacementFor) + '</strong>. The old token stays active until you explicitly disable or delete it.</span></div>'
+              esc(replacementFor) + '</strong>. ' + (prefill.replacementRevoked
+                ? 'The old token remains revoked.'
+                : 'Creating a replacement does not revoke the old token.') + '</span></div>'
             : '';
         var body = replacementNotice +
             '<div class="form-group">' +
@@ -1311,16 +1313,15 @@
     function openReplacementModal(token) {
         var body =
             '<div class="access-banner replacement-banner">' + icon('refresh') +
-            '<span>The backend does not expose an atomic regenerate-or-replace operation. ' +
-            'Hivemind can create a new one-time secret, but it cannot reissue the existing token.</span></div>' +
+            '<span>Create a new token with the same access profile. The existing secret cannot be shown again.</span></div>' +
             '<ol class="replacement-steps">' +
             '<li>Create a replacement with the access profile prefilled.</li>' +
             '<li>Save its plaintext token and full Token ID.</li>' +
             '<li>Verify the new credential works.</li>' +
-            '<li>Return to this row and disable or delete <strong>' + esc(String(token.name || 'the old token')) +
-            '</strong>.</li></ol>' +
-            '<p class="form-hint"><strong>The old token stays active</strong> until you explicitly disable or delete it. ' +
-            'No destructive action is chained to creation.</p>' +
+            (token.revoked ? '' : '<li>Return to this row and revoke or delete <strong>' + esc(String(token.name || 'the old token')) + '</strong>.</li>') + '</ol>' +
+            (token.revoked
+                ? '<p class="form-hint">The old token remains revoked.</p>'
+                : '<p class="form-hint"><strong>Creating a replacement does not revoke the old token.</strong> Revoke or delete it when no longer needed.</p>') +
             '<div id="replacementErr"></div>';
 
         _openModal('Replace token safely', body, 'Create replacement', function () {
@@ -1516,9 +1517,9 @@
         var hash = token.hash || '';
         var name = token.name || '';
 
-        var warn = '<p>This permanently disables <strong>' + esc(name) + '</strong> by soft-revoking it. ' +
-            'There is no reactivation: a revoked token can only be replaced or permanently deleted.</p>';
-        openConfirmDanger('Disable token', warn, 'Disable token', 'access-revoke-do', hash);
+        var warn = '<p>Revoke <strong>' + esc(name) + '</strong>? ' +
+            'This token will stop working and cannot be reactivated.</p>';
+        openConfirmDanger('Revoke token', warn, 'Revoke token', 'access-revoke-do', hash);
     }
 
     function openDeleteModal(token) {

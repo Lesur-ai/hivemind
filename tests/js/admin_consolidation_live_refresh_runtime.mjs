@@ -27,7 +27,9 @@ function harness() {
     const calls = [];             // callTool invocations: {name, args}
     const modal = { style: { display: 'none' }, shows: [] };
     let nextResponse = () => ({});
-    const elements = { consolLanes: fakeElement(), consolSubtitle: fakeElement(), consolStale: fakeElement(), adminModal: modal };
+    const actions = {};
+    let generation = 1;
+    const elements = { consolJobFreshness: fakeElement(), consolFreshness: fakeElement(), consolPickerActions: fakeElement(), consolPickSpace: { value: '' }, consolStaleResults: fakeElement(), consolStaleMinNotes: { value: '5' }, consolStaleMinAge: { value: '5' }, consolLanes: fakeElement(), consolSubtitle: fakeElement(), consolStale: fakeElement(), adminModal: modal };
     const ctx = {
         console,
         esc: escapeHtml,
@@ -43,8 +45,9 @@ function harness() {
         truncateMiddle: v => String(v ?? ''),
         stateError: stateStub('error'), stateEmpty: stateStub('empty'),
         stateLoading: stateStub('loading'), stateUnavailable: stateStub('unavailable'),
-        registerAction() {}, showToast() {}, showDestructiveModal() {},
-        showModal(title, body) { modal.style.display = 'flex'; modal.shows.push(String(body)); },
+        registerAction(name, fn) { actions[name] = fn; }, showToast() {}, showDestructiveModal() {},
+        currentSessionGeneration: () => generation, sessionGenerationIsCurrent: g => g === generation,
+        showModal(title, body, confirmLabel, onConfirm) { modal.style.display = 'flex'; modal.shows.push(String(body)); modal.confirm = onConfirm; },
         closeModal() { modal.style.display = 'none'; },
         callTool: async (name, args) => { calls.push({ name, args }); return nextResponse(name, args); },
         AdminViews: { register() {} },
@@ -64,14 +67,14 @@ function harness() {
     const source = fs.readFileSync(consolidationPath, 'utf8');
     const instrumented = source.replace(
         "AdminViews.register('consolidation', render);",
-        'globalThis.__live = { render, loadLanes, inspectJob, state };',
+        'globalThis.__live = { render, loadLanes, inspectJob, state, paintLanes, progressBar };',
     );
     assert.notEqual(instrumented, source, 'consolidation instrumentation anchor missing');
     vm.runInContext(instrumented, ctx, { filename: consolidationPath });
     assert.ok(ctx.__live, 'consolidation instrumentation failed');
     const pending = () => timers.filter(t => !t.cancelled && !t.fired);
     const fire = async t => { t.fired = true; await t.fn(); await new Promise(r => setImmediate(r)); };
-    return { ctx, timers, calls, modal, pending, fire, setResponse(fn) { nextResponse = fn; } };
+    return { ctx, elements, actions, setGeneration(g) { generation = g; }, timers, calls, modal, pending, fire, setResponse(fn) { nextResponse = fn; } };
 }
 
 const RUNNING = { status: 'ok', parallelism_model: 'one_worker_per_space', service_config: { batch_size: 2 },
@@ -93,7 +96,7 @@ const settle = () => new Promise(r => setImmediate(r));
     assert.equal(h.pending()[0].ms, 60000, 'live period is one minute (owner arbitration 2026-09-05)');
     assert.ok(h.ctx.__live.state.liveTimer !== null, 'the pending timer is tracked in view state');
     const sub = h.ctx.document.getElementById('consolSubtitle').innerHTML;
-    assert.ok(sub.includes('live · refreshes every 60 s while a job runs'), 'the subtitle announces the live refresh');
+    assert.ok(sub.includes('Live · refreshes every 60 s while a job runs'), 'the subtitle announces the live refresh');
     await h.fire(h.pending()[0]); await settle();
     assert.equal(h.calls.filter(c => c.name === 'bank_consolidation_queues').length, 2, 'the tick reloads the lanes');
     assert.equal(h.calls[1].args.space_ids, 'demo', 'the tick re-reads the painted lanes by explicit id — in-memory path, never the storage scan');
@@ -126,7 +129,7 @@ const settle = () => new Promise(r => setImmediate(r));
     await h.fire(h.pending()[0]); await settle();
     assert.equal(h.pending().length, 0, 'idle lanes: nothing scheduled, the loop stops');
     assert.equal(h.ctx.__live.state.liveTimer, null);
-    assert.equal(h.ctx.document.getElementById('consolSubtitle').innerHTML.includes('live ·'), false, 'no live marker when idle');
+    assert.equal(h.ctx.document.getElementById('consolSubtitle').innerHTML.includes('Live ·'), false, 'no live marker when idle');
 }
 
 // ── 3. a route-epoch change or a lost session drops the tick without a call ──
@@ -232,6 +235,7 @@ const settle = () => new Promise(r => setImmediate(r));
     response = () => ({ status: 'error', message: 'registry unavailable' });
     await h.fire(h.pending()[0]); await settle();
     assert.equal(h.modal.shows.length, shownBefore, 'typed error: the last good snapshot stays on screen');
+    assert.ok(h.elements.consolJobFreshness.innerHTML.includes('stale') && h.elements.consolJobFreshness.innerHTML.includes('<time>'), 'job refresh error has last-success timestamp');
     assert.equal(h.pending().length, 1, 'typed error: re-armed');
     response = () => { throw new Error('network'); };
     await h.fire(h.pending()[0]); await settle();
@@ -241,6 +245,216 @@ const settle = () => new Promise(r => setImmediate(r));
     await h.fire(h.pending()[0]); await settle();
     assert.equal(h.modal.shows.length, shownBefore, 'sentinel: no repaint');
     assert.equal(h.pending().length, 0, 'sentinel: the loop ends');
+}
+
+
+// Job-first layout, valid terminal history, active exclusion and honest unknowns.
+{
+    const h = harness();
+    h.setResponse(() => ({ status: 'ok', lanes: [{ space_id: 'demo', lane_state: 'running', queued_count: 1,
+        running_job: { job_id: 'active', status: 'running', scope_label: 'All agents' },
+        queued_jobs: [{ job_id: 'queued', status: 'queued', queue_position: 2, scope_label: 'Agent B' }],
+        latest_jobs: [
+            { job_id: 'active', status: 'succeeded', finished_at: '2026-09-09T14:00:00Z' },
+            { job_id: 'old', status: 'succeeded', finished_at: '2026-09-09T10:00:00Z' },
+            { job_id: 'new', status: 'failed', finished_at: '2026-09-09T12:00:00Z', result: { status: 'partial' }, error: '<unsafe>' },
+            { job_id: 'new', status: 'failed', finished_at: '2026-09-09T12:00:00Z' },
+            { job_id: 'bad-date', status: 'failed', finished_at: 'not-a-date' },
+            { job_id: 'unknown', status: 'future_state' },
+        ] }, { space_id: 'idle-space', lane_state: 'idle', queued_count: 0, latest_jobs: [] }] }));
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    const html = h.elements.consolLanes.innerHTML;
+    assert.ok(html.includes('In progress') && html.includes('Recent history'), 'jobs replace the lane inventory');
+    assert.equal(html.includes('Total spaces'), false, 'inventory metrics removed');
+    assert.equal(html.includes('idle-space'), false, 'idle spaces do not produce rows');
+    for (const id of ['active', 'queued', 'old', 'new', 'bad-date', 'unknown']) {
+        assert.equal(html.split(`data-job-id="${id}"`).length - 1, 1, `job ${id} rendered once`);
+    }
+    assert.ok(html.indexOf('data-job-id="new"') < html.indexOf('data-job-id="old"'), 'history sorted by valid finish time');
+    assert.ok(html.includes('Partial completion'), 'partial outcome visible');
+    assert.ok(html.indexOf('data-job-id="old"') < html.indexOf('data-job-id="bad-date"'), 'undated terminals follow dated history');
+    assert.ok(html.includes('Completion time unavailable'), 'invalid terminal timestamp is diagnosed');
+    assert.ok(html.includes('Unknown') && html.includes('future_state'), 'unrecognized state never becomes idle');
+    assert.ok(html.includes('&lt;unsafe&gt;') && !html.includes('<unsafe>'), 'job errors escaped');
+    assert.equal(h.calls.length, 1, 'render never scans stale banks or performs per-space calls');
+}
+
+// Missing counters never manufacture a percentage or zero.
+{
+    const h = harness();
+    for (const progress of [{ notes_total: 9 }, { notes_done: 3 }, { notes_total: 9, notes_done: NaN }, { notes_total: -9, notes_done: 1 }]) {
+        const html = h.ctx.__live.progressBar(progress);
+        assert.ok(html.includes('consol-bar-indeterminate'), 'incomplete progress remains indeterminate');
+        assert.equal(html.includes('0/9'), false, 'missing done is not zero');
+        assert.equal(html.includes('NaN'), false, 'non-finite counter never displayed');
+    }
+}
+
+// Scoped load, picker from the aggregate response, and stale bulk capture stay scoped.
+{
+    const h = harness();
+    h.setResponse(name => name === 'bank_stale_spaces'
+        ? { status: 'ok', spaces: [{ space_id: 'demo', live_notes_count: 7 }, { space_id: 'other', live_notes_count: 9 }], total_spaces: 2, total_stale: 2, min_notes: 5, min_age_days: 5 }
+        : { status: 'ok', lanes: [RUNNING.lanes[0], { space_id: 'other', running_job: { job_id: 'other-job', status: 'running' }, queued_count: 0 }] });
+    const root = fakeElement();
+    h.ctx.__live.render(root, { spaceId: 'demo' }, { identity: { token_hash: 'sha256:a', client_name: 'owner', permissions: ['manage'] }, epoch: 1 });
+    await settle();
+    assert.equal(h.calls[0].args.space_ids, 'demo', 'scoped entry uses the explicit target');
+    assert.ok(root.innerHTML.includes('All spaces'), 'scope has a clear exit');
+    assert.equal(h.elements.consolLanes.innerHTML.includes('other-job'), false, 'unrelated jobs excluded');
+    h.actions['consol-picker']();
+    assert.ok(h.modal.shows.at(-1).includes('demo'), 'picker consumes the last response');
+    assert.equal(h.calls.length, 1, 'opening picker does not scan spaces');
+    await h.actions['consol-stale-scan']();
+    assert.equal(h.elements.consolStaleResults.innerHTML.includes('other'), false, 'stale rows scoped');
+    await h.actions['consol-stale-all']();
+    assert.ok(h.modal.shows.at(-1).includes('demo') && !h.modal.shows.at(-1).includes('<li><code>other'), 'bulk confirmation captures only the visible scope');
+}
+
+// No overlapping lane requests, even when manual refresh arrives during a tick.
+{
+    const h = harness();
+    h.setResponse(() => RUNNING);
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    let resolve;
+    h.setResponse(() => new Promise(r => { resolve = r; }));
+    const tick = h.fire(h.pending()[0]);
+    await settle();
+    h.ctx.AdminRouter.epoch = 2;
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 2 });
+    await settle();
+    assert.equal(h.calls.length, 2, 'new render waits for the outstanding request');
+    h.setResponse(() => IDLE);
+    resolve(RUNNING);
+    await tick; await settle();
+    assert.equal(h.calls.length, 3, 'latest full refresh starts after the old request settles');
+    assert.equal(h.pending().length, 0, 'only current response can re-arm the timer');
+}
+
+// Errors retain the last successful snapshot, clearly labeled with update time.
+{
+    const h = harness();
+    h.setResponse(() => RUNNING);
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    const before = h.elements.consolLanes.innerHTML;
+    h.setResponse(() => ({ status: 'error', message: 'queue unavailable' }));
+    await h.fire(h.pending()[0]); await settle();
+    assert.equal(h.elements.consolLanes.innerHTML, before, 'refresh error retains the last rows');
+    assert.ok(h.elements.consolFreshness.innerHTML.includes('stale') && h.elements.consolFreshness.innerHTML.includes('<time>'), 'stale data carries the last success timestamp');
+}
+
+// A response from a former session cannot repaint or arm a new session, even
+// if the login overlay is already hidden again and route epoch did not change.
+{
+    const h = harness();
+    let resolve;
+    h.setResponse(() => new Promise(r => { resolve = r; }));
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    h.setGeneration(2);
+    h.elements.consolLanes.innerHTML = 'new session';
+    resolve(RUNNING); await settle();
+    assert.equal(h.elements.consolLanes.innerHTML, 'new session', 'old-session response dropped');
+    assert.equal(h.pending().length, 0, 'old-session response cannot schedule another read');
+}
+
+// A decoded comma/path/oversized target cannot widen a scoped request.
+for (const spaceId of ['demo,other', '../other', 'a'.repeat(65)]) {
+    const h = harness();
+    const root = fakeElement();
+    h.ctx.__live.render(root, { spaceId }, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    assert.equal(h.calls.length, 0, 'invalid scope makes no tool request');
+    assert.ok(root.innerHTML.includes('Invalid space id'));
+}
+
+{
+    const h = harness();
+    h.setResponse(() => RUNNING);
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    h.ctx.AdminRouter.epoch = 2;
+    h.ctx.document.hidden = true;
+    await h.fire(h.pending()[0]); await settle();
+    assert.equal(h.pending().length, 0, 'stale route never re-arms a hidden-tab timer');
+}
+
+for (const status of ['constructor', '__proto__', 'toString']) {
+    const h = harness();
+    h.ctx.__live.paintLanes({ lanes: [{ space_id: 'demo', lane_state: 'idle', latest_jobs: [{ job_id: 'unknown-prototype-key', status }] }] });
+    assert.ok(h.elements.consolLanes.innerHTML.includes('Unknown'), 'prototype keys remain unknown states');
+    assert.ok(h.elements.consolLanes.innerHTML.includes(`<code>${status}</code>`), 'raw unknown state stays inspectable');
+}
+
+// F4 sibling: a bounded tick has no evidence about denied spaces it did not read.
+{
+    const h = harness();
+    h.setResponse(() => ({ ...RUNNING, denied_spaces: [
+        { space_id: 'denied-a', message: 'first refusal' },
+        { space_id: 'denied-b', message: 'other refusal' },
+    ] }));
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    h.setResponse(() => RUNNING);
+    await h.fire(h.pending()[0]); await settle();
+    assert.equal(h.calls.at(-1).args.space_ids, 'demo', 'tick only reads loaded lane IDs');
+    assert.ok(h.elements.consolLanes.innerHTML.includes('denied-a') && h.elements.consolLanes.innerHTML.includes('denied-b'), 'scoped tick preserves unrequested access denials');
+    h.setResponse(() => ({ ...RUNNING, denied_spaces: [{ space_id: 'denied-a', message: 'updated refusal' }] }));
+    await h.ctx.__live.loadLanes(1, ['demo', 'denied-a']);
+    assert.equal(h.elements.consolLanes.innerHTML.includes('first refusal'), false, 'requested denial is replaced');
+    assert.ok(h.elements.consolLanes.innerHTML.includes('updated refusal') && h.elements.consolLanes.innerHTML.includes('other refusal'));
+    h.setResponse(() => ({ ...RUNNING, lanes: [...RUNNING.lanes, { ...IDLE.lanes[0], space_id: 'denied-a' }] }));
+    await h.ctx.__live.loadLanes(1, ['demo', 'denied-a']);
+    assert.equal(h.elements.consolLanes.innerHTML.includes('updated refusal'), false, 'successful re-read clears only its target denial');
+    assert.ok(h.elements.consolLanes.innerHTML.includes('other refusal'));
+    h.setResponse(() => IDLE);
+    await h.ctx.__live.loadLanes(1);
+    assert.equal(h.elements.consolLanes.innerHTML.includes('other refusal'), false, 'full successful read replaces the entire denied set');
+}
+
+// F5: no lane visibility is distinct from visible, inactive spaces and denials.
+{
+    const h = harness();
+    h.ctx.__live.paintLanes({ lanes: [], denied_spaces: [] });
+    assert.ok(h.elements.consolLanes.innerHTML.includes('No spaces visible'), 'empty registry shows missing visibility');
+    assert.equal(h.elements.consolLanes.innerHTML.includes('No jobs in progress'), false, 'missing visibility is not quiet activity');
+    h.ctx.__live.paintLanes(IDLE);
+    assert.ok(h.elements.consolLanes.innerHTML.includes('No jobs in progress'), 'visible inactive spaces retain the jobs empty state');
+    assert.equal(h.elements.consolLanes.innerHTML.includes('No spaces visible'), false);
+    h.ctx.__live.paintLanes({ lanes: [], denied_spaces: [{ space_id: 'denied', message: 'permission refused' }] });
+    assert.ok(h.elements.consolLanes.innerHTML.includes('permission refused'), 'denied state keeps the real cause');
+    assert.equal(h.elements.consolLanes.innerHTML.includes('No spaces visible'), false);
+}
+
+// F6: the expanded scan panel can collapse without another scan, and a late
+// scan cannot update the closed panel or its cache. Reopening explicitly scans.
+{
+    const h = harness();
+    h.setResponse(() => IDLE);
+    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
+    await settle();
+    let resolve;
+    h.setResponse(() => new Promise(r => { resolve = r; }));
+    h.actions['consol-stale-toggle']();
+    assert.ok(h.elements.consolStale.innerHTML.includes('data-action="consol-stale-toggle"') && h.elements.consolStale.innerHTML.includes('Hide notes'), 'expanded panel offers a collapse control');
+    assert.ok(h.elements.consolStale.innerHTML.includes('aria-expanded="true"'));
+    assert.equal(h.calls.length, 2, 'opening performs exactly one scan');
+    h.actions['consol-stale-toggle']();
+    assert.equal(h.ctx.__live.state.staleMode, false);
+    assert.ok(h.elements.consolStale.innerHTML.includes('Find notes') && !h.elements.consolStale.innerHTML.includes('consolStaleMinNotes'));
+    assert.ok(h.elements.consolStale.innerHTML.includes('aria-expanded="false"'));
+    assert.equal(h.calls.length, 2, 'collapsing performs no tool call');
+    resolve({ status: 'ok', spaces: [{ space_id: 'demo' }], min_notes: 5, min_age_days: 5 });
+    await settle();
+    assert.equal(h.ctx.__live.state.staleData, null, 'late scan cannot repopulate a collapsed panel cache');
+    h.setResponse(() => ({ status: 'ok', spaces: [], min_notes: 5, min_age_days: 5 }));
+    h.actions['consol-stale-toggle']();
+    await settle();
+    assert.equal(h.calls.length, 3, 'reopening scans explicitly, with no lane reload');
+    assert.equal(h.calls.at(-1).name, 'bank_stale_spaces');
 }
 
 console.log('admin consolidation live refresh runtime: ok');

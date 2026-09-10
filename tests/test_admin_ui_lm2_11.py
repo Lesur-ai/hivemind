@@ -113,7 +113,7 @@ class TestAccessCapabilitySplit:
         assert 'role="menu"' not in row
         assert 'role="menuitem"' not in row
         assert 'data-action="access-close-menu"' in row
-        for label in ("Edit token", "Create replacement", "Disable token", "Reactivate token", "Delete permanently"):
+        for label in ("Edit token", "Create replacement", "Revoke token", "Revoked permanently", "Delete permanently"):
             assert label in row
         assert row.count('data-hash="') == 1
         assert "_tokenListEpoch !== AdminRouter.epoch" in lookup
@@ -209,7 +209,7 @@ class TestSpacesCreateGate:
         empty = _body(source, "_renderBody")
         assert "const createAction = _hasManage(_identity)" in render
         assert "const canCreate = _hasManage(_identity)" in empty
-        assert "actionHtml: canCreate" in empty
+        assert "actionHtml: !anySpaces && canCreate" in empty
 
     def test_forged_create_action_and_submit_both_fail_closed(self):
         source = _read(SPACES)

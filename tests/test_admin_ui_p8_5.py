@@ -185,7 +185,7 @@ class TestRotateHonesty:
         )
         assert "access-replace" in actions
         replacement = _fn_body(src, "openReplacementModal")
-        assert "does not expose an atomic regenerate-or-replace operation" in replacement
+        assert "The existing secret cannot be shown again" in replacement
         assert "openCreateModal(replacementPrefill(token))" in replacement
         assert "admin_revoke_token" not in replacement
 
@@ -324,8 +324,8 @@ class TestDestructiveUX:
 
     def test_revoked_rows_do_not_claim_reactivation(self):
         row = _fn_body(_access(), "renderRow")
-        assert "Reactivate token" in row
-        assert "Revocation is permanent" in row
+        assert "Reactivate token" not in row
+        assert "Revoked permanently" in row
         assert "disabled aria-disabled=\"true\"" in row
 
     def test_internal_long_is_hidden_from_list_but_purge_warning_remains(self):

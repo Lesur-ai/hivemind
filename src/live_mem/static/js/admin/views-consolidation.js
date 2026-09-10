@@ -1,13 +1,13 @@
 /**
  * Consolidation view (P8-4, issue #142) — route #/consolidation.
  *
- * Absorbs the inherited consolidation-lanes dashboard AND the Stale Banks view
+ * Jobs-first operation view with on-demand notes-to-consolidate scan
  * (contract §4.8 K1–K6, §5.5). Real data only: every widget consumes exactly
  * the fields the real tools return (bank_consolidation_queues / _status /
  * bank_consolidate / bank_stale_spaces). Refresh triggers are load, manual
  * Refresh, after-action, and — the one bounded exception to D8 (§5.5.1) —
  * a live refresh every LIVE_REFRESH_MS while a
- * lane shows a running or queued job (lanes table) or while the open job
+ * space shows a running or queued job or while the open job
  * inspector shows a running/queued job. It stops by itself when no job is
  * active, when the route epoch or the session changes, when the modal is
  * closed, and it skips network calls while the tab is hidden. The live tick
@@ -33,15 +33,21 @@
         staleData: null,        // last bank_stale_spaces payload while in stale mode
         identity: {},           // cached ctx.identity (never a fresh probe)
         owner: null,            // unique session marker (token_hash); null = unproven → cache never retained
+        scope: '',              // optional route spaceId; does not widen a request
+        data: null, lastSuccess: null,
+        sessionGeneration: null,
+        request: null, pendingLoad: null, renderSeq: 0,
         liveTimer: null,        // pending lanes live-refresh timer (§5.5.1); one at a time
     };
 
     // §5.5.1 — live refresh period while a job is running or queued.
     // Period fixed at one minute by the owner (arbitration 2026-09-05, PR #489).
     const LIVE_REFRESH_MS = 60000;
+    const SPACE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
     function laneActive(lane) {
-        return !!(lane && (lane.running_job || (typeof lane.queued_count === 'number' && lane.queued_count > 0)));
+        return !!(lane && (lane.running_job || (typeof lane.queued_count === 'number' && lane.queued_count > 0)
+            || (Array.isArray(lane.queued_jobs) && lane.queued_jobs.length)));
     }
 
     function anyLaneActive(data) {
@@ -53,8 +59,7 @@
     // token's access rules and the in-memory queue registry (§5.5.1: no space
     // scan; authentication's own token-registry read applies as to any request).
     function laneIds(data) {
-        const lanes = data && Array.isArray(data.lanes) ? data.lanes : [];
-        return lanes.map(l => l && l.space_id).filter(Boolean);
+        return scopedItems(data && data.lanes).map(l => l.space_id).filter(Boolean);
     }
 
     function clearLive() {
@@ -70,9 +75,11 @@
     function scheduleLive(epoch, data) {
         clearLive();
         if (!anyLaneActive(data)) return;
+        const generation = state.sessionGeneration;
+        const seq = state.renderSeq;
         state.liveTimer = setTimeout(() => {
             state.liveTimer = null;
-            if (AdminRouter.epoch !== epoch || !sessionActive()) return;
+            if (AdminRouter.epoch !== epoch || !sessionActive() || !sessionGenerationIsCurrent(generation) || seq !== state.renderSeq) return;
             if (document.hidden) { scheduleLive(epoch, data); return; }
             loadLanes(epoch, laneIds(data));
         }, LIVE_REFRESH_MS);
@@ -89,8 +96,9 @@
     // NEWER modal opened on the same route. Checked
     // alongside the navigation epoch before any modal/close effect.
     let _modalOp = 0;
-    function beginModalOp() { return ++_modalOp; }
-    function modalOpCurrent(t) { return _modalOp === t; }
+    let _modalSession = null;
+    function beginModalOp() { _modalSession = currentSessionGeneration(); return ++_modalOp; }
+    function modalOpCurrent(t) { return _modalOp === t && sessionGenerationIsCurrent(_modalSession); }
 
     // Stale-scan generation: a later scan (e.g. different thresholds) bumps this,
     // so an earlier scan resolving out of order drops instead of overwriting the
@@ -111,28 +119,34 @@
     // ───────────────────────── header / layout ─────────────────────────
 
     function headerActions() {
-        const staleLabel = state.staleMode ? 'Hide stale banks' : 'Stale banks';
-        return `
-            <button type="button" class="btn btn-secondary btn-sm" data-action="consol-stale-toggle">${esc(staleLabel)}</button>
-            <button type="button" class="btn btn-secondary btn-sm" data-action="consol-refresh">${icon('refresh')}<span>Refresh</span></button>`;
+        return `<button type="button" class="btn btn-secondary btn-sm" data-action="consol-refresh">${icon('refresh')}<span>Refresh</span></button>
+            <button type="button" class="btn btn-primary btn-sm" data-action="consol-picker">${icon('plus')}<span>Consolidate notes</span></button>`;
+    }
+
+    function scopedItems(items) {
+        return (Array.isArray(items) ? items : []).filter(item => item && (!state.scope || item.space_id === state.scope));
     }
 
     function subtitle(data) {
-        // §8.2 trap: the sanctioned mental model is one worker per space;
-        // never compose the banned two-word phrase describing that scheduling.
-        // Every token below is read from the real bank_consolidation_queues
-        // response (§5.5) — nothing is hardcoded and presented as server data.
-        const model = data && data.parallelism_model
-            ? `<span class="mono micro-label consol-model">${esc(String(data.parallelism_model))}</span>` : '';
-        const lanes = (data && Array.isArray(data.lanes)) ? data.lanes : [];
-        const guarantee = lanes.map(l => l && l.guarantee).find(Boolean);
-        const guaranteeBadge = guarantee
-            ? `<span class="pill pill-neutral consol-guarantee" title="Job state lives in server memory: it does not survive a restart and history is trimmed.">${esc(String(guarantee))}</span>` : '';
-        const batch = data && data.service_config && typeof data.service_config.batch_size === 'number'
-            ? `<span class="mono micro-label consol-batch">batch size ${esc(String(data.service_config.batch_size))}</span>` : '';
         const live = anyLaneActive(data)
-            ? `<span class="micro-label consol-live">live · refreshes every ${esc(String(LIVE_REFRESH_MS / 1000))} s while a job runs</span>` : '';
-        return `<p class="consol-subtitle body-small">One worker per space · lanes are isolated per space. ${model}${guaranteeBadge}${batch}${live}</p>`;
+            ? `<span class="consol-live">Live · refreshes every ${esc(String(LIVE_REFRESH_MS / 1000))} s while a job runs</span>` : '';
+        const rawModel = data && data.parallelism_model;
+        const model = rawModel === 'one_worker_per_space' ? '1 worker per space' : 'Worker configuration unavailable';
+        const guarantee = scopedItems(data && data.lanes).map(lane => lane.guarantee).find(Boolean);
+        const guaranteeBadge = guarantee ? `<span class="pill pill-neutral consol-guarantee" title="Job state lives in server memory: it does not survive a restart and history is trimmed.">${esc(String(guarantee))}</span>` : '';
+        const batchSize = data && data.service_config && data.service_config.batch_size;
+        const batch = Number.isFinite(batchSize) ? `<span class="consol-batch">batch size: <span class="mono-data">${esc(String(batchSize))}</span> notes</span>` : '';
+        return `<p class="consol-subtitle body-small">${live}</p><details class="diagnostic-details body-small"><summary>Technical details</summary>
+            <p>${model} ${guaranteeBadge} ${batch}</p><p>Worker configuration code: <code>${esc(String(rawModel ?? 'Not reported'))}</code></p></details>`;
+    }
+
+    function paintFreshness(error) {
+        const el = document.getElementById('consolFreshness');
+        if (!el) return;
+        const updated = state.lastSuccess ? `Last updated ${renderTimestamp(state.lastSuccess)}` : '';
+        el.innerHTML = error
+            ? `<div class="state-degraded body-small" role="status">${statusDot('warn', 'Consolidation data is stale')} ${updated}${serverMessage(error.message || '')}</div>`
+            : `<p class="body-small text-muted">${updated}</p>`;
     }
 
     // ───────────────────────── render entry ─────────────────────────
@@ -159,17 +173,31 @@
         // never keep the panel open — its own activation refresh would cancel it.
         if (owner === null || owner !== state.owner) state.staleData = null;
         if (owner !== state.owner) state.staleMode = false;
+        const generation = currentSessionGeneration();
+        const scope = params && typeof params.spaceId === 'string' ? params.spaceId : '';
+        if (owner === null || owner !== state.owner || generation !== state.sessionGeneration || scope !== state.scope) {
+            state.data = null; state.lastSuccess = null; state.staleData = null;
+        }
+        state.scope = scope;
+        state.sessionGeneration = generation;
+        state.renderSeq += 1;
         state.owner = owner;
         state.identity = identity;
         clearLive();
         const epoch = ctx ? ctx.epoch : AdminRouter.epoch;
-        contentEl.innerHTML = `<div class="page">
+        if (scope && !SPACE_ID_RE.test(scope)) {
+            contentEl.innerHTML = `<div class="page consolidation-page">${pageHeader('Consolidation')}${panel(stateError({ title: 'Invalid space id' }))}<a href="#/consolidation">All spaces</a></div>`;
+            return;
+        }
+        contentEl.innerHTML = `<div class="page consolidation-page">
             ${pageHeader('Consolidation', headerActions())}
-            <div id="consolSubtitle"></div>
+            ${scope ? `<p class="consol-scope-filter body-small">Space: <strong>${esc(scope)}</strong> · <a href="#/consolidation">All spaces</a></p>` : ''}
+            <div id="consolSubtitle"></div><div id="consolFreshness" class="consol-freshness"></div>
+            <div id="consolLanes">${panel(stateLoading('Loading consolidation jobs…'))}</div>
             <div id="consolStale"></div>
-            <div id="consolLanes">${panel(stateLoading('Loading consolidation lanes…'))}</div>
         </div>`;
-        if (state.staleMode) renderStalePanel(epoch);
+        renderStalePanel(epoch);
+        if (state.data) { paintLanes(state.data); paintFreshness(); }
         loadLanes(epoch);
     }
 
@@ -179,26 +207,45 @@
     // "" lets the server resolve the visible spaces (storage-backed scan).
     // Live tick (liveIds present): the painted ids only — in-memory read.
     async function loadLanes(epoch, liveIds) {
-        const spaceIds = Array.isArray(liveIds) ? liveIds.join(',') : '';
+        const generation = state.sessionGeneration;
+        const seq = state.renderSeq;
+        const current = () => AdminRouter.epoch === epoch && sessionActive()
+            && sessionGenerationIsCurrent(generation) && seq === state.renderSeq;
+        if (!current()) return;
+        if (state.request) { state.pendingLoad = { epoch, liveIds, generation, seq }; return; }
+        clearLive();
+        const request = {};
+        state.request = request;
+        const spaceIds = Array.isArray(liveIds) ? liveIds.join(',') : state.scope;
         let data;
         try {
-            data = await callTool('bank_consolidation_queues', { space_ids: spaceIds });
-        } catch (e) {
-            if (AdminRouter.epoch !== epoch) return;
-            paintLanesError({ status: 'error', message: '' });
-            return;
+            try { data = await callTool('bank_consolidation_queues', { space_ids: spaceIds }); }
+            catch (e) { data = { status: 'error', message: '' }; }
+            if (!current()) return;
+            if (!data || data.status !== 'ok' || !Array.isArray(data.lanes)) {
+                if (state.data) {
+                    paintFreshness(data || {});
+                    if (!['truncated', 'rate_limited', 'read_only'].includes(data && data.status)) scheduleLive(epoch, state.data);
+                } else paintLanesError(data || {});
+                return;
+            }
+            const retainedDenials = Array.isArray(liveIds) && state.data
+                ? scopedItems(state.data.denied_spaces).filter(item => !liveIds.includes(item.space_id)) : [];
+            data = { ...data, lanes: scopedItems(data.lanes), denied_spaces: retainedDenials.concat(scopedItems(data.denied_spaces)) };
+            state.data = data;
+            state.lastSuccess = new Date().toISOString();
+            const sub = document.getElementById('consolSubtitle');
+            if (sub) sub.innerHTML = subtitle(data);
+            paintLanes(data);
+            paintFreshness();
+            scheduleLive(epoch, data);
+        } finally {
+            if (state.request === request) state.request = null;
+            const pending = state.pendingLoad;
+            state.pendingLoad = null;
+            if (pending && pending.epoch === AdminRouter.epoch && pending.seq === state.renderSeq
+                && sessionGenerationIsCurrent(pending.generation) && sessionActive()) loadLanes(pending.epoch, pending.liveIds);
         }
-        if (AdminRouter.epoch !== epoch) return;
-
-        const sub = document.getElementById('consolSubtitle');
-        if (sub) sub.innerHTML = subtitle(data);
-
-        if (!data || data.status !== 'ok') {
-            paintLanesError(data || {});
-            return;
-        }
-        paintLanes(data);
-        scheduleLive(epoch, data);
     }
 
     function paintLanesError(data) {
@@ -211,51 +258,27 @@
             return;
         }
         el.innerHTML = panel(stateError({
-            title: "Couldn't load consolidation lanes",
+            title: "Couldn't load consolidation jobs",
             message: data && data.message,
             retryAction: 'consol-refresh',
         }));
     }
 
-    function metricCards(d) {
-        const cards = [
-            ['Total spaces', d.total_spaces],
-            ['Active', d.active_spaces],
-            ['Running', d.running_spaces],
-            ['Queued jobs', d.queued_jobs],
-            ['Failed recent', d.failed_recent],
-        ];
-        const html = cards.map(([label, value]) => {
-            const shown = (typeof value === 'number') ? String(value) : '—';
-            return `<div class="metric-card"><span class="micro-label">${esc(label)}</span><span class="metric-value">${esc(shown)}</span></div>`;
-        }).join('');
-        return `<div class="metric-grid consol-metrics">${html}</div>`;
-    }
-
-    function laneStateDot(laneState) {
-        if (laneState === 'running') return statusDot('warn', 'Running');
-        if (laneState === 'queued') return statusDot('warn', 'Queued');
-        // §5(d): `failed` is idle-with-most-recent-failure — an attention chip,
-        // NOT a currently-running failure. Frame it as idle + last run failed.
-        if (laneState === 'failed') return statusDot('error', 'Idle · last run failed');
-        return statusDot('neutral', 'Idle');
-    }
-
     function progressBar(progress) {
         if (!progress) return '';
-        const nd = Number(progress.notes_done || 0);
+        const nd = progress.notes_done;
         const nt = progress.notes_total;
-        const bd = Number(progress.batches_done || 0);
+        const bd = progress.batches_done;
         const bt = progress.batches_total;
         // Keep phase/label RAW; escape once at each sink (the aria-label and the
         // visible meta) — never pre-escape, or the aria-label double-escapes.
         const phase = progress.phase ? String(progress.phase) : '';
         let pct = null;
         let label = '';
-        if (typeof nt === 'number' && nt > 0) {
+        if (Number.isFinite(nt) && nt > 0 && Number.isFinite(nd) && nd >= 0) {
             pct = Math.min(100, Math.round((nd / nt) * 100));
             label = `${nd}/${nt} notes`;
-        } else if (typeof bt === 'number' && bt > 0) {
+        } else if (Number.isFinite(bt) && bt > 0 && Number.isFinite(bd) && bd >= 0) {
             pct = Math.min(100, Math.round((bd / bt) * 100));
             label = `${bd}/${bt} batches`;
         }
@@ -269,51 +292,56 @@
         </div>`;
     }
 
-    function jobCell(job) {
-        if (!job) return '<span class="text-faint">—</span>';
+    function collectJobs(lanes) {
+        const active = [], history = [], undated = [], unreported = [], seen = new Set();
+        const add = (job, sid, fromQueue) => {
+            if (!job || typeof job !== 'object') return;
+            const id = typeof job.job_id === 'string' ? job.job_id : '';
+            const key = sid + '/' + id;
+            if (id && seen.has(key)) return;
+            if (id) seen.add(key);
+            const item = { ...job, space_id: sid };
+            if (job.status === 'running' || job.status === 'queued') active.push(item);
+            else if (!fromQueue && ['succeeded', 'failed'].includes(job.status)) {
+                if (typeof job.finished_at === 'string' && Number.isFinite(Date.parse(job.finished_at))) history.push(item);
+                else undated.push(item);
+            }
+            else unreported.push(item);
+        };
+        // Active registry entries win over duplicate/inconsistent history.
+        lanes.forEach(lane => {
+            add(lane.running_job, lane.space_id, true);
+            (Array.isArray(lane.queued_jobs) ? lane.queued_jobs : []).forEach(job => add(job, lane.space_id, true));
+        });
+        lanes.forEach(lane => (Array.isArray(lane.latest_jobs) ? lane.latest_jobs : []).forEach(job => add(job, lane.space_id, false)));
+        history.sort((a, b) => Date.parse(b.finished_at) - Date.parse(a.finished_at));
+        return { active, history: history.concat(undated), unreported };
+    }
+
+    function jobRow(job) {
         const jid = String(job.job_id || '');
-        const scope = esc(String(job.scope_label || ''));
-        const idChip = jid
-            ? `<button type="button" class="btn btn-ghost btn-sm consol-job-link" data-action="consol-job" data-job-id="${esc(jid)}" title="${esc(jid)}">${esc(truncateMiddle(jid, 10, 6))}</button>`
-            : '';
-        return `<div class="consol-jobcell"><span class="consol-scope mono-data">${scope}</span> ${idChip}${progressBar(job.progress)}</div>`;
-    }
-
-    function queuedCell(lane) {
-        const n = Number(lane.queued_count || 0);
-        if (!n) return '<span class="text-faint">0</span>';
-        // Render the FIFO queue payload (queued_jobs[], insertion order) as
-        // inspectable position chips — each opens the job inspector (§5.5).
-        const jobs = Array.isArray(lane.queued_jobs) ? lane.queued_jobs : [];
-        if (!jobs.length) {
-            return `<span class="count-pill mono">${esc(String(n))}</span> <span class="body-small">in queue</span>`;
-        }
-        const chips = jobs.map(j => {
-            const jid = String(j.job_id || '');
-            const pos = Number(j.queue_position);
-            const scope = String(j.scope_label || '');
-            // Position is the visible label; the real scope_label rides in the
-            // title/aria so the chip carries the job's actual scope (§5.5).
-            const label = (pos >= 2 ? `#${pos}` : 'queued') + (scope ? ` · ${scope}` : '');
-            const aria = `Inspect queued job ${truncateMiddle(jid, 10, 6)} at position ${pos}${scope ? ' — ' + scope : ''}`;
-            return jid
-                ? `<button type="button" class="btn btn-ghost btn-sm consol-qchip" data-action="consol-job" data-job-id="${esc(jid)}" title="${esc(scope || jid)}" aria-label="${esc(aria)}">${esc(label)}</button>`
-                : `<span class="count-pill mono">${esc(label)}</span>`;
-        }).join(' ');
-        return `<span class="consol-queued">${chips}</span>`;
-    }
-
-    function latestCell(lane) {
-        const jobs = Array.isArray(lane.latest_jobs) ? lane.latest_jobs : [];
-        if (!jobs.length) return '<span class="text-faint">—</span>';
-        const j = jobs[0];
-        const sev = j.status === 'succeeded' ? 'ok' : j.status === 'failed' ? 'error' : 'warn';
-        const when = j.finished_at ? renderTimestamp(j.finished_at) : '';
-        const jid = String(j.job_id || '');
-        const link = jid
-            ? `<button type="button" class="btn btn-ghost btn-sm" data-action="consol-job" data-job-id="${esc(jid)}" aria-label="Inspect job ${esc(truncateMiddle(jid, 10, 6))}">Details</button>`
-            : '';
-        return `<div class="consol-latest">${statusDot(sev, j.status || 'unknown')} ${when} ${link}</div>`;
+        const sid = String(job.space_id || '');
+        const partial = job.result && (job.result.status === 'partial' || job.result.partial === true
+            || (Number.isFinite(job.result.batches_completed) && Number.isFinite(job.result.batches_total)
+                && job.result.batches_completed < job.result.batches_total));
+        const labels = { running: 'Running', queued: 'Queued', succeeded: 'Completed', failed: 'Failed' };
+        const status = Object.hasOwn(labels, job.status) ? labels[job.status] : 'Unknown';
+        const severity = job.status === 'failed' ? 'error' : partial || ['running', 'queued'].includes(job.status) ? 'warn' : job.status === 'succeeded' ? 'ok' : 'neutral';
+        const phase = statusDot(severity, status);
+        const when = ['succeeded', 'failed'].includes(job.status) ? job.finished_at : job.started_at || job.queued_at || job.requested_at;
+        const time = typeof when === 'string' && Number.isFinite(Date.parse(when)) ? renderTimestamp(when)
+            : ['succeeded', 'failed'].includes(job.status) ? 'Completion time unavailable' : 'Time unavailable';
+        const position = job.status === 'queued' && Number.isSafeInteger(job.queue_position) && job.queue_position >= 2
+            ? ` · Position ${esc(String(job.queue_position))}` : '';
+        const inspect = jid ? `<button type="button" class="btn btn-secondary btn-sm" data-action="consol-job" data-job-id="${esc(jid)}" aria-label="Inspect job ${esc(jid)}">Details</button>` : '';
+        return `<article class="consol-job-row">
+            <div class="consol-job-heading"><a class="consol-space-name" href="${esc('#/spaces/' + encodeURIComponent(sid))}">${esc(sid)}</a>${phase}${inspect}</div>
+            <p class="consol-job-meta body-small">${esc(String(job.scope_label || 'Scope unavailable'))}${position} · ${time}</p>
+            ${['running', 'queued'].includes(job.status) ? progressBar(job.progress) : ''}
+            ${partial ? '<p class="consol-partial body-small">Partial completion</p>' : ''}
+            ${job.error ? serverMessage(job.error) : ''}
+            ${status === 'Unknown' ? `<p class="body-small">Status code: <code>${esc(String(job.status || 'Not reported'))}</code></p>` : ''}
+        </article>`;
     }
 
     function laneActions(lane) {
@@ -336,17 +364,24 @@
         return parts.join(' ');
     }
 
-    function laneRow(lane) {
-        const sid = String(lane.space_id || '');
-        const href = '#/spaces/' + encodeURIComponent(sid);
-        return `<tr>
-            <td><a class="mono" href="${esc(href)}">${esc(sid)}</a></td>
-            <td>${laneStateDot(lane.lane_state)}</td>
-            <td>${jobCell(lane.running_job)}</td>
-            <td class="num">${queuedCell(lane)}</td>
-            <td>${latestCell(lane)}</td>
-            <td class="actions">${laneActions(lane)}</td>
-        </tr>`;
+    function openPicker() {
+        beginModalOp();
+        const lanes = scopedItems(state.data && state.data.lanes);
+        if (!lanes.length) { showModal('Consolidate notes', stateUnavailable('No accessible spaces loaded. Refresh to try again.')); return; }
+        const options = lanes.map(lane => `<option value="${esc(lane.space_id)}">${esc(lane.space_id)}</option>`).join('');
+        showModal('Consolidate notes', `<div class="consol-picker form-group"><label class="form-label" for="consolPickSpace">Space</label>
+            <select id="consolPickSpace" class="form-input"><option value="">Select a space</option>${options}</select></div>
+            <div id="consolPickerActions"></div>`);
+        const select = document.getElementById('consolPickSpace');
+        if (!select) return;
+        const update = () => {
+            const el = document.getElementById('consolPickerActions');
+            const lane = lanes.find(item => item.space_id === select.value);
+            if (el) el.innerHTML = lane ? laneActions(lane) : '';
+        };
+        select.onchange = update;
+        if (state.scope) select.value = state.scope;
+        update();
     }
 
     function deniedFooter(denied) {
@@ -361,16 +396,34 @@
     function paintLanes(d) {
         const el = document.getElementById('consolLanes');
         if (!el) return;
-        const lanes = Array.isArray(d.lanes) ? d.lanes : [];
-        let body;
-        if (!lanes.length) {
-            body = stateEmpty({ title: 'No spaces visible', hint: 'This token cannot see any consolidation lanes.' });
-        } else {
-            const rows = lanes.map(laneRow).join('');
-            const table = dataTable(['Space', 'Lane', 'Running job', 'Queued', 'Latest', 'Actions'], rows);
-            body = `<div class="panel-header"><h2>Lanes</h2><span class="count-pill mono">${esc(String(lanes.length))}</span></div>${table}`;
+        const focusedJob = document.activeElement && el.contains && el.contains(document.activeElement)
+            ? document.activeElement.dataset && document.activeElement.dataset.jobId : null;
+        const lanes = scopedItems(d.lanes);
+        const denied = scopedItems(d.denied_spaces);
+        if (!lanes.length && denied.length) {
+            el.innerHTML = panel(stateUnavailable('Consolidation data is not accessible.')) + deniedFooter(denied);
+            return;
         }
-        el.innerHTML = metricCards(d) + panel(body) + deniedFooter(d.denied_spaces);
+        if (!lanes.length) {
+            el.innerHTML = panel(stateEmpty({ title: 'No spaces visible', hint: 'This token cannot see any consolidation lanes.' }));
+            return;
+        }
+        const jobs = collectJobs(lanes);
+        const section = (title, items, empty, hint) => panel(`<div class="panel-header"><h2>${title}</h2><span class="count-pill">${esc(String(items.length))}</span></div>
+            <div class="consol-job-list">${items.length ? items.map(jobRow).join('') : stateEmpty({ title: empty, hint })}</div>`);
+        const diagnostics = lanes.filter(lane => !['idle', 'running', 'queued', 'failed'].includes(lane.lane_state)
+            || (lane.queued_count > 0 && !(Array.isArray(lane.queued_jobs) && lane.queued_jobs.length)))
+            .map(lane => `<p class="body-small">${esc(lane.space_id)} · ${lane.queued_count > 0 ? `${esc(String(lane.queued_count))} queued; job details unavailable` : 'Consolidation state unavailable'}</p>`).join('');
+        el.innerHTML = section('In progress', jobs.active, 'No jobs in progress', 'Refresh to check for newly submitted jobs.')
+            + (diagnostics ? panel(diagnostics) : '')
+            + section('Recent history', jobs.history, 'No completed jobs available', 'History may have been cleared by a server restart or trimmed.')
+            + `<p class="consol-history-note body-small text-muted">History is held in server memory and is bounded. It may be cleared by a restart.</p>`
+            + (jobs.unreported.length ? panel(`<div class="state-degraded body-small">Some jobs have an unknown state.</div>${jobs.unreported.map(jobRow).join('')}`) : '')
+            + deniedFooter(denied);
+        if (focusedJob && el.querySelectorAll) {
+            const target = Array.from(el.querySelectorAll('[data-action="consol-job"]')).find(button => button.dataset.jobId === focusedJob);
+            if (target) target.focus();
+        }
     }
 
     // ───────────────────────── job inspector ─────────────────────────
@@ -385,7 +438,7 @@
             return `<tr><td class="mono-data">${esc(item.filename)}</td><td class="num mono-data">${esc(String(item.utf8_bytes))}</td><td class="num mono-data">${esc(String(item.max_size))}</td></tr>`;
         }).join('');
         return rows
-            ? `<div class="consol-size-advisory">${statusDot('warn', 'Bank size advisory — compaction is a human decision: bank_compact (MCP tool, manage) from any client')}${dataTable(['File', 'UTF-8 bytes', 'Advisory threshold'], rows)}</div>`
+            ? `<div class="consol-size-advisory">${statusDot('warn', 'Some bank files exceed the advisory size')}<p class="body-small">Compaction is optional. Open the space’s Memory Bank to check files for compaction.</p>${dataTable(['File', 'UTF-8 bytes', 'Advisory threshold'], rows)}</div>`
             : '';
     }
 
@@ -395,7 +448,7 @@
         // A stop at the first batch leaves notes_processed at 0 with notes_total > 0
         // and must render its counters, never "nothing to do".
         if (Number(result.notes_total) === 0 && result.message) {
-            return `<div class="consol-nothing"><span class="micro-label">NOTHING TO DO</span>${serverMessage(result.message)}</div>`;
+            return `<div class="consol-nothing"><span class="micro-label">Nothing to do</span>${serverMessage(result.message)}</div>`;
         }
         const rows = [
             ['Notes total', result.notes_total],
@@ -447,13 +500,24 @@
         else if (qp >= 2) posLine = statusDot('warn', `Position ${qp} in queue`);
         let statusBlock = '';
         if (job.status === 'succeeded') statusBlock = renderResultMetrics(job.result) + renderBankSizeAdvisory(job.result);
-        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">FAILED</div>${serverMessage(job.error)}</div></div>${renderResultMetrics(job.result)}${renderBankSizeAdvisory(job.result)}`;
+        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">Failed</div>${serverMessage(job.error)}</div></div>${renderResultMetrics(job.result)}${renderBankSizeAdvisory(job.result)}`;
         else if (job.message) statusBlock = serverMessage(job.message);
         return `<div class="consol-jobinspect">
             ${progressBar(job.progress)}
             <div class="consol-jobmeta">${meta.join('')}${posLine ? `<div class="consol-jobmeta-row">${posLine}</div>` : ''}</div>
             ${statusBlock}
         </div>`;
+    }
+
+    let jobLastSuccess = null;
+    function jobSnapshot(job) {
+        jobLastSuccess = new Date().toISOString();
+        return `<div id="consolJobFreshness" class="body-small text-muted">Last updated ${renderTimestamp(jobLastSuccess)}</div>${renderJob(job)}`;
+    }
+
+    function paintJobStale(error) {
+        const el = document.getElementById('consolJobFreshness');
+        if (el) el.innerHTML = `${statusDot('warn', 'Job data is stale')} Last updated ${renderTimestamp(jobLastSuccess)}${serverMessage(error && error.message || '')}`;
     }
 
     async function inspectJob(jobId) {
@@ -476,7 +540,7 @@
             showModal('Consolidation job', panel(stateUnavailable(data.message)));
             return;
         }
-        showModal('Consolidation job', renderJob(data));
+        showModal('Consolidation job', jobSnapshot(data));
         scheduleJobLive(jobId, op, epoch, data);
     }
 
@@ -500,7 +564,7 @@
                 next = await callTool('bank_consolidation_status', { job_id: jobId });
             } catch (e) {
                 // Transport failure: keep the last snapshot on screen and re-arm.
-                if (AdminRouter.epoch === epoch && modalOpCurrent(op) && sessionActive() && modalOpen()) scheduleJobLive(jobId, op, epoch, data);
+                if (AdminRouter.epoch === epoch && modalOpCurrent(op) && sessionActive() && modalOpen()) { paintJobStale(); scheduleJobLive(jobId, op, epoch, data); }
                 return;
             }
             if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive() || !modalOpen()) return;
@@ -509,12 +573,13 @@
             // payload (typed `error`, unknown shape) keeps the last good snapshot
             // and re-arms: a running job must never be replaced on screen by an
             // error state because one status read failed.
-            if (nextStatus === 'truncated' || nextStatus === 'rate_limited' || nextStatus === 'read_only') return;
+            if (nextStatus === 'truncated' || nextStatus === 'rate_limited' || nextStatus === 'read_only') { paintJobStale(next); return; }
             if (!['running', 'queued', 'succeeded', 'failed', 'not_found'].includes(nextStatus)) {
+                paintJobStale(next);
                 scheduleJobLive(jobId, op, epoch, data);
                 return;
             }
-            showModal('Consolidation job', renderJob(next));
+            showModal('Consolidation job', jobSnapshot(next));
             scheduleJobLive(jobId, op, epoch, next);
         }, LIVE_REFRESH_MS);
     }
@@ -583,6 +648,7 @@
         const op = beginModalOp();
         showModal('Consolidate', `<p class="body-small">${scopeCopy}</p><p class="body-small">Consolidation is asynchronous and runs one worker per space.</p>`,
             'Consolidate', async () => {
+                if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
                 const data = await enqueue(spaceId, scope);
                 if (!data) return true; // guard already toasted (missing identity)
                 return handleEnqueueResult(data, epoch, op);
@@ -596,7 +662,8 @@
         if (!el) return;
         const t = state.thresholds;
         const controls = `
-            <div class="panel-header"><h2>Stale banks</h2></div>
+            <div class="panel-header"><h2>Notes to consolidate</h2>
+                <button type="button" class="btn btn-secondary btn-sm" data-action="consol-stale-toggle" aria-expanded="true">Hide notes</button></div>
             <div class="consol-stale-controls">
                 <div class="form-group">
                     <label class="form-label" for="consolStaleMinNotes">Min notes</label>
@@ -609,8 +676,10 @@
                 <button type="button" class="btn btn-primary" data-action="consol-stale-scan">Scan</button>
             </div>
             <div id="consolStaleResults"></div>`;
-        el.innerHTML = panel(controls);
-        if (state.staleData) paintStale(state.staleData);
+        el.innerHTML = state.staleMode ? panel(controls) : panel(`<div class="panel-header"><h2>Notes to consolidate</h2>
+            <button type="button" class="btn btn-secondary btn-sm" data-action="consol-stale-toggle" aria-expanded="false">Find notes</button></div>
+            <p class="body-small">Check for accumulated notes using minimum note count and age. This scan runs on demand.</p>`);
+        if (state.staleMode && state.staleData) paintStale(state.staleData);
     }
 
     function staleRow(sp) {
@@ -618,7 +687,7 @@
         const href = '#/spaces/' + encodeURIComponent(sid);
         const age = (typeof sp.oldest_note_age_days === 'number') ? String(sp.oldest_note_age_days) : '—';
         return `<tr>
-            <td><a class="mono" href="${esc(href)}">${esc(sid)}</a></td>
+            <td><a class="consol-space-name" href="${esc(href)}">${esc(sid)}</a></td>
             <td class="num mono">${esc(String(sp.live_notes_count ?? '—'))}</td>
             <td class="num mono">${esc(age)}</td>
             <td>${sp.oldest_note_timestamp ? renderTimestamp(sp.oldest_note_timestamp) : '<span class="text-faint">—</span>'}</td>
@@ -633,9 +702,9 @@
             el.innerHTML = stateError({ title: "Couldn't scan stale banks", message: d && d.message, retryAction: 'consol-stale-scan' });
             return;
         }
-        const stale = Array.isArray(d.spaces) ? d.spaces : [];
-        const scanned = (typeof d.total_spaces === 'number') ? d.total_spaces : (Array.isArray(d.scanned) ? d.scanned.length : 0);
-        const scanLine = `<p class="body-small consol-scan-line">Scanned ${esc(String(scanned))} space(s) at thresholds ≥ ${esc(String(d.min_notes))} notes, ≥ ${esc(String(d.min_age_days))} days.</p>`;
+        const stale = scopedItems(d.spaces);
+        const scanned = (typeof d.total_spaces === 'number') ? d.total_spaces : (Array.isArray(d.scanned) ? d.scanned.length : '—');
+        const scanLine = `<p class="body-small consol-scan-line">Scanned ${esc(String(scanned))} accessible space(s)${state.scope ? '; showing this space only' : ''} at thresholds ≥ ${esc(String(d.min_notes))} notes, ≥ ${esc(String(d.min_age_days))} days.</p>`;
         let body;
         if (!stale.length) {
             body = scanLine + stateEmpty({ title: 'No stale banks', hint: `No stale banks at the current thresholds (≥ ${d.min_notes} notes, ≥ ${d.min_age_days} days).` });
@@ -643,9 +712,9 @@
             const rows = stale.map(staleRow).join('');
             const table = dataTable(['Space', 'Notes', 'Oldest (days)', 'Oldest note', 'Actions'], rows);
             const allBtn = `<button type="button" class="btn btn-secondary btn-sm" data-action="consol-stale-all">Consolidate all stale</button>`;
-            body = scanLine + `<div class="panel-header"><h3>${esc(String(d.total_stale))} stale</h3><div class="page-header-actions">${allBtn}</div></div>` + table;
+            body = scanLine + `<div class="panel-header"><h3>${esc(String(stale.length))} matching space(s)</h3><div class="page-header-actions">${allBtn}</div></div>` + table;
         }
-        el.innerHTML = body + deniedFooter(d.denied_spaces);
+        el.innerHTML = body + deniedFooter(scopedItems(d.denied_spaces));
     }
 
     async function scanStale() {
@@ -660,8 +729,9 @@
         if (resultsEl) resultsEl.innerHTML = stateLoading('Scanning stale banks…');
         const epoch = AdminRouter.epoch;
         const gen = ++_staleGen;
+        const generation = currentSessionGeneration();
         // Drop out-of-order scans: only the latest scan may paint / set staleData.
-        const stale = () => AdminRouter.epoch !== epoch || gen !== _staleGen || !sessionActive();
+        const stale = () => AdminRouter.epoch !== epoch || gen !== _staleGen || !sessionActive() || !sessionGenerationIsCurrent(generation);
         let data;
         try {
             data = await callTool('bank_stale_spaces', { min_notes: minNotes, min_age_days: minAge });
@@ -687,6 +757,7 @@
         const op = beginModalOp();
         showModal('Consolidate stale bank', `<p class="body-small">Submit a consolidation for space <code>${esc(spaceId)}</code>? This clears accumulated live notes into the mid bank.</p><p class="body-small">Scope depends on your permission and is enforced by the server: manage/admin consolidates <strong>all agents'</strong> notes; a write-only token consolidates <strong>only your own</strong> notes (the note count above counts all agents).</p>`,
             'Consolidate', async () => {
+                if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
                 let data;
                 const args = { space_id: spaceId };
                 if (hasManage()) args.agent = '';
@@ -721,8 +792,7 @@
         }
         state.staleData = scan;
         paintStale(scan);
-        const captured = Array.isArray(scan.spaces)
-            ? scan.spaces.map(s => String(s.space_id || '')).filter(Boolean) : [];
+        const captured = scopedItems(scan.spaces).map(s => String(s.space_id || '')).filter(Boolean);
         if (!captured.length) { showModal('Consolidate all stale', panel(stateEmpty({ title: 'No stale banks to consolidate' }))); return; }
         const list = captured.map(s => `<li>${copyable(s)}</li>`).join('');
         const scopeCopy = hasManage()
@@ -780,6 +850,7 @@
 
     // ───────────────────────── action registration ─────────────────────────
 
+    registerAction('consol-picker', () => { if (sessionActive() && sessionGenerationIsCurrent(state.sessionGeneration)) openPicker(); });
     registerAction('consol-refresh', () => AdminRouter.refresh());
     registerAction('consol-job', (d) => { if (d.jobId) inspectJob(d.jobId); });
     registerAction('consol-mine', (d) => { if (d.space) confirmEnqueue(d.space, 'mine'); });
@@ -791,7 +862,8 @@
         // the cache so renderStalePanel shows an empty panel, then scan with a
         // visible loading phase. Deactivating just hides the panel.
         if (activating) state.staleData = null;
-        AdminRouter.refresh();
+        else _staleGen += 1; // A late scan must not repaint or refill the collapsed panel.
+        renderStalePanel(AdminRouter.epoch);
         if (activating) scanStale();
     });
     registerAction('consol-stale-scan', () => scanStale());
