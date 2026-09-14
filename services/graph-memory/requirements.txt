@@ -55,7 +55,7 @@ pypdf==6.17.0             # Lecture fichiers PDF
 beautifulsoup4==4.15.0
 
 # === CLI ===
-click==8.4.2               # Framework CLI
+click==8.5.0               # Framework CLI
 rich==15.0.0               # Affichage CLI (tableaux, spinners, couleurs)
 aiohttp==3.14.3            # CVE-2026-69244 (parser C de reponses malformees)
 
