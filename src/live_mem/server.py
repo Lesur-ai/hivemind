@@ -264,7 +264,7 @@ def create_app():
     Crée l'application ASGI complète avec les middlewares.
 
     Pile d'exécution (premier exécuté → dernier) :
-        RequestId → Auth → Metrics → Audit → Logging → ResponseLimit
+        RequestId → Auth → Metrics → Audit → Logging → MCPRequestLimit → ResponseLimit
         → [Mesh namespace, si activé] → StaticFiles → MCP Streamable HTTP
 
     Le RequestIdMiddleware génère un ID unique par requête (contextvars).
@@ -273,6 +273,7 @@ def create_app():
     L'AuditMiddleware émet des entrées d'audit JSON structurées.
     Le LoggingMiddleware trace les requêtes HTTP en JSON sur stderr.
     Le ResponseLimitMiddleware tronque les réponses > 512 KB (MCP exclu).
+    Le MCPRequestLimitMiddleware borne le body avant le buffering du SDK.
     Le StaticFilesMiddleware sert /live, /static/*, /api/* (interface web).
     """
     # HM-01 fix : rejeter une ADMIN_BOOTSTRAP_KEY par défaut/faible ICI, dans la
@@ -302,6 +303,7 @@ def create_app():
     from .middleware import (
         RequestIdMiddleware,
         MetricsMiddleware,
+        MCPRequestLimitMiddleware,
         ResponseLimitMiddleware,
         AuditMiddleware,
     )
@@ -437,7 +439,7 @@ def create_app():
     app = mcp.streamable_http_app()
 
     # Empiler les middlewares (dernier ajouté = premier exécuté)
-    # Ordre d'exécution : RequestId → Auth → Metrics → Audit → Logging → ResponseLimit → Static → MCP
+    # Ordre : RequestId → Auth → Metrics → Audit → Logging → MCPRequestLimit → ResponseLimit → Static → MCP
     # HM-02 fix : MetricsMiddleware est désormais APRÈS AuthMiddleware. Une requête
     # non authentifiée sur une route non-publique est court-circuitée en 401 par
     # Auth et n'atteint plus Metrics → plus de cardinalité de métriques pilotable
@@ -464,6 +466,7 @@ def create_app():
 
         app = MeshAdminMiddleware(app, mesh_pairing_service, process_lock=mesh_process_lock)
     app = ResponseLimitMiddleware(app, max_bytes=settings.response_max_bytes)
+    app = MCPRequestLimitMiddleware(app, max_bytes=settings.mcp_request_max_bytes)
     app = LoggingMiddleware(app)
     app = AuditMiddleware(app)
     app = MetricsMiddleware(app)

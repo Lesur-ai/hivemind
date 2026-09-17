@@ -34,7 +34,9 @@ from hivemind_inference import (
 
 SELF_TEST_CACHE_SECONDS = 300.0
 SELF_TEST_ROLE_TIMEOUT_SECONDS = 15.0
-SELF_TEST_CHAT_MAX_OUTPUT_TOKENS = 8
+# Reasoning may consume the output budget before any visible text is emitted.
+# Keep one bounded call, still capped by the operator's configured ceiling.
+SELF_TEST_CHAT_MAX_OUTPUT_TOKENS = 1024
 # Match the provider-runtime close budget: lifecycle shutdown must terminate
 # even when a provider delays or suppresses cooperative cancellation.
 SELF_TEST_SHUTDOWN_BUDGET_SECONDS = 10.0
@@ -292,6 +294,8 @@ async def _test_chat(runtime: InferenceRuntime) -> SelfTestRoleEvidence:
         return _normalized_failure(profile, request, exc)
     if (
         type(result) is not ChatResult
+        or not result.text.strip()
+        or result.finish_reason != "stop"
         or result.correlation_id != request.correlation_id
         or result.configured_model != profile.configured_model
         or (

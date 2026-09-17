@@ -17,6 +17,7 @@ Format de backup sur S3 :
 Politique de rétention : configurable via BACKUP_RETENTION_COUNT (.env)
 """
 
+import gzip
 import io
 import json
 import sys
@@ -26,6 +27,8 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from ..config import get_settings
+from .egress import redact_proxy_errors_async
+from .validators import validate_graph_document_references
 
 
 # Version du format de backup (pour compatibilité future)
@@ -33,6 +36,103 @@ BACKUP_FORMAT_VERSION = "1.0"
 
 # Taille max d'une archive tar.gz en bytes (100 MB)
 MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024
+MAX_ARCHIVE_EXPANDED_SIZE_BYTES = 512 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_SIZE_BYTES = 128 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_ARCHIVE_METADATA_SIZE_BYTES = 1024 * 1024
+MAX_ARCHIVE_MANIFEST_SIZE_BYTES = 1024 * 1024
+MAX_ARCHIVE_JSON_SIZE_BYTES = 64 * 1024 * 1024
+
+
+class _BoundedArchiveInfo(tarfile.TarInfo):
+    def _proc_member(self, archive):
+        # tarfile consumes PAX/GNU extension bodies before returning a member.
+        # Check their headers here, then leave format parsing to the stdlib.
+        archive._restore_header_count = getattr(archive, "_restore_header_count", 0) + 1
+        if archive._restore_header_count > MAX_ARCHIVE_MEMBERS:
+            raise ValueError("Archive member count exceeds limit")
+        if self.size < 0 or self.size > MAX_ARCHIVE_MEMBER_SIZE_BYTES:
+            raise ValueError("Archive member size exceeds limit")
+        if self.type in (tarfile.XGLTYPE, tarfile.GNUTYPE_SPARSE):
+            # Global PAX dictionaries are copied to every member. Native
+            # exports use local PAX headers and never generate sparse files.
+            raise ValueError("Unsupported global PAX or sparse member")
+        if self.type in (
+            tarfile.XHDTYPE, tarfile.SOLARIS_XHDTYPE,
+            tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK,
+        ) and self.size > MAX_ARCHIVE_METADATA_SIZE_BYTES:
+            raise ValueError("Archive metadata size exceeds limit")
+        return super()._proc_member(archive)
+
+    def _proc_gnusparse_00(self, *args):
+        # Sparse maps can allocate outside the ordinary header processing.
+        raise ValueError("Unsupported sparse member")
+
+    _proc_gnusparse_01 = _proc_gnusparse_00
+    _proc_gnusparse_10 = _proc_gnusparse_00
+
+
+def _is_archive_document(name: str) -> bool:
+    return name.startswith("documents/") or "/documents/" in name
+
+
+def _archive_member_limit(name: str) -> int:
+    if _is_archive_document(name):
+        return MAX_ARCHIVE_MEMBER_SIZE_BYTES
+    filename = name.rsplit("/", 1)[-1]
+    if filename == "manifest.json":
+        return min(MAX_ARCHIVE_MEMBER_SIZE_BYTES, MAX_ARCHIVE_MANIFEST_SIZE_BYTES)
+    if filename in {"graph_data.json", "document_keys.json", "qdrant_vectors.jsonl"}:
+        return min(MAX_ARCHIVE_MEMBER_SIZE_BYTES, MAX_ARCHIVE_JSON_SIZE_BYTES)
+    return MAX_ARCHIVE_MEMBER_SIZE_BYTES
+
+
+def _open_bounded_archive(archive_bytes: bytes) -> tarfile.TarFile:
+    """Preflight the entire archive before JSON parsing or backend access."""
+    if not isinstance(archive_bytes, bytes):
+        raise ValueError("archive_bytes must be bytes")
+    if len(archive_bytes) > MAX_ARCHIVE_SIZE_BYTES:
+        raise ValueError("Archive is too large")
+
+    expanded = io.BytesIO()
+    with gzip.GzipFile(fileobj=io.BytesIO(archive_bytes)) as compressed:
+        while True:
+            remaining = MAX_ARCHIVE_EXPANDED_SIZE_BYTES - expanded.tell()
+            block = compressed.read(min(64 * 1024, remaining + 1))
+            if not block:
+                break
+            if expanded.tell() + len(block) > MAX_ARCHIVE_EXPANDED_SIZE_BYTES:
+                raise ValueError("Archive decompressed size exceeds limit")
+            expanded.write(block)
+    expanded.seek(0)
+    archive = tarfile.open(fileobj=expanded, mode="r:", tarinfo=_BoundedArchiveInfo)
+    try:
+        names = set()
+        for member in archive:
+            if not (member.isfile() or member.isdir()):
+                raise ValueError("Unsupported archive member type")
+            if member.name in names:
+                raise ValueError("Duplicate archive member name")
+            names.add(member.name)
+            # PAX can override the header's size before extraction.
+            if member.size < 0 or member.size > _archive_member_limit(member.name):
+                raise ValueError("Archive member size exceeds limit")
+        return archive
+    except Exception:
+        archive.close()
+        raise
+
+
+def _read_archive_member(archive: tarfile.TarFile, name: str) -> bytes:
+    member_file = archive.extractfile(name)
+    if member_file is None:
+        raise ValueError(f"Unable to read '{name}' from the archive")
+    limit = _archive_member_limit(name)
+    with member_file:
+        content = member_file.read(limit + 1)
+    if len(content) > limit:
+        raise ValueError("Archive member size exceeds limit")
+    return content
 
 # Regex pour valider les composants d'un backup_id (pas de path traversal)
 import re
@@ -101,6 +201,22 @@ class BackupService:
     def _backup_s3_prefix(self, memory_id: str, timestamp: str) -> str:
         """Construit le préfixe S3 pour un backup."""
         return f"{self._prefix}/{memory_id}/{timestamp}"
+
+    def _validate_document_keys(self, memory_id: str, documents: list) -> None:
+        """Refuse untrusted and persisted document-key copies before any I/O."""
+        if type(documents) is not list:
+            raise ValueError("Invalid document_keys.json")
+        for document in documents:
+            if type(document) is not dict:
+                raise ValueError("Invalid document_keys.json")
+            try:
+                key = self._storage.document_key(memory_id, document.get("key"))
+                uri = document.get("uri")
+                if uri is not None and uri != "":
+                    if self._storage.document_key(memory_id, uri) != key:
+                        raise ValueError("Document key and URI disagree")
+            except ValueError:
+                raise ValueError("Invalid document_keys.json") from None
     
     # =========================================================================
     # Backup
@@ -157,6 +273,7 @@ class BackupService:
         # === 1. Export Neo4j ===
         await _log("📊 Exporting Neo4j graph...")
         graph_data = await self._graph.export_memory_data(memory_id)
+        validate_graph_document_references(graph_data, memory_id, self._storage._bucket)
         graph_json = json.dumps(graph_data, ensure_ascii=False, indent=2)
         graph_hash = hashlib.sha256(graph_json.encode()).hexdigest()
         
@@ -197,18 +314,15 @@ class BackupService:
         for doc in graph_data.get("documents", []):
             uri = doc.get("uri", "")
             if uri:
-                try:
-                    key = self._storage._parse_key(uri)
-                    document_keys.append({
-                        "doc_id": doc.get("id"),
-                        "filename": doc.get("filename"),
-                        "uri": uri,
-                        "key": key,
-                        "hash": doc.get("hash"),
-                        "size_bytes": doc.get("size_bytes", 0)
-                    })
-                except ValueError:
-                    pass
+                key = self._storage.document_key(memory_id, uri)
+                document_keys.append({
+                    "doc_id": doc.get("id"),
+                    "filename": doc.get("filename"),
+                    "uri": uri,
+                    "key": key,
+                    "hash": doc.get("hash"),
+                    "size_bytes": doc.get("size_bytes", 0)
+                })
         
         doc_keys_json = json.dumps(document_keys, ensure_ascii=False, indent=2)
         doc_keys_hash = hashlib.sha256(doc_keys_json.encode()).hexdigest()
@@ -409,6 +523,8 @@ class BackupService:
                 f"Incompatible backup version: {manifest.get('version')} "
                 f"(expected: {BACKUP_FORMAT_VERSION})"
             )
+        if manifest.get("memory_id") != memory_id:
+            raise ValueError("Backup manifest memory namespace mismatch")
         
         await _log(f"✅ Manifest OK: {manifest.get('memory_name', '?')} "
                     f"({manifest['stats']['entities']} entities, "
@@ -429,6 +545,10 @@ class BackupService:
             )
         
         await _log("✅ Graph data verified (checksum OK)")
+
+        validate_graph_document_references(graph_data, memory_id, self._storage._bucket)
+        doc_keys = await self._download_json(f"{backup_prefix}/document_keys.json")
+        self._validate_document_keys(memory_id, doc_keys)
         
         # === 3. Télécharger les vecteurs Qdrant ===
         await _log("🔢 Loading Qdrant vectors...")
@@ -477,14 +597,12 @@ class BackupService:
         
         # === 6. Vérifier les documents S3 ===
         await _log("📄 Verifying S3 documents...")
-        doc_keys = await self._download_json(f"{backup_prefix}/document_keys.json")
-        
         docs_ok = 0
         docs_missing = 0
         for doc in doc_keys:
             uri = doc.get("uri", "")
             if uri:
-                exists = await self._storage.document_exists(uri)
+                exists = await self._storage.document_exists(uri, memory_id=memory_id)
                 if exists:
                     docs_ok += 1
                 else:
@@ -544,6 +662,17 @@ class BackupService:
         backup_prefix = self._backup_s3_prefix(memory_id, timestamp)
         
         await _log(f"Preparing archive: {backup_id}")
+
+        # Historical backups are untrusted too. Check all persisted reference
+        # copies before any document GET, including lightweight downloads.
+        reference_files = {
+            filename: (await self._download_text(f"{backup_prefix}/{filename}")).encode("utf-8")
+            for filename in ("graph_data.json", "document_keys.json")
+        }
+        graph_data = json.loads(reference_files["graph_data.json"])
+        validate_graph_document_references(graph_data, memory_id, self._storage._bucket)
+        doc_keys = json.loads(reference_files["document_keys.json"])
+        self._validate_document_keys(memory_id, doc_keys)
         
         # Créer l'archive tar.gz en mémoire
         buf = io.BytesIO()
@@ -562,11 +691,14 @@ class BackupService:
             for filename in json_files:
                 key = f"{backup_prefix}/{filename}"
                 try:
-                    response = self._storage._client.get_object(
-                        Bucket=self._storage._bucket,
-                        Key=key
-                    )
-                    content = response["Body"].read()
+                    if filename in reference_files:
+                        content = reference_files[filename]
+                    else:
+                        response = self._storage._client.get_object(
+                            Bucket=self._storage._bucket,
+                            Key=key
+                        )
+                        content = response["Body"].read()
                     
                     # Ajouter au tar
                     info = tarfile.TarInfo(name=f"{archive_dir}/{filename}")
@@ -581,23 +713,11 @@ class BackupService:
             if include_documents:
                 await _log("📄 Adding original documents...")
                 
-                doc_keys_text = await self._download_text(
-                    f"{backup_prefix}/document_keys.json"
-                )
-                doc_keys = json.loads(doc_keys_text) if doc_keys_text.strip() else []
-                
                 for i, doc in enumerate(doc_keys):
-                    key = doc.get("key", "")
+                    key = doc["key"]
                     filename_orig = doc.get("filename", f"doc_{i}")
-                    if not key:
-                        continue
-                    
                     try:
-                        response = self._storage._client.get_object(
-                            Bucket=self._storage._bucket,
-                            Key=key
-                        )
-                        content = response["Body"].read()
+                        content = await self._storage.download_document(memory_id, key)
                         
                         info = tarfile.TarInfo(
                             name=f"{archive_dir}/documents/{filename_orig}"
@@ -621,22 +741,14 @@ class BackupService:
     @staticmethod
     def _archive_memory_id(archive_bytes: bytes) -> str:
         """Read and validate the manifest namespace before admission."""
-        if not isinstance(archive_bytes, bytes):
-            raise ValueError("archive_bytes must be bytes")
-        if len(archive_bytes) > MAX_ARCHIVE_SIZE_BYTES:
-            raise ValueError("Archive is too large")
-
         try:
-            with tarfile.open(
-                fileobj=io.BytesIO(archive_bytes),
-                mode="r:gz",
-            ) as archive:
+            with _open_bounded_archive(archive_bytes) as archive:
                 manifest_name = next(
                     (
                         name
                         for name in archive.getnames()
-                        if name == "manifest.json"
-                        or name.endswith("/manifest.json")
+                        if not _is_archive_document(name)
+                        and (name == "manifest.json" or name.endswith("/manifest.json"))
                     ),
                     None,
                 )
@@ -644,12 +756,9 @@ class BackupService:
                     raise ValueError(
                         "manifest.json was not found in the archive"
                     )
-                manifest_file = archive.extractfile(manifest_name)
-                if manifest_file is None:
-                    raise ValueError(
-                        "Could not read 'manifest.json' from the archive"
-                    )
-                manifest = json.loads(manifest_file.read().decode("utf-8"))
+                manifest = json.loads(
+                    _read_archive_member(archive, manifest_name).decode("utf-8")
+                )
         except ValueError:
             raise
         except Exception as error:
@@ -724,9 +833,8 @@ class BackupService:
         await _log(f"Archive received: {self._human_size(archive_size)}")
         
         # === 1. Extraire l'archive en mémoire ===
-        buf = io.BytesIO(archive_bytes)
         try:
-            tar = tarfile.open(fileobj=buf, mode='r:gz')
+            tar = _open_bounded_archive(archive_bytes)
         except Exception as e:
             raise ValueError(f"Invalid tar.gz archive: {e}")
         
@@ -736,16 +844,15 @@ class BackupService:
         def _find_member(filename: str) -> Optional[str]:
             """Trouve un fichier dans l'archive (avec ou sans préfixe dossier)."""
             for m in members:
-                if m == filename or m.endswith(f"/{filename}"):
+                if not _is_archive_document(m) and (
+                    m == filename or m.endswith(f"/{filename}")
+                ):
                     return m
             return None
         
         def _read_member(member_name: str) -> bytes:
             """Lit le contenu d'un membre de l'archive."""
-            f = tar.extractfile(member_name)
-            if f is None:
-                raise ValueError(f"Unable to read '{member_name}' from the archive")
-            return f.read()
+            return _read_archive_member(tar, member_name)
         
         # === 2. Lire et vérifier le manifest ===
         manifest_path = _find_member("manifest.json")
@@ -787,6 +894,7 @@ class BackupService:
             raise ValueError("graph_data.json not found in the archive")
         
         graph_data = json.loads(_read_member(graph_path).decode("utf-8"))
+        validate_graph_document_references(graph_data, memory_id, self._storage._bucket)
         
         # Vérifier le checksum
         graph_json = json.dumps(graph_data, ensure_ascii=False, indent=2)
@@ -834,6 +942,7 @@ class BackupService:
         if type(doc_keys_list) is not list:
             tar.close()
             raise ValueError("Invalid document_keys.json")
+        self._validate_document_keys(memory_id, doc_keys_list)
         
         # Construire un mapping filename → key S3 original
         filename_to_key = {}
@@ -972,6 +1081,7 @@ class BackupService:
     # Delete backup
     # =========================================================================
     
+    @redact_proxy_errors_async
     async def delete_backup(self, backup_id: str) -> Dict[str, Any]:
         """
         Supprime un backup de S3.
@@ -985,8 +1095,29 @@ class BackupService:
         # Valider le backup_id (anti path-traversal)
         memory_id, timestamp = self._validate_backup_id(backup_id)
         prefix = self._backup_s3_prefix(memory_id, timestamp)
-        
-        result = await self._storage.delete_prefix(f"{prefix}/")
+
+        # Hivemind snapshots share this historical prefix. A Graph manifest
+        # identifies only our four format artifacts, never the whole prefix.
+        # Do not require a live Graph memory: backups intentionally outlive it.
+        manifest = await self._download_json(f"{prefix}/manifest.json")
+        files = ("graph_data.json", "qdrant_vectors.jsonl", "document_keys.json", "manifest.json")
+        if (
+            type(manifest) is not dict
+            or manifest.get("version") != BACKUP_FORMAT_VERSION
+            or manifest.get("memory_id") != memory_id
+            or manifest.get("backup_id") != backup_id
+            or type(manifest.get("files")) is not list
+            or sorted(manifest["files"], key=str) != sorted(files)
+        ):
+            raise ValueError("Backup is not an identified Graph backup")
+
+        # Fixed names, not manifest-provided deletion targets. Delete the
+        # manifest last so a partial failure can be retried with ownership proof.
+        for filename in files:
+            self._storage._client.delete_object(
+                Bucket=self._storage._bucket, Key=f"{prefix}/{filename}"
+            )
+        result = {"deleted_count": len(files), "error_count": 0}
         
         print(f"🗑️ [Backup] Deleted: {backup_id} "
               f"({result['deleted_count']} files)", file=sys.stderr)

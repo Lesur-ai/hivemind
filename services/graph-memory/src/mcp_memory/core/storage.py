@@ -27,7 +27,7 @@ from .maintenance import (
     MAX_REINDEX_SOURCE_TOTAL_BYTES,
     ReindexSourceLimitExceeded,
 )
-from .validators import MAX_INGEST_SIZE_BYTES
+from .validators import MAX_INGEST_SIZE_BYTES, VALID_MEMORY_ID, validate_document_key
 
 
 # P12-3 (Hivemind #268) : frontière de redaction partagée (voir egress.py) —
@@ -236,11 +236,7 @@ class StorageService:
         Returns:
             Contenu binaire du document
         """
-        key = self._parse_key(key_or_uri)
-        
-        # Vérification que le document appartient à la mémoire
-        if not key.startswith(f"{memory_id}/"):
-            raise PermissionError(f"Document does not belong to memory {memory_id}")
+        key = self.document_key(memory_id, key_or_uri)
         
         try:
             response = self._client.get_object(Bucket=self._bucket, Key=key)
@@ -266,11 +262,7 @@ class StorageService:
         Returns:
             True si supprimé, False si n'existait pas
         """
-        key = self._parse_key(key_or_uri)
-        
-        # Vérification que le document appartient à la mémoire
-        if not key.startswith(f"{memory_id}/"):
-            raise PermissionError(f"Document does not belong to memory {memory_id}")
+        key = self.document_key(memory_id, key_or_uri)
         
         try:
             self._client.delete_object(Bucket=self._bucket, Key=key)
@@ -282,9 +274,9 @@ class StorageService:
             return False
     
     @_redact_proxy_errors
-    async def document_exists(self, key_or_uri: str) -> bool:
+    async def document_exists(self, key_or_uri: str, *, memory_id: str) -> bool:
         """Vérifie si un document existe dans S3."""
-        key = self._parse_key(key_or_uri)
+        key = self.document_key(memory_id, key_or_uri)
         
         try:
             self._client.head_object(Bucket=self._bucket, Key=key)
@@ -296,7 +288,9 @@ class StorageService:
     async def get_signed_url(
         self,
         key_or_uri: str,
-        expires_in_seconds: int = 3600
+        expires_in_seconds: int = 3600,
+        *,
+        memory_id: str,
     ) -> str:
         """
         Génère une URL signée pour accéder au document.
@@ -308,7 +302,7 @@ class StorageService:
         Returns:
             URL signée
         """
-        key = self._parse_key(key_or_uri)
+        key = self.document_key(memory_id, key_or_uri)
         
         url = self._client.generate_presigned_url(
             'get_object',
@@ -356,7 +350,7 @@ class StorageService:
             return []
     
     @_redact_proxy_errors
-    async def check_documents(self, uris: list) -> dict:
+    async def check_documents(self, references: list[tuple[str, str]]) -> dict:
         """
         Vérifie l'accessibilité de documents S3 à partir d'une liste d'URIs.
         
@@ -364,7 +358,7 @@ class StorageService:
         la taille. Utilise le client SigV4 pour HEAD (compatible Dell ECS).
         
         Args:
-            uris: Liste d'URIs S3 (format s3://bucket/key)
+            references: Paires (memory_id, URI) issues du graphe autorisé
             
         Returns:
             dict avec:
@@ -381,8 +375,13 @@ class StorageService:
         errors = 0
         total_size = 0
         
-        for uri in uris:
-            key = self._parse_key(uri)
+        # Validate the complete inventory before its first HEAD, including old
+        # persisted references; one invalid reference cannot hide in a report.
+        documents = [
+            (uri, self.document_key(memory_id, uri))
+            for memory_id, uri in references
+        ]
+        for uri, key in documents:
             try:
                 # HEAD avec SigV4 (plus fiable pour les métadonnées sur Dell ECS)
                 response = self._client_v4.head_object(Bucket=self._bucket, Key=key)
@@ -436,7 +435,7 @@ class StorageService:
                 errors += 1
         
         return {
-            "total": len(uris),
+            "total": len(documents),
             "accessible": accessible,
             "missing": missing,
             "errors": errors,
@@ -491,7 +490,8 @@ class StorageService:
             
         except ClientError as e:
             print(f"❌ [S3] Full listing error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
-            return []
+            # Failed inventory is not proof of an empty document namespace.
+            raise
 
     @_redact_proxy_errors
     async def list_reindex_objects(self, memory_id: str) -> list:
@@ -501,7 +501,7 @@ class StorageService:
         raised to the maintenance boundary. Returning an empty list on a
         backend error would make an unverifiable namespace look authoritative.
         """
-        if type(memory_id) is not str or not memory_id:
+        if type(memory_id) is not str or not VALID_MEMORY_ID.fullmatch(memory_id):
             raise ValueError("memory_id is required")
         prefix = f"{memory_id}/documents/"
         objects = []
@@ -571,6 +571,7 @@ class StorageService:
                     raise ReindexSourceLimitExceeded(
                         "source inventory limit exceeded"
                     )
+                self.document_key(memory_id, key)
                 page_objects.append((key, size))
                 page_keys.add(key)
                 page_size += size
@@ -626,14 +627,10 @@ class StorageService:
         expected_size: int,
     ) -> bytes:
         """Read one exact retained source without emitting its key to logs."""
-        if (
-            type(memory_id) is not str
-            or not memory_id
-            or type(key) is not str
-            or not key.startswith(f"{memory_id}/documents/")
-            or key == f"{memory_id}/documents/"
-        ):
-            raise PermissionError("source object is outside the memory namespace")
+        try:
+            key = self.document_key(memory_id, key)
+        except ValueError:
+            raise PermissionError("source object is outside the memory namespace") from None
         if (
             type(expected_size) is not int
             or expected_size < 0
@@ -670,40 +667,23 @@ class StorageService:
     
     @_redact_proxy_errors
     async def delete_prefix(self, prefix: str) -> dict:
-        """
-        Supprime tous les objets S3 sous un préfixe donné.
-        
-        Utilisé pour nettoyer tous les fichiers d'une mémoire.
-        
-        Args:
-            prefix: Préfixe S3 (ex: "quoteflow-legal/")
-            
-        Returns:
-            dict avec deleted_count et errors
-        """
+        """Delete only one Graph document subtree, never a shared space root."""
+        if type(prefix) is not str:
+            raise ValueError("Invalid Graph document prefix")
+        memory_id, separator, suffix = prefix.partition("/")
+        if not separator or suffix != "documents/" or not VALID_MEMORY_ID.fullmatch(memory_id):
+            raise ValueError("Invalid Graph document prefix")
         objects = await self.list_all_objects(prefix=prefix)
-        deleted_count = 0
-        error_count = 0
-        
-        for obj in objects:
-            try:
-                self._client.delete_object(Bucket=self._bucket, Key=obj['key'])
-                deleted_count += 1
-                print(f"🗑️ [S3] Deleted: {obj['key']}", file=sys.stderr)
-            except ClientError as e:
-                error_count += 1
-                print(f"❌ [S3] Error deleting {obj['key']}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
-        
-        return {
-            "deleted_count": deleted_count,
-            "error_count": error_count,
-            "total_found": len(objects)
-        }
+        # Validate the complete inventory against this exact memory before
+        # the first DELETE, including unexpected keys returned by a backend.
+        keys = [self.document_key(memory_id, obj["key"]) for obj in objects]
+        result = await self.delete_objects(keys)
+        return {**result, "total_found": len(objects)}
     
     @_redact_proxy_errors
     async def delete_objects(self, keys: list) -> dict:
         """
-        Supprime une liste d'objets S3 par leurs clés.
+        Supprime une liste de documents Graph par leurs clés.
         
         Args:
             keys: Liste de clés S3 ou URIs
@@ -713,9 +693,14 @@ class StorageService:
         """
         deleted_count = 0
         error_count = 0
-        
-        for key_or_uri in keys:
-            key = self._parse_key(key_or_uri)
+
+        # Global orphan cleanup may span memories, but never owns Hivemind
+        # data. Prevalidate the entire batch so a late bad key deletes nothing.
+        document_keys = [
+            self.document_key(self._parse_key(reference).split("/", 1)[0], reference)
+            for reference in keys
+        ]
+        for key in document_keys:
             try:
                 self._client.delete_object(Bucket=self._bucket, Key=key)
                 deleted_count += 1
@@ -792,6 +777,10 @@ class StorageService:
                 )
             }
     
+    def document_key(self, memory_id: str, key_or_uri: str) -> str:
+        """Return the exact authorized key before a document GET/HEAD/sign."""
+        return validate_document_key(memory_id, key_or_uri, self._bucket)
+
     def _parse_key(self, key_or_uri: str) -> str:
         """Extrait la clé S3 d'une URI ou retourne la clé directement."""
         if key_or_uri.startswith("s3://"):

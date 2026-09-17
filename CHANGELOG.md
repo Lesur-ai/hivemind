@@ -24,6 +24,77 @@ Upgrading from separate Live Memory and Graph Memory services is covered by the
 
 ---
 
+## [1.5.3] — Unreleased
+
+Hivemind 1.5.3 addresses all seven application findings from the 16 September
+2026 source security review and updates DOMPurify, alongside fixes for Gemini
+embedding ingestion and inference readiness.
+**Release identity.** Hivemind now reports runtime version `1.5.3`.
+
+### Security
+
+The [security report](docs/SECURITY_AUDIT_1.5.3.md) describes the seven application
+corrections, dependency maintenance and verification evidence. Broader audit
+coverage and dependency follow-up remain open; this is not a security certification.
+
+- Prevent Rules and MID Markdown from invoking admin-console commands. Document
+  rendering removes command attributes, and the console independently rejects
+  delegated actions originating in document readers. Ordinary links, console
+  controls and required confirmations retain their existing behavior.
+- Update vendored DOMPurify from 3.1.6 to 3.4.15, replacing a version matching
+  known dependency advisories. The `/live` and `/admin` rendering contracts are
+  preserved, and the exact upstream artifact and license are documented. These
+  advisory matches do not establish exploits in Hivemind.
+
+- Confine Graph deletion and orphan cleanup to each memory's `documents/`
+  objects. A missing Graph memory causes no deletion; failed S3 cleanup keeps
+  the Graph record so an explicit retry remains possible.
+- Delete Graph backups only after validating their manifest identity and only
+  remove the four defined Graph artifacts, with the manifest last. Other
+  objects under a shared backup prefix remain intact. Proxy credentials remain
+  redacted from deletion errors and retention diagnostics.
+- Bound embedded Graph tar.gz restores before namespace admission and backend
+  access: compressed and expanded bytes, member size/count, metadata and JSON
+  parsing now have explicit limits. Native full/light exports, Unicode names
+  and documents with reserved basenames remain supported. Unsupported sparse,
+  global PAX, link and duplicate members are rejected. See the
+  [archive limits](docs/SECURITY.md#46-graph-memory-native-backups--long-runtime-only-never-recovery-truth).
+- Confine embedded Graph static assets to their packaged directory, reject
+  escaping paths and symlinks, and return constant protected errors.
+- Validate Graph document references against the configured S3 bucket and the
+  owning memory's `documents/` prefix before imports, backups and reads,
+  including references persisted by older versions.
+- Bound MCP request bodies before SDK buffering, including chunked requests,
+  with the same configurable limit at the WAF. Ordinary MCP and SSE exchanges
+  remain supported; oversized requests return HTTP 413.
+- Reserve derived Graph memory names against Hivemind space creation and
+  refuse conflicting historical prefixes before reads, exports, restores or
+  deletion. Embedded binding refuses Hivemind-owned prefixes; unbound spaces
+  cannot read documents or ingestion jobs using their raw space identifier.
+  Existing collisions require separately authorized operator recovery; the
+  derivation algorithm and stored Graph identifiers are unchanged.
+
+### Fixed
+
+- Accept valid singleton embeddings without indexes for Gemini and generic
+  OpenAI-compatible profiles. Explicit Gemini batches use ordered singleton
+  requests under one total deadline, preserving bounded retries for failed
+  inputs only, with no partial result;
+  malformed vectors and ambiguous multi-input wire responses still fail.
+- Give the manage-only inference self-test up to 1,024 output tokens, bounded
+  by the configured profile ceiling. Blank or truncated chat output remains
+  not ready; the one-call policy, timeout, cache and confidentiality stay intact.
+
+Changing an existing embedding provider identity still requires the documented
+maintenance/reindex procedure. This fix does not certify Gemini, establish
+input-truncation behavior, or qualify a benchmark. See the
+[provider guide](docs/INFERENCE_PROVIDER_PROFILES.md).
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary. Portal extension seams are described in
+[extension points](docs/EXTENSION_POINTS.md). See the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
 ## [1.5.2] — 2026-09-09
 
 Hivemind 1.5.2 adds a contextual manual compaction shortcut and reshapes the

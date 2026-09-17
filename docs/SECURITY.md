@@ -43,7 +43,7 @@ Python MCP service. Two boundaries matter:
 
 | Edge route   | WAF inspects body? | Carries           | Owner of validation        |
 |--------------|--------------------|-------------------|----------------------------|
-| `/mcp*`      | **No**             | Streamable HTTP / JSON-RPC MCP | **Application layer** (Hivemind code) |
+| `/mcp*`      | **No** (raw byte cap only) | Streamable HTTP / JSON-RPC MCP | Edge byte cap + **application layer** (Hivemind code) |
 | `/mesh/v1*` (enabled only) | No body (URI/headers only, after an exact 256 KiB raw cap) | Signed peer HTTP | Edge cap + WAF metadata + Mesh signature/membership policy |
 | `/api/tool`  | No (body off)      | Admin console tool calls       | Application layer + cookie auth |
 | `/api/*`     | Yes                | Admin REST + UI                | WAF + application layer   |
@@ -89,8 +89,27 @@ defense-in-depth in a public deployment.
   `/mcp*` is therefore reverse-proxied **without** WAF body inspection. See
   `waf/Caddyfile` route 1.
 * **Trust assumption changed**: A public deployer cannot assume "the WAF
-  protects all routes." For `/mcp`, the **only** layer between the public
-  internet and the MCP tool surface is the Hivemind Python application.
+  inspects all routes." For `/mcp`, content validation remains in the
+  Hivemind Python application; the edge enforces rate and raw-byte limits.
+* **Request byte budget**: `MCP_REQUEST_MAX_BYTES` defaults to **78,643,200
+  bytes (75 MiB)**. Caddy and the ASGI entry point both enforce this cap on
+  `/mcp*`. The application rejects an oversized `Content-Length` before
+  reading and counts actual streamed bytes even when that header is absent
+  or understated. It returns HTTP **413** before passing any body to the
+  MCP SDK or invoking a tool. Invalid/ambiguous lengths return HTTP 400.
+  Accepted request bodies are buffered within the budget, then passed to
+  the SDK; SSE responses, archive exports and downloads are not capped by
+  this request setting.
+  The default accommodates one supported 50 MiB LONG document encoded in
+  base64 plus its JSON envelope. The limit applies to the **whole serialized
+  JSON request**, including escaping and all documents in a batch. Split
+  larger batches, use base64 for heavily escaped content, or increase the
+  positive integer byte budget consistently at both layers. Compose passes
+  the same setting to both services; custom ingress deployments must align
+  their limit explicitly. Raising it increases memory exposure. Buffer memory
+  scales with the budget plus an incoming transport chunk and temporary
+  conversion copies; JSON parsing and concurrent requests add further memory.
+  This is a per-request bound, not an aggregate memory or concurrency quota.
 * **Deployer responsibility**:
   1. Treat `/mcp` as the actual attack surface. Anything that would be
      CRS-blocked on `/api/*` must be blocked or harmless when it reaches
@@ -98,10 +117,10 @@ defense-in-depth in a public deployment.
   2. Keep MCP authentication on. `/mcp` is bearer-token-authenticated at
      the application layer; **do not** disable that auth.
   3. Keep rate limiting on `/mcp`. The Caddy `rate_limit` zone on `/mcp*`
-     is the only abuse limiter on this route — calibrate, do not remove.
+     complements the byte budget — calibrate, do not remove.
   4. If you front Hivemind with your own ingress, replicate the same
      posture: stream-friendly proxying, bearer-token enforcement,
-     per-IP rate limiting.
+     per-IP rate limiting, and the same raw request byte cap.
 
 ### 3.2 WAF → service plain-HTTP hop
 
@@ -581,6 +600,44 @@ The embedded Graph Memory service ships its own backup tooling
   of a graph restore is the derived projection, never Hivemind protocol
   state. Operators who want stricter control must protect the internal
   network boundary (§2.1) and audit the shared token store.
+* Tar.gz restore checks resource limits both before namespace admission and
+  before restoring data: 100 MiB compressed, 512 MiB decompressed (including
+  padding and concatenated gzip streams), 128 MiB per member, and 10,000 TAR
+  headers including extensions.
+  Manifest and extended-header metadata are limited to 1 MiB each; graph,
+  vector JSONL and document-key files to 64 MiB each, before JSON parsing.
+  Native exports within these limits remain supported, including local PAX
+  headers for long Unicode names. Global PAX metadata, sparse files, links,
+  special files, duplicate member names and trailing non-gzip garbage are
+  rejected. Budget failures cause no backend access or mutation. These are
+  input bounds, not a process RSS or concurrency guarantee; the archive format
+  and the direct S3 restore path are unchanged.
+
+Restore buffers the expanded archive (up to 512 MiB) in addition to compressed
+input and parsed JSON. Provision memory for this increased admission footprint;
+parsed objects can substantially exceed their encoded size, so the byte caps
+reduce amplification without eliminating it or defining a safe RAM minimum.
+Qualify container memory with representative backups before relying on restore.
+The 10,000-header cap includes four control files: native archives allow at most
+9,996 plain-name documents, or 4,998 when each document needs a PAX extension
+for its Unicode/long name; additional headers lower that ceiling. Export does
+not enforce the restore caps, so a successful download alone does not establish
+that the archive can be restored within these limits.
+
+Graph memory deletion first requires an existing Graph record and confines S3
+deletion to validated `<memory_id>/documents/` objects. Orphan cleanup uses the
+same document boundary; Hivemind metadata, bank, live notes and protocol objects
+are outside that inventory. If S3 cleanup fails or is incomplete, the Graph
+record remains for retry. This is not a cross-backend transaction: vector
+deletion can already have succeeded when a subsequent storage operation fails.
+
+Graph backup deletion requires a matching supported manifest and removes only
+`graph_data.json`, `qdrant_vectors.jsonl`, `document_keys.json` and
+`manifest.json`, with the manifest last. Other objects under the backup prefix
+are preserved. A valid backup remains deletable after its Graph memory is gone;
+absent or incompatible manifests fail closed and require operator inspection.
+These checks do not change S3 credentials or provide IAM isolation, and do not
+automatically migrate historical objects.
 
 ---
 

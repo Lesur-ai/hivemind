@@ -70,6 +70,32 @@ No upstream runtime import path reaches an excluded directory.
 Modifications applied to the vendored tree are tracked here so the import can be
 refreshed against a future upstream release:
 
+- **`src/mcp_memory/core/backup.py` — bounded archive restore (#543).**
+  Shared preflight limits gzip expansion, TAR member/header sizes and count,
+  and control-file reads before namespace admission, JSON parsing or backend
+  access. Small stdlib TAR hooks reject global PAX and sparse metadata before
+  amplification; links and duplicate members are refused. Native exports,
+  local PAX Unicode names and original documents with reserved basenames remain
+  compatible within the documented limits. This adaptation does not change
+  the archive format, direct S3 restore or the pinned upstream import.
+- **Static asset confinement.** `src/mcp_memory/auth/middleware.py` validates
+  static paths, resolves the packaged root and candidate canonically, and
+  rejects escaping paths and symlinks before opening files. Missing or invalid
+  assets return constant 404 responses with defensive headers.
+- **Document reference ownership.** `src/mcp_memory/core/validators.py`,
+  `core/storage.py`, `core/graph.py`, `core/backup.py`, and `server.py` validate
+  the exact configured bucket, canonical memory ID and `documents/` prefix
+  before imports, backup effects, GET/HEAD and signed URLs. Persisted references
+  are rechecked; opaque S3 filenames retain their literal characters. These
+  local adaptations do not update the pinned upstream import or migrate data.
+
+- **Deletion ownership.** `server.py`, `core/storage.py`, and `core/backup.py`
+  confine document deletion and orphan cleanup to validated `documents/`
+  keys, require a Graph record before memory deletion, and preserve that record
+  after S3 cleanup failure for retry. Backup deletion validates the manifest
+  and deletes only the four defined artifacts, with the manifest last.
+  These local changes neither migrate storage nor change bucket credentials.
+
 - **`.env.example`** — rewritten as an internal-runtime reference with blank
   credentials and an explicit warning that agents must use Hivemind's public
   endpoint. Root Compose remains the supported configuration owner.
@@ -248,6 +274,22 @@ refreshed against a future upstream release:
     the public Hivemind facade owns the stronger `manage` gate.
 
 ---
+
+## DOMPurify — `src/live_mem/static/vendor/purify.min.js`
+
+| Field | Value |
+| --- | --- |
+| Upstream repository | https://github.com/cure53/DOMPurify |
+| Upstream release | [3.4.15](https://github.com/cure53/DOMPurify/releases/tag/3.4.15) |
+| Import date | 2026-09-17 |
+| Copyright | Cure53 and other contributors (upstream bundle header retained verbatim) |
+| License | Apache-2.0 or MPL-2.0, as offered by upstream; the upstream [Apache-2.0 license text](src/live_mem/static/vendor/purify.LICENSE) is included verbatim |
+| Modifications | None — the official minified browser bundle is served locally by `/live` and `/admin` |
+
+The exact distribution URL and SHA-384 checksum are recorded in the
+[vendor inventory](src/live_mem/static/vendor/README.md). The bytes match the
+official GitHub tag, the pinned CDN artifact and the integrity-checked npm
+tarball; no build or minification step was applied locally.
 
 ## Vendored fonts (Hivemind admin console) — `src/live_mem/static/fonts/`
 

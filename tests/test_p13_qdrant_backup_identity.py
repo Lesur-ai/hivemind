@@ -166,32 +166,8 @@ class _StorageClient:
         self.operations.append("storage.put")
         self.objects[Key] = bytes(Body)
 
-
-class _Storage:
-    _bucket = "test-bucket"
-
-    def __init__(self, objects: dict[str, bytes], operations: list[str]):
-        self._client = _StorageClient(objects, operations)
-        self._operations = operations
-
-    @staticmethod
-    def _parse_key(uri: str) -> str:
-        return uri.split("test-bucket/", 1)[1]
-
-    @staticmethod
-    def _guess_content_type(filename: str) -> str:
-        return "text/plain"
-
-    @staticmethod
-    def _sanitize_metadata_value(value: str) -> str:
-        return value
-
-    async def document_exists(self, uri: str) -> bool:
-        return True
-
-    async def upload_document(self, **kwargs):
-        self._operations.append("storage.upload")
-        return {"uri": f"s3://test-bucket/{kwargs['filename']}"}
+    def head_object(self, *, Bucket, Key):
+        return {}
 
 
 class _Graph:
@@ -272,10 +248,16 @@ def _service(
         objects.update(
             {f"{prefix}/{filename}": content for filename, content in artifacts.items()}
         )
+    from mcp_memory.core.storage import StorageService
+
+    storage = StorageService.__new__(StorageService)
+    storage._bucket = "test-bucket"
+    storage._client = _StorageClient(objects, operations)
+    storage._client_v4 = storage._client
     service = backup_module.BackupService(
         _Graph(operations, exists=memory_exists),
         _Vectors(operations, accepted_identity=identity),
-        _Storage(objects, operations),
+        storage,
     )
     return service, operations, objects
 

@@ -21,6 +21,8 @@ Convention nommage : ``test_<area>_<expected_behavior>_<attack_vector>``.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import re
 import sys
@@ -898,6 +900,17 @@ class TestLM2_06_VendoredLibraries:
         assert "sha384" in content.lower() or "SHA-384" in content, (
             "README.md doit documenter les hashes SHA-384 des libs vendored"
         )
+
+    @pytest.mark.parametrize("filename", ["marked.min.js", "purify.min.js"])
+    def test_vendored_bundle_matches_documented_artifact(self, filename):
+        readme = (VENDOR_DIR / "README.md").read_text()
+        row = next(line for line in readme.splitlines() if f"`{filename}` |" in line)
+        version, source, checksum = [cell.strip() for cell in row.split("|")[2:5]]
+        bundle = (VENDOR_DIR / filename).read_bytes()
+        assert f"@{version}/" in source
+        assert version in bundle.split(b"*/", 1)[0].decode()
+        actual = base64.b64encode(hashlib.sha384(bundle).digest()).decode()
+        assert actual == checksum.strip("`")
 
     def test_live_html_loads_local_vendor_not_cdn(self):
         live_html = ROOT / "src" / "live_mem" / "static" / "live.html"

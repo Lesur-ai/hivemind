@@ -124,6 +124,91 @@ async def _run(coro, storage, settings):
         return await coro()
 
 
+@pytest.mark.parametrize("marker", ["_meta.json", "_rules.md", "live/.keep", "bank/.keep", "_hivemind/node.json"])
+async def test_embedded_namespace_collision_refuses_before_network_or_writes(marker):
+    storage = FakeStorage(bank={"brief.md": "hello"})
+    storage.objects[_META] = json.dumps(_space_meta())
+    storage.objects[f"{derive_memory_id(_SPACE)}/{marker}"] = "foreign authority"
+    before = storage.snapshot()
+    bridge, factory = _bridge()
+    result = await _run(lambda: bridge.push(_SPACE), storage, _settings())
+    assert result["status"] == "error"
+    assert result.get("recovery_required") is True
+    assert storage.snapshot() == before
+    assert factory.instances == []
+
+
+async def test_bound_embedded_collision_refuses_document_read():
+    storage = FakeStorage()
+    storage.objects[_META] = json.dumps({**_space_meta(), "graph_memory": {
+        "url": _EMBEDDED_URL, "token": EMBEDDED_TOKEN_SENTINEL,
+        "memory_id": derive_memory_id(_SPACE), "binding": _BINDING_EMBEDDED,
+    }})
+    storage.objects[f"{derive_memory_id(_SPACE)}/_meta.json"] = "null"
+    bridge, factory = _bridge()
+    result = await _run(lambda: bridge.get_document(_SPACE, document_id="doc-1"), storage, _settings())
+    assert result["status"] == "error"
+    assert result.get("recovery_required") is True
+    assert factory.instances == []
+
+
+async def test_embedded_namespace_probe_unavailable_fails_closed(monkeypatch):
+    storage = FakeStorage(bank={"brief.md": "hello"})
+    storage.objects[_META] = json.dumps(_space_meta())
+    original_get = storage.get
+
+    async def failed_get(key):
+        if key == f"{derive_memory_id(_SPACE)}/_meta.json":
+            raise PermissionError("storage access denied")
+        return await original_get(key)
+
+    monkeypatch.setattr(storage, "get", failed_get)
+    before = storage.snapshot()
+    bridge, factory = _bridge()
+    result = await _run(lambda: bridge.push(_SPACE), storage, _settings())
+    assert result["status"] == "error" and result.get("recovery_required") is True
+    assert storage.snapshot() == before
+    assert factory.instances == []
+
+
+async def test_explicit_binding_to_embedded_prefix_has_same_ownership_guard():
+    storage = FakeStorage()
+    storage.objects[_META] = json.dumps(_space_meta())
+    storage.objects["other-space/_rules.md"] = "authoritative rules"
+    bridge, factory = _bridge()
+    result = await _run(lambda: bridge.connect(
+        _SPACE, _EMBEDDED_URL, "operator-token", "other-space"
+    ), storage, _settings())
+    assert result["status"] == "error" and result.get("recovery_required") is True
+    assert factory.instances == []
+
+
+@pytest.mark.parametrize("operation", ["document", "documents", "jobs", "job"])
+async def test_unbound_memory_scoped_reads_never_use_raw_space_id(operation):
+    storage = FakeStorage()
+    storage.objects[_META] = json.dumps(_space_meta())
+    bridge, factory = _bridge()
+    calls = {
+        "document": lambda: bridge.get_document(_SPACE, document_id="d"),
+        "documents": lambda: bridge.list_documents(_SPACE),
+        "jobs": lambda: bridge.ingest_list(_SPACE),
+        "job": lambda: bridge.ingest_status(_SPACE, "j"),
+    }
+    result = await _run(calls[operation], storage, _settings())
+    assert result["status"] == "error"
+    assert "not connected" in result["message"]
+    assert factory.instances == []
+
+
+async def test_unbound_global_ontology_catalog_still_works_without_memory_scope():
+    storage = FakeStorage()
+    storage.objects[_META] = json.dumps(_space_meta())
+    bridge, factory = _bridge(responses={"ontology_list": {"status": "ok", "ontologies": []}})
+    result = await _run(lambda: bridge.list_ontologies(_SPACE), storage, _settings())
+    assert result["status"] == "ok"
+    assert [call for inst in factory.instances for call in inst.args_for("ontology_list")] == [{}]
+
+
 # ─────────────────────────────────────────────────────────────
 # status : READ-ONLY — ne provisionne jamais, ne mute rien
 # ─────────────────────────────────────────────────────────────

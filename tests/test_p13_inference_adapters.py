@@ -59,6 +59,7 @@ from hivemind_inference.registry import (
 from tests.fakes.inference_emulator import (
     InferenceEmulator,
     anthropic_message_payload,
+    gemini_embedding_payload,
     openai_chat_payload,
     openai_embeddings_payload,
 )
@@ -2661,5 +2662,239 @@ class TestReasoningEffortWireShape:
                 with pytest.raises(InferenceError) as exc_info:
                     await provider.complete(chat_request(reasoning_effort="high"))
                 assert exc_info.value.category == "invalid_request"
+            finally:
+                await provider.aclose()
+
+
+class TestGeminiUnindexedEmbeddings:
+    @pytest.mark.parametrize("provider", ["gemini", "openai-compatible"])
+    async def test_observed_singleton_without_index(self, provider):
+        async with InferenceEmulator([{"body": gemini_embedding_payload(dimensions=3072)}]) as emulator:
+            request = EmbeddingRequest(inputs=("synthetic readiness",), timeout_seconds=5)
+            result = await embed_with(embedding_profile(emulator.v1_url, provider=provider, dimensions=3072), request)
+        assert result.vectors == ((0.25,) * 3072,)
+        assert result.correlation_id == request.correlation_id
+        assert result.model_evidence == "provider_reported"
+        assert result.input_tokens is result.total_tokens is None
+        assert len(emulator.requests) == 1
+
+    async def test_batch_uses_ordered_singletons_without_replaying(self):
+        payloads = [gemini_embedding_payload(base=v) for v in (0.5, 0.75, 1.0)]
+        for body in payloads:
+            body["usage"] = {"prompt_tokens": 2, "total_tokens": 2}
+        async with InferenceEmulator([{"body": body} for body in payloads]) as emulator:
+            request = EmbeddingRequest(inputs=("alpha", "beta", "gamma"), input_type="query", timeout_seconds=5)
+            result = await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), request)
+        assert [r["json"]["input"] for r in emulator.requests] == [["alpha"], ["beta"], ["gamma"]]
+        assert all(set(r["json"]) == {"model", "input"} for r in emulator.requests)
+        assert [v[0] for v in result.vectors] == [0.5, 0.75, 1.0]
+        assert result.input_tokens == result.total_tokens == 6
+        assert result.correlation_id == request.correlation_id
+        assert result.model_evidence == "provider_reported"
+
+    @pytest.mark.parametrize("index", [None, True, False, -1, 1, "0", 0.0])
+    async def test_present_invalid_singleton_index_remains_invalid(self, index):
+        body = gemini_embedding_payload()
+        body["data"][0]["index"] = index
+        async with InferenceEmulator([{"body": body}]) as emulator:
+            with pytest.raises(InferenceError) as exc:
+                await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a",), timeout_seconds=5))
+        assert exc.value.category == "invalid_response"
+        assert len(emulator.requests) == 1
+
+    @pytest.mark.parametrize("bad", [True, None, "0.25", float("nan"), float("inf"), 10**400])
+    async def test_unindexed_singleton_still_validates_components(self, bad):
+        body = gemini_embedding_payload()
+        body["data"][0]["embedding"][0] = bad
+        async with InferenceEmulator([{"body_raw": json.dumps(body).encode()}]) as emulator:
+            with pytest.raises(InferenceError) as exc:
+                await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a",), timeout_seconds=5))
+        assert exc.value.category == "invalid_response"
+        assert not exc.value.retryable
+
+    @pytest.mark.parametrize("dimensions,count", [(3, 1), (4, 0), (4, 2)])
+    async def test_unindexed_singleton_requires_exact_shape(self, dimensions, count):
+        body = gemini_embedding_payload(dimensions=dimensions)
+        body["data"] *= count
+        async with InferenceEmulator([{"body": body}]) as emulator:
+            with pytest.raises(InferenceError) as exc:
+                await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a",), timeout_seconds=5))
+        assert exc.value.category == "invalid_response"
+
+    @pytest.mark.parametrize("provider", ["cloud-temple", "openai", "mistral", "scaleway", "ovhcloud", "ollama"])
+    async def test_named_other_providers_keep_strict_index_contract(self, provider):
+        async with InferenceEmulator([{"body": gemini_embedding_payload()}]) as emulator:
+            with pytest.raises(InferenceError) as exc:
+                await embed_with(embedding_profile(emulator.v1_url, provider=provider), EmbeddingRequest(inputs=("a",), timeout_seconds=5))
+        assert exc.value.category == "invalid_response"
+
+    @pytest.mark.parametrize("provider_id", ["gemini", "openai-compatible"])
+    async def test_ambiguous_wire_batch_is_never_normalized(self, provider_id):
+        body = gemini_embedding_payload()
+        body["data"] *= 2
+        provider = build_embedding_provider(embedding_profile("http://localhost:1234/v1", provider=provider_id))
+        try:
+            with pytest.raises(InferenceError) as exc:
+                provider._normalize_embedding_response(json.dumps(body).encode(), EmbeddingRequest(inputs=("a", "b"), timeout_seconds=5))
+            assert exc.value.category == "invalid_response"
+        finally:
+            await provider.aclose()
+
+    @pytest.mark.parametrize("failure", [
+        {"body": {"data": []}},
+        {"status": 429, "headers": {"Retry-After": "0"}, "body": {"error": {"code": "rate_limit_exceeded"}}},
+        {"action": "drop"},
+    ])
+    async def test_zero_retry_batch_failure_never_replays_or_returns_partial(self, failure):
+        async with InferenceEmulator([{"body": gemini_embedding_payload()}, failure, {"body": gemini_embedding_payload()}]) as emulator:
+            with pytest.raises(InferenceError):
+                await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=5, retry_policy="none"))
+        assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
+
+    async def test_batch_deadline_is_shared_and_stops_later_inputs(self):
+        async with InferenceEmulator([{"body": gemini_embedding_payload()}, {"action": "stall"}]) as emulator:
+            started = time.monotonic()
+            with pytest.raises(InferenceError) as exc:
+                await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=0.2))
+        assert exc.value.category == "timeout"
+        assert time.monotonic() - started < 1
+        assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
+
+    async def test_batch_passes_only_remaining_budget_to_later_inputs(self, monkeypatch):
+        provider = build_embedding_provider(
+            embedding_profile("http://localhost:1234/v1", provider="gemini")
+        )
+        requests = []
+
+        async def wire(request):
+            requests.append(request)
+            if len(requests) == 1:
+                await asyncio.sleep(0.05)
+            return provider._normalize_embedding_response(
+                json.dumps(gemini_embedding_payload()).encode(), request
+            )
+
+        monkeypatch.setattr(provider, "_embed_wire_request", wire)
+        try:
+            await provider.embed(EmbeddingRequest(
+                inputs=("a", "b"), timeout_seconds=2
+            ))
+        finally:
+            await provider.aclose()
+        assert len(requests) == 2
+        assert requests[1].timeout_seconds < requests[0].timeout_seconds - 0.04
+        assert all(request.retry_policy == "bounded" for request in requests)
+
+    @staticmethod
+    def _transient_429(retry_after="0"):
+        return {
+            "status": 429,
+            "headers": {"Retry-After": retry_after},
+            "body": {"error": {"details": [{"reason": "RATE_LIMIT_EXCEEDED"}]}},
+        }
+
+    async def test_batch_retries_only_failed_singleton_within_requested_policy(self):
+        script = [
+            {"body": gemini_embedding_payload(base=0.25)},
+            self._transient_429(),
+            {"body": gemini_embedding_payload(base=0.5)},
+            {"body": gemini_embedding_payload(base=0.75)},
+        ]
+        async with InferenceEmulator(script) as emulator:
+            result = await embed_with(
+                embedding_profile(emulator.v1_url, provider="gemini"),
+                EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=5),
+            )
+        assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"], ["b"], ["c"]]
+        assert [vector[0] for vector in result.vectors] == [0.25, 0.5, 0.75]
+
+    async def test_batch_exhausted_retry_never_replays_success_or_continues(self):
+        script = [{"body": gemini_embedding_payload()}, self._transient_429(), self._transient_429()]
+        async with InferenceEmulator(script) as emulator:
+            with pytest.raises(InferenceError) as exc:
+                await embed_with(
+                    embedding_profile(emulator.v1_url, provider="gemini"),
+                    EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=5),
+                )
+        assert exc.value.category == "rate_limited"
+        assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"], ["b"]]
+
+    @pytest.mark.parametrize("failure", [
+        {"status": 429, "headers": {"Retry-After": "0"}, "body": {"error": {"code": "insufficient_quota"}}},
+        {"status": 429, "headers": {"Retry-After": "0"}, "body": {}},
+        {"body": {"data": []}},
+        {"action": "drop"},
+    ])
+    async def test_bounded_batch_does_not_retry_ambiguous_or_invalid_failures(self, failure):
+        async with InferenceEmulator([{"body": gemini_embedding_payload()}, failure]) as emulator:
+            with pytest.raises(InferenceError):
+                await embed_with(
+                    embedding_profile(emulator.v1_url, provider="gemini"),
+                    EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=5),
+                )
+        assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
+
+    async def test_batch_retry_wait_must_fit_original_deadline(self):
+        async with InferenceEmulator([{"body": gemini_embedding_payload()}, self._transient_429("1")]) as emulator:
+            with pytest.raises(InferenceError) as exc:
+                await embed_with(
+                    embedding_profile(emulator.v1_url, provider="gemini"),
+                    EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=0.2),
+                )
+        assert exc.value.category == "rate_limited"
+        assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
+
+    @pytest.mark.parametrize("counts,expected", [
+        ((10**18, 10**18), None),
+        ((10**18, 1), None),
+        ((5 * 10**17, 5 * 10**17), 10**18),
+    ])
+    @pytest.mark.parametrize("field,attribute", [("prompt_tokens", "input_tokens"), ("total_tokens", "total_tokens")])
+    async def test_batch_summed_usage_remains_bounded_without_losing_vectors(self, counts, expected, field, attribute):
+        bodies = [gemini_embedding_payload(base=v) for v in (0.25, 0.5)]
+        for body, count in zip(bodies, counts):
+            body["usage"] = {"prompt_tokens": 1, "total_tokens": 1, field: count}
+        async with InferenceEmulator([{"body": body} for body in bodies]) as emulator:
+            result = await embed_with(
+                embedding_profile(emulator.v1_url, provider="gemini"),
+                EmbeddingRequest(inputs=("a", "b"), timeout_seconds=5),
+            )
+        assert getattr(result, attribute) == expected
+        other = "total_tokens" if attribute == "input_tokens" else "input_tokens"
+        assert getattr(result, other) == 2
+        assert [vector[0] for vector in result.vectors] == [0.25, 0.5]
+
+    async def test_batch_incomplete_usage_and_model_evidence_stay_absent(self):
+        first = gemini_embedding_payload()
+        first["usage"] = {"prompt_tokens": 2, "total_tokens": 2}
+        second = gemini_embedding_payload(base=0.75)
+        del second["model"]
+        async with InferenceEmulator([{"body": first}, {"body": second}]) as emulator:
+            result = await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a", "b"), timeout_seconds=5))
+        assert result.input_tokens is result.total_tokens is result.resolved_model is None
+        assert result.model_evidence == "configured_only"
+
+    async def test_batch_uncorroborated_model_stays_configured_only(self):
+        async with InferenceEmulator([
+            {"body": gemini_embedding_payload(model="another-model")},
+            {"body": gemini_embedding_payload()},
+        ]) as emulator:
+            result = await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a", "b"), timeout_seconds=5))
+        assert result.model_evidence == "configured_only"
+        assert result.resolved_model is None
+        assert len(emulator.requests) == 2
+
+    async def test_batch_cancellation_stops_remaining_inputs(self):
+        async with InferenceEmulator([{"body": gemini_embedding_payload()}, {"action": "stall"}]) as emulator:
+            provider = build_embedding_provider(embedding_profile(emulator.v1_url, provider="gemini"))
+            try:
+                task = asyncio.create_task(provider.embed(EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=5)))
+                async with asyncio.timeout(1):
+                    while len(emulator.requests) < 2:
+                        await asyncio.sleep(0.005)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert len(emulator.requests) == 2
             finally:
                 await provider.aclose()

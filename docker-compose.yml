@@ -114,6 +114,7 @@ services:
       # - caddy_config:/config
     environment:
       - SITE_ADDRESS=${SITE_ADDRESS:-:8080}
+      - MCP_REQUEST_MAX_BYTES=${MCP_REQUEST_MAX_BYTES:-78643200}
       # Project Mesh is enabled by default. Set the feature gate explicitly to
       # false only for a deliberately non-Mesh deployment; that retains the
       # legacy WAF catch-all instead of the 256 KiB pre-Coraza Mesh guard.
@@ -170,6 +171,7 @@ services:
       - ALL
     env_file: .env
     environment:
+      - MCP_REQUEST_MAX_BYTES=${MCP_REQUEST_MAX_BYTES:-78643200}
       # Embedded long runtime binding. The URL is the
       # internal compose service, not localhost/external. LONG_EMBEDDED_TOKEN is
       # a local-only secret; leave empty to let Hivemind durably create and

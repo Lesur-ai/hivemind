@@ -306,11 +306,9 @@ class StaticFilesMiddleware:
         # Fichiers statiques (CSS, JS)
         if path.startswith("/static/"):
             rel_path = path[len("/static/"):]
-            # Sécurité : pas de traversée de répertoire
-            if ".." not in rel_path and rel_path:
-                ct = self._guess_content_type(rel_path)
-                await self._serve_file(send, rel_path, ct)
-                return
+            ct = self._guess_content_type(rel_path)
+            await self._serve_file(send, rel_path, ct)
+            return
         
         # Health check
         if path in ("/health", "/healthz", "/ready"):
@@ -740,58 +738,71 @@ class StaticFilesMiddleware:
         await send({"type": "http.response.body", "body": body})
     
     async def _serve_file(self, send, filename: str, content_type: str):
-        """Sert un fichier statique."""
-        filename = filename.split("?", 1)[0]
-        filepath = os.path.join(self._static_dir, filename)
-        
-        if not os.path.exists(filepath):
-            await self._send_404(send, f"File not found: {filename}")
+        """Serve only regular files contained in the resolved static root."""
+        # ASGI path is already decoded; query_string is separate. Keep this
+        # check at the shared sink so /static, /graph and /admin cannot bypass
+        # it. Malformed /static requests must never fall through to MCP.
+        if (
+            not filename
+            or os.path.isabs(filename)
+            or "\\" in filename
+            or ".." in filename
+        ):
+            await self._send_static_404(send)
             return
-        
+
         try:
+            static_root = os.path.realpath(self._static_dir)
+            filepath = os.path.realpath(os.path.join(static_root, filename))
+            # Resolve both sides before comparing: lexical prefixes permit
+            # sibling directories and symlinks may leave the allowed root.
+            if (
+                os.path.commonpath((static_root, filepath)) != static_root
+                or not os.path.isfile(filepath)
+            ):
+                raise FileNotFoundError
             with open(filepath, "rb") as f:
                 body = f.read()
-            
-            await send({
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [
-                    (b"content-type", content_type.encode()),
-                    (b"content-length", str(len(body)).encode()),
-                    (b"cache-control", b"no-store, no-cache, must-revalidate, max-age=0"),
-                    (b"pragma", b"no-cache"),
-                    (b"expires", b"0"),
-                ],
-            })
-            await send({
-                "type": "http.response.body",
-                "body": body,
-            })
-        except Exception as e:
-            await self._send_500(send, str(e))
-    
-    async def _send_404(self, send, message: str):
-        """Envoie une erreur 404."""
-        body = f"<h1>404 Not Found</h1><p>{message}</p>".encode()
+        except (OSError, ValueError):
+            # Missing, unreadable, invalid or concurrently removed assets
+            # have the same response; never reflect a path or OS error.
+            await self._send_static_404(send)
+            return
+
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", content_type.encode()),
+                (b"content-length", str(len(body)).encode()),
+                (b"cache-control", b"no-store, no-cache, must-revalidate, max-age=0"),
+                (b"pragma", b"no-cache"),
+                (b"expires", b"0"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def _send_static_404(self, send):
+        """Constant error for rejected, missing or unreadable static files."""
+        body = b"<h1>404 Not Found</h1>"
         await send({
             "type": "http.response.start",
             "status": 404,
             "headers": [
-                (b"content-type", b"text/html"),
+                (b"content-type", b"text/html; charset=utf-8"),
                 (b"content-length", str(len(body)).encode()),
-            ],
-        })
-        await send({"type": "http.response.body", "body": body})
-    
-    async def _send_500(self, send, message: str):
-        """Envoie une erreur 500."""
-        body = f"<h1>500 Internal Server Error</h1><p>{message}</p>".encode()
-        await send({
-            "type": "http.response.start",
-            "status": 500,
-            "headers": [
-                (b"content-type", b"text/html"),
-                (b"content-length", str(len(body)).encode()),
+                (
+                    b"content-security-policy",
+                    b"default-src 'none'; frame-ancestors 'none'; "
+                    b"base-uri 'none'; form-action 'none'",
+                ),
+                (b"x-frame-options", b"DENY"),
+                (b"x-content-type-options", b"nosniff"),
+                (b"referrer-policy", b"no-referrer"),
+                (
+                    b"permissions-policy",
+                    b"camera=(), microphone=(), geolocation=(), payment=()",
+                ),
             ],
         })
         await send({"type": "http.response.body", "body": body})

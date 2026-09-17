@@ -205,6 +205,10 @@
 	# Certains outils peuvent prendre plusieurs minutes (consolidation LLM).
 	# =========================================================================
 	handle /mcp* {
+		# Raw bytes only: preserve SSE and the Coraza bypass. Same setting as ASGI.
+		request_body {
+			max_size {$MCP_REQUEST_MAX_BYTES:78643200}
+		}
 		reverse_proxy hivemind:8002 {
 			flush_interval -1
 			transport http {

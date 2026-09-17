@@ -328,7 +328,12 @@ An operator with `manage` permission may explicitly call the hidden,
 zero-argument `inference_self_test` tool. It tests only the process-frozen
 configured roles, accepts no provider/model/endpoint/key/prompt input, uses
 fixed synthetic content, issues at most one zero-retry request per role, and
-caps chat output at eight tokens. It returns only normalized role readiness,
+caps chat output at 1,024 tokens (or the smaller configured profile ceiling).
+Reasoning models may spend that budget before returning visible text. A blank
+or truncated chat result remains `not_ready`; only the normalized `stop` finish
+counts as complete, so unknown or absent finish reasons also remain `not_ready`.
+The check does not retry it.
+It returns only normalized role readiness,
 safe model/usage metadata, correlation identifiers, and timestamps; completion
 text and vectors are discarded.
 
@@ -344,6 +349,34 @@ changed-profile evidence is `readiness=unknown`.
 Self-test may spend provider budget. Grant `manage` narrowly and invoke it only
 under the operator's provider/cost policy; its bounded shape is not a free-call
 or zero-cost claim.
+
+## Gemini embedding responses without indexes
+
+Gemini's OpenAI-compatible endpoint can return a valid singleton embedding
+without `data[0].index`. Hivemind accepts that absent key for the explicit
+`gemini` profile and for `openai-compatible` only when exactly one input and one
+vector are present. A present invalid index still fails. Cardinality,
+dimensions, finite numeric components and model-evidence redaction retain their
+normal checks.
+
+Use `INFERENCE_EMBEDDING_PROVIDER=gemini` for multi-input Gemini operations.
+This explicit profile sends each input as a separate singleton request, in
+order, under the original total deadline. A batch of N inputs costs N wire
+requests on success without retries, at most 2N with the caller's `bounded`
+policy: only a failed singleton may use the existing authorized transient or
+pre-send retry. Caller `none` and strict certification still disable retries.
+An exhausted failure or cancellation stops later inputs and returns no partial
+result; earlier successful inputs and the whole batch are never replayed.
+Usage is summed only when every response reports it and the sum remains bounded; provider-reported model evidence requires
+confirmation in every response. The full-batch response-size admission bound
+still applies. The generic profile continues to require valid indexes for
+multi-input wire responses; it never guesses their order or infers Gemini from
+a URL/model name.
+
+Changing an existing embedding provider identity can require reindexing even
+when the endpoint/model/dimensions are identical; follow the maintenance path
+below. This compatibility correction does not certify a profile, prove absence
+of upstream input truncation, or qualify a benchmark.
 
 ## Embedding identity and bounded reindex
 

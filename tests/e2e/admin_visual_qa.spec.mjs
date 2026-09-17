@@ -91,7 +91,7 @@ function graphStatus(includeGraph) {
     };
 }
 
-async function routeConsole(page, { createToken = false, meshSource = null, compactResponse = null, permissions = ['read', 'write', 'manage', 'admin'], spaceData = null, accessTokens = null, rules = null } = {}) {
+async function routeConsole(page, { createToken = false, meshSource = null, compactResponse = null, permissions = ['read', 'write', 'manage', 'admin'], spaceData = null, accessTokens = null, rules = null, midContent = null } = {}) {
     const state = { calls: [], meshCalls: [] };
     await page.addInitScript(() => { window.__visualQaXss = 0; });
     await page.route('**/*', async route => {
@@ -149,9 +149,9 @@ async function routeConsole(page, { createToken = false, meshSource = null, comp
             });
             case 'bank_read': return json(route, {
                 status: 'ok', filename: body.arguments.filename, size: 80,
-                content: body.arguments.filename === 'activeContext.md'
+                content: midContent ?? (body.arguments.filename === 'activeContext.md'
                     ? '# Current focus\n\n**Ready for visual QA.**'
-                    : '# Progress\n\nSecond file selected.',
+                    : '# Progress\n\nSecond file selected.'),
             });
             case 'bank_compact': {
                 const dryRun = body.arguments.dry_run === true;
@@ -321,6 +321,92 @@ test('space detail is a clean Markdown reader with lazy graph exploration and si
     await expect(page.locator('#modalConfirmBtn')).toBeDisabled();
     await page.locator('#destructiveConfirmInput').fill('demo');
     await expect(page.locator('#modalConfirmBtn')).toBeEnabled();
+});
+
+// HM-AUD-07: use the real Markdown renderer, sanitizer, shell dispatcher and
+// callTool transport. Only the API is controlled; no privileged operation runs.
+const DOCUMENT_COMMAND = `<a href="#/spaces/demo/mid" title="Document link" DATA-ACTION="run" data-tool="admin_update_token" data-args="{&quot;token_hash&quot;:&quot;attacker-fixture&quot;,&quot;permissions&quot;:&quot;admin&quot;}"><strong>Read document</strong></a>\n\n[Documentation](https://docs.example.invalid/guide)`;
+
+for (const [surface, panel] of [['Rules', '#sdRulesPanel'], ['MID', '#sdBankPreview']]) {
+    test(`Markdown ${surface} strips console commands and preserves ordinary links`, async ({ page }) => {
+        const state = await routeConsole(page, { rules: DOCUMENT_COMMAND, midContent: DOCUMENT_COMMAND });
+        await page.goto(`${ORIGIN}/admin.html#/spaces/demo/mid`);
+        const document = page.locator(`${panel} .markdown-body`);
+        const link = document.getByRole('link', { name: 'Read document' });
+        await expect(link).toBeVisible();
+        await expect(document.locator('[data-action], [data-tool], [data-args]')).toHaveCount(0);
+        await expect(link).toHaveAttribute('href', '#/spaces/demo/mid');
+        await expect(link).toHaveAttribute('title', 'Document link');
+        await page.waitForLoadState('networkidle');
+        const before = state.calls.length;
+        await link.locator('strong').click();
+        await page.waitForLoadState('networkidle');
+        expect(state.calls).toHaveLength(before);
+        await link.press('Enter');
+        await page.waitForLoadState('networkidle');
+        expect(state.calls).toHaveLength(before);
+        await expect(page.locator('#adminModal')).not.toBeVisible();
+        await document.getByRole('link', { name: 'Documentation' }).click();
+        await expect(page).toHaveURL('https://docs.example.invalid/guide');
+    });
+
+    test(`Markdown ${surface} cannot dispatch console commands even with restored data attributes`, async ({ page }) => {
+        const state = await routeConsole(page, { rules: DOCUMENT_COMMAND, midContent: DOCUMENT_COMMAND });
+        await page.goto(`${ORIGIN}/admin.html#/spaces/demo/mid`);
+        const link = page.locator(`${panel} .markdown-body`).getByRole('link', { name: 'Read document' });
+        await expect(link).toBeVisible();
+        // Bypass only the sanitizer to test the independent event boundary.
+        await link.evaluate(el => {
+            el.dataset.action = 'run';
+            el.dataset.tool = 'admin_update_token';
+            el.dataset.args = JSON.stringify({ token_hash: 'attacker-fixture', permissions: 'admin' });
+        });
+        await page.waitForLoadState('networkidle');
+        const before = state.calls.length;
+        await link.locator('strong').click();
+        await page.waitForLoadState('networkidle');
+        expect(state.calls).toHaveLength(before);
+        await link.press('Enter');
+        await page.waitForLoadState('networkidle');
+        expect(state.calls).toHaveLength(before);
+        await expect(page.locator('#adminModal')).not.toBeVisible();
+
+        // Another registered handler must not be reachable through a document.
+        await link.evaluate(el => { el.dataset.action = 'sd-edit-rules'; });
+        await link.click();
+        await expect(page.locator('#sdRulesInput')).not.toBeVisible();
+        // The actual console-created control remains usable with a confirmation
+        // surface; document-origin rejection is not a blanket action shutdown.
+        await page.getByRole('button', { name: 'Edit rules' }).click();
+        await expect(page.locator('#sdRulesInput')).toBeVisible();
+        await page.getByRole('button', { name: 'Cancel' }).click();
+        await expect(page.locator('#adminModal')).not.toBeVisible();
+        expect(state.calls).toHaveLength(before);
+    });
+}
+
+test('vendored sanitizer preserves admin Markdown formatting and rejects active content', async ({ page }) => {
+    const content = '# Safe document\n\n[Guide](https://docs.example.invalid/guide "Guide title")\n\n'
+        + '| Name | Value |\n| --- | --- |\n| Example | 42 |\n\n'
+        + '```html\n<img src=x onerror="window.__visualQaXss = 1">\n```\n\n'
+        + '<script>window.__visualQaXss = 1</script>'
+        + '<img src=x onerror="window.__visualQaXss = 1">'
+        + '<svg onload="window.__visualQaXss = 1"></svg>'
+        + '<iframe srcdoc="<script>parent.__visualQaXss = 1</script>"></iframe>'
+        + '<a href="javascript:window.__visualQaXss=1" onclick="window.__visualQaXss=1">Unsafe link</a>';
+    await routeConsole(page, { rules: content, midContent: content });
+    await page.goto(`${ORIGIN}/admin.html#/spaces/demo/mid`);
+    for (const panel of ['#sdRulesPanel', '#sdBankPreview']) {
+        const document = page.locator(`${panel} .markdown-body`);
+        await expect(document.getByRole('heading', { name: 'Safe document' })).toBeVisible();
+        await expect(document.locator('table tbody td')).toHaveText(['Example', '42']);
+        await expect(document.locator('pre code')).toHaveText('<img src=x onerror="window.__visualQaXss = 1">\n');
+        await expect(document.getByRole('link', { name: 'Guide' })).toHaveAttribute('href', 'https://docs.example.invalid/guide');
+        await expect(document.getByRole('link', { name: 'Guide' })).toHaveAttribute('title', 'Guide title');
+        await expect(document.locator('script, img, svg, iframe, [onerror], [onload], [onclick]')).toHaveCount(0);
+        await expect(document.getByText('Unsafe link', { exact: true })).not.toHaveAttribute('href');
+    }
+    expect(await page.evaluate(() => window.__visualQaXss)).toBe(0);
 });
 
 test('space detail hides manual compaction from a write-only session', async ({ page }) => {

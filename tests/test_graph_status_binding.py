@@ -23,6 +23,9 @@ class FakeStorage:
     def __init__(self, meta: dict) -> None:
         self.objects = {META_KEY: json.dumps(meta)}
 
+    async def get(self, key: str):
+        return self.objects.get(key)
+
     async def get_json(self, key: str):
         raw = self.objects.get(key)
         return json.loads(raw) if raw is not None else None

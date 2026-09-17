@@ -283,6 +283,10 @@ class Settings(BaseSettings):
     # ─── Response limits ──────────────────────────────────────
     response_max_bytes: int = 512 * 1024  # Max response body size (512 KB)
 
+    # Raw JSON envelope: accommodates a 50 MiB LONG document encoded in base64.
+    # Keep the same default in the Caddyfile and both Compose services.
+    mcp_request_max_bytes: int = 75 * 1024 * 1024
+
     # ─── Admin console /api/tool (ADM-05 fix) ─────────────
     api_tool_max_body_bytes: int = 1_048_576  # Max request body for /api/tool (1 MB)
 
@@ -297,6 +301,9 @@ class Settings(BaseSettings):
     def _validate_config(self) -> "Settings":
         """Semantic validation — fail fast at startup on misconfiguration."""
         errors: list[str] = []
+
+        if self.mcp_request_max_bytes < 1:
+            errors.append("MCP_REQUEST_MAX_BYTES must be a positive byte count")
 
         # Port range
         if not (1 <= self.mcp_server_port <= 65535):

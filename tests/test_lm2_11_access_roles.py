@@ -117,6 +117,13 @@ class FakeStorage:
             keys = keys[:max_keys]
         return [{"Key": key, "Size": len(self.objects[key])} for key in keys]
 
+    async def list_and_get(self, prefix: str, exclude_keep: bool = True) -> list[dict]:
+        return [
+            {"key": obj["Key"], "content": await self.get(obj["Key"])}
+            for obj in await self.list_objects(prefix)
+            if not exclude_keep or not obj["Key"].endswith(".keep")
+        ]
+
     async def delete_many(self, keys: list[str]) -> int:
         self.events.append("delete_many")
         deleted = 0
@@ -152,6 +159,61 @@ def _seed_store(storage: FakeStorage, *tokens: TokenInfo) -> None:
 
 def _stored_tokens(storage: FakeStorage) -> TokensStore:
     return TokensStore(**json.loads(storage.objects[TOKENS_KEY]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("graph_first", [False, True])
+async def test_derived_graph_namespace_cannot_be_created_as_space(wired, graph_first):
+    from live_mem.core.memory_id import derive_memory_id
+    storage, _ = wired
+    _seed_store(storage)
+    target = derive_memory_id("victim-space")
+    if graph_first:
+        storage.objects[f"{target}/documents/source.txt"] = "private graph document"
+    before = dict(storage.objects)
+    result = await SpaceService().create(target, "collision", "# Rules", bootstrap_admin=True)
+    assert result["status"] == "error"
+    assert result.get("recovery_required") is True
+    assert storage.objects == before
+    assert not storage.events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["export", "delete", "unsafe_delete", "backup", "download", "restore", "unsafe_restore"])
+async def test_historical_graph_collision_never_reads_or_deletes_payload(wired, operation):
+    from live_mem.core.memory_id import derive_memory_id
+    storage, _ = wired
+    _seed_store(storage)
+    target = derive_memory_id("victim-space")
+    storage.objects[f"{target}/_meta.json"] = json.dumps({"space_id": target})
+    storage.objects[f"{target}/documents/source.txt"] = "private graph document"
+    backup_id = f"{target}/2026-09-16T00-00-00"
+    storage.objects[f"_backups/{backup_id}/documents/source.txt"] = "historical copy"
+    before = dict(storage.objects)
+    calls = {
+        "export": lambda: SpaceService().export_space(target),
+        "delete": lambda: SpaceService().delete(target, bootstrap_admin=True),
+        "unsafe_delete": lambda: SpaceService().delete(target, unsafe_recovery=True, bootstrap_admin=True),
+        "backup": lambda: BackupService().create(target),
+        "download": lambda: BackupService().download(backup_id),
+        "restore": lambda: BackupService().restore(backup_id),
+        "unsafe_restore": lambda: BackupService().restore(backup_id, unsafe_recovery=True),
+    }
+    result = await calls[operation]()
+    assert result["status"] == "error"
+    assert result.get("recovery_required") is True
+    assert storage.objects == before
+    assert not storage.events
+    assert not any("/documents/" in key for key in storage.get_counts)
+
+
+@pytest.mark.parametrize("permissions", [["read"], ["manage"], ["admin"]])
+def test_derived_namespace_is_not_an_authorizable_hivemind_space(permissions):
+    from live_mem.core.memory_id import derive_memory_id
+    target = derive_memory_id("victim-space")
+    result = auth_context._evaluate_access({"permissions": permissions, "allowed_resources": [target]}, target)
+    assert result is not None and result["status"] == "error"
+    assert result.get("recovery_required") is True
 
 
 def _seed_committed_space(storage: FakeStorage, space_id: str) -> None:

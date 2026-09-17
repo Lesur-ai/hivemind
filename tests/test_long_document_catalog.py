@@ -524,6 +524,20 @@ async def test_mcp_tool_execution_authorized():
 
 
 # Actual embedded document reads through the public facade, with synthetic I/O.
+@pytest.mark.parametrize("uri", [
+    "s3://foreign-bucket/test-space/documents/guide.txt",
+    "s3://test-bucket/test-space/bank/activeContext.md",
+    "s3://test-bucket/other-space/documents/guide.txt",
+])
+@pytest.mark.parametrize("route", ["backend", "bridge", "public"])
+async def test_document_read_refuses_foreign_storage_without_get(document_read_runtime, uri, route):
+    runtime = document_read_runtime
+    runtime.document["uri"] = uri
+    result = await runtime.read(route=route)
+    assert result["status"] == "error"
+    runtime.storage._client.get_object.assert_not_called()
+
+
 @pytest.fixture
 def document_read_runtime(monkeypatch, mcp_server):
     import dotenv

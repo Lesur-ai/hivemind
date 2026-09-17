@@ -73,3 +73,14 @@ def test_derive_distinct_after_sanitization() -> None:
 def test_derive_empty_raises() -> None:
     with pytest.raises(ValueError):
         derive_memory_id("")
+
+
+@pytest.mark.parametrize("space_id", ["a", "A" * 64, "UPPER_and-lower_123", "___"])
+def test_derived_names_are_reserved_without_changing_the_algorithm(space_id):
+    error = memory_id.reserved_space_error(derive_memory_id(space_id))
+    assert error["recovery_required"] is True
+
+
+@pytest.mark.parametrize("space_id", ["ordinary", "hm-team", "hm-team-0123", "hm-team-0123456789abcdeg"])
+def test_ordinary_names_are_not_reserved(space_id):
+    assert memory_id.reserved_space_error(space_id) is None

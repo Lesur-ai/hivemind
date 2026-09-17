@@ -16,7 +16,7 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.5.2-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.5.3-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#requirements)
@@ -29,6 +29,13 @@ critical behavior but may trail this page's editorial structure.
 </div>
 
 ---
+
+> **Security fixes in 1.5.3.** This version addresses all seven application
+> findings from the 16 September 2026 source security review, including Graph
+> storage boundaries, request and archive limits, and admin Markdown commands.
+> It also updates DOMPurify to 3.4.15. See the
+> [security report](docs/SECURITY_AUDIT_1.5.3.md) for verification and remaining
+> work, and the [release notes](CHANGELOG.md#153--unreleased).
 
 ## Why Hivemind?
 
@@ -327,6 +334,10 @@ resume, or transfer of discarded detail to Graph in this version. See the
 [MCP tool specification](docs/MCP_TOOLS_SPEC.md) for the complete contract.
 
 ## Security and boundaries
+
+The [1.5.3 security report](docs/SECURITY_AUDIT_1.5.3.md) documents the seven
+application fixes, dependency maintenance, and the audit's scope and limitations.
+The broader audit follow-up remains open; this is not a security certification.
 
 - Every MCP request requires a bearer token.
 - Tokens are stored as SHA-256 hashes; plaintext is shown only at creation.

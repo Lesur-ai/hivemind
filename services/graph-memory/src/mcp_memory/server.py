@@ -401,6 +401,12 @@ async def memory_delete(
         if write_err:
             return write_err
         
+        # An absent Graph namespace never authorizes backend deletion. Even
+        # an existing namespace may share its ID with a Hivemind space, so S3
+        # deletion below remains restricted to Graph's document subtree.
+        if not await get_graph().get_memory(memory_id):
+            return {"status": "not_found", "memory_id": memory_id}
+
         # 1. Supprimer la collection Qdrant (couplage strict)
         qdrant_deleted = False
         try:
@@ -412,10 +418,14 @@ async def memory_delete(
         # 2. Supprimer tous les fichiers S3 de la mémoire
         s3_result = {"deleted_count": 0, "error_count": 0}
         try:
-            s3_result = await get_storage().delete_prefix(f"{memory_id}/")
+            s3_result = await get_storage().delete_prefix(f"{memory_id}/documents/")
+            if s3_result.get("error_count", 0):
+                raise RuntimeError("Graph document cleanup is incomplete")
             print(f"🗑️ [S3] Memory {memory_id} cleanup: deleted {s3_result['deleted_count']} files", file=sys.stderr)
-        except Exception as e:
-            print(f"⚠️ [S3] S3 cleanup error for {memory_id}: {e}", file=sys.stderr)
+        except Exception:
+            # Keep the ownership marker so the same operation can be retried;
+            # deleting it now would strand any documents left by S3 failure.
+            raise RuntimeError("Unable to complete Graph document cleanup") from None
         
         # 3. Supprimer du graphe Neo4j
         deleted = await get_graph().delete_memory(memory_id)
@@ -2519,6 +2529,7 @@ async def storage_check(
         # 2. Collecter toutes les URIs des documents référencés dans le graphe
         graph_uris = set()          # URIs référencées dans Neo4j
         graph_uri_details = {}      # URI -> {memory_id, filename, doc_id}
+        document_references = set() # Keep the authoritative memory for each URI.
         memory_prefixes = set()     # Préfixes S3 des mémoires connues
 
         for mem in memories:
@@ -2529,6 +2540,7 @@ async def storage_check(
             for doc in graph_data.get("documents", []):
                 uri = doc.get("uri", "")
                 if uri:
+                    document_references.add((mid, uri))
                     graph_uris.add(uri)
                     graph_uri_details[uri] = {
                         "memory_id": mid,
@@ -2537,7 +2549,7 @@ async def storage_check(
                     }
         
         # 3. Vérifier l'accessibilité S3 de chaque document du graphe
-        check_result = await get_storage().check_documents(list(graph_uris))
+        check_result = await get_storage().check_documents(list(document_references))
         
         # Enrichir les détails avec les infos du graphe
         for detail in check_result.get("details", []):
@@ -2583,6 +2595,13 @@ async def storage_check(
         orphans = []
         for obj in all_s3_objects:
             key = obj["key"]
+
+            # This shared bucket also contains authoritative Hivemind state.
+            # Lack of a Graph reference cannot make that state an orphan.
+            try:
+                get_storage().document_key(key.split("/", 1)[0], key)
+            except ValueError:
+                continue
 
             # Ignorer les fichiers de health check
             if key.startswith("_health_check/"):

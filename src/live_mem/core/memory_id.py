@@ -18,8 +18,8 @@ une mémoire Graph Memory interne. Le ``memory_id`` cible est **dérivé** du
   sur le corps sanitizé) garantit que deux ``space_id`` distincts qui se
   sanitizent au même corps gardent des suffixes distincts.
 
-Module PUR (stdlib only). Volontairement isolé : AUCUN module du chemin de
-commit ne l'importe (ADR-0010 ; verrouillé par test_long_isolation).
+Module PUR (stdlib only). La réservation lexicale ne consulte aucun état Graph
+et ne confère aucune autorité protocolaire au tier long (ADR-0010).
 """
 
 from __future__ import annotations
@@ -36,6 +36,30 @@ _HASH_BYTES = 8
 _MAX = 64  # cap dur GM (VALID_MEMORY_ID : leading + {0,63})
 # Budget corps = 64 - len("hm-") - len("-") - 16 = 44
 _BODY_MAX = _MAX - len(_PREFIX) - 1 - _HASH_HEX
+
+_DERIVED_NAMESPACE = re.compile(
+    rf"{re.escape(_PREFIX)}[a-zA-Z0-9_-]{{1,{_BODY_MAX}}}-[0-9a-f]{{{_HASH_HEX}}}"
+)
+
+
+def reserved_space_error(space_id: str) -> dict | None:
+    """Keep Hivemind authority out of the existing derived Graph namespace.
+
+    This is a lexical storage boundary, independent of Graph availability or
+    contents. Legacy collisions require explicit operator recovery, including
+    when the caller is an administrator or requests unsafe recovery.
+    """
+    if _DERIVED_NAMESPACE.fullmatch(space_id):
+        return {
+            "status": "error",
+            "recovery_required": True,
+            "message": (
+                "This identifier is reserved for derived Graph memory. "
+                "Existing Hivemind data under it requires separately authorized "
+                "operator recovery; no automatic read, migration or deletion."
+            ),
+        }
+    return None
 
 
 def derive_memory_id(space_id: str) -> str:

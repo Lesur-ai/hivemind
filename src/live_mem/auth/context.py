@@ -27,6 +27,8 @@ import re
 from contextvars import ContextVar
 from typing import Any, Mapping, Optional, Protocol, runtime_checkable
 
+from ..core.memory_id import reserved_space_error
+
 
 # Request-scoped identity attached by ``AuthMiddleware`` after bearer
 # validation.  MCP Streamable HTTP copies the Starlette ``Request`` for each
@@ -275,6 +277,10 @@ def _evaluate_access(
             "status": "error",
             "message": f"Invalid space identifier: '{resource_id}'",
         }
+
+    namespace_error = reserved_space_error(resource_id)
+    if namespace_error is not None:
+        return namespace_error
 
     # Admin → accès total (pas de restriction par espace)
     if "admin" in token_info.get("permissions", []):

@@ -727,12 +727,15 @@ async def test_server_memory_tools_hold_the_outer_multi_backend_gate(
             }
 
         async def delete_prefix(self, prefix: str):
-            assert prefix.endswith("/")
-            memory_id = prefix.removesuffix("/")
+            assert prefix.endswith("/documents/")
+            memory_id = prefix.removesuffix("/documents/")
             effects.append(("s3.delete_prefix", memory_id))
             return {"deleted_count": 1, "error_count": 0}
 
     class Graph:
+        async def get_memory(self, memory_id: str):
+            return SimpleNamespace(id=memory_id)
+
         async def create_memory(self, *, memory_id, name, description, ontology, ontology_uri):
             effects.append(("neo4j.create_memory", memory_id))
             return SimpleNamespace(
@@ -827,7 +830,7 @@ async def test_memory_delete_rejects_reserved_namespace_before_backend_resolutio
     assert result == {"status": "error", "message": "Invalid memory_id"}
 
 
-async def test_memory_delete_fails_closed_before_s3_or_graph_for_active_alias(
+async def test_memory_delete_fails_closed_before_s3_or_graph_deletion_for_active_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from mcp_memory import server
@@ -850,13 +853,17 @@ async def test_memory_delete_fails_closed_before_s3_or_graph_for_active_alias(
         effects.append("s3.resolve")
         raise AssertionError("S3 must remain untouched after vector refusal")
 
-    def unexpected_graph():
-        effects.append("neo4j.resolve")
-        raise AssertionError("Neo4j must remain untouched after vector refusal")
+    class Graph:
+        async def get_memory(self, memory_id: str):
+            effects.append("neo4j.get_memory")
+            return SimpleNamespace(id=memory_id)
+
+        async def delete_memory(self, memory_id: str):
+            raise AssertionError("Neo4j must not be deleted after vector refusal")
 
     monkeypatch.setattr(server, "get_vector_store", lambda: Vectors())
     monkeypatch.setattr(server, "get_storage", unexpected_storage)
-    monkeypatch.setattr(server, "get_graph", unexpected_graph)
+    monkeypatch.setattr(server, "get_graph", lambda: Graph())
 
     auth_token = server.current_auth.set(None)
     try:
@@ -866,7 +873,7 @@ async def test_memory_delete_fails_closed_before_s3_or_graph_for_active_alias(
 
     assert result["status"] == "error"
     assert "active_alias_delete_unsupported" in result["message"]
-    assert effects == ["qdrant.delete_collection"]
+    assert effects == ["neo4j.get_memory", "qdrant.delete_collection"]
 
 
 @pytest.mark.parametrize("denied_gate", [None, "access", "write"])
