@@ -132,6 +132,29 @@ The same target `space_id` keeps project references stable. The supported
 does not rename a space. If a rename is required, stop and design a separate,
 reviewed storage migration instead of improvising a prefix rewrite.
 
+### Reserved derived names and historical collisions
+
+The embedded Graph runtime still uses the inherited flat S3 layout in the
+shared bucket. Hivemind reserves the existing derived-name format
+`hm-<1–44 letters, digits, underscores or hyphens>-<16 lowercase hex digits>`
+for Graph memories. The deterministic ID algorithm is unchanged. New Hivemind
+spaces cannot use that format, regardless of which namespace was created first.
+
+An existing Hivemind space under such a name is refused, including for admin,
+export, backup download, deletion and unsafe restore. Embedded Graph binding
+also refuses a destination containing Hivemind metadata or creation/protocol
+markers, or whose ownership probes fail. A space without a persisted Graph
+binding cannot read memory-scoped documents or jobs by using its raw space ID;
+the global ontology catalog remains available.
+
+If an upgrade returns `recovery_required`, preserve the affected prefix and
+backups. Do not delete markers, retry with `unsafe_recovery`, rename keys in
+place, or reconstruct authoritative state from the graph. Record the source
+space and its derived ID in the migration manifest, then obtain a separately
+authorized operator plan to inventory ownership, preserve both data sets and
+rebuild the derived index under a nonconflicting space. No automatic migration
+or repair is performed by this release.
+
 ## 4. Create new Hivemind tokens for agents
 
 Every agent must receive a **new, unique Hivemind token**. Do this even if two

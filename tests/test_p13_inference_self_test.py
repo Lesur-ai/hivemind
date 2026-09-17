@@ -177,7 +177,7 @@ async def test_self_test_uses_fixed_bounded_zero_retry_inputs_and_safe_output():
     chat_request = chat.requests[0]
     embedding_request = embedding.requests[0]
     assert chat_request.messages == readiness._CHAT_MESSAGES
-    assert chat_request.max_output_tokens <= 8
+    assert chat_request.max_output_tokens == 64
     assert chat_request.retry_policy == "none"
     assert embedding_request.inputs == readiness._EMBEDDING_INPUTS
     assert embedding_request.input_type == "query"
@@ -588,3 +588,36 @@ async def test_manage_gate_precedes_runtime_and_hidden_contract(monkeypatch):
         assert "inference_self_test" not in discovery_names_for_permission(
             permission
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ceiling,expected", [(32, 32), (1024, 1024), (8192, 1024)])
+async def test_readiness_budget_supports_reasoning_but_respects_profile(ceiling, expected):
+    from dataclasses import replace
+    runtime, chat, _ = _runtime()
+    profile = replace(runtime.config.chat, max_output_tokens=ceiling)
+    runtime._config = replace(runtime.config, chat=profile)
+    chat.profile = profile
+    await readiness.run_inference_self_test(runtime)
+    assert chat.requests[0].max_output_tokens == expected
+    assert chat.requests[0].retry_policy == "none"
+    assert chat.requests[0].timeout_seconds == 15
+    assert len(chat.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,finish", [("", "stop"), ("  \n", "stop"), ("OK", "length"), ("", "length"), ("OK", "other")])
+async def test_unusable_chat_result_is_not_ready_and_cache_does_not_retry(text, finish):
+    runtime, chat, _ = _runtime()
+    async def complete(request):
+        chat.requests.append(request)
+        return ChatResult(text=text, finish_reason=finish, configured_model=chat.profile.configured_model,
+                          model_evidence="configured_only", correlation_id=request.correlation_id)
+    chat.complete = complete
+    result = await readiness.run_inference_self_test(runtime)
+    cached = await readiness.run_inference_self_test(runtime)
+    assert result["readiness"] == "not_ready"
+    assert result["roles"]["chat"]["error_category"] == "invalid_response"
+    assert result["roles"]["chat"]["retryable"] is False
+    assert cached["cached"] is True
+    assert len(chat.requests) == 1

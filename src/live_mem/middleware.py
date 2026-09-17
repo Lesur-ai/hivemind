@@ -5,6 +5,7 @@ Production middleware stack for Live Memory MCP Server.
 ASGI middlewares for observability, safety, and audit:
     - RequestIdMiddleware     — unique correlation ID per request (contextvars)
     - MetricsMiddleware       — per-path request counts, error rates, latency
+    - MCPRequestLimitMiddleware — bounds request bytes before SDK buffering
     - ResponseLimitMiddleware — truncates oversized responses (default 512 KB)
     - AuditMiddleware         — structured audit trail (who, what, when)
 
@@ -244,6 +245,83 @@ class MetricsMiddleware:
                 ],
             }
         )
+        await send({"type": "http.response.body", "body": body})
+
+
+# =============================================================================
+# MCPRequestLimitMiddleware
+# =============================================================================
+
+
+class MCPRequestLimitMiddleware:
+    """Bound raw MCP request bytes before the SDK buffers/parses any body.
+
+    A receive-wrapper exception is insufficient: the SDK catches it and emits
+    a 500. Read to a bounded bytearray first, then replay the accepted body.
+    No per-chunk list is retained, and response/SSE messages pass unchanged.
+    This bounds request buffering, not aggregate process/JSON-parser memory.
+    """
+
+    def __init__(self, app, *, max_bytes: int):
+        if max_bytes < 1:
+            raise ValueError("MCP request byte limit must be positive")
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope.get("path", "").startswith("/mcp"):
+            return await self.app(scope, receive, send)
+
+        lengths = [
+            value for name, value in scope.get("headers", [])
+            if name.lower() == b"content-length"
+        ]
+        if lengths:
+            # Do not trust framing as a substitute for counting actual bytes.
+            # Decimal comparison also avoids Python's huge-integer parsing limit.
+            length = lengths[0].strip()
+            if len(lengths) != 1 or not length or not length.isdigit():
+                return await self._reject(send, 400, "Invalid Content-Length")
+            length = length.lstrip(b"0") or b"0"
+            limit = str(self.max_bytes).encode("ascii")
+            if len(length) > len(limit) or (len(length) == len(limit) and length > limit):
+                return await self._reject(send, 413, "MCP request body too large")
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            # Check BEFORE copying the incoming chunk into our buffer.
+            if len(chunk) > self.max_bytes - len(body):
+                return await self._reject(send, 413, "MCP request body too large")
+            body.extend(chunk)
+            if not message.get("more_body", False):
+                break
+
+        accepted_body = bytes(body)
+        del body, chunk, message
+
+        async def replay_receive():
+            nonlocal accepted_body
+            if accepted_body is not None:
+                message = {"type": "http.request", "body": accepted_body, "more_body": False}
+                accepted_body = None
+                return message
+            # The SDK's SSE disconnect listener must keep the original channel.
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+    async def _reject(self, send, status: int, message: str):
+        body = json.dumps({"error": message, "max_bytes": self.max_bytes}).encode()
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [(b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode())],
+        })
         await send({"type": "http.response.body", "body": body})
 
 

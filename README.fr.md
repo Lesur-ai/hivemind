@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.5.2-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.5.3-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -27,6 +27,14 @@ English · [README.md](README.md)
 </div>
 
 ---
+
+> **Correctifs de sécurité de la 1.5.3.** Cette version corrige les sept constats
+> applicatifs de l'audit du code source du 16 septembre 2026 : frontières du
+> stockage Graph, limites des requêtes et archives, et commandes issues du
+> Markdown d'administration. Elle met aussi DOMPurify à jour en 3.4.15. Le
+> [rapport de sécurité en anglais](docs/SECURITY_AUDIT_1.5.3.md) présente les
+> vérifications et les travaux restants ; les
+> [notes de version](CHANGELOG.md#153--unreleased) détaillent les corrections.
 
 ## 📋 Table des matières
 
@@ -1147,6 +1155,12 @@ uv run pytest tests
 ---
 
 ## 🔒 Sécurité
+
+Le [rapport de sécurité de la 1.5.3](docs/SECURITY_AUDIT_1.5.3.md), en anglais,
+documente les sept corrections applicatives et la mise à jour de dépendance,
+ainsi que le périmètre et les limites de l'audit. Le suivi global de l'audit
+reste ouvert ; il ne s'agit pas d'une
+certification de sécurité.
 
 ### Authentification
 

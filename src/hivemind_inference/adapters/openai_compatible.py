@@ -41,6 +41,7 @@ import json
 import logging
 import struct
 import time
+from dataclasses import replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -785,8 +786,6 @@ class OpenAICompatibleEmbeddingProvider(_OpenAICompatibleBase):
         # Exactly the documented wire body MINUS encoding_format (see class
         # docstring). No dimensions field: expected_dimensions is validation
         # metadata, never an implicit request parameter (ADR-0027).
-        body = {"model": profile.configured_model, "input": list(request.inputs)}
-
         # Refuse BEFORE any paid call when the request's own shape implies a
         # response larger than this boundary will ever read: the caller gets an
         # actionable invalid_request instead of a mid-read invalid_response,
@@ -799,6 +798,62 @@ class OpenAICompatibleEmbeddingProvider(_OpenAICompatibleBase):
                 role="embedding",
                 correlation_id=request.correlation_id,
             )
+        # Gemini's compatibility endpoint can omit indexes. Send a declared
+        # Gemini batch as singletons up front: positional attribution is then
+        # unambiguous, without replaying an already-paid ambiguous batch.
+        if profile.provider_id == "gemini" and len(request.inputs) > 1:
+            return await self._embed_gemini_batch(request)
+        return await self._embed_wire_request(request)
+
+    async def _embed_gemini_batch(self, request: EmbeddingRequest) -> EmbeddingResult:
+        profile = self.profile
+
+        async def collect(remaining_seconds: float):
+            deadline = time.monotonic() + remaining_seconds
+            results: list[EmbeddingResult] = []
+            for text in request.inputs:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise self._direct_error(
+                        "timeout", role="embedding", correlation_id=request.correlation_id
+                    )
+                # Preserve caller policy. The wire path applies certification's
+                # zero-retry override and retries only this failed input.
+                result = await self._embed_wire_request(replace(
+                    request, inputs=(text,), timeout_seconds=remaining,
+                ))
+                results.append(result)
+            # Partial evidence must not become an aggregate provider claim.
+            reported = all(r.resolved_model == profile.configured_model for r in results)
+
+            def summed_usage(field: str) -> int | None:
+                values = [getattr(r, field) for r in results]
+                return safe_token_count(sum(values)) if all(v is not None for v in values) else None
+
+            return EmbeddingResult(
+                vectors=tuple(r.vectors[0] for r in results),
+                configured_model=profile.configured_model,
+                resolved_model=profile.configured_model if reported else None,
+                model_evidence="provider_reported" if reported else "configured_only",
+                effective_dimensions=profile.expected_dimensions,
+                input_tokens=summed_usage("input_tokens"),
+                total_tokens=summed_usage("total_tokens"),
+                correlation_id=request.correlation_id,
+            )
+
+        # Never retry the whole batch. Only a failed singleton may use its
+        # caller-authorized bounded retry, within the original total deadline.
+        # Cancellation/late-success guards cover the whole batch; an exhausted
+        # failure never returns partial vectors or replays successful inputs.
+        return await run_with_bounded_retry(
+            collect, timeout_seconds=request.timeout_seconds, role="embedding",
+            provider_id=profile.provider_id, adapter_id=profile.adapter_id,
+            correlation_id=request.correlation_id, retry_policy="none",
+        )
+
+    async def _embed_wire_request(self, request: EmbeddingRequest) -> EmbeddingResult:
+        profile = self.profile
+        body = {"model": profile.configured_model, "input": list(request.inputs)}
         # The response can be no larger than the vectors we asked for; a fixed
         # ceiling would let a hostile body sit just under it and still amplify
         # through JSON/base64 decoding.
@@ -888,19 +943,23 @@ class OpenAICompatibleEmbeddingProvider(_OpenAICompatibleBase):
             raise _invalid()
         if not all(isinstance(item, dict) for item in items):
             raise _invalid()
-        # EVERY index must be a non-bool int and the set must form EXACTLY the
-        # permutation 0..N-1 — a missing, partial, duplicate, or boolean index
-        # is invalid (never "the provider's order" by default, which would
-        # allow silent chunk/vector misalignment).
-        indexes = [item.get("index") for item in items]
-        if not all(
-            isinstance(index, int) and not isinstance(index, bool)
-            for index in indexes
-        ):
-            raise _invalid()
-        if sorted(indexes) != list(range(len(items))):
-            raise _invalid()
-        items = sorted(items, key=lambda item: item["index"])
+        # An absent index has a unique meaning only for one input/vector.
+        # Never treat a present invalid value as absent, or infer batch order.
+        unindexed_singleton = (
+            profile.provider_id in ("gemini", "openai-compatible")
+            and len(items) == 1
+            and "index" not in items[0]
+        )
+        if not unindexed_singleton:
+            indexes = [item.get("index") for item in items]
+            if not all(
+                isinstance(index, int) and not isinstance(index, bool)
+                for index in indexes
+            ):
+                raise _invalid()
+            if sorted(indexes) != list(range(len(items))):
+                raise _invalid()
+            items = sorted(items, key=lambda item: item["index"])
         vectors: list[tuple[float, ...]] = []
         for item in items:
             # Accept a float array OR a base64 float32 buffer; the decoded

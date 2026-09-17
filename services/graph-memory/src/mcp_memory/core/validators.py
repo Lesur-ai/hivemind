@@ -77,6 +77,52 @@ def validate_memory_id(memory_id: str) -> str:
     return memory_id
 
 
+def validate_document_key(memory_id: str, reference: str, bucket: str) -> str:
+    """Authorize an opaque S3 key or URI within one memory's documents.
+
+    Uploads preserve filename characters literally. Do not URL-decode keys or
+    interpret '?' and '#' as URL delimiters: that would select another object.
+    """
+    if type(memory_id) is not str or not VALID_MEMORY_ID.fullmatch(memory_id):
+        raise ValueError("Invalid document memory ID")
+    if type(reference) is not str or not reference:
+        raise ValueError("Invalid document reference")
+    key = reference
+    if reference.startswith("s3://"):
+        referenced_bucket, separator, key = reference[5:].partition("/")
+        if not separator or referenced_bucket != bucket:
+            raise ValueError("Document reference uses a different or invalid bucket")
+    prefix = f"{memory_id}/documents/"
+    if (
+        not key.startswith(prefix)
+        or key == prefix
+        or any(part in (".", "..") for part in key.split("/"))
+    ):
+        raise ValueError("Document reference is outside the memory document namespace")
+    return key
+
+
+def validate_graph_document_references(data: dict, memory_id: str, bucket: str) -> None:
+    """Validate every graph reference before import or backup effects."""
+    if type(memory_id) is not str or not VALID_MEMORY_ID.fullmatch(memory_id):
+        raise ValueError("Invalid document memory ID")
+    memory = data.get("memory") if type(data) is dict else None
+    if type(memory) is not dict or memory.get("id") != memory_id:
+        raise ValueError("Backup graph memory namespace mismatch")
+    documents = data.get("documents", [])
+    if type(documents) is not list:
+        raise ValueError("Invalid graph document references")
+    for document in documents:
+        if type(document) is not dict:
+            raise ValueError("Invalid graph document references")
+        if "memory_id" in document and document["memory_id"] != memory_id:
+            raise ValueError("Backup graph memory namespace mismatch")
+        uri = document.get("uri")
+        # Preserve legacy metadata-only documents. They authorize no S3 read.
+        if uri is not None and uri != "":
+            validate_document_key(memory_id, uri, bucket)
+
+
 def validate_filename(filename: str) -> str:
     """
     Valide et sanitise un nom de fichier.

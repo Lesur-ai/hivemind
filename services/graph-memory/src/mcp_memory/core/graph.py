@@ -95,6 +95,9 @@ def _guard_graph_import(method):
         for item in data.get("documents", []) + data.get("entities", []):
             if "memory_id" in item and item["memory_id"] != memory_id:
                 raise ValueError("backup graph namespace mismatch")
+        from .validators import validate_graph_document_references
+
+        validate_graph_document_references(data, memory_id, get_settings().s3_bucket_name)
         from .maintenance import get_maintenance_coordinator
 
         async with get_maintenance_coordinator().ordinary(memory_id):

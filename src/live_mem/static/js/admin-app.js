@@ -43,6 +43,7 @@ function renderMarkdown(value) {
         return DOMPurify.sanitize(raw, {
             ALLOWED_TAGS: ['a', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'li', 'ol', 'p', 'pre', 'strong', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul'],
             ALLOWED_ATTR: ['href', 'title'],
+            ALLOW_DATA_ATTR: false,
         });
     } catch {
         return `<pre class="mono-block">${esc(text)}</pre>`;
@@ -580,6 +581,9 @@ function _copyFallback(text, done) {
 // ═══════════════ GLOBAL EVENT DELEGATION (CSP-safe, data-action switchboard) ═══════════════
 
 document.addEventListener('click', e => {
+    // Document content never carries console commands, even if command
+    // attributes reach the DOM despite the Markdown sanitizer.
+    if (e.target.closest('.markdown-body')) return;
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
     const action = btn.dataset.action;

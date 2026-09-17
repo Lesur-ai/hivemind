@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from .storage import get_storage, inventory_object_size
 from .locks import get_lock_manager
 from .models import mask_meta_secrets
+from .memory_id import reserved_space_error
 from .reservation_guard import (
     NotMembershipLeaderError,
     PairingActivationError,
@@ -102,6 +103,9 @@ class BackupService:
         Returns:
             {"status": "created", "backup_id": "...", ...}
         """
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
         storage = storage if storage is not None else get_storage()
 
         # Vérifier l'existence de l'espace
@@ -319,6 +323,9 @@ class BackupService:
                 "message": "Invalid backup_id (format: space_id/timestamp)",
             }
         space_id, _timestamp = parts
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
         async with get_lock_manager().space_lifecycle(space_id):
             return await self._restore_locked(
                 backup_id, unsafe_recovery=unsafe_recovery
@@ -387,6 +394,9 @@ class BackupService:
             }
 
         space_id, timestamp = parts
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
         await assert_space_not_reserved(space_id)
         backup_prefix = f"_backups/{space_id}/{timestamp}/"
 
@@ -1379,6 +1389,9 @@ class BackupService:
             return {"status": "error", "message": "Invalid backup_id"}
 
         space_id, timestamp = parts
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
         backup_prefix = f"_backups/{space_id}/{timestamp}/"
 
         all_objects = await storage.list_and_get(backup_prefix, exclude_keep=False)

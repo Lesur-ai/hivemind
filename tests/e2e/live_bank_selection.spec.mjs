@@ -169,6 +169,35 @@ const VIEWPORTS = [
     { name: 'tablet', width: 768, height: 1024 },
 ];
 
+test('vendored sanitizer preserves live Markdown formatting and rejects active content', async ({ page }) => {
+    const state = await routeLive(page);
+    await page.addInitScript(() => { window.__sanitizerXss = 0; });
+    await page.goto(`${ORIGIN}/live?space=${SPACE_ID}`);
+    const content = '# Safe document\n\n[Guide](https://docs.example.invalid/guide "Guide title")\n\n'
+        + '| Name | Value |\n| --- | --- |\n| Example | 42 |\n\n'
+        + '```html\n<img src=x onerror="window.__sanitizerXss = 1">\n```\n\n'
+        + '<script>window.__sanitizerXss = 1</script>'
+        + '<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onload="window.__sanitizerXss = 1">'
+        + '<svg onload="window.__sanitizerXss = 1"></svg>'
+        + '<iframe srcdoc="<script>parent.__sanitizerXss = 1</script>"></iframe>'
+        + '<a href="javascript:window.__sanitizerXss=1" onclick="window.__sanitizerXss=1">Unsafe link</a>';
+    await fulfillOldest(state, 'alpha.md', { status: 'ok', filename: 'alpha.md', content });
+    const document = page.locator('#bankContent .md-content');
+    await expect(document.getByRole('heading', { name: 'Safe document' })).toBeVisible();
+    await expect(document.locator('table tbody td')).toHaveText(['Example', '42']);
+    await expect(document.locator('pre code')).toHaveText('<img src=x onerror="window.__sanitizerXss = 1">\n');
+    await expect(document.getByRole('link', { name: 'Guide' })).toHaveAttribute('href', 'https://docs.example.invalid/guide');
+    await expect(document.getByRole('link', { name: 'Guide' })).toHaveAttribute('title', 'Guide title');
+    await expect(document.locator('script, svg, iframe, [onerror], [onload], [onclick]')).toHaveCount(0);
+    await expect(document.getByText('Unsafe link', { exact: true })).not.toHaveAttribute('href');
+    // /live allows safe HTML images; /admin deliberately has a smaller tag set.
+    await expect(document.locator('img')).toHaveCount(1);
+    expect(await page.evaluate(() => window.__sanitizerXss)).toBe(0);
+    expect(state.pageErrors).toEqual([]);
+    expect(state.consoleErrors).toEqual([]);
+    expect(await page.evaluate(() => window.__cspViolations)).toEqual([]);
+});
+
 for (const viewport of VIEWPORTS) {
     test(`real /live shell: a stale bank response never clobbers a newer selection @ ${viewport.name}`, async ({ browser }, testInfo) => {
         const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height } });

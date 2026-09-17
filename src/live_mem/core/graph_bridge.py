@@ -45,7 +45,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from ..config import get_settings
 from .storage import get_storage, bank_relpath
 from .models import GraphMemoryConfig, EMBEDDED_TOKEN_SENTINEL
-from .memory_id import derive_memory_id
+from .memory_id import derive_memory_id, reserved_space_error
 from .embedded_secret import resolve_embedded_token
 from .url_guard import validate_gm_url
 from .reservation_guard import assert_space_not_reserved
@@ -793,6 +793,35 @@ class GraphBridgeService:
             return {**block, "token": EMBEDDED_TOKEN_SENTINEL}
         return dict(block)
 
+    async def _local_memory_namespace_error(self, memory_id: str) -> Optional[dict]:
+        """Refuse Hivemind-owned prefixes before contacting embedded Graph.
+
+        Probe both the commit marker and creation/protocol sentinels: an
+        interrupted or corrupt Hivemind prefix is not free Graph storage.
+        Reads are bounded to fixed keys and never consume document payloads.
+        """
+        storage = get_storage()
+        try:
+            for suffix in (
+                "_meta.json", "_rules.md", "live/.keep", "bank/.keep",
+                "_hivemind/node.json", "_hivemind/members.json",
+                "_hivemind/node_status.json", "_hivemind/bank_version.json",
+            ):
+                if await storage.get(f"{memory_id}/{suffix}") is not None:
+                    break
+            else:
+                return None
+        except Exception:
+            pass
+        return {
+            "status": "error", "connected": False, "recovery_required": True,
+            "message": (
+                "Embedded Graph storage ownership is conflicting or unverifiable. "
+                "Preserve the prefix and request separately authorized operator recovery."
+            ),
+            "long_authority": _LONG_AUTHORITY_MARKER,
+        }
+
     async def _resolve_or_embedded(
         self, space_id: str, *, provision: bool = False
     ) -> tuple[Optional[GraphMemoryConfig], Optional[dict], Optional[dict]]:
@@ -813,6 +842,9 @@ class GraphBridgeService:
         embedded ET explicite (corrige le trou pré-P7-3 où push/status
         construisaient un client sans ``_guard_url``, graph_bridge.py:638/:907).
         """
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return None, None, namespace_error
         storage = get_storage()
         meta_data = await storage.get_json(f"{space_id}/_meta.json")
         if meta_data is None:
@@ -826,6 +858,10 @@ class GraphBridgeService:
         embedded_url = settings.long_embedded_url
 
         if block:
+            if self._canonical_url(block.get("url", "")) == self._canonical_url(embedded_url):
+                namespace_error = await self._local_memory_namespace_error(block.get("memory_id", ""))
+                if namespace_error is not None:
+                    return None, None, namespace_error
             binding = block.get("binding")
             token = block.get("token")
             # Classification EXPLICITE : embedded ssi binding=embedded (ou legacy
@@ -899,6 +935,10 @@ class GraphBridgeService:
         persisté (l'appelant n'atteint pas la persistance) ; le token enregistré
         est un état infra idempotent bénin, réutilisé au bind suivant.
         """
+        memory_id = derive_memory_id(space_id)
+        namespace_error = await self._local_memory_namespace_error(memory_id)
+        if namespace_error is not None:
+            return None, None, namespace_error
         url = settings.long_embedded_url
         token = resolve_embedded_token(settings)
         if not url or not token or token == EMBEDDED_TOKEN_SENTINEL:
@@ -930,7 +970,6 @@ class GraphBridgeService:
                 "long_authority": _LONG_AUTHORITY_MARKER,
             }
 
-        memory_id = derive_memory_id(space_id)
         try:
             # Protected certification runs two sequential provider-discovery
             # probes inside Graph Memory's ``system_health``.  A complete,
@@ -1069,6 +1108,9 @@ class GraphBridgeService:
         Returns:
             {"status": "connected", ...} ou erreur
         """
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
         await assert_space_not_reserved(space_id)
         # P7-3 : un token opérateur ne peut JAMAIS valoir le sentinel embarqué
         # (sinon un override explicite deviendrait indistinguable d'un embedded
@@ -1096,6 +1138,11 @@ class GraphBridgeService:
         guard = self._guard_url(url)
         if guard is not None:
             return guard
+
+        if self._canonical_url(url) == self._canonical_url(get_settings().long_embedded_url):
+            namespace_error = await self._local_memory_namespace_error(memory_id)
+            if namespace_error is not None:
+                return namespace_error
 
         # Tester la connexion à graph-memory
         try:
@@ -2016,14 +2063,23 @@ class GraphBridgeService:
                 return None, None, guard
             return self._make_client(config.url, config.token), config.memory_id, None
 
-        if err is not None and not ("is not connected to Graph Memory" in err.get("message", "")):
-            return None, None, err
+        return None, None, err or {"status": "error", "message": "Graph Memory binding is unavailable"}
 
-        # Fallback sans binding : vérifier si le space existe et si le runtime embarqué est accessible
+    async def _resolve_read_client(self, space_id: str) -> tuple[Any, Optional[dict]]:
+        """Resolve global ontology access, without granting a memory namespace."""
+        client, _, err = await self._resolve_read_client_and_memory(space_id)
+        if err is None:
+            return client, None
+
+        if err is not None and not ("is not connected to Graph Memory" in err.get("message", "")):
+            return None, err
+
+        # Global ontology tools do not take memory_id. No document/job call
+        # may use this unbound client or infer a memory ID from space_id.
         storage = get_storage()
         meta_data = await storage.get_json(f"{space_id}/_meta.json")
         if meta_data is None:
-            return None, None, {
+            return None, {
                 "status": "not_found",
                 "message": f"Space '{space_id}' not found",
             }
@@ -2032,19 +2088,14 @@ class GraphBridgeService:
         embedded_url = settings.long_embedded_url
         live_token = resolve_embedded_token(settings, generate=False)
         if not live_token:
-            return None, None, {
+            return None, {
                 "status": "error",
                 "message": "Embedded long-runtime secret is unavailable.",
             }
         guard = self._guard_url(embedded_url)
         if guard is not None:
-            return None, None, guard
-        return self._make_client(embedded_url, live_token), space_id, None
-
-    async def _resolve_read_client(self, space_id: str) -> tuple[Any, Optional[dict]]:
-        """Résout un client Graph Memory en lecture seule, avec fallback embarqué si non-lié."""
-        client, _, err = await self._resolve_read_client_and_memory(space_id)
-        return client, err
+            return None, guard
+        return self._make_client(embedded_url, live_token), None
 
 
     async def list_ontologies(self, space_id: str) -> dict:

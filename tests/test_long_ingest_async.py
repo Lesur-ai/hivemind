@@ -373,8 +373,8 @@ async def test_graph_bridge_async_ingest_ssrf_protection():
 
 
 @pytest.mark.asyncio
-async def test_graph_bridge_ingest_status_unlinked_fallback():
-    """Vérifie que ingest_status utilise le runtime embarqué sans muter S3 pour les espaces non liés."""
+async def test_graph_bridge_ingest_status_unlinked_refuses_raw_id_fallback():
+    """Un espace non lié ne peut pas lire les jobs d’un identifiant Graph brut homonyme."""
     mock_settings = Settings(
         long_embedded_url="http://127.0.0.1:8765/mcp",
         long_embedded_enabled=True,
@@ -397,12 +397,10 @@ async def test_graph_bridge_ingest_status_unlinked_fallback():
 
             mock_load.return_value = (None, {"status": "error", "message": "Space 'test-space' is not connected to Graph Memory"})
             res = await bridge.ingest_status("test-space", "j-1")
-            assert res["status"] == "ok"
-            mock_instance.call_tool.assert_called_once_with(
-                "ingest_job_status",
-                {"job_id": "j-1", "expected_memory_id": "test-space"},
-            )
-            mock_tok.assert_called_once_with(mock_settings, generate=False)
+            assert res["status"] == "error"
+            mock_client_cls.assert_not_called()
+            mock_instance.call_tool.assert_not_called()
+            mock_tok.assert_not_called()
 
 
 # =============================================================================

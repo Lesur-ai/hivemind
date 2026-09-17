@@ -98,6 +98,19 @@ def openai_chat_payload(
     }
 
 
+def gemini_embedding_payload(*, dimensions=4, base=0.25, model="emulated-embedding-model"):
+    """Observed Gemini /embeddings singleton shape: no data[].index.
+
+    Synthetic finite values replace the private diagnostic's 3072-vector.
+    This fixture makes no assumption about multi-input response ordering.
+    """
+    return {
+        "object": "list",
+        "data": [{"object": "embedding", "embedding": [base] * dimensions}],
+        "model": model,
+    }
+
+
 def openai_embeddings_payload(
     count: int,
     *,

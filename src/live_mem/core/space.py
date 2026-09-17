@@ -24,6 +24,7 @@ from typing import Optional
 from .storage import bank_relpath, get_storage, inventory_object_size
 from .locks import get_lock_manager
 from .models import SpaceMeta, mask_meta_secrets
+from .memory_id import reserved_space_error
 from .hivemind import hive_status_label, CorruptedStateError
 from .reservation_guard import (
     assert_direct_local_allowed,
@@ -124,6 +125,10 @@ class SpaceService:
                     "alphanumeric characters, hyphens, or underscores."
                 ),
             }
+
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
 
         # VULN-07 fix : valider les tailles des champs
         if len(rules) > MAX_RULES_SIZE:
@@ -907,6 +912,9 @@ class SpaceService:
         """
         import json as _json
 
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
         storage = get_storage()
 
         # Vérifier l'existence
@@ -981,6 +989,9 @@ class SpaceService:
         préfixe. Le verrou reste tenu jusqu'à la confirmation que tous les
         ``space_ids`` correspondants ont disparu.
         """
+        namespace_error = reserved_space_error(space_id)
+        if namespace_error is not None:
+            return namespace_error
         locks = get_lock_manager()
         async with locks.space_lifecycle(space_id):
             from .tokens import get_token_service

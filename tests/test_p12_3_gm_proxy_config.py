@@ -472,7 +472,7 @@ class TestProxyRedaction:
         import asyncio
 
         result = asyncio.run(
-            svc.check_documents(["s3://test-bucket/m1/documents/a.txt"])
+            svc.check_documents([("m1", "s3://test-bucket/m1/documents/a.txt")])
         )
         assert result["errors"] == 1
         detail = result["details"][0]
@@ -581,7 +581,7 @@ class TestProxyRedaction:
         import asyncio
 
         result = asyncio.run(
-            svc.check_documents(["s3://test-bucket/m1/documents/a.txt"])
+            svc.check_documents([("m1", "s3://test-bucket/m1/documents/a.txt")])
         )
         detail = result["details"][0]
         assert detail["status"] == "error"
