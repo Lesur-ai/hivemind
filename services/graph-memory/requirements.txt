@@ -13,7 +13,7 @@ mcp==1.28.1
 
 # === Cryptography runtime (PyJWT/MCP transitif) ===
 # CVE-2026-69247 affecte les versions 44.x a 49.x.
-cryptography==50.0.0
+cryptography==50.0.2
 PyJWT==2.15.1           # CVE-2026-102274/101918; restore PyJWT library padding compatibility.
 urllib3==2.8.0          # CVE-2026-97687/97688/97689; constrain botocore/Qdrant.
 
