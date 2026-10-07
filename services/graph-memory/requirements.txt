@@ -34,7 +34,7 @@ jsonschema==4.26.0       # Closed construction output contracts; already hash-lo
 qdrant-client==1.19.1
 
 # === S3 Client (AWS SDK) ===
-boto3==1.43.88
+boto3==1.43.108
 
 # === OpenAI-compatible client (pour LLMaaS) ===
 openai==2.46.0
