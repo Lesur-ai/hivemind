@@ -30,6 +30,7 @@ import ast
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -50,6 +51,18 @@ _GM_PKG = _REPO_ROOT / "services" / "graph-memory" / "src" / "mcp_memory"
 _SHARED_PKG = _REPO_ROOT / "src" / "hivemind_inference"
 
 _EXTERNAL_ORIGIN = "http://llm.p13-1c.invalid/v1"
+
+
+@pytest.fixture(autouse=True)
+def _offline_mid_archive_scan(monkeypatch):
+    # Keep the real process-owned start/stop without scanning external storage.
+    # Projection behavior is covered by test_mid_archive_projection.py.
+    from live_mem.core.mid_archive_projection import MidArchiveProjector
+    from live_mem.core import storage
+    from tests.test_write_sink import WriteSinkFakeStorage
+
+    monkeypatch.setattr(storage, "get_storage", lambda: WriteSinkFakeStorage())
+    monkeypatch.setattr(MidArchiveProjector, "run_once", AsyncMock())
 
 
 def _module_trees(package: Path):
@@ -1049,7 +1062,8 @@ class TestStartupAndShutdownWiring:
         ], "the process window is not bound to the positive lifecycle contract"
         assert registered["on_startup"] == [
             "window.guard(_migrate_target_pairing_admission_anchors)",
-            "window.guard(_validate_inference_startup)"
+            "window.guard(_validate_inference_startup)",
+            "window.guard(_start_mid_archive_projection)",
         ], "the process startup hooks are not owner-guarded"
         # SIBLINGS, not nested: the guard runs every on_shutdown entry through
         # `run_finalizers`, so a consolidator close that raises cannot skip the
@@ -1057,6 +1071,7 @@ class TestStartupAndShutdownWiring:
         # Process-window release is not in this list: it needs a positive
         # lifecycle verdict after every sibling has settled.
         assert registered["on_shutdown"] == [
+            "window.guard(_stop_mid_archive_projection)",
             "window.guard(_close_core_process_resources)",
             "window.guard(_close_inference_runtime)",
         ]

@@ -34,7 +34,7 @@ from live_mem.core.engines import EngineRegistry
 from live_mem.core.engines.long_engine import LongEngine
 from live_mem.core.graph_bridge import GraphBridgeService
 from live_mem.core.models import meta_local_complement, meta_shared_projection
-from tests.fakes import FakeGraphTransport
+from tests.fakes import FakeGraphTransport, validate_fake_graph_url
 
 # Reuse the proven P3-8 offline consolidation harness (real ConsolidatorService,
 # stubbed _call_llm, frozen clock, in-memory storage).
@@ -122,8 +122,14 @@ async def test_push_records_watermark_locally_and_shared_projection_excludes_it(
     )
     await storage.put(f"{_SPACE}/bank/systemPatterns.md", "patterns")
 
-    engine = LongEngine(bridge=GraphBridgeService(client_factory=FakeGraphTransport.factory()))
-    with patch("live_mem.core.graph_bridge.get_storage", return_value=storage):
+    engine = LongEngine(bridge=GraphBridgeService(
+        client_factory=FakeGraphTransport.factory(),
+        url_validator=validate_fake_graph_url,
+    ))
+    with patch("live_mem.core.graph_bridge.get_storage", return_value=storage), patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        side_effect=AssertionError("fake transport must not resolve DNS"),
+    ):
         res = await engine.push(_SPACE)
     assert res["status"] == "ok", res
 

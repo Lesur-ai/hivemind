@@ -36,6 +36,7 @@ import base64
 import hashlib
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Callable, Optional, Any
 
@@ -51,6 +52,24 @@ from .url_guard import validate_gm_url
 from .reservation_guard import assert_space_not_reserved
 
 logger = logging.getLogger("live_mem.graph_bridge")
+
+
+async def _finish_local_mutation(operation):
+    """Drain a started local write before cancellation releases its caller's lock."""
+    task = asyncio.create_task(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not task.cancelled():
+            task.exception()  # Consume any write error; cancellation remains visible.
+        raise
 
 # P7-3 — classification EXPLICITE du binding persisté dans le bloc
 # ``graph_memory`` (jamais inférée depuis url/token).
@@ -289,6 +308,46 @@ def _reindex_result_view(raw: object) -> dict:
 def _invalid_embedding_collection_view() -> dict:
     """Return a fresh fixed failure; never reflect malformed backend values."""
     return {"state": "unavailable", "reason": "invalid_status"}
+
+
+def _embedding_identity_view(raw: object) -> dict | None:
+    """Only model diagnostics may cross this service boundary, never raw metadata."""
+    from hivemind_inference.registry import EMBEDDING_PROVIDER_IDS
+
+    def model(value):
+        return (type(value) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}", value)
+                and "://" not in value and not value.startswith(("sk-", "gsk_", "AIza")))
+
+    def role(value, persisted=False):
+        keys = {"provider", "model", "dimensions"}
+        if persisted:
+            keys |= {"resolved_model", "model_evidence", "profile_fingerprint"}
+        if type(value) is not dict or any(type(key) is not str for key in value) or set(value) != keys:
+            return None
+        if (type(value["provider"]) is not str or value["provider"] not in EMBEDDING_PROVIDER_IDS
+                or not model(value["model"]) or type(value["dimensions"]) is not int
+                or not 1 <= value["dimensions"] <= 2**31 - 1):
+            return None
+        if persisted:
+            resolved = value["resolved_model"]
+            evidence = value["model_evidence"]
+            fingerprint = value["profile_fingerprint"]
+            if (type(evidence) is not str or evidence not in {"configured_only", "provider_reported", "immutable_digest"}
+                    or (resolved is not None and not model(resolved))
+                    or (evidence == "provider_reported" and resolved is None)
+                    or (evidence == "configured_only" and resolved is not None)
+                    or type(fingerprint) is not str or len(fingerprint) != 64
+                    or any(character not in _LOWER_HEX_DIGITS for character in fingerprint)):
+                return None
+        return dict(value)
+
+    if type(raw) is not dict or any(type(key) is not str for key in raw) or set(raw) != {"configured", "persisted"}:
+        return None
+    configured = role(raw["configured"])
+    persisted = role(raw["persisted"], True) if raw["persisted"] is not None else None
+    if configured is None or (raw["persisted"] is not None and persisted is None):
+        return None
+    return {"configured": configured, "persisted": persisted}
 
 
 def _embedding_collection_view(raw: object) -> dict:
@@ -721,9 +780,43 @@ class GraphBridgeService:
         projection. ``provision=False`` → aucune écriture ; un space non lié
         renvoie l'erreur historique not_found / non-connecté (byte-for-byte).
         """
-        config, _block, err = await self._resolve_or_embedded(
+        # Only the first asynchronous ingest needs to publish its newly
+        # provisioned binding. Reads and already-bound calls stay unchanged.
+        original_meta = None
+        if provision:
+            original_meta = await get_storage().get_json(f"{space_id}/_meta.json")
+        config, block, err = await self._resolve_or_embedded(
             space_id, provision=provision
         )
+        if err is not None or not provision or (
+            original_meta is not None and original_meta.get("graph_memory")
+        ):
+            return config, err
+        if original_meta is None or config is None or block is None:
+            return None, {"status": "error", "message": "Long binding was not established."}
+
+        # The caller's lifecycle lock protects automatic projection. Keep a
+        # drift check for direct callers too; never recreate a removed space
+        # or overwrite an operator's binding after remote provisioning.
+        storage = get_storage()
+        key = f"{space_id}/_meta.json"
+        try:
+            latest = await storage.get_json(key)
+            if latest is None:
+                return None, {"status": "not_found", "message": "Space removed during provisioning."}
+            if latest.get("created_at") != original_meta.get("created_at") or (
+                latest.get("graph_memory") != original_meta.get("graph_memory")
+            ):
+                return None, {"status": "error", "message": "Space or long binding changed during provisioning."}
+            persisted = self._sentinelize_for_persist(block)
+            await _finish_local_mutation(storage.put_json(key, {**latest, "graph_memory": persisted}))
+            observed = await storage.get_json(key)
+            if observed is None or observed.get("created_at") != original_meta.get("created_at") or (
+                observed.get("graph_memory") != persisted
+            ):
+                return None, {"status": "error", "message": "Long binding persistence could not be verified."}
+        except Exception:
+            return None, {"status": "error", "message": "Long binding persistence failed."}
         return config, err
 
     def _guard_url(self, url: str) -> Optional[dict]:
@@ -958,7 +1051,7 @@ class GraphBridgeService:
         # dans _system/tokens.json). Idempotent + rotation (P7-3 R1/R5).
         from .tokens import get_token_service
 
-        reg = await get_token_service().register_internal_long_token(token)
+        reg = await _finish_local_mutation(get_token_service().register_internal_long_token(token))
         if reg.get("status") != "ok" or reg.get("current_active") is not True:
             return None, None, {
                 "status": "error",
@@ -1082,6 +1175,20 @@ class GraphBridgeService:
     # ─────────────────────────────────────────────────────────
 
     async def connect(
+        self,
+        space_id: str,
+        url: str,
+        token: str,
+        memory_id: str,
+        ontology: str = "general",
+    ) -> dict:
+        """Change the binding outside any active space lifecycle operation."""
+        from .locks import get_lock_manager
+
+        async with get_lock_manager().space_lifecycle(space_id):
+            return await self._connect_locked(space_id, url, token, memory_id, ontology)
+
+    async def _connect_locked(
         self,
         space_id: str,
         url: str,
@@ -1704,6 +1811,17 @@ class GraphBridgeService:
     # ─────────────────────────────────────────────────────────
 
     async def status(self, space_id: str, *, include_graph: bool = False) -> dict:
+        """Read connection state and the independent MID archive backlog."""
+        from .mid_archive import projection_status
+        from .mid_automation import automation_policy
+
+        result = await self._connection_status(space_id, include_graph=include_graph)
+        if result.get("status") != "not_found":
+            result["mid_automation"] = automation_policy()
+            result["mid_archive_projection"] = await projection_status(get_storage(), space_id)
+        return result
+
+    async def _connection_status(self, space_id: str, *, include_graph: bool = False) -> dict:
         """
         Vérifie le statut de la connexion graph-memory d'un space.
 
@@ -1793,6 +1911,7 @@ class GraphBridgeService:
             graph_stats = None
             top_entities = []
             embedding_collection = _invalid_embedding_collection_view()
+            embedding_identity = None
             if stats.get("status") == "ok":
                 graph_stats = {
                     "document_count": stats.get("document_count", 0),
@@ -1804,6 +1923,7 @@ class GraphBridgeService:
                 embedding_collection = _embedding_collection_view(
                     stats.get("embedding_collection")
                 )
+                embedding_identity = _embedding_identity_view(stats.get("embedding_identity"))
 
             graph_documents = []
             if doc_list.get("status") == "ok":
@@ -1818,6 +1938,7 @@ class GraphBridgeService:
                     )
 
             graph_view = _graph_view_payload(results[2]) if include_graph else None
+            mid_archive_index = await self.archive_index_status(space_id)
 
         except ConnectionError as e:
             return {
@@ -1871,6 +1992,8 @@ class GraphBridgeService:
             "files_pushed": config.files_pushed,
             "graph_stats": graph_stats,
             "embedding_collection": embedding_collection,
+            "embedding_identity": embedding_identity,
+            "mid_archive_index": mid_archive_index,
             "graph_documents": graph_documents,
             "top_entities": top_entities,
             **({"graph_view": graph_view} if include_graph else {}),
@@ -1883,6 +2006,15 @@ class GraphBridgeService:
     # ─────────────────────────────────────────────────────────
 
     async def disconnect(
+        self, space_id: str, *, use_embedded: bool = False
+    ) -> dict:
+        """Change the binding outside any active space lifecycle operation."""
+        from .locks import get_lock_manager
+
+        async with get_lock_manager().space_lifecycle(space_id):
+            return await self._disconnect_locked(space_id, use_embedded=use_embedded)
+
+    async def _disconnect_locked(
         self, space_id: str, *, use_embedded: bool = False
     ) -> dict:
         """
@@ -2166,74 +2298,92 @@ class GraphBridgeService:
             }
 
 
-    async def query(self, space_id: str, query: str, limit: int = 10) -> dict:
-        """Interroge le graphe (recherche structurée, SANS LLM).
+    async def _optional_archive_reader(self, space_id: str):
+        # Legacy/documentary-only spaces keep their original transport contract.
+        meta = await get_storage().get_json(f"{space_id}/_meta.json")
+        if not meta or not isinstance(meta.get("created_at"), str) or not meta["created_at"] or (
+            not isinstance(meta.get("graph_memory"), dict)
+        ):
+            return None, None, None
+        if await get_storage().get_json(self._archive_binding_key(space_id, meta)) is None:
+            return None, None, None
+        return await self._resolve_archive_read_client_and_memory(space_id)
 
-        Outil GM : ``memory_query`` — args ``{memory_id, query, limit}``.
-        Volontairement sans LLM (chemin déterministe, agent-friendly).
-        """
+    @staticmethod
+    def _interleave_evidence(left: list, right: list, memory_ids: list[str], limit: int) -> list:
+        # Preserve each graph's rank without comparing incomparable scores or
+        # merging same-named entities that may have different ontology types.
+        combined = []
+        for index in range(max(len(left), len(right))):
+            for rows, memory_id in zip((left, right), memory_ids):
+                if index < len(rows):
+                    combined.append({**rows[index], "memory_id": memory_id})
+                    if len(combined) >= limit:
+                        return combined
+        return combined
+
+    @staticmethod
+    def _archive_partial(result: dict, error: dict | None = None) -> dict:
+        reason = (error or {}).get("reason")
+        if reason not in ("archive_destination_changed", "archive_not_configured"):
+            reason = "archive_unavailable"
+        return {**result, "partial": True, "warnings": [{"scope": "mid_archive", "reason": reason,
+            "message": "Archive evidence is unavailable; documentary results only."}]}
+
+    async def _query_with_archives(self, space_id: str, query: str, limit: int, tool: str) -> dict:
         config, err = await self._load_gm_config(space_id)
         if err is not None:
             return err
-
         guard = self._guard_url(config.url)
         if guard is not None:
             return guard
-
         try:
             gm = self._make_client(config.url, config.token)
-            return await gm.call_tool(
-                "memory_query",
-                {
-                    "memory_id": config.memory_id,
-                    "query": query,
-                    "limit": limit,
-                },
-            )
+            result = await gm.call_tool(tool, {"memory_id": config.memory_id, "query": query, "limit": limit})
+            if not isinstance(result, dict) or result.get("status") != "ok":
+                return result
+            try:
+                archive, archive_id, err = await self._optional_archive_reader(space_id)
+                if err is not None:
+                    return self._archive_partial(result, err)
+                if archive is None:
+                    return result
+                other = await archive.call_tool(tool, {"memory_id": archive_id, "query": query, "limit": limit})
+                if not isinstance(other, dict) or other.get("status") != "ok":
+                    return self._archive_partial(result, other if isinstance(other, dict) else None)
+            except Exception:
+                return self._archive_partial(result)
+            ids = [config.memory_id, archive_id]
+            out = {**result, "memory_ids": ids}
+            if tool == "memory_search":
+                out["results"] = self._interleave_evidence(result["results"], other["results"], ids, limit)
+                out["result_count"] = len(out["results"])
+            else:
+                out["entities"] = self._interleave_evidence(result["entities"], other["entities"], ids, limit)
+                chunk_limit = max(result["stats"]["rag_chunk_limit"], other["stats"]["rag_chunk_limit"])
+                out["rag_chunks"] = self._interleave_evidence(result["rag_chunks"], other["rag_chunks"], ids, chunk_limit)
+                # Keep source evidence resolvable, including graph-only sources.
+                out["source_documents"] = [
+                    {**doc, "memory_id": mid}
+                    for response, mid in zip((result, other), ids)
+                    for doc in response["source_documents"]
+                ]
+                out["stats"] = {**result["stats"], "entities_found": len(out["entities"]),
+                    "rag_chunks_retained": len(out["rag_chunks"]), "rag_chunk_limit": chunk_limit,
+                    "rag_chunks_filtered": result["stats"]["rag_chunks_filtered"] + other["stats"]["rag_chunks_filtered"]}
+            return out
         except ConnectionError as e:
-            return {
-                "status": "error",
-                "message": f"Could not connect to Graph Memory: {e}",
-            }
+            return {"status": "error", "message": f"Could not connect to Graph Memory: {e}"}
         except Exception as e:
-            return {
-                "status": "error",
-                "message": f"memory_query error: {e}",
-            }
+            return {"status": "error", "message": f"{tool} error: {e}"}
+
+    async def query(self, space_id: str, query: str, limit: int = 10) -> dict:
+        """Structured retrieval across documents and archives, without an LLM."""
+        return await self._query_with_archives(space_id, query, limit, "memory_query")
 
     async def search(self, space_id: str, query: str, limit: int = 10) -> dict:
-        """Recherche graph-first dans le graphe de connaissances.
-
-        Outil GM : ``memory_search`` — args ``{memory_id, query, limit}``.
-        """
-        config, err = await self._load_gm_config(space_id)
-        if err is not None:
-            return err
-
-        guard = self._guard_url(config.url)
-        if guard is not None:
-            return guard
-
-        try:
-            gm = self._make_client(config.url, config.token)
-            return await gm.call_tool(
-                "memory_search",
-                {
-                    "memory_id": config.memory_id,
-                    "query": query,
-                    "limit": limit,
-                },
-            )
-        except ConnectionError as e:
-            return {
-                "status": "error",
-                "message": f"Could not connect to Graph Memory: {e}",
-            }
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": f"memory_search error: {e}",
-            }
+        """Graph-first retrieval across independently typed document/archive graphs."""
+        return await self._query_with_archives(space_id, query, limit, "memory_search")
 
     async def ingest(
         self,
@@ -2518,6 +2668,240 @@ class GraphBridgeService:
             "message": "mode must be one of dry-run|check-remote|apply",
         }
 
+    async def prepare_ingest(self, space_id: str) -> dict:
+        """Persist the first LONG binding without submitting a document."""
+        _, err = await self._load_gm_config(space_id, provision=True)
+        return err if err is not None else {"status": "ok"}
+
+    @staticmethod
+    def _archive_error(reason: str = "archive_destination_changed") -> dict:
+        return {"status": "error", "reason": reason, "message": {
+            "archive_destination_changed": "The pinned archive destination is inconsistent or changed.",
+            "initial_capture_pending": "The initial archive capture must finish its automatic catalogue first.",
+            "archive_unavailable": "The archive destination could not be verified.",
+        }[reason]}
+
+    def _archive_memory_id(self, space_id: str, meta: dict) -> str:
+        block = meta["graph_memory"]
+        identity = [space_id, meta["created_at"], self._canonical_url(block["url"]), block["memory_id"]]
+        return "mid_" + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:40]
+
+    def _archive_binding_key(self, space_id: str, meta: dict) -> str:
+        return f"{space_id}/_mid_archive_bindings/{self._archive_memory_id(space_id, meta)}.json"
+
+    def _archive_parent_identity(self, block):
+        if not isinstance(block, dict):
+            return None
+        binding = block.get("binding")
+        if binding is None:
+            binding = "embedded" if block.get("token") == EMBEDDED_TOKEN_SENTINEL else "explicit"
+        return binding, self._canonical_url(block.get("url", "")), block.get("memory_id")
+
+    async def _archive_context(self, space_id: str):
+        """Read the parent binding and validate its local archive marker, without provisioning."""
+        config, block, err = await self._resolve_or_embedded(space_id)
+        if err is not None:
+            return None, None, None, err
+        # Resolve credentials/SSRF once, then choose the pin belonging to this
+        # parent and space incarnation. Operational counters are not identity.
+        meta = await get_storage().get_json(f"{space_id}/_meta.json")
+        if not meta or not isinstance(meta.get("created_at"), str) or not meta["created_at"] or (
+            self._archive_parent_identity(meta.get("graph_memory")) != self._archive_parent_identity(block)
+        ):
+            return None, None, None, self._archive_error()
+        marker = await get_storage().get_json(self._archive_binding_key(space_id, meta))
+        if marker is not None and (
+            not isinstance(marker, dict)
+            or set(marker) - {"memory_id", "initial_preimage_id", "remote_created_at"}
+            or marker.get("memory_id") != self._archive_memory_id(space_id, meta)
+            or not isinstance(marker.get("initial_preimage_id"), str)
+            or not marker["initial_preimage_id"]
+            or ("remote_created_at" in marker and (
+                not isinstance(marker["remote_created_at"], str) or not marker["remote_created_at"]
+            ))
+        ):
+            return None, None, None, self._archive_error()
+        if self._canonical_url(config.url) == self._canonical_url(get_settings().long_embedded_url):
+            namespace_error = await self._local_memory_namespace_error(self._archive_memory_id(space_id, meta))
+            if namespace_error is not None:
+                return None, None, None, namespace_error
+        return config, meta, marker, None
+
+    async def _persist_archive_marker(self, space_id: str, meta: dict, marker: dict, *, previous) -> None:
+        """Caller holds the existing space lifecycle lock; verify the pin before egress."""
+        storage, meta_key = get_storage(), f"{space_id}/_meta.json"
+        key = self._archive_binding_key(space_id, meta)
+        latest = await storage.get_json(meta_key)
+        if not latest or latest.get("created_at") != meta["created_at"] or (
+            self._archive_parent_identity(latest.get("graph_memory")) != self._archive_parent_identity(meta["graph_memory"])
+            or await storage.get_json(key) != previous
+        ):
+            raise ValueError("archive binding changed")
+        # Push/disconnect rewrite metadata independently. They must never own
+        # the archive pin, including while construction is still resumable.
+        await _finish_local_mutation(storage.put_json(key, marker))
+        observed = await storage.get_json(meta_key)
+        if not observed or observed.get("created_at") != meta["created_at"] or (
+            self._archive_parent_identity(observed.get("graph_memory")) != self._archive_parent_identity(meta["graph_memory"])
+            or await storage.get_json(key) != marker
+        ):
+            raise ValueError("archive pin not verified")
+
+    @staticmethod
+    async def _archive_remote_memory(client, memory_id: str):
+        result = await client.call_tool("memory_list", {})
+        if not isinstance(result, dict) or result.get("status") != "ok" or (
+            not isinstance(result.get("memories"), list)
+        ):
+            raise ValueError("archive listing unavailable")
+        rows = [row for row in result["memories"] if isinstance(row, dict)
+                and row.get("memory_id", row.get("id")) == memory_id]
+        if not rows:
+            return None
+        if len(rows) != 1 or not isinstance(rows[0].get("created_at"), str) or not rows[0]["created_at"]:
+            raise ValueError("archive incarnation unavailable")
+        return rows[0]
+
+    @staticmethod
+    def _archive_frozen(remote: dict) -> bool:
+        name = remote.get("ontology")
+        return isinstance(name, str) and re.fullmatch(r"auto_[0-9a-f]{16}", name) is not None
+
+    async def prepare_archive_ingest(self, space_id: str, *, preimage_id: str) -> dict:
+        """Pin the first complete capture, then bootstrap its independent archive catalogue."""
+        try:
+            if not isinstance(preimage_id, str) or not preimage_id:
+                return self._archive_error()
+            _, err = await self._load_gm_config(space_id, provision=True)
+            if err is not None:
+                return err
+            config, meta, marker, err = await self._archive_context(space_id)
+            if err is not None:
+                return err
+            client = self._make_client(config.url, config.token, timeout=60.0)
+            memory_id = marker["memory_id"] if marker else self._archive_memory_id(space_id, meta)
+            remote = await self._archive_remote_memory(client, memory_id)
+            if marker is None:
+                marker = {"memory_id": memory_id, "initial_preimage_id": preimage_id}
+                if remote is not None:
+                    # Loss or restoration of older local archive-binding state may remove the marker,
+                    # while the deterministic namespace and its catalogue survive.
+                    # Only an already frozen catalogue can be safely readopted;
+                    # an unknown bootstrap must not acquire a new initial corpus.
+                    if not self._archive_frozen(remote):
+                        return self._archive_error()
+                    marker["remote_created_at"] = remote["created_at"]
+                await self._persist_archive_marker(space_id, meta, marker, previous=None)
+            if remote is None:
+                if marker.get("remote_created_at"):
+                    return self._archive_error()
+                if marker["initial_preimage_id"] != preimage_id:
+                    return self._archive_error("initial_capture_pending")
+                # The shell has no content. Only the complete initial batch may
+                # replace this temporary default with the automatic catalogue.
+                await client.call_tool("memory_create", {
+                    "memory_id": marker["memory_id"], "name": f"MID archives — {space_id}",
+                    "description": "Retained working-memory captures", "ontology": "general",
+                })
+                remote = await self._archive_remote_memory(client, marker["memory_id"])
+                if remote is None:
+                    return self._archive_error("archive_unavailable")
+            if marker.get("remote_created_at") not in (None, remote["created_at"]):
+                return self._archive_error()
+            frozen = self._archive_frozen(remote)
+            if not frozen and remote.get("ontology") != "general":
+                return self._archive_error()
+            if not marker.get("remote_created_at"):
+                if frozen:
+                    return self._archive_error()
+                updated = {**marker, "remote_created_at": remote["created_at"]}
+                await self._persist_archive_marker(space_id, meta, updated, previous=marker)
+                marker = updated
+            if not frozen and marker["initial_preimage_id"] != preimage_id:
+                return self._archive_error("initial_capture_pending")
+            return {"status": "ok", "ontology_mode": "frozen" if frozen else "auto"}
+        except Exception:
+            return self._archive_error("archive_unavailable")
+
+    async def _resolve_archive_destination(self, space_id: str):
+        """Resolve only a previously pinned namespace; never recreate or retarget it."""
+        try:
+            config, _, marker, err = await self._archive_context(space_id)
+            if err is not None:
+                return None, None, None, err
+            if marker is None:
+                return None, None, None, {"status": "error", "reason": "archive_not_configured",
+                                          "message": "No archive destination is configured."}
+            client = self._make_client(config.url, config.token, timeout=60.0)
+            remote = await self._archive_remote_memory(client, marker["memory_id"])
+            if remote is None or marker.get("remote_created_at") != remote["created_at"] or (
+                remote.get("ontology") != "general" and not self._archive_frozen(remote)
+            ):
+                return None, None, None, self._archive_error()
+            return client, marker["memory_id"], remote, None
+        except Exception:
+            return None, None, None, self._archive_error("archive_unavailable")
+
+    async def _resolve_archive_read_client_and_memory(self, space_id: str):
+        """Read seam for common LONG retrieval, with the archive incarnation guard."""
+        client, memory_id, _, err = await self._resolve_archive_destination(space_id)
+        return client, memory_id, err
+
+    async def archive_index_status(self, space_id: str) -> dict:
+        """Read model provenance only from the owned, already pinned archive."""
+        client, memory_id, err = await self._resolve_archive_read_client_and_memory(space_id)
+        if err is not None:
+            return err
+        try:
+            stats = await client.call_tool("memory_stats", {"memory_id": memory_id})
+            if not isinstance(stats, dict) or stats.get("status") != "ok":
+                return self._archive_error("archive_unavailable")
+            return {"status": "ok",
+                    "embedding_collection": _embedding_collection_view(stats.get("embedding_collection")),
+                    "embedding_identity": _embedding_identity_view(stats.get("embedding_identity"))}
+        except Exception:
+            return self._archive_error("archive_unavailable")
+
+    async def ingest_archive(self, space_id: str, *, documents: list[dict], automatic: bool) -> dict:
+        client, memory_id, remote, err = await self._resolve_archive_destination(space_id)
+        if err is not None:
+            return err
+        if not automatic and not self._archive_frozen(remote):
+            return self._archive_error("initial_capture_pending")
+        arguments = {"memory_id": memory_id, "documents": documents, "replace_existing": False}
+        if automatic:
+            arguments["ontology"] = "auto"
+        try:
+            return await client.call_tool("memory_ingest_batch_async", arguments)
+        except Exception:
+            return self._archive_error("archive_unavailable")
+
+    async def archive_ingest_status(self, space_id: str, job_id: str) -> dict:
+        client, memory_id, err = await self._resolve_archive_read_client_and_memory(space_id)
+        if err is not None:
+            return err
+        try:
+            return await client.call_tool("ingest_job_status", {"job_id": job_id, "expected_memory_id": memory_id})
+        except Exception:
+            return self._archive_error("archive_unavailable")
+
+    async def get_archive_document(self, space_id: str, *, source_path: str) -> dict:
+        client, memory_id, err = await self._resolve_archive_read_client_and_memory(space_id)
+        if err is not None:
+            return err
+        try:
+            result = await client.call_tool("document_get", {"memory_id": memory_id,
+                "source_path": source_path, "include_content": False, "content_format": "text"})
+            if not isinstance(result, dict) or result.get("status") != "ok":
+                return result
+            doc = result.get("document", {})
+            return {"status": "ok", "space_id": space_id, "document": {
+                **doc, "document_id": doc.get("document_id") or doc.get("id"),
+                "sha256": doc.get("sha256") or doc.get("hash"),
+            }}
+        except Exception:
+            return self._archive_error("archive_unavailable")
+
     async def ingest_async(
         self,
         space_id: str,
@@ -2625,12 +3009,24 @@ class GraphBridgeService:
         status: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        archive: bool = False,
     ) -> dict:
-        """Liste les jobs d'ingestion asynchrone d'un espace.
+        """List asynchronous jobs in the primary or pinned MID archive memory.
 
-        Outil GM : ``ingest_job_list``.
+        Read-only Graph tool: ``ingest_job_list``.
         """
-        client, memory_id, err = await self._resolve_read_client_and_memory(space_id)
+        if archive:
+            namespace_error = reserved_space_error(space_id)
+            if namespace_error is not None:
+                return namespace_error
+            meta = await get_storage().get_json(f"{space_id}/_meta.json")
+            if (isinstance(meta, dict) and meta.get("graph_memory") is None
+                    and get_settings().long_embedded_url):
+                return {"status": "error", "reason": "archive_not_configured",
+                        "message": "No archive destination is configured."}
+        resolver = (self._resolve_archive_read_client_and_memory if archive
+                    else self._resolve_read_client_and_memory)
+        client, memory_id, err = await resolver(space_id)
         if err is not None:
             return err
 
@@ -2647,11 +3043,15 @@ class GraphBridgeService:
         try:
             return await client.call_tool("ingest_job_list", arguments)
         except ConnectionError as e:
+            if archive:
+                return self._archive_error("archive_unavailable")
             return {
                 "status": "error",
                 "message": f"Could not connect to Graph Memory: {e}",
             }
         except Exception as e:
+            if archive:
+                return self._archive_error("archive_unavailable")
             return {
                 "status": "error",
                 "message": f"ingest_job_list error: {e}",
@@ -2721,10 +3121,31 @@ class GraphBridgeService:
                 return res
 
             raw_docs = res.get("documents", [])
+            total_count = res.get("total_count", len(raw_docs))
+            try:
+                archive, archive_id, err = await self._optional_archive_reader(space_id)
+                if err is not None:
+                    res = self._archive_partial(res, err)
+                elif archive is not None:
+                    archive_args = {**arguments, "memory_id": archive_id}
+                    if limit is not None:
+                        archive_args["offset"] = max(0, offset - total_count)
+                    other = await archive.call_tool("document_list", archive_args)
+                    if not isinstance(other, dict) or other.get("status") != "ok":
+                        res = self._archive_partial(res, other if isinstance(other, dict) else None)
+                    else:
+                        raw_docs = [{**d, "memory_id": memory_id} for d in raw_docs] + [
+                            {**d, "memory_id": archive_id} for d in other["documents"]]
+                        if limit is not None:
+                            raw_docs = raw_docs[:limit]
+                        total_count += other.get("total_count", len(other["documents"]))
+            except Exception:
+                res = self._archive_partial(res)
             projected = []
             for d in raw_docs:
                 if isinstance(d, dict):
                     projected.append({
+                        **({"memory_id": d["memory_id"]} if "memory_id" in d else {}),
                         "document_id": d.get("document_id") or d.get("id"),
                         "filename": d.get("filename"),
                         "sha256": d.get("sha256") or d.get("hash"),
@@ -2744,8 +3165,9 @@ class GraphBridgeService:
                 "status": "ok",
                 "space_id": space_id,
                 "count": len(projected),
-                "total_count": res.get("total_count", len(projected)),
+                "total_count": total_count,
                 "documents": projected,
+                **({"partial": True, "warnings": res["warnings"]} if res.get("partial") else {}),
             }
             if limit is not None:
                 out["limit"] = limit
@@ -2791,11 +3213,22 @@ class GraphBridgeService:
 
         try:
             res = await client.call_tool("document_get", arguments)
+            target = document_id or source_path
+            missing = isinstance(res, dict) and (res.get("status") == "not_found" or (
+                res.get("status") == "error" and res.get("message") == f"Document '{target}' not found"))
+            archive_id = None
+            if missing:
+                archive, archive_id, err = await self._optional_archive_reader(space_id)
+                if err is not None:
+                    return err
+                if archive is not None:
+                    res = await archive.call_tool("document_get", {**arguments, "memory_id": archive_id})
             if not isinstance(res, dict) or res.get("status") != "ok":
                 return res
 
             raw_doc = res.get("document", {})
             doc_dict = {
+                **({"memory_id": archive_id} if archive_id is not None else {}),
                 "document_id": raw_doc.get("document_id") or raw_doc.get("id"),
                 "filename": raw_doc.get("filename"),
                 "sha256": raw_doc.get("sha256") or raw_doc.get("hash"),

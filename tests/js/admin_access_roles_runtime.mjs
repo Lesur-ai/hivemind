@@ -33,7 +33,7 @@ function node(value = '') {
         style: { display: 'block' },
         classList: { contains: name => name === 'hidden', add() {}, remove() {} },
         addEventListener(name, callback) { listeners[name] = callback; },
-        dispatch(name) { if (listeners[name]) listeners[name]({ target: this }); },
+        dispatch(name) { if (listeners[name]) return listeners[name]({ target: this }); },
         removeAttribute(name) { delete attributes[name]; },
         setAttribute(name, value) { attributes[name] = String(value); },
         querySelectorAll() { return []; },
@@ -63,6 +63,8 @@ function accessHarness(identity, overrides = {}) {
     const toasts = [];
     const cache = { spaces: [{ space_id: 'stale-admin-space' }], tokens: [{ hash: 'secret-admin-row' }] };
     const editBoxes = [node('alpha'), node('beta')];
+    let grantBoxes = [];
+    const copied = [];
     const elements = new Map([
         ['loginOverlay', node()],
         ['adminModal', node()],
@@ -95,7 +97,7 @@ function accessHarness(identity, overrides = {}) {
         ['editTokenPicker', node()],
         ['editTokenPickerErr', node()],
     ]);
-    elements.get('adminModal').querySelectorAll = () => [];
+    elements.get('adminModal').querySelectorAll = selector => selector === '.ao-space' ? grantBoxes : [];
 
     const responseFor = async (tool, args) => {
         if (overrides[tool]) return await overrides[tool](args);
@@ -120,20 +122,21 @@ function accessHarness(identity, overrides = {}) {
 
     const context = {
         console,
+        URL,
         window: { addEventListener() {} },
         location: { hash: '#/access' },
-        navigator: {},
+        navigator: { clipboard: { async writeText(value) { copied.push(value); } } },
         cache,
         document: {
             body: { appendChild() {}, removeChild() {} },
             addEventListener() {},
             getElementById(id) { return elements.get(id) || null; },
-            querySelectorAll(selector) { return selector === '.et-space' ? editBoxes : []; },
+            querySelectorAll(selector) { return selector === '.et-space' ? editBoxes : selector === '.ao-space' ? grantBoxes : []; },
             createElement() { return node(); },
             execCommand() { return false; },
         },
         AdminRouter: { epoch: 1, refresh() {} },
-        AdminViews: { register(name, fn) { assert.equal(name, 'access'); render = fn; } },
+        AdminViews: { register(name, fn) { if (name === 'access') render = fn; } },
         _ctx: () => ({ identity }),
         registerAction(name, fn) { actions[name] = fn; },
         callTool: async (tool, args) => {
@@ -143,6 +146,23 @@ function accessHarness(identity, overrides = {}) {
         showModal(title, body, verb, onConfirm) {
             modal = { title, body, verb, onConfirm };
             elements.get('adminModal').style.display = 'block';
+            for (const key of [...elements.keys()]) if (key.startsWith('ao')) elements.delete(key);
+            for (const match of body.matchAll(/id="(ao[^" ]+)"/g)) elements.set(match[1], node());
+            if (elements.has('aoSpaces')) {
+                let html = '';
+                Object.defineProperty(elements.get('aoSpaces'), 'innerHTML', {
+                    get() { return html; },
+                    set(value) {
+                        html = value;
+                        grantBoxes = [...value.matchAll(/<input\b[^>]*class="ao-space"[^>]*>/g)].map(match => {
+                            const box = node(match[0].match(/value="([^"]*)"/)[1]);
+                            box.checked = /\bchecked\b/.test(match[0]);
+                            box.disabled = /\bdisabled\b/.test(match[0]);
+                            return box;
+                        });
+                    },
+                });
+            }
         },
         showDestructiveModal() {},
         closeModal() {},
@@ -170,6 +190,7 @@ function accessHarness(identity, overrides = {}) {
         "globalThis.__access = { render, openCreateModal, openInviteModal }; AdminViews.register('access', render);",
     );
     vm.runInContext(instrumented, context, { filename: accessPath });
+    vm.runInContext(fs.readFileSync(spacesPath, 'utf8'), context, { filename: spacesPath });
     assert.equal(typeof render, 'function');
 
     const content = node();
@@ -180,6 +201,9 @@ function accessHarness(identity, overrides = {}) {
         content,
         elements,
         editBoxes,
+        get grantBoxes() { return grantBoxes; },
+        context, copied,
+        setIdentity(value) { identity = value; },
         get modal() { return modal; },
         render() { render(content, {}, { epoch: 1, identity }); },
         toasts,
@@ -414,11 +438,14 @@ async function provePartialCredentialIsNeverHidden() {
     h.render();
     h.actions['access-create']();
     await h.modal.onConfirm();
-    assert.match(h.modal.title, /uncertain/i);
+    assert.match(h.modal.title, /Creation needs checking/);
     assert.match(h.modal.body, new RegExp(token));
     assert.match(h.modal.body, new RegExp(tokenHash));
     assert.match(h.modal.body, /Do not discard either value/);
     assert.match(h.modal.body, /Do not assume the token is active or absent/);
+    await h.modal.onConfirm();
+    assert.equal(h.calls.some(call => call.tool === 'space_list' || call.tool === 'space_invite_token'), false,
+        'partial credential must never proceed to grants');
 }
 
 function spacesHarness(identity, overrides = {}) {
@@ -611,6 +638,155 @@ async function proveRetrySafeSpacePartialAllowsOnlyManualIdenticalRetry() {
     }
 }
 
+async function proveOnboardingGrantsAndClientConfiguration() {
+    for (const admin of [false, true]) {
+        const hash = 'sha256:' + 'c'.repeat(64);
+        const secret = 'lm_research_fixture_never_in_config';
+        const grants = [];
+        const results = [
+            { status: 'ok', added: true, mode: 'delta', space_ids_added: ['alpha'], space_ids_after: ['alpha'] },
+            { status: 'error', message: 'Temporary failure' },
+            { status: 'partial', recovery_required: true, message: 'Inspect exact target' },
+            { status: 'ok', added: false, mode: 'delta', space_ids_noop: ['add:beta'], space_ids_after: ['alpha', 'beta'] },
+        ];
+        const create = async () => ({ status: 'created', token: secret, token_hash: hash,
+            name: 'agent', permissions: ['read', 'write'], space_ids: [] });
+        const grant = async args => {
+            grants.push(JSON.parse(JSON.stringify(args)));
+            const response = results.shift();
+            if (admin && response.status === 'error') throw new Error('Lost response');
+            return response;
+        };
+        const h = accessHarness({ client_name: 'owner', permissions: admin ? ['admin'] : ['read', 'write', 'manage'] }, {
+            admin_create_token: create, token_create: create,
+            space_list: async () => ({ status: 'ok', spaces: ['alpha', 'beta', 'gamma'].map(space_id => ({ space_id })) }),
+            admin_update_token: grant, space_invite_token: grant,
+        });
+        assert.equal(typeof h.context.window.openAccessOnboarding, 'function', 'shared entry point must exist');
+        h.context.window.openAccessOnboarding({ spaceId: 'beta', message: 'Space created' });
+        assert.equal(h.calls.length, 0, 'opening handoff must never create a token automatically');
+        await h.modal.onConfirm();
+        assert.equal(h.calls.length, 1, 'create only once before acknowledgement');
+        assert.match(h.modal.body, /Copy token/);
+        await h.modal.onConfirm();
+        assert.equal(h.elements.get('ctSecret').textContent, '', 'plaintext cleared before grants');
+        assert.equal(h.elements.get('ctTokenHash').textContent, '', 'secret screen hash cleared');
+        assert.equal(h.modal.title, 'Grant space access');
+        assert.match(h.modal.body, new RegExp(hash), 'non-secret full Token ID remains visible during grants');
+        await h.elements.get('aoCopyHashBtn').dispatch('click');
+        await flush();
+        assert.equal(h.copied.at(-1), hash, 'operator can copy the Token ID after acknowledging the plaintext');
+        assert.equal(h.grantBoxes.find(box => box.value === 'beta').checked, true);
+        for (const box of h.grantBoxes) box.checked = true;
+        await h.elements.get('aoGrant').dispatch('click');
+        assert.equal(grants.length, 3);
+        assert.match(h.elements.get('aoResults').innerHTML, /Granted/);
+        assert.match(h.elements.get('aoResults').innerHTML, /Needs checking/);
+        assert.match(h.elements.get('aoResults').innerHTML,
+            admin ? /Not confirmed — retry available/ : /Refused by server — retry available/,
+            'explicit server refusal and lost transport response have distinct labels');
+        await h.elements.get('aoRetry').dispatch('click');
+        assert.equal(grants.length, 4, 'retry excludes success and recovery-required');
+        assert.deepEqual(grants[3], admin ? { token_hash: hash, space_ids_add: 'beta' } : { token_hash: hash, space_id: 'beta' });
+        assert.ok(grants.every(args => args.token_hash === hash), 'no prefix or name as identity');
+        assert.ok(grants.every(args => !('permissions' in args || 'space_ids' in args || 'space_ids_remove' in args)));
+        assert.equal(h.calls.filter(call => call.tool.endsWith('create_token') || call.tool === 'token_create').length, 1);
+        if (!admin) assert.equal(h.calls.some(call => call.tool.startsWith('admin_')), false);
+        await h.modal.onConfirm();
+        assert.equal(h.modal.title, 'Configure client');
+        assert.equal(h.elements.get('aoUrl').value, '', 'external URL is never inferred');
+        h.elements.get('aoUrl').value = 'https://external.example/proxy/hivemind/mcp';
+        h.elements.get('aoClient').value = 'codex';
+        await h.elements.get('aoCopyConfig').dispatch('click');
+        assert.match(h.copied.at(-1), /bearer_token_env_var = "HIVEMIND_TOKEN"/);
+        assert.match(h.copied.at(-1), /https:\/\/external.example\/proxy\/hivemind\/mcp/);
+        assert.ok(!h.copied.at(-1).includes(secret));
+        h.elements.get('aoClient').value = 'claude';
+        await h.elements.get('aoCopyConfig').dispatch('click');
+        assert.equal(JSON.parse(h.copied.at(-1)).mcpServers.hivemind.headers.Authorization, 'Bearer ${HIVEMIND_TOKEN}');
+        const copies = h.copied.length;
+        h.elements.get('aoUrl').value = 'https://user:password@external.example/mcp';
+        await h.elements.get('aoCopyConfig').dispatch('click');
+        assert.equal(h.copied.length, copies, 'credentials in URL must not reach config');
+        assert.match(h.elements.get('aoConfigError').textContent, /HTTP|credentials/);
+        h.setIdentity({ client_name: 'another', permissions: ['admin'] });
+        h.elements.get('aoUrl').value = 'https://external.example/mcp';
+        await h.elements.get('aoCopyConfig').dispatch('click');
+        assert.equal(h.copied.length, copies, 'stale-session config cannot be copied');
+    }
+}
+
+async function proveOnboardingOwnershipAndSingleFlight() {
+    const hash = 'sha256:' + 'd'.repeat(64);
+    for (const boundary of ['session', 'close', 'route', 'modal']) {
+        let finish;
+        const gate = new Promise(resolve => { finish = resolve; });
+        const h = accessHarness({ permissions: ['manage'] }, {
+            token_create: async () => ({ status: 'created', token: 'lm_once', token_hash: hash, permissions: ['read'] }),
+            space_list: async () => ({ status: 'ok', spaces: [{ space_id: 'alpha' }, { space_id: 'beta' }] }),
+            space_invite_token: async () => await gate,
+        });
+        h.context.window.openAccessOnboarding({});
+        await h.modal.onConfirm();
+        await h.modal.onConfirm();
+        h.grantBoxes.forEach(box => { box.checked = true; });
+        // A forged checkbox from outside the fresh list must not enter the batch.
+        h.grantBoxes.push(Object.assign(node('forged'), { checked: true }));
+        const request = h.elements.get('aoGrant').dispatch('click');
+        await h.elements.get('aoGrant').dispatch('click');
+        assert.equal(h.calls.filter(call => call.tool === 'space_invite_token').length, 1, 'single flight');
+        assert.equal(await h.modal.onConfirm(), false, 'cannot leave for config while submitting');
+        assert.equal(h.modal.title, 'Grant space access');
+        if (boundary === 'session') h.setIdentity({ client_name: 'other', permissions: ['manage'] });
+        if (boundary === 'close') { h.context.window.clearAccessHandoff(); h.elements.get('adminModal').style.display = 'none'; }
+        if (boundary === 'route') h.context.AdminRouter.epoch += 1;
+        if (boundary === 'modal') h.elements.set('aoResults', node());
+        const before = h.elements.get('aoResults').innerHTML;
+        finish({ status: 'ok', added: true });
+        await request;
+        assert.equal(h.calls.filter(call => call.tool === 'space_invite_token').length, 1, `${boundary}: no next grant`);
+        assert.equal(h.elements.get('aoResults').innerHTML, before, `${boundary}: no stale painting`);
+    }
+}
+
+async function proveOnboardingInitialScopesAndSpaceEntry() {
+    const hash = 'sha256:' + 'e'.repeat(64);
+    const h = accessHarness({ permissions: ['manage'] }, {
+        space_create: async args => ({ status: 'created', space_id: args.space_id, token_message: 'Owner <saved> & ready' }),
+        token_create: async () => ({ status: 'created', token: 'lm_once', token_hash: hash, permissions: ['read'], space_ids: ['alpha'] }),
+        space_list: async () => ({ status: 'ok', spaces: [{ space_id: 'alpha' }, { space_id: 'beta' }] }),
+    });
+    for (const [id, value] of Object.entries({ csSpaceId: 'beta', csDescription: '', csOwner: '', csRules: '',
+        csRulesCount: '', csSpaceIdError: '', csFormError: '' })) h.elements.set(id, node(value));
+    h.actions['spaces-open-create']();
+    await h.modal.onConfirm();
+    assert.equal(h.modal.title, 'Create token', 'Space-created opens the actual shared form');
+    assert.match(h.modal.body, /Owner &lt;saved&gt; &amp; ready/);
+    assert.deepEqual(h.calls.map(call => call.tool), ['space_create'], 'no implicit token creation');
+    await h.modal.onConfirm();
+    await h.modal.onConfirm();
+    assert.equal(h.grantBoxes.find(box => box.value === 'alpha').disabled, true, 'initial grant retained');
+    assert.equal(h.grantBoxes.find(box => box.value === 'beta').checked, true, 'new space preselected');
+    h.grantBoxes.push(Object.assign(node('forged'), { checked: true }));
+    await h.elements.get('aoGrant').dispatch('click');
+    const grants = h.calls.filter(call => call.tool === 'space_invite_token');
+    assert.equal(grants.length, 1);
+    assert.equal(grants[0].args.space_id, 'beta');
+
+    const admin = accessHarness({ permissions: ['admin'] }, {
+        admin_create_token: async () => ({ status: 'created', token: 'lm_admin', token_hash: hash, permissions: ['admin'], space_ids: [] }),
+    });
+    admin.actions['access-create']();
+    await admin.modal.onConfirm();
+    await admin.modal.onConfirm();
+    assert.equal(admin.modal.title, 'Configure client');
+    assert.match(admin.modal.body, /global access/);
+    assert.equal(admin.calls.length, 1, 'global admin target skips spaces and grants');
+}
+
+await proveOnboardingGrantsAndClientConfiguration();
+await proveOnboardingOwnershipAndSingleFlight();
+await proveOnboardingInitialScopesAndSpaceEntry();
 await proveManagerNeverCallsAdmin();
 await proveAdminAndBootstrapKeepLegacyCreate();
 await proveAdminEditPromotionAndDowngradeScopeTransitions();

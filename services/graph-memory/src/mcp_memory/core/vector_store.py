@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import sys
 import threading
 import warnings
@@ -120,6 +121,7 @@ class EmbeddingCollectionError(RuntimeError):
 
     def __init__(self, reason: str):
         self.reason = reason
+        self.identity: EmbeddingCollectionIdentity | None = None
         super().__init__(f"embedding collection {self.state}: {reason}")
 
 
@@ -421,6 +423,13 @@ class VectorStoreService:
                 result=result,
             )
         except EmbeddingIdentityError as error:
+            # The validator checked the exact namespace before this mismatch.
+            # Preserve already-validated metadata for diagnostics only; the
+            # exception still blocks every search/write with the new profile.
+            if error.reason == "static_profile_mismatch":
+                failure = EmbeddingCollectionReindexRequired(error.reason)
+                failure.identity = identity
+                raise failure from None
             self._raise_identity_error(error)
         except Exception:
             raise EmbeddingCollectionUnavailable("canonical_unreadable") from None
@@ -703,6 +712,7 @@ class VectorStoreService:
         embedding_result: EmbeddingResult,
         doc_ids: Optional[List[str]] = None,
         limit: int = 5,
+        query_text: Optional[str] = None,
     ) -> List[ChunkResult]:
         """Search only owned payloads after dynamic embedding compatibility."""
         if (
@@ -712,6 +722,9 @@ class VectorStoreService:
             raise ValueError("query embedding_result must contain one vector")
         if type(limit) is not int or limit < 1:
             raise ValueError("limit must be a positive integer")
+        if query_text is not None and type(query_text) is not str:
+            raise ValueError("query_text must be a string")
+        references = list(dict.fromkeys(re.findall(r"(?<!\w)#\d+\b", query_text or "")))
         conditions: list[qmodels.FieldCondition] = []
         if doc_ids is not None:
             if type(doc_ids) is not list or any(
@@ -740,6 +753,34 @@ class VectorStoreService:
                     limit=limit,
                     with_payload=True,
                 )
+                if references:
+                    # Keep exact references that embeddings can confuse with
+                    # similar issue numbers. Same identity, namespace and active
+                    # document filters; no index mutation or extra embedding.
+                    reference_response = self._client.query_points(
+                        collection_name=resolved.name,
+                        query=list(embedding_result.vectors[0]),
+                        query_filter=self._memory_filter(memory_id, *conditions, *[
+                            qmodels.FieldCondition(key="text", match=qmodels.MatchText(text=reference))
+                            for reference in references
+                        ]),
+                        limit=limit,
+                        with_payload=True,
+                    )
+                    reference_points = []
+                    for point in reference_response.points:
+                        payload = self._validate_returned_payload(point.payload, memory_id)
+                        # Unindexed Qdrant versions may use substring matching.
+                        # #17 must not be promoted solely because #170 occurs.
+                        if all(re.search(r"(?<!\w)" + re.escape(reference) + r"\b", payload.get("text", "")) for reference in references):
+                            reference_points.append(point)
+                    seen = set()
+                    combined = []
+                    for point in reference_points + response.points:
+                        if point.id not in seen:
+                            seen.add(point.id)
+                            combined.append(point)
+                    response.points = combined[:limit]
             except Exception:
                 raise EmbeddingCollectionUnavailable("search_failed") from None
 
@@ -1569,21 +1610,41 @@ class VectorStoreService:
             }
 
     @_guard_memory_operation
-    async def get_collection_info(self, memory_id: str) -> dict:
+    async def get_collection_info(self, memory_id: str, *, include_identity: bool = False) -> dict:
+        """Read index state, optionally with bounded model diagnostics for MCP stats."""
+        persisted = None
         try:
             with self._memory_lock(memory_id):
                 resolved = self._resolve_collection(memory_id)
+                if resolved is None:
+                    status = {"state": "missing"}
+                else:
+                    persisted = resolved.identity
+                    status = {
+                        "state": "ready",
+                        "profile_fingerprint": persisted.profile_fingerprint,
+                        "points_count": resolved.points_count,
+                    }
         except EmbeddingCollectionReindexRequired as error:
-            return {"state": error.state, "reason": error.reason}
+            persisted = error.identity
+            status = {"state": error.state, "reason": error.reason}
         except EmbeddingCollectionUnavailable as error:
-            return {"state": error.state, "reason": error.reason}
-        if resolved is None:
-            return {"state": "missing"}
-        return {
-            "state": "ready",
-            "profile_fingerprint": resolved.identity.profile_fingerprint,
-            "points_count": resolved.points_count,
-        }
+            status = {"state": error.state, "reason": error.reason}
+        if include_identity:
+            try:
+                profile = self._embedding_profile()
+                status["embedding_identity"] = {
+                    "configured": {"provider": profile.provider_id, "model": profile.configured_model,
+                                   "dimensions": profile.expected_dimensions},
+                    "persisted": None if persisted is None else {
+                        "provider": persisted.provider_id, "model": persisted.configured_model,
+                        "resolved_model": persisted.resolved_model, "model_evidence": persisted.model_evidence,
+                        "dimensions": persisted.dimensions, "profile_fingerprint": persisted.profile_fingerprint,
+                    },
+                }
+            except EmbeddingCollectionUnavailable:
+                status["embedding_identity"] = None
+        return status
 
 
 _vector_store: Optional[VectorStoreService] = None

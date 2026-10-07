@@ -189,14 +189,20 @@ class StorageService:
         s3_metadata = {}
         if metadata:
             for k, v in metadata.items():
-                s3_metadata[k] = self._sanitize_metadata_value(str(v))
+                # S3 sends these names as HTTP headers. Some compatible
+                # endpoints/proxies reject underscores and capitalize reads.
+                key_name = k.lower().replace("_", "-")
+                value = self._sanitize_metadata_value(str(v))
+                if key_name in s3_metadata and s3_metadata[key_name] != value:
+                    raise ValueError("conflicting document metadata")
+                s3_metadata[key_name] = value
         # Ownership and retained-source evidence are authoritative outputs of
         # this method, never caller-overridable user metadata.
         s3_metadata.update({
-            'memory_id': memory_id,
-            'original_filename': self._sanitize_metadata_value(filename),
-            'doc_hash': doc_hash,
-            'uploaded_at': datetime.utcnow().isoformat()
+            'memory-id': memory_id,
+            'original-filename': self._sanitize_metadata_value(filename),
+            'doc-hash': doc_hash,
+            'uploaded-at': datetime.utcnow().isoformat()
         })
         
         try:
@@ -604,12 +610,24 @@ class StorageService:
                     )
                 ):
                     raise RuntimeError("invalid source inventory")
+                # Keep the adapter's existing snake_case contract for both
+                # legacy objects and portable HTTP metadata. Ambiguous
+                # ownership/hash aliases must never be resolved by ordering.
+                normalized_metadata = {}
+                for meta_key, meta_value in metadata.items():
+                    canonical_key = meta_key.lower().replace("-", "_")
+                    if (
+                        canonical_key in normalized_metadata
+                        and normalized_metadata[canonical_key] != meta_value
+                    ):
+                        raise RuntimeError("conflicting source metadata")
+                    normalized_metadata[canonical_key] = meta_value
                 objects.append(
                     {
                         "key": key,
                         "uri": f"s3://{self._bucket}/{key}",
                         "size_bytes": size,
-                        "metadata": dict(metadata),
+                        "metadata": normalized_metadata,
                     }
                 )
             if is_truncated is True:

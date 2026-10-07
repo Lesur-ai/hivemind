@@ -173,7 +173,7 @@ class TestAccessCapabilitySplit:
         assert 'id="ctTokenHash"' in secret
         assert 'id="ctCopyBtn"' in secret
         assert 'id="ctCopyHashBtn"' in secret
-        assert "Copy plaintext" in secret
+        assert "Copy token" in secret
         assert "Copy Token ID" in secret
         assert "Token ID (full hash)" in secret
         assert "holder.value = ''" in secret
@@ -342,3 +342,32 @@ def test_space_partial_retry_safety_runtime_kills_both_branch_mutants(
             check=False,
         )
         assert result.returncode != 0, f"runtime survived {filename}"
+
+
+@pytest.mark.parametrize(("before", "after"), [
+    ("token_hash: flow.hash,", "token_hash: flow.hash.slice(0, 23),"),
+    ("space_ids_add: sid", "space_ids: sid"),
+    ("return flow.rows[sid].state === 'failed' || flow.rows[sid].state === 'refused';\n            }) :",
+     "return flow.rows[sid].state !== 'recovery';\n            }) :"),
+    ("var recovery = res && (res.status === 'partial' || res.recovery_required === true);", "var recovery = false;"),
+    ("if (uncertain || !/^sha256:", "if (!/^sha256:"),
+    ("!_isStale(epoch, gen, session) && hasManage", "hasManage"),
+    ("Authorization: 'Bearer ${HIVEMIND_TOKEN}'", "Authorization: 'Bearer lm_research_fixture_never_in_config'"),
+])
+def test_onboarding_runtime_kills_grant_and_secret_mutants(tmp_path: Path, before: str, after: str):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    source = _read(ACCESS)
+    assert before in source
+    subject = tmp_path / "onboarding-mutant.js"
+    subject.write_text(source.replace(before, after), encoding="utf-8")
+    result = subprocess.run([node, str(RUNTIME), str(subject), str(SPACES)], cwd=ROOT,
+                            text=True, capture_output=True, check=False)
+    assert result.returncode != 0, f"runtime survived mutation {before}"
+
+
+def test_logout_clears_access_handoff_before_removing_modal():
+    shell = _read(ROOT / "src/live_mem/static/js/admin-app.js")
+    wipe = shell.split("function wipeSession() {", 1)[1].split("async function doLogin", 1)[0]
+    assert wipe.index("window.clearAccessHandoff()") < wipe.index("modal.remove()")

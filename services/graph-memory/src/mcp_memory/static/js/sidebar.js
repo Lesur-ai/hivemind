@@ -78,11 +78,11 @@ function buildEntityTypeFilters(nodes) {
         const checked = filterState.visibleEntityTypes.has(type) ? 'checked' : '';
         const dimmed = checked ? '' : 'dimmed';
         return `
-            <label class="filter-item" title="${type} (${typeCounts[type]})">
+            <label class="filter-item" title="${escapeHtml(type)} (${typeCounts[type]})">
                 <input type="checkbox" ${checked}
-                       data-action="toggle-entity-type" data-type="${type}">
+                       data-action="toggle-entity-type" data-type="${escapeHtml(type)}">
                 <div class="filter-color" data-color="${color}"></div>
-                <span class="filter-label ${dimmed}" id="label-etype-${type}">${type}</span>
+                <span class="filter-label ${dimmed}" id="label-etype-${escapeHtml(type)}">${escapeHtml(type)}</span>
                 <span class="filter-count">${typeCounts[type]}</span>
             </label>`;
     }).join('');
@@ -175,11 +175,11 @@ function buildEdgeTypeFilters(edges) {
         const dimmed = checked ? '' : 'dimmed';
         const displayName = type.replace(/_/g, ' ');
         return `
-            <label class="filter-item" title="${displayName} (${typeCounts[type]})">
+            <label class="filter-item" title="${escapeHtml(displayName)} (${typeCounts[type]})">
                 <input type="checkbox" ${checked}
-                       data-action="toggle-edge-type" data-type="${type}">
+                       data-action="toggle-edge-type" data-type="${escapeHtml(type)}">
                 <div class="filter-edge-color" data-color="${color}"></div>
-                <span class="filter-label ${dimmed}" id="label-etype-edge-${type}">${displayName}</span>
+                <span class="filter-label ${dimmed}" id="label-etype-edge-${escapeHtml(type)}">${escapeHtml(displayName)}</span>
                 <span class="filter-count">${typeCounts[type]}</span>
             </label>`;
     }).join('');
@@ -264,11 +264,11 @@ function buildDocumentFilters(documents) {
         const name = doc.filename || doc.id;
         const shortName = name.length > 30 ? name.substring(0, 28) + '…' : name;
         return `
-            <label class="filter-item" title="${name}">
+            <label class="filter-item" title="${escapeHtml(name)}">
                 <input type="checkbox" ${checked}
-                       data-action="toggle-document" data-doc-id="${doc.id}">
+                       data-action="toggle-document" data-doc-id="${escapeHtml(doc.id)}">
                 <div class="filter-color filter-color-doc"></div>
-                <span class="filter-label ${dimmed}" id="label-doc-${doc.id}">${shortName}</span>
+                <span class="filter-label ${dimmed}" id="label-doc-${escapeHtml(doc.id)}">${escapeHtml(shortName)}</span>
             </label>`;
     }).join('');
 }
@@ -323,10 +323,10 @@ function updateEntityList(nodes) {
     list.innerHTML = sorted.slice(0, 80).map(n => {
         const color = TYPE_COLORS[n.type] || TYPE_COLORS.Unknown;
         return `
-        <div class="entity-item" data-action="focus-node" data-node-id="${n.id}"
+        <div class="entity-item" data-action="focus-node" data-node-id="${escapeHtml(n.id)}"
              data-border-color="${color}">
-            ${n.label.substring(0, 35)}${n.label.length > 35 ? '…' : ''}
-            <div class="type">${n.type}</div>
+            ${escapeHtml(n.label.substring(0, 35))}${n.label.length > 35 ? '…' : ''}
+            <div class="type">${escapeHtml(n.type)}</div>
         </div>`;
     }).join('');
 

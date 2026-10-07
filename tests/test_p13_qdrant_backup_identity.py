@@ -158,6 +158,7 @@ class _StorageClient:
     def __init__(self, objects: dict[str, bytes], operations: list[str]):
         self.objects = objects
         self.operations = operations
+        self.metadata = {}
 
     def get_object(self, *, Bucket, Key):
         return {"Body": _Body(self.objects[Key])}
@@ -165,6 +166,7 @@ class _StorageClient:
     def put_object(self, *, Bucket, Key, Body, **kwargs):
         self.operations.append("storage.put")
         self.objects[Key] = bytes(Body)
+        self.metadata[Key] = kwargs.get("Metadata", {})
 
     def head_object(self, *, Bucket, Key):
         return {}
@@ -282,6 +284,8 @@ async def test_export_persists_identity_beside_checksum_protected_jsonl(
         vectors
     ).hexdigest()
     assert operations.count("storage.put") == 4
+    assert all(metadata == {"backup-id": result["backup_id"], "memory-id": MEMORY_ID}
+               for metadata in service._storage._client.metadata.values())
 
 
 async def test_s3_restore_preflights_immediately_before_mutations(
@@ -314,6 +318,11 @@ async def test_archive_restore_preflights_before_s3_graph_and_vector_mutations(
     result = await service.restore_from_archive(_archive_bytes())
 
     assert result["status"] == "ok"
+    assert service._storage._client.metadata[DOCUMENT_KEYS[0]["key"]] == {
+        "memory-id": MEMORY_ID,
+        "original-filename": "document.txt",
+        "restored-from": "archive",
+    }
     assert operations == [
         "vector.preflight",
         "storage.put",

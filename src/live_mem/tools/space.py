@@ -244,12 +244,15 @@ def register(mcp: FastMCP) -> int:
             return safe_error(e, "space")
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def space_list() -> dict:
+    async def space_list(
+        include_counts: Annotated[bool, Field(description="Include short-note and bank-file counts; False reads only space metadata")] = True,
+    ) -> dict:
         """
         List memory spaces accessible to the current credential.
 
-        Returns metadata plus short-note and memory-bank file counts for each
-        visible space.
+        Returns metadata (including cumulative consolidation counters) for each
+        visible space. Counts are included by default; include_counts=False
+        skips short-note and bank-file listings, retaining credential filtering.
 
         Returns:
             Accessible spaces and summary statistics.
@@ -274,7 +277,7 @@ def register(mcp: FastMCP) -> int:
             else:
                 allowed_ids = allowed
 
-            return await get_space_service().list_spaces(allowed_space_ids=allowed_ids)
+            return await get_space_service().list_spaces(allowed_space_ids=allowed_ids, include_counts=include_counts)
         except Exception as e:
             from ..auth.context import safe_error
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,7 +31,7 @@ from functools import wraps
 from typing import Any, Optional
 
 from ..config import get_settings
-from .ingest_pipeline import resolve_ingestion, run_ingest_pipeline
+from .ingest_pipeline import IngestCancelled, resolve_ingestion, run_ingest_pipeline
 
 logger = logging.getLogger("mcp_memory.ingest_queue")
 
@@ -49,6 +50,15 @@ NO_AUTO_POLLING_CONTRACT = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class AutomaticBatchAdmittedError(RuntimeError):
+    """Admission completed before maintenance release reported a failure."""
+
+    def __init__(self, batch_id: str, results: list[dict]):
+        self.batch_id = batch_id
+        self.results = results
+        super().__init__("automatic_batch_admitted_release_failed")
 
 
 def _guard_queue_admission(method):
@@ -99,6 +109,8 @@ class IngestJob:
     _metadata: Optional[dict] = None
     _source_modified_at: Optional[str] = None
     _content_size: int = 0
+    _automatic_ontology: Any = field(default=None, repr=False)
+    ontology_diagnostics: Optional[dict] = None
 
 
 class IngestQueueService:
@@ -133,6 +145,8 @@ class IngestQueueService:
         job_id: Optional[str] = None,
         batch_id: Optional[str] = None,
         ontology: Optional[str] = None,
+        _automatic_ontology=None,
+        _defer_worker: bool = False,
     ) -> dict:
         """
         Résout l'idempotence puis met le job en file si nécessaire.
@@ -223,6 +237,7 @@ class IngestQueueService:
                 _metadata=metadata,
                 _source_modified_at=source_modified_at,
                 _content_size=content_size,
+                _automatic_ontology=_automatic_ontology,
             )
             # On mémorise la décision/replace_doc_id pour le worker
             job.result = {"_replace_doc_id": replace_doc_id}
@@ -237,8 +252,87 @@ class IngestQueueService:
                 self._queues[memory_id].append(jid)
 
             self._trim_history_locked()
-            self._ensure_worker_locked(memory_id)
+            if not _defer_worker:
+                self._ensure_worker_locked(memory_id)
             return self._job_payload(job)
+
+    async def submit_automatic_batch(
+        self, *, memory_id: str, documents: list[dict], batch_id: str,
+        replace_existing: bool, requested_by: str,
+    ) -> list[dict]:
+        """Admit the whole bootstrap batch before starting its existing worker.
+
+        The exclusive boundary is short: validation/read/enqueue only, no LLM.
+        Idle admission prevents mixing an earlier chosen batch with calibration.
+        """
+        from .automatic_ontology import AutomaticOntologyBatch, batch_fingerprint
+        from .ontology_construction import OntologyConstructionError
+        from .graph import get_graph_service
+        from .maintenance import get_maintenance_coordinator
+
+        results = []
+        admitted = False
+        try:
+            async with get_maintenance_coordinator().maintenance(
+                memory_id, idle_check=lambda: self.is_idle_for_memory(memory_id),
+            ):
+                memory = await get_graph_service().get_memory(memory_id)
+                if memory is None:
+                    raise OntologyConstructionError("automatic_ontology_memory_missing")
+                batch = AutomaticOntologyBatch(
+                    created_at=memory.created_at.isoformat(),
+                    fingerprint=batch_fingerprint(documents), documents=list(documents),
+                )
+                await batch.check_admission(memory_id)
+                async with self._state_lock:
+                    # Retain existing queue capacity, with all-or-nothing admission.
+                    if (len(documents) > self._max_queued_per_memory + 1
+                            or self._queued_bytes + sum(len(d["content"]) for d in documents)
+                            > self._max_queued_bytes):
+                        raise OntologyConstructionError("automatic_ontology_queue_full")
+                try:
+                    for doc in documents:
+                        results.append(await self.submit(
+                            memory_id=memory_id, content=doc["content"],
+                            filename=doc["filename"], sha256=doc["sha256"],
+                            source_path=doc["source_path"], replace_existing=replace_existing,
+                            metadata=doc.get("metadata"), source_modified_at=doc.get("source_modified_at"),
+                            requested_by=requested_by, batch_id=batch_id,
+                            _automatic_ontology=batch, _defer_worker=True,
+                        ))
+                        if results[-1]["status"] == "queue_full":
+                            raise OntologyConstructionError("automatic_ontology_queue_full")
+                        if results[-1]["status"] == "error":
+                            raise RuntimeError("automatic_ontology_batch_admission_failed")
+                except BaseException:
+                    # No worker has started and no document effect has occurred.
+                    # Undo only this incomplete admission; its client can retry.
+                    async with self._state_lock:
+                        owned = {jid for jid, job in self._jobs.items()
+                                 if job.memory_id == memory_id and job.batch_id == batch_id}
+                        for jid in owned:
+                            self._release_content_locked(self._jobs.pop(jid))
+                        if self._active_jobs.get(memory_id) in owned:
+                            self._active_jobs.pop(memory_id)
+                        if memory_id in self._queues:
+                            remaining = deque(jid for jid in self._queues[memory_id] if jid not in owned)
+                            if remaining:
+                                self._queues[memory_id] = remaining
+                            else:
+                                self._queues.pop(memory_id)
+                    raise
+                admitted = True
+        except Exception:
+            if admitted:
+                raise AutomaticBatchAdmittedError(batch_id, results) from None
+            raise
+        finally:
+            # maintenance.__aexit__ drains its release before propagating a
+            # cancellation. Starting the admitted worker is synchronous (no
+            # await / task interleaving), so that boundary cannot orphan jobs.
+            if admitted:
+                self._ensure_worker_locked(memory_id)
+        return results
 
     async def _record_terminal_locked(
         self, *, memory_id, source_path, sha256, filename, status, batch_id, document_id
@@ -349,6 +443,7 @@ class IngestQueueService:
                 job.current_step = "cancelled"
                 job.finished_at = _now()
                 job.updated_at = _now()
+                self._release_automatic_batch_if_terminal_locked(job)
                 return {"status": "cancelled", "job_id": job_id, "message": "Queued job cancelled"}
             # running : annulation coopérative (le pipeline s'arrête à la prochaine frontière)
             job.cancel_requested = True
@@ -443,22 +538,30 @@ class IngestQueueService:
                 def cancel_check() -> bool:
                     return job.cancel_requested
 
-                result = await run_ingest_pipeline(
-                    memory_id=memory_id,
-                    content=content if content is not None else b"",
-                    filename=job.filename,
-                    doc_hash=job.sha256,
-                    metadata=metadata,
-                    source_path=job.source_path,
-                    source_modified_at=source_modified_at,
-                    last_ingest_job_id=job.job_id,
-                    replace_doc_id=replace_doc_id,
-                    ontology=job.ontology,
-                    progress_cb=progress_cb,
-                    cancel_check=cancel_check,
-                )
+                if job._automatic_ontology is not None:
+                    await progress_cb("ontology_construction", 1, {})
+                    job.ontology = await job._automatic_ontology.prepare(memory_id, cancel_check=cancel_check)
+                async with self._automatic_identity_guard(job):
+                    result = await run_ingest_pipeline(
+                        memory_id=memory_id,
+                        content=content if content is not None else b"",
+                        filename=job.filename,
+                        doc_hash=job.sha256,
+                        metadata=metadata,
+                        source_path=job.source_path,
+                        source_modified_at=source_modified_at,
+                        last_ingest_job_id=job.job_id,
+                        replace_doc_id=replace_doc_id,
+                        ontology=job.ontology,
+                        progress_cb=progress_cb,
+                        cancel_check=cancel_check,
+                    )
                 async with self._state_lock:
                     self._apply_result_locked(job, result)
+                    self._finish_active_locked(memory_id, job.job_id)
+            except IngestCancelled:
+                async with self._state_lock:
+                    self._apply_result_locked(job, {"status": "cancelled"})
                     self._finish_active_locked(memory_id, job.job_id)
             except Exception as e:  # pragma: no cover - défensif
                 logger.exception("Ingest job failed — job=%s", job.job_id)
@@ -469,6 +572,17 @@ class IngestQueueService:
                     job.finished_at = _now()
                     job.updated_at = _now()
                     self._finish_active_locked(memory_id, job.job_id)
+
+    @asynccontextmanager
+    async def _automatic_identity_guard(self, job):
+        if job._automatic_ontology is None:
+            yield
+            return
+        from .maintenance import get_maintenance_coordinator
+
+        async with get_maintenance_coordinator().maintenance(job.memory_id):
+            await job._automatic_ontology.check_memory_identity(job.memory_id)
+            yield
 
     def _apply_result_locked(self, job: IngestJob, result: dict) -> None:
         status = result.get("status")
@@ -481,6 +595,7 @@ class IngestQueueService:
             job.document_id = result.get("document_id")
             job.created_entities = result.get("entities_created", 0)
             job.created_relations = result.get("relations_created", 0)
+            job.ontology_diagnostics = result.get("ontology_diagnostics")
             if result.get("purge_status"):
                 job.purge_status = result["purge_status"]
             if result.get("purge_errors"):
@@ -544,7 +659,16 @@ class IngestQueueService:
     def _finish_active_locked(self, memory_id: str, job_id: str) -> None:
         if self._active_jobs.get(memory_id) == job_id:
             self._active_jobs.pop(memory_id, None)
+        self._release_automatic_batch_if_terminal_locked(self._jobs[job_id])
         self._trim_history_locked()
+
+    def _release_automatic_batch_if_terminal_locked(self, job: IngestJob) -> None:
+        batch = job._automatic_ontology
+        if batch is not None and not any(
+            item._automatic_ontology is batch and item.status not in TERMINAL_STATUSES
+            for item in self._jobs.values()
+        ):
+            batch.documents.clear()
 
     def _release_content_locked(self, job: IngestJob) -> None:
         if job._content is not None:
@@ -589,6 +713,10 @@ class IngestQueueService:
             payload["purge_status"] = job.purge_status
         if job.purge_errors:
             payload["purge_errors"] = job.purge_errors
+        if job.ontology_diagnostics is not None:
+            payload["ontology_diagnostics"] = job.ontology_diagnostics
+        if job._automatic_ontology is not None:
+            payload["automatic_ontology"] = job._automatic_ontology.diagnostics
         if job.status in ("queued", "running"):
             payload["message"] = (
                 f"Ingestion job {job.status} for '{job.memory_id}'. Do not wait for "

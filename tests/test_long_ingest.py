@@ -54,7 +54,11 @@ from live_mem.core.graph_bridge import GraphBridgeService
 from live_mem.core.engines.long_engine import LongEngine
 from live_mem.tools import graph as graph_tools
 from live_mem.tools import register_all_tools
-from tests.fakes import FakeGraphTransport, GraphLongFakeStorage as FakeStorage
+from tests.fakes import (
+    FakeGraphTransport,
+    GraphLongFakeStorage as FakeStorage,
+    validate_fake_graph_url,
+)
 
 
 # =============================================================================
@@ -120,7 +124,9 @@ class _FakeRegistry:
     LongEngine over a real bridge wired to the fake transport factory."""
 
     def __init__(self, factory) -> None:
-        self._engine = LongEngine(bridge=GraphBridgeService(client_factory=factory))
+        self._engine = LongEngine(bridge=GraphBridgeService(
+            client_factory=factory, url_validator=validate_fake_graph_url,
+        ))
 
     def long_engine(self) -> LongEngine:
         return self._engine
@@ -368,7 +374,10 @@ async def test_check_remote_makes_no_write_calls_when_remote_empty() -> None:
 
     reset = _set_token(_token("writer", ["read", "write"]))
     try:
-        with patches, storage_patch:
+        with patches, storage_patch, patch(
+            "live_mem.core.url_guard._resolve_bounded",
+            side_effect=AssertionError("fake transport must not resolve DNS"),
+        ):
             result = await long_ingest(
                 space_id=_SPACE,
                 documents=[
@@ -696,6 +705,10 @@ def test_long_path_imports_no_commit_module(label: str, tree: ast.AST) -> None:
     """No module on the long_ingest / long_query code path imports a commit-path
     module (consolidator / hivemind / write_sink / mid engine)."""
     for imp in _imports_of(tree):
+        # Only immutable IDs from the independent inference package are allowed;
+        # test_p13_inference_package.py pins its dependency direction.
+        if imp == "from hivemind_inference.registry import EMBEDDING_PROVIDER_IDS":
+            continue
         low = imp.lower()
         for marker in _COMMIT_MODULE_MARKERS:
             assert marker not in low, f"{label}: forbidden commit-path import: {imp}"

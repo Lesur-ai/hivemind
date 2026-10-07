@@ -63,23 +63,62 @@ function fmtSize(bytes) {
 
 function _pad2(n) { return String(n).padStart(2, '0'); }
 
-// Mono UTC "YYYY-MM-DD HH:mm" + full-precision title tooltip. On parse
-// failure, shows the raw server string — never blank (contract §2.2.2).
-function fmtTimestamp(iso) {
-    if (!iso) return { text: '', title: '' };
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return { text: String(iso), title: String(iso) };
-    const text = `${d.getUTCFullYear()}-${_pad2(d.getUTCMonth() + 1)}-${_pad2(d.getUTCDate())} ${_pad2(d.getUTCHours())}:${_pad2(d.getUTCMinutes())}`;
-    return { text, title: String(iso) };
+function _parseServerTimestamp(value) {
+    const raw = String(value);
+    let normalized = raw;
+    // Historical server values use UTC compact forms for backups and GC notes.
+    let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})(?:-[0-9a-f]{32})?$/);
+    if (match) {
+        normalized = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`;
+    } else {
+        match = raw.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/);
+        if (match) {
+            normalized = `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`;
+        } else if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw)) {
+            // Legacy naïve server timestamps were UTC; do not reinterpret them
+            // as local browser time before conversion.
+            normalized += 'Z';
+        }
+    }
+    return new Date(normalized);
 }
 
-// Renders fmtTimestamp() as an HTML fragment with the mono "UTC" unit label
-// and the full-precision tooltip. Callers needing the raw parts (rare) can
-// call fmtTimestamp() directly instead.
+function _localOffsetLabel(date) {
+    const minutes = -date.getTimezoneOffset();
+    const sign = minutes >= 0 ? '+' : '-';
+    const absolute = Math.abs(minutes);
+    return `UTC${sign}${_pad2(Math.floor(absolute / 60))}:${_pad2(absolute % 60)}`;
+}
+
+function _browserTimeZone() {
+    try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || 'browser local time';
+    } catch {
+        return 'browser local time';
+    }
+}
+
+// Mono browser-local "YYYY-MM-DD HH:mm" + visible offset and an exact source
+// tooltip. On parse failure, shows the raw server string — never blank.
+function fmtTimestamp(iso) {
+    if (!iso) return { text: '', title: '', zone: '' };
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(iso))) {
+        return { text: String(iso), title: String(iso), zone: '' };
+    }
+    const d = _parseServerTimestamp(iso);
+    if (Number.isNaN(d.getTime())) return { text: String(iso), title: String(iso), zone: '' };
+    const text = `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())} ${_pad2(d.getHours())}:${_pad2(d.getMinutes())}`;
+    const zone = _localOffsetLabel(d);
+    return { text, title: `${String(iso)} · ${_browserTimeZone()} (${zone})`, zone };
+}
+
+// Renders fmtTimestamp() with the browser's current UTC offset. Callers needing
+// the raw parts (rare) can call fmtTimestamp() directly instead.
 function renderTimestamp(iso) {
     const t = fmtTimestamp(iso);
     if (!t.text) return '<span class="text-faint">—</span>';
-    return `<span class="mono-data" title="${esc(t.title)}">${esc(t.text)} <span class="unit-utc">UTC</span></span>`;
+    const zone = t.zone ? ` <span class="unit-timezone">${esc(t.zone)}</span>` : '';
+    return `<span class="mono-data" title="${esc(t.title)}">${esc(t.text)}${zone}</span>`;
 }
 
 function truncateMiddle(str, head = 10, tail = 6) {
@@ -127,7 +166,7 @@ function icon(name) {
 // ═══════════════ DATA CACHE / SHARED CONTEXT ═══════════════
 
 const cache = { spaces: [], tokens: [], backups: [], bankFiles: {}, agents: {} };
-let _dashHealth = {};
+let _dashHealth = null;
 let _currentIdentity = {};
 let _epoch = 0;
 // Monotonic browser-session ownership token. It is deliberately independent
@@ -207,7 +246,7 @@ function _resetCaches() {
     cache.backups = [];
     cache.bankFiles = {};
     cache.agents = {};
-    _dashHealth = {};
+    _dashHealth = null;
     _currentIdentity = {};
 }
 
@@ -238,6 +277,8 @@ const AdminViews = (() => {
 
 const SPACE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const TIERS = new Set(['short', 'mid', 'long']);
+const SPACE_TABS = new Set(['activity', 'consolidation', 'rules', 'access', 'backups', 'maintenance']);
+const LONG_PANELS = new Set(['overview', 'ontology', 'documents', 'jobs', 'graph']);
 
 function _matchRoute(hash) {
     // hash includes the leading '#'. Strip it; require a leading '/'.
@@ -264,11 +305,27 @@ function _matchRoute(hash) {
     if (raw === '/operator/maintenance') return { view: 'operator', params: { tab: 'maintenance' }, raw };
     if (raw === '/operator') return { view: '__normalize-operator', params: {}, raw };
 
-    if (segments.length === 2 && segments[0] === 'spaces' && segments[1] !== '') {
-        return _matchSpaceDetail(segments[1], null, raw);
-    }
-    if (segments.length === 3 && segments[0] === 'spaces' && segments[1] !== '') {
-        return _matchSpaceDetail(segments[1], segments[2], raw);
+    if (segments[0] === 'spaces' && segments[1]) {
+        const route = _matchSpaceDetail(segments[1], null, raw);
+        if (!route.view) return route;
+        if (segments.length === 2 || (segments.length === 3 && TIERS.has(segments[2]))) {
+            const tier = segments[2] || 'short';
+            const suffix = tier === 'long' ? 'long/overview' : 'memory/' + tier;
+            route.normalize = '#/spaces/' + encodeURIComponent(route.params.spaceId) + '/' + suffix;
+            return route;
+        }
+        if (segments.length === 3 && SPACE_TABS.has(segments[2])) {
+            route.params.tab = segments[2];
+            return route;
+        }
+        if (segments.length === 4 && segments[2] === 'memory' && ['short', 'mid'].includes(segments[3])) {
+            Object.assign(route.params, { tab: 'memory', tier: segments[3] });
+            return route;
+        }
+        if (segments.length === 4 && segments[2] === 'long' && LONG_PANELS.has(segments[3])) {
+            Object.assign(route.params, { tab: 'long', tier: 'long', panel: segments[3] });
+            return route;
+        }
     }
     if (raw === '/mesh') return { view: 'mesh', params: {}, raw };
     if (segments.length === 2 && segments[0] === 'mesh' && segments[1] !== '') {
@@ -323,6 +380,10 @@ const AdminRouter = (() => {
         const hash = location.hash || '#/dashboard';
         let matched = _matchRoute(hash);
 
+        if (matched.normalize) {
+            location.replace(matched.normalize);
+            return;
+        }
         if (matched.view === '__normalize-operator') {
             location.replace('#/operator/backups');
             return;
@@ -338,6 +399,7 @@ const AdminRouter = (() => {
 
         current = matched;
         _epoch += 1;
+        if (typeof PortalRefresh !== 'undefined') PortalRefresh.clearRoute();
         _setActiveNav(matched.view);
 
         const renderFn = AdminViews.get(matched.view);
@@ -439,6 +501,105 @@ function dataTable(headers, rowsHtml) {
     return `<div class="table-scroll"><table class="data-table"><thead><tr>${thead}</tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
 }
 
+function renderAutoCompaction(result) {
+    const data = result && result.auto_compaction;
+    if (!data || typeof data !== 'object') return '';
+    const labels = { ok: 'Files compacted', not_needed: 'No oversized files', disabled: 'Disabled by configuration', not_applicable: 'Space not eligible', error: 'Compaction failed', partial: 'Compaction incomplete', cancelled: 'Compaction interrupted' };
+    const label = labels[data.status] || 'Unknown outcome';
+    const failed = ['error', 'partial', 'cancelled'].includes(data.status) || data.recovery_required === true;
+    const dates = ['started_at', 'finished_at'].filter(key => typeof data[key] === 'string').map(key =>
+        `<div>${key === 'started_at' ? 'Started' : 'Finished'}: ${renderTimestamp(data[key])}</div>`).join('');
+    const reason = typeof (data.failure_reason || data.reason) === 'string' ? `<p>${esc(data.failure_reason || data.reason)}</p>` : '';
+    const recovery = data.recovery_required === true ? '<p>Recovery must be checked before retrying.</p>' : '';
+    const preimage = typeof data.preimage_id === 'string' && data.preimage_id ? `<p>Retained source: ${esc(data.preimage_id)}</p>` : '';
+    const files = Array.isArray(data.files) ? data.files.filter(f => f && typeof f.filename === 'string' && f.over_limit === true) : [];
+    const rows = files.map(f => `<li>${esc(f.filename)}${typeof f.error === 'string' ? ` — ${esc(f.error)}` : ''}</li>`).join('');
+    return `<section class="state ${failed ? 'state-error' : ''}" role="${failed ? 'alert' : 'status'}"><div><h4>Automatic MID compaction — ${esc(label)}</h4>${dates}${reason}${recovery}${preimage}${rows ? `<ul>${rows}</ul>` : ''}${preimage ? '<p class="body-small">Originals are retained before compaction. LONG indexing has its own status.</p>' : ''}</div></section>`;
+}
+
+// All Portal entry points use this explicit scope choice and enqueue once.
+// The caller supplies its already-loaded spaces/lanes; no inventory is fetched.
+function openConsolidationLauncher({ spaces, lanes = [], spaceId = '', ctx, onSubmitted }) {
+    const identity = ctx && ctx.identity || {};
+    const permissions = Array.isArray(identity.permissions) ? identity.permissions : [];
+    const canManage = permissions.includes('manage') || permissions.includes('admin');
+    const canWrite = canManage || permissions.includes('write');
+    if (!canWrite) { showModal('Start a consolidation', stateUnavailable('Write permission is required.')); return; }
+    const available = (Array.isArray(spaces) ? spaces : []).filter(space => space
+        && typeof space.space_id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(space.space_id));
+    const ids = new Set(available.map(space => space.space_id));
+    if (!ids.size) { showModal('Start a consolidation', stateUnavailable('No accessible spaces loaded. Refresh to try again.')); return; }
+    const epoch = ctx.epoch;
+    const generation = ctx.sessionGeneration ?? currentSessionGeneration();
+    if (AdminRouter.epoch !== epoch || !sessionGenerationIsCurrent(generation)) return;
+    let form, inFlight = false;
+    const current = () => AdminRouter.epoch === epoch && sessionGenerationIsCurrent(generation)
+        && form && form.isConnected && document.getElementById('portalConsolidationForm') === form
+        && document.getElementById('adminModal')?.style.display === 'flex';
+    const options = [...ids].map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join('');
+    showModal('Start a consolidation', `<div id="portalConsolidationForm">
+        <div class="form-group"><label class="form-label" for="portalConsolidationSpace">Space</label><select id="portalConsolidationSpace" class="form-input"><option value="">Select a space</option>${options}</select></div>
+        <div class="form-group"><label class="form-label" for="portalConsolidationScope">Notes to consolidate</label><select id="portalConsolidationScope" class="form-input"><option value="mine">My notes</option><option value="all"${canManage ? '' : ' disabled'}>All agents</option></select>${canManage ? '' : '<p class="form-hint">All agents requires manage or admin permission.</p>'}</div>
+        <p id="portalConsolidationSummary" class="body-small"></p><div id="portalConsolidationError" role="alert"></div>
+        </div>`, 'Start a consolidation', async () => {
+        if (!current() || inFlight) return false;
+        const selected = document.getElementById('portalConsolidationSpace').value;
+        const scope = document.getElementById('portalConsolidationScope').value;
+        const agent = typeof identity.client_name === 'string' ? identity.client_name : '';
+        const error = document.getElementById('portalConsolidationError');
+        if (!ids.has(selected) || !['mine', 'all'].includes(scope)
+            || (scope === 'all' && !canManage) || (scope === 'mine' && !agent.trim())) {
+            error.innerHTML = serverMessage('Choose an accessible space and a permitted scope. My notes requires your agent identity.');
+            return false;
+        }
+        inFlight = true;
+        document.getElementById('portalConsolidationSpace').disabled = true;
+        document.getElementById('portalConsolidationScope').disabled = true;
+        error.innerHTML = '';
+        let result;
+        try { result = await callTool('bank_consolidate', { space_id: selected, agent: scope === 'all' ? '' : agent }); }
+        catch (_) { result = { status: 'error', message: 'The request failed. Its outcome is unknown; check the jobs before trying again.' }; }
+        if (AdminRouter.epoch === epoch && sessionGenerationIsCurrent(generation)
+            && ['running', 'queued'].includes(result && result.status)) {
+            showToast('ok', result.status === 'running' ? 'Consolidation running' : 'Consolidation queued');
+        }
+        if (!current()) return false;
+        inFlight = false;
+        document.getElementById('portalConsolidationSpace').disabled = false;
+        document.getElementById('portalConsolidationScope').disabled = false;
+        if (!result || !['running', 'queued'].includes(result.status)) {
+            // Replace the form: the shared modal wrapper re-enables its old
+            // confirm button, so disabling that button here would not suffice.
+            showModal('Consolidation not confirmed',
+                serverMessage(result && result.message || 'The outcome is unknown; check the jobs before trying again.')
+                + `<p><a href="#/spaces/${esc(selected)}/consolidation" data-action="portal-open-jobs" data-space-id="${esc(selected)}">View jobs</a> before starting another consolidation.</p>`);
+            return false;
+        }
+        // Close our modal before the caller refreshes or opens an inspector.
+        // Returning false prevents showModal's wrapper from closing that next UI.
+        closeModal();
+        if (AdminRouter.epoch === epoch && sessionGenerationIsCurrent(generation) && onSubmitted) onSubmitted(result);
+        return false;
+    });
+    form = document.getElementById('portalConsolidationForm');
+    const picker = document.getElementById('portalConsolidationSpace');
+    const scopePicker = document.getElementById('portalConsolidationScope');
+    picker.value = ids.has(spaceId) ? spaceId : ids.size === 1 ? [...ids][0] : '';
+    const update = () => {
+        if (!current()) return;
+        const lane = lanes.find(item => item && item.space_id === picker.value);
+        const button = document.getElementById('modalConfirmBtn');
+        button.textContent = lane && lane.running_job ? 'Queue after current job' : 'Start a consolidation';
+        button.disabled = !ids.has(picker.value);
+        document.getElementById('portalConsolidationSummary').textContent = scopePicker.value === 'all'
+            ? 'This confirms consolidation of all agents’ notes in the selected space.'
+            : 'This confirms consolidation of only your own notes in the selected space.';
+    };
+    picker.addEventListener('change', update);
+    scopePicker.addEventListener('change', update);
+    update();
+}
+
 function statusDot(severity, label) {
     const sev = ['ok', 'warn', 'error', 'neutral'].includes(severity) ? severity : 'neutral';
     return `<span class="status-dot-wrap"><span class="status-dot dot-${sev}"></span><span class="status-dot-label">${esc(String(label ?? ''))}</span></span>`;
@@ -469,6 +630,11 @@ function registerAction(name, handler) {
 }
 
 registerAction('close-modal', () => closeModal());
+registerAction('portal-open-jobs', data => {
+    if (typeof data.spaceId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(data.spaceId)) return;
+    closeModal();
+    AdminRouter.go(`/spaces/${encodeURIComponent(data.spaceId)}/consolidation`);
+});
 registerAction('copy-value', (data) => {
     let value = '';
     try { value = JSON.parse(data.value || '""'); } catch { value = data.value || ''; }
@@ -630,6 +796,8 @@ function _syncInteractionSurfaces() {
     if (modal) modal.inert = loginVisible || !modalVisible;
     if (app) app.inert = loginVisible || modalVisible;
     if (content) content.inert = !!sidebar && sidebar.classList.contains('sidebar--drawer-open');
+    const topbar = document.getElementById('portalTopbar');
+    if (topbar) topbar.inert = !!sidebar && sidebar.classList.contains('sidebar--drawer-open');
 }
 
 function _visibleFocusTarget(element) {
@@ -821,6 +989,13 @@ function hideLogin() {
 // any current-generation 401 from /api/tool. The hash is deliberately NOT
 // touched here; stale 401 responses reject only their original caller.
 function wipeSession() {
+    if (typeof window.clearAccessHandoff === 'function') window.clearAccessHandoff();
+    if (typeof PortalRefresh !== 'undefined') PortalRefresh.endSession({ logout: false });
+    _portalHealthFlight = null;
+    const health = document.getElementById('portalHealth');
+    if (health) health.textContent = 'Services not checked';
+    const serviceButton = document.getElementById('portalCheckServices');
+    if (serviceButton) serviceButton.disabled = true;
     _closeDrawer(false);
     _modalReturnFocus = null;
     const content = document.getElementById('content');
@@ -879,6 +1054,7 @@ async function doLogin() {
 
 async function doLogout() {
     if (!_beginSessionCookieMutation()) return;
+    if (typeof PortalRefresh !== 'undefined') PortalRefresh.endSession({ logout: true });
     // Invalidate and wipe BEFORE awaiting the network request. No continuation
     // can cross the logout boundary while POST /api/logout is in flight.
     showLogin();
@@ -918,7 +1094,7 @@ const NAV_OPERATOR = [
 ];
 
 function _navItemHtml(item) {
-    return `<li><a href="${esc(item.href)}" data-nav="${esc(item.name)}" class="nav-item">${icon(item.name)}<span class="nav-label">${esc(item.label)}</span></a></li>`;
+    return `<li><a href="${esc(item.href)}" data-nav="${esc(item.name)}" class="nav-item" aria-label="${esc(item.label)}">${icon(item.name)}<span class="nav-label">${esc(item.label)}</span></a></li>`;
 }
 
 let _meshNavVisible = false;
@@ -974,9 +1150,13 @@ function renderIdentityBlock(identity) {
         return;
     }
     const perms = (identity.permissions || []).map(p => `<span class="chip">${esc(String(p))}</span>`).join('');
+    const spaces = identity.allowed_spaces;
+    const scope = (identity.permissions || []).includes('admin') || (Array.isArray(spaces) && spaces.includes('*'))
+        ? 'All spaces' : Array.isArray(spaces) ? `${spaces.length} ${spaces.length === 1 ? 'space' : 'spaces'}` : 'Scope unavailable';
     const authType = esc(identity.auth_type || 'unknown');
-    const expiresChip = identity.expires_at
-        ? `<span class="chip chip-expiry" title="${esc(fmtTimestamp(identity.expires_at).title)}">expires ${esc(fmtTimestamp(identity.expires_at).text)} UTC</span>`
+    const expiry = identity.expires_at ? fmtTimestamp(identity.expires_at) : null;
+    const expiresChip = expiry
+        ? `<span class="chip chip-expiry" title="${esc(expiry.title)}">expires ${esc([expiry.text, expiry.zone].filter(Boolean).join(' '))}</span>`
         : '';
     el.innerHTML = `
         <div class="identity-row">
@@ -986,6 +1166,7 @@ function renderIdentityBlock(identity) {
         <div class="identity-chips">
             <span class="chip chip-auth">${authType}</span>
             ${perms}
+            <span class="chip chip-scope">${esc(scope)}</span>
             ${expiresChip}
         </div>`;
     _wireLogoutButton();
@@ -1051,6 +1232,60 @@ function _wireDrawer() {
 // than falling through to the generic "Identity unavailable" state.
 const CALLTOOL_SENTINEL_STATUSES = new Set(['read_only', 'rate_limited', 'truncated']);
 
+// Instance-wide explicit probe; never registered with the read scheduler.
+let _portalHealthFlight = null;
+function checkPortalServices() {
+    if (!_currentIdentity.client_name) return Promise.resolve(null);
+    if (_portalHealthFlight) return _portalHealthFlight;
+    const generation = currentSessionGeneration();
+    const button = document.getElementById('portalCheckServices');
+    const status = document.getElementById('portalHealth');
+    if (button) button.disabled = true;
+    if (status) status.textContent = 'Checking services…';
+    _portalHealthFlight = callTool('system_health', {}).catch(() => ({ status: 'error' })).then(result => {
+        if (!sessionGenerationIsCurrent(generation)) return null;
+        _portalHealthFlight = null;
+        if (button) button.disabled = false;
+        _dashHealth = result;
+        if (status) status.textContent = result?.status === 'healthy' ? 'Services healthy' : result?.status === 'degraded' ? 'Services degraded' : 'Service check failed';
+        document.dispatchEvent(new CustomEvent('portal:services-change'));
+        return result;
+    });
+    document.dispatchEvent(new CustomEvent('portal:services-change'));
+    return _portalHealthFlight;
+}
+
+function _renderPortalRefresh() {
+    if (typeof PortalRefresh === 'undefined') return;
+    const state = PortalRefresh.state();
+    const button = document.getElementById('portalRefresh');
+    if (!button) return;
+    button.disabled = state.busy || !_currentIdentity.client_name;
+    button.textContent = state.busy ? 'Refreshing…' : 'Refresh';
+    document.getElementById('portalAutoControl').hidden = !state.eligible;
+    document.getElementById('portalIntervalControl').hidden = !state.eligible;
+    document.getElementById('portalAutoEnabled').checked = state.enabled;
+    document.getElementById('portalInterval').value = String(state.intervalSeconds);
+    const updated = state.lastSuccess ? new Date(state.lastSuccess).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    document.getElementById('portalFreshness').textContent = state.error ? `Refresh failed${updated ? ' · Updated ' + updated : ''}` : updated ? 'Updated ' + updated : '';
+}
+
+function _wirePortalControls() {
+    const origin = document.getElementById('portalOrigin');
+    if (!origin) return;
+    origin.textContent = location.origin;
+    document.getElementById('portalCheckServices').addEventListener('click', checkPortalServices);
+    document.getElementById('portalRefresh').addEventListener('click', () => {
+        if (typeof PortalRefresh !== 'undefined' && PortalRefresh.state().available) {
+            PortalRefresh.refresh().catch(() => {}); // callback renders its local read error
+        } else AdminRouter.refresh(); // legacy views keep their explicit full read until integration
+    });
+    document.getElementById('portalAutoEnabled').addEventListener('change', event => PortalRefresh.configure({ enabled: event.target.checked, intervalSeconds: PortalRefresh.state().intervalSeconds }));
+    document.getElementById('portalInterval').addEventListener('change', event => PortalRefresh.configure({ enabled: PortalRefresh.state().enabled, intervalSeconds: Number(event.target.value) }));
+    document.addEventListener('portal:refresh-change', _renderPortalRefresh);
+    _renderPortalRefresh();
+}
+
 async function _bootAuthenticated() {
     const sessionGeneration = currentSessionGeneration();
     buildSidebar();
@@ -1078,6 +1313,9 @@ async function _bootAuthenticated() {
     } else {
         _currentIdentity = whoami && whoami.client_name ? whoami : {};
         renderIdentityBlock(_currentIdentity);
+        if (_currentIdentity.client_name && typeof PortalRefresh !== 'undefined') PortalRefresh.beginSession();
+        const serviceButton = document.getElementById('portalCheckServices');
+        if (serviceButton) serviceButton.disabled = !_currentIdentity.client_name;
         // Fire-and-forget: the nav item appears as soon as the probe resolves,
         // never blocking the first route dispatch.
         _refreshMeshNav(sessionGeneration);
@@ -1099,6 +1337,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (e.key === 'Enter') doLogin();
     });
     _wireDrawer();
+    _wirePortalControls();
     _wireFocusContainment();
     _syncInteractionSurfaces();
 

@@ -93,23 +93,19 @@ PYTHON_RUNTIME_SURFACES = tuple(
         }
     )
 )
-STATIC_CLIENT_SURFACES = (
-    *sorted((ROOT / "src/live_mem/static").rglob("*.html")),
-    *sorted((ROOT / "src/live_mem/static").rglob("*.js")),
-    *sorted((ROOT / "src/live_mem/static").rglob("*.svg")),
-    *sorted((ROOT / "src/live_mem/static").rglob("*.css")),
-    *sorted(
-        (ROOT / "services/graph-memory/src/mcp_memory/static").rglob("*.html")
-    ),
-    *sorted(
-        (ROOT / "services/graph-memory/src/mcp_memory/static").rglob("*.js")
-    ),
-    *sorted(
-        (ROOT / "services/graph-memory/src/mcp_memory/static").rglob("*.svg")
-    ),
-    *sorted(
-        (ROOT / "services/graph-memory/src/mcp_memory/static").rglob("*.css")
-    ),
+STATIC_CLIENT_ROOTS = (
+    ROOT / "src/live_mem/static",
+    ROOT / "services/graph-memory/src/mcp_memory/static",
+)
+STATIC_CLIENT_SURFACES = tuple(
+    sorted(
+        path
+        for static_root in STATIC_CLIENT_ROOTS
+        for extension in ("html", "js", "svg", "css")
+        for path in static_root.rglob(f"*.{extension}")
+        # Third-party bundles are byte-pinned separately and are not product copy.
+        if "vendor" not in path.relative_to(static_root).parts
+    )
 )
 EMBEDDED_ONTOLOGY_SURFACES = tuple(
     sorted((ROOT / "services/graph-memory/ONTOLOGIES").glob("*.yaml"))
@@ -1357,6 +1353,9 @@ def test_python_runtime_surface_rule_covers_all_shipped_runtime_roots() -> None:
         "services/graph-memory/src/mcp_memory/static/img/logo-cloudtemple.svg"
         in static_surfaces
     )
+    assert "src/live_mem/static/js/app.js" in static_surfaces
+    assert "services/graph-memory/src/mcp_memory/static/js/graph.js" in static_surfaces
+    assert not any("vendor" in path.relative_to(ROOT).parts for path in STATIC_CLIENT_SURFACES)
 
 
 def test_static_guard_keeps_entity_and_semicolon_copy_visible() -> None:

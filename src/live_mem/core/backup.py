@@ -24,6 +24,7 @@ import base64
 import io
 import json as _json
 import logging
+import re
 import tarfile
 import uuid
 from datetime import datetime, timezone
@@ -72,6 +73,12 @@ from pydantic import ValidationError
 
 logger = logging.getLogger("live_mem.core.backup")
 
+# Existing compaction identity, reserved before the first preimage copy.
+# Keep older 1.5.x preimages protected without relying on copied metadata.
+_COMPACTION_BACKUP_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9a-f]{32}"
+)
+
 
 class BackupService:
     """
@@ -94,9 +101,9 @@ class BackupService:
         Args:
             space_id: Espace à sauvegarder
             description: Description du backup (optionnel)
-            operation_id: Internal opaque 32-character lower-hex suffix used
-                when one caller needs collision-resistant same-second backup
-                identity. Public backup calls retain the timestamp-only form.
+            operation_id: Internal opaque 32-character lower-hex suffix
+                reserved for retained compaction preimages. Public backup
+                calls retain the deletable timestamp-only form.
             storage: Internal injected storage view; defaults to the normal
                 process storage service for public backup operations.
 
@@ -1439,7 +1446,7 @@ class BackupService:
 
     async def delete(self, backup_id: str) -> dict:
         """
-        Supprime un backup.
+        Supprime un backup ordinaire ; conserve les préimages de compaction.
 
         Args:
             backup_id: Format "space_id/timestamp"
@@ -1447,13 +1454,22 @@ class BackupService:
         Returns:
             {"status": "deleted", "files_deleted": N}
         """
-        storage = get_storage()
-
         parts = backup_id.split("/", 1)
         if len(parts) != 2:
             return {"status": "error", "message": "Invalid backup_id"}
 
         space_id, timestamp = parts
+        # Refuse from the namespace alone, including a direct internal request
+        # for a descendant. A partial copy or missing/corrupt _meta.json must
+        # never make retained source bytes eligible for deletion.
+        if _COMPACTION_BACKUP_TIMESTAMP.fullmatch(timestamp.split("/", 1)[0]):
+            return {
+                "status": "error",
+                "error": "compaction_preimage_protected",
+                "message": "Deletion refused: compaction preimages are retained.",
+            }
+
+        storage = get_storage()
         backup_prefix = f"_backups/{space_id}/{timestamp}/"
 
         objects = await storage.list_objects(backup_prefix)

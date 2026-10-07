@@ -50,7 +50,7 @@ from live_mem.core.backup import BackupService
 from live_mem.core.graph_bridge import GraphBridgeService
 from live_mem.core.models import EMBEDDED_TOKEN_SENTINEL
 from live_mem.core.tokens import TokenService
-from tests.fakes import FakeGraphTransport
+from tests.fakes import FakeGraphTransport, validate_fake_graph_url
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GM_SERVER = (
@@ -121,7 +121,9 @@ def _settings(**kw) -> Settings:
 
 def _bridge(**factory_kwargs):
     factory = FakeGraphTransport.factory(**factory_kwargs)
-    return GraphBridgeService(client_factory=factory), factory
+    return GraphBridgeService(
+        client_factory=factory, url_validator=validate_fake_graph_url,
+    ), factory
 
 
 def _patches(storage: FakeStorage, settings: Settings):
@@ -180,9 +182,13 @@ async def test_reingest_delete_uses_document_id_from_document_list() -> None:
         }
     )
 
-    result = await _run(
-        lambda: bridge.push(_SPACE), storage, _settings(long_embedded_url="")
-    )
+    with patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        side_effect=AssertionError("fake transport must not resolve DNS"),
+    ):
+        result = await _run(
+            lambda: bridge.push(_SPACE), storage, _settings(long_embedded_url="")
+        )
 
     assert result["status"] == "ok"
     assert result["deleted_before_reingest"] == 1

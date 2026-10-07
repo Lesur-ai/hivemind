@@ -213,30 +213,16 @@ def test_readme_tool_tables_keep_manage_and_confirmation_contracts() -> None:
     assert "56 registered" not in mapping
 
 
-def test_compaction_diagnostics_are_documented_for_manual_results_only() -> None:
-    """Compaction is a human decision through `bank_compact`; a
-    consolidation never compacts, so its job-result contract carries no
-    compaction diagnostics — only the bank size advisory."""
+def test_compaction_diagnostics_are_separate_from_consolidation_outcome() -> None:
     spec = _read("docs/MCP_TOOLS_SPEC.md")
-    # `bank_repair` and `bank_write` precede `bank_compact`: bound the manual
-    # section by the NEXT heading, not by a heading that already went by.
     manual = re.split(r"\n#{1,3} ", spec.split("### `bank_compact`", 1)[1], maxsplit=1)[0]
     job = spec.split("**Job result contract", 1)[1].split("### `bank_consolidation_status`", 1)[0]
-
-    for token in ("hivemind_state_corrupt", "compaction_tool_failure", "preimage_id"):
-        assert token in manual, token
-    assert "failed_phase" in manual and "rollback_outcome" in manual
-    for token in (
-        "failed_phase",
-        "rollback_outcome",
-        "compaction_advisory",
-        "compaction_failures",
-        "recovery_required",
-        "preimage_id",
-    ):
-        assert token not in job, token
-    assert "bank_size_advisory" in job
-    assert "compaction is a human decision" in job
+    for token in ("hivemind_state_corrupt", "compaction_tool_failure", "preimage_id", "failed_phase", "rollback_outcome"):
+        assert token in manual
+    for token in ("bank_size_advisory", "auto_compaction", "MID_AUTO_COMPACT", "preimage_id"):
+        assert token in job
+    assert "does not relabel completed consolidation as failed" in job
+    assert "compaction_advisory" not in job
 
 
 def test_compaction_configuration_validation_changelog_has_upgrade_actions() -> None:

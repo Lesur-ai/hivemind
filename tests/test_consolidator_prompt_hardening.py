@@ -195,7 +195,7 @@ class TestSystemPromptRules:
         assert "then DELETE the superseded state, do not archive it" in flat
         assert "A decision the batch reverses keeps one line in the history file (dated the same way) naming what it replaced" in flat
         assert "Items the batch does not touch stay exactly as they are" in flat
-        assert "age alone is never a reason — age-based condensation is compaction's job, a human decision" in flat
+        assert "age alone is never a reason — age-based condensation is compaction's job" in flat
         assert "legacy size reduction belongs to compaction" in flat
         assert "delete_section is allowed ONLY for a section whose facts already live elsewhere in the bank" in flat
         assert "the superseded state itself is not preserved" in flat

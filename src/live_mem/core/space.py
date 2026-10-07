@@ -695,7 +695,9 @@ class SpaceService:
             "message": f"Rules updated ({len(rules.encode('utf-8'))} bytes)",
         }
 
-    async def list_spaces(self, allowed_space_ids: Optional[list[str]] = None) -> dict:
+    async def list_spaces(
+        self, allowed_space_ids: Optional[list[str]] = None, include_counts: bool = True,
+    ) -> dict:
         """
         Liste tous les espaces accessibles.
 
@@ -703,6 +705,7 @@ class SpaceService:
 
         Args:
             allowed_space_ids: Liste des space_ids autorisés (None = tous)
+            include_counts: False skips live/bank listings; metadata still costs GETs.
 
         Returns:
             {"status": "ok", "spaces": [...], "total": N}
@@ -730,26 +733,21 @@ class SpaceService:
             if meta is None:
                 continue  # Préfixe sans _meta.json → pas un espace valide
 
-            # Compter les notes live et fichiers bank
-            live_objects = await storage.list_objects(f"{sid}/live/")
-            bank_objects = await storage.list_objects(f"{sid}/bank/")
-            live_count = len(
-                [o for o in live_objects if not o["Key"].endswith(".keep")]
-            )
-            bank_count = len(
-                [o for o in bank_objects if not o["Key"].endswith(".keep")]
-            )
-
-            spaces.append(
-                {
-                    "space_id": sid,
-                    "description": meta.get("description", ""),
-                    "owner": meta.get("owner", ""),
-                    "created_at": meta.get("created_at", ""),
-                    "live_notes_count": live_count,
-                    "bank_files_count": bank_count,
-                }
-            )
+            entry = {
+                "space_id": sid,
+                "description": meta.get("description", ""),
+                "owner": meta.get("owner", ""),
+                "created_at": meta.get("created_at", ""),
+                "last_consolidation": meta.get("last_consolidation"),
+                "consolidation_count": meta.get("consolidation_count"),
+                "total_notes_processed": meta.get("total_notes_processed"),
+            }
+            if include_counts:
+                live_objects = await storage.list_objects(f"{sid}/live/")
+                bank_objects = await storage.list_objects(f"{sid}/bank/")
+                entry["live_notes_count"] = sum(not o["Key"].endswith(".keep") for o in live_objects)
+                entry["bank_files_count"] = sum(not o["Key"].endswith(".keep") for o in bank_objects)
+            spaces.append(entry)
 
         return {"status": "ok", "spaces": spaces, "total": len(spaces)}
 

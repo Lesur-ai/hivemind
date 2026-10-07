@@ -179,10 +179,10 @@ WRITE_SINK_MUTATION_CALL_SITES: tuple[dict, ...] = (
         "method": "ConsolidatorService.compact_bank",
         "key_pattern": "{space_id}/bank/{filename}",
         "line_hint": 1977,
-        "description": "compact_bank effective bank-file PUT (manual compaction).",
+        "description": "compact_bank effective bank-file PUT (manual or queued automatic compaction).",
     },
-    # The automatic compaction PUT inside the consolidate run no longer
-    # exists (compaction is a human decision through compact_bank, above).
+    # The old in-mutator automatic PUT was removed. The 1.6.0 queued
+    # post-consolidation stage calls compact_bank through this DirectLocal path.
     # ---- BANK-TOOL branch (documented for #8/#9; not surfaced by MidEngine) ---
     {
         "engine": "MidEngine",

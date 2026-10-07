@@ -8,7 +8,7 @@ provider-neutral inference boundary (#275) are testable with NO network / S3 /
 Neo4j / Qdrant / LLM.
 """
 
-from .fake_graph_transport import FakeGraphTransport, RecordedCall
+from .fake_graph_transport import FakeGraphTransport, RecordedCall, validate_fake_graph_url
 from .fake_storage import GraphLongFakeStorage
 from .inference_emulator import InferenceEmulator
 
@@ -17,4 +17,5 @@ __all__ = [
     "GraphLongFakeStorage",
     "InferenceEmulator",
     "RecordedCall",
+    "validate_fake_graph_url",
 ]

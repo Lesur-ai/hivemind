@@ -15,16 +15,283 @@ linked guides when installing or upgrading.
 
 ## [Unreleased] — Hivemind public release
 
-> Hivemind OSS is strictly mono-tenant; the `space_id` allowlist is not a tenant
-> boundary. Downstream extension seams are described in
-> `docs/EXTENSION_POINTS.md`.
-
-Upgrading from separate Live Memory and Graph Memory services is covered by the
-[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+No changes recorded yet.
 
 ---
 
-## [1.5.3] — Unreleased
+## [1.6.0] — 2026-10-07
+
+Hivemind 1.6.0 preserves original MID captures and indexes them automatically in
+LONG. It also prepares public delivery of the chosen-ontology ingestion CLI
+with batching and resume. Automatic ontology for document ingestion is
+experimental, with supported delivery planned for 1.7.0. No cumulative
+hundreds-of-megabytes capacity is claimed.
+
+**Upgrade action:** a successful queued consolidation that processes notes now
+automatically compacts oversized MID files on DirectLocal spaces. An older `.env`
+without `MID_AUTO_COMPACT` enables this new behaviour by default. Set
+`MID_AUTO_COMPACT=false` before upgrading to keep compaction manual; set
+`MID_AUTO_ARCHIVE=false` independently to pause transfer of retained captures
+to LONG. Review compacted summaries and retained originals when fidelity matters.
+
+**Retrieval upgrade:** LONG no longer applies a universal embedding-score cutoff
+by default. An existing explicit `RAG_SCORE_THRESHOLD` continues to apply;
+remove that assignment to use the new default, rather than setting it blank.
+Ranked passages are candidates, and their scores do not establish factual support.
+Q&A is instructed to use source evidence and disclose insufficient context;
+this is not a guarantee of semantic correctness or universal abstention.
+The [deployment guide](docs/DEPLOYMENT.md#readable-embedding-provenance-and-retrieval-rc3)
+describes embedding compatibility and explicit reindexing after a model change.
+Automatic compaction and archive transfer do not automatically schedule
+SHORT → MID consolidation.
+
+**Release identity.** Hivemind now reports runtime version `1.6.0`.
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary; Portal extension seam is described in
+[extension points](docs/EXTENSION_POINTS.md). Upgrading from
+separate Live Memory and Graph Memory services is covered by the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### RC3 — memory journey in the MCP CLI
+
+- Add `space status <id>` in Click and the interactive shell to show SHORT notes,
+  the latest MID job and compaction phase/outcome, and the LONG capture backlog
+  and ingestion job steps from existing read-only tools. Zero pending captures
+  does not prove every MID file is indexed.
+- Render queued and completed consolidations distinctly and return nonzero CLI
+  exit codes on MCP failures, refusals, recovery-required compaction receipts
+  and lock conflicts, including JSON mode. Archive-scoped reads show the
+  active/queued indexing stages of pending MID captures separately from
+  documentary ingestion jobs.
+- Show configured and persisted embedding identities separately in status reads.
+  `graph job <space> <job-id> --archive` inspects an existing capture-indexing job;
+  document jobs retain their primary-memory scope. Job history remains volatile,
+  so document identities and hashes are needed to verify successful indexing.
+
+### Portal
+
+- Keep Access token-row actions visible in narrow layouts while long values
+  scroll inside the table; open menus remain above subsequent rows.
+
+- Add a Space **Active work** tab that shows what is running in the space, at
+  which step, and whether it is blocked: MID consolidation (phase, notes and
+  batches), automatic compaction (`compacting` phase, then its separate
+  outcome), document ingestion and MID capture indexing, each opening its
+  existing detail in one click. Only reported stages and percentages are
+  shown. Idle, waiting (including a first capture before its archive exists),
+  failed and finished states stay distinct; a zero backlog is not presented as
+  proof of complete indexing. Long › Ingestion jobs can list the MID capture
+  archive separately and read-only. Reads stay read-only, and opt-in refresh
+  follows active jobs without polling LONG status.
+
+- LONG graph exploration now uses a readable bounded layout, spaced labels,
+  shown/total counters, local neighbor/source inspection and Back navigation.
+  Fit measures visible bounds; mobile zoom controls and a separate inspector
+  keep local navigation usable without extra graph requests or inferred document IDs.
+  Selected labels avoid visible node shapes, including after late font loading.
+  Selected-label fallbacks link to their node; other labels stay near or are hidden.
+  Dense views show only a subset of labels
+  and can have overlapping nodes. Full names remain in search and node details.
+  Empty projections provide scoped guidance and explicit panel navigation;
+  searches without local matches clear stale details and offer a focus-safe reset.
+
+- Make LONG ingestion jobs readable in a desktop table and mobile cards, with
+  reported progress, results, queue position and timestamps. Add an accessible
+  selected-job inspector with escaped ontology diagnostics, confirmed row
+  cancellation and guarded pagination. Distinguish unavailable job history from
+  filters with no results, offer catalog/reset actions, and hide unnecessary pagers.
+  Close the selected inspector when a complete refresh returns no jobs. Preserve
+  dated cancellation outcomes outside the inspector, recover explicitly from pages
+  past a shrinking history, and clarify ingestion stages and active position.
+
+- Surface LONG binding health, configured ontology, graph volumes and entity
+  types in Space Overview, followed by MID→LONG automation and indexing backlog.
+  Retain the last successful snapshot on refresh failure and show explicit
+  availability diagnostics when LONG is unconfigured or unreachable.
+- Give collapsed primary, operator and Live viewer navigation links accessible
+  names while preserving their visible labels and existing navigation behavior.
+- Separate Space Long memory into Overview, Ontology, Documents, Ingestion jobs
+  and Graph on existing APIs. Add explicit YAML validation and document-content
+  reads, filtered pagination, optional job refresh and confirmed cancellation.
+  Keep the graph bounded and distinguish available ontologies from configuration.
+- Make LONG documents distinguishable by source and version metadata, with
+  status labels, bounded pagination, phone cards and a focused inspector.
+  Document content remains an explicit separate read. Empty catalogs and filter
+  results have distinct recovery actions; pagination hides when unnecessary.
+  Match document filters to persisted statuses, recover empty later pages and
+  identify retained reading and stale results. Unknown sizes stay unavailable;
+  source/version action names and wrapped statuses distinguish homonyms.
+- Read SHORT notes by local day and MID files through persistent file tabs in
+  Space Memory. Reuse opt-in refresh with applied filters, same-name file
+  updates and preserved focus/reading position. Keep source and refresh dates
+  distinct, retain dated content on read failures, and preserve `/live` access.
+- Guide token creation through one-time secret saving, additive space grants
+  and Codex or Claude Code setup with an operator-entered MCP URL. Retry only
+  unconfirmed grants, preserve explicit recovery states, and clear secret
+  holders when the handoff closes or the session ends.
+- Show recently consolidated spaces on the Dashboard without pagination,
+  with responsive cards, real timestamps and explicitly cumulative results.
+  Lightweight metadata refresh skips short-note and bank-file count scans;
+  visible-card jobs retain detailed diagnostics and permission-safe actions.
+- Make Dashboard activity easier to scan with concise job outcomes, deduplicated
+  actor labels, compact no-op compaction summaries and expandable raw diagnostics.
+- Follow consolidation from its Space or the global view with the shared
+  opt-in refresh control and one explicit My notes / All agents launcher across
+  Portal entry points. Keep compaction results visible while jobs update, and
+  open maintenance and backup restoration scoped to the selected Space.
+  After an unconfirmed launch, direct the operator to the jobs before retrying;
+  show an explicit reconnect state when refresh has no authenticated session.
+- Introduce the Hivemind Portal shell at `/admin`: shared instance and explicit
+  service controls, token scope, and permission-aware Space tabs. Keep existing
+  tier links and `/live` access. Add the opt-in 15/30/60-second refresh controller
+  for subsequent view integrations, with session/navigation guards and no secret
+  storage. Existing views retain their refresh behaviour until integrated.
+
+### Security
+
+- Lock the embedded Graph runtime's `multidict` dependency to 6.9.1 with verified
+  package hashes, addressing CVE-2026-104874 without audit exceptions.
+
+- Require PyJWT >=2.15.1 and urllib3 >=2.8.0, locking PyJWT 2.15.1 and
+  urllib3 2.8.0 in core and embedded Graph runtime. Fix CVE-2026-101918 and
+  CVE-2026-97687/97688/97689, and restore padded-signature decoding compatibility
+  in the PyJWT library, without audit exceptions.
+- Serve Graph's Marked 15.0.12 and vis-network 10.1.2 browser bundles locally
+  with pinned provenance, checksums and licences instead of unversioned CDN
+  scripts. These versions match the former URLs' resolved artifacts.
+- Sanitize Graph Q&A Markdown in the interactive view and standalone HTML exports,
+  and escape graph metadata and API errors before inserting them into the UI.
+  The reviewed DOMPurify 3.4.15 bundle is served locally; unavailable,
+  unsupported, or failing sanitization falls back to escaped text.
+- Update the root AnyIO lock from 4.13.0 to 4.14.2, addressing
+  [CVE-2026-63374](https://github.com/agronholm/anyio/security/advisories/GHSA-82r6-8w77-94w6)
+  and [CVE-2026-64847](https://github.com/agronholm/anyio/security/advisories/GHSA-5p39-cfhj-2xmp).
+  The embedded Graph runtime already uses 4.14.2. No audit exclusions are added.
+- Update the root and embedded Graph Memory PyJWT pins to 2.14.0 to
+  address CVE-2026-102274.
+
+### Fixed
+
+- Route MID archive job status to the pinned archive memory, and correct filtered
+  document-catalog reads that collided with Neo4j's query argument.
+- Preserve existing capture IDs, source hashes and capture timestamps in archive
+  passages and Q&A context. Same-filename versions have distinct document IDs
+  in a bounded source catalogue. Capture and ingestion times differ from event
+  or validity dates; removal from MID alone does not invalidate a historical fact.
+  Source attribution does not establish that every associated document supports
+  every claim or guarantee general temporal accuracy.
+
+- Display `/admin` timestamps in the browser timezone and human CLI timestamps
+  in the CLI process timezone, with an explicit UTC offset. Stored values,
+  API responses and `--json` output remain canonical UTC.
+- Return an explicit content-read error when an indexed document has no storage
+  URI and content is requested. Metadata-only reads still succeed; no storage
+  access, repair or reingestion is attempted for the missing reference.
+
+### Added
+
+- Compaction preimages, including 1.5.x snapshots, are protected from
+  `backup_delete`; ordinary snapshots remain deletable.
+- DirectLocal compaction, manual or automatic, records verified historical MID
+  captures for background LONG projection with durable retry and document identity checks.
+  `long_status` reports pending captures, their age and safe failure codes.
+  New captures construct an automatic ontology from the complete first capture,
+  then reuse the frozen catalogue. Documents keep their chosen ontology;
+  both are searchable in one space on the existing runtime, without new settings.
+- First asynchronous ingestion persists its embedded LONG binding so subsequent
+  document/status reads address the same memory.
+
+Sources remain retained after indexing, including captures from failed attempts.
+LONG never decides MID apply or recovery; shared-space compaction is unchanged.
+Existing pending records keep their original destination; no graph migration is
+implicit. Continuous ontology evolution, parsing and volume qualification remain
+separate work.
+
+- Automatic ontology construction core: representative D1/D2 selection,
+  sourced assertions and resumable complete-catalogue construction for new MID
+  archives. Its documentary integration remains experimental.
+- The `hivemind-ingest` Go CLI source, tests and build script are included.
+  Chosen-ontology ingestion supports batches of up to 200 files / 50 MiB,
+  progress tracking, machine-readable results and path/SHA-256 resumption.
+  See the [CLI guide](tools/hivemind-ingest/README.md).
+
+### Changed
+
+- Search every authorized active document in LONG retrieval and embedded Q&A;
+  graph matches add context without excluding documents. Inactive and foreign
+  candidates stay excluded. The default score cutoff is removed, explicit
+  cutoffs remain supported, and the default passage budget remains eight.
+- Keep the persisted embedding identity separate from current configuration,
+  including the pinned MID archive. Ingestion and search use the same compatible
+  profile; a different model still requires explicit reindexing even at equal
+  dimensions. Status reads do not provision or migrate an index.
+- Prioritize retrieved passages containing an explicit numeric reference such
+  as `#17`, then fill remaining slots with semantic matches within the same
+  configured passage budget (eight by default). This is a ranking heuristic, not semantic validation;
+  cosine scores, source text, ownership and embedding guards are unchanged.
+
+- After a successful queued consolidation with processed notes, run one
+  DirectLocal compaction pass over oversized MID files. `MID_AUTO_COMPACT` and
+  `MID_AUTO_ARCHIVE` both default to true and are independent. Verified raw
+  captures remain in storage; LONG indexing is asynchronous. A file still above
+  the threshold may be compacted again after a later consolidation, creating
+  another capture and storage/LLM cost. This release adds no cross-capture
+  deduplication or retention policy.
+- New Graph S3 objects write hyphenated user-metadata keys instead of
+  `memory_id`, `original_filename`, `doc_hash`, `uploaded_at`, `backup_id` and
+  `restored_from`. Hivemind reads both spellings; external tooling that reads
+  the old S3 headers must accept the new names.
+- A document-extraction chunk timeout now fails the whole document instead of
+  silently skipping that chunk. Correct the provider fault before resubmitting.
+- Chosen-ontology extraction now enforces the effective vocabulary. Previously
+  degraded unknown labels, empty responses and skipped invalid chunks now fail
+  the document after one correction (`Invalid extraction for frozen ontology`).
+  Inspect the provider output contract before resubmitting. The
+  [ingestion contract](docs/MCP_TOOLS_SPEC.md) describes cancellation, temporary
+  source-bearing checkpoints and peak batch memory requirements.
+- The Hivemind and embedded Graph runtime images use the refreshed
+  `python:3.14.6-slim-bookworm` base image digest proposed by Dependabot.
+  Python stays at 3.14.6.
+- The embedded Graph runtime now uses qdrant-client 1.19.1, as proposed by
+  Dependabot. The bundled Qdrant server stays at 1.16.2 and no stored vector
+  data is migrated.
+- The embedded Graph runtime now uses pypdf 6.19.0, as proposed by
+  Dependabot, picking up upstream PDF parser resource limits.
+- The WAF image now builds its custom Caddy binary from the refreshed
+  `caddy:2.11.4-builder` digest (Go 1.26.7), as proposed by Dependabot. Caddy
+  2.11.4, its plugins, the runtime image and the Caddyfile are unchanged.
+- The embedded Graph runtime now uses the neo4j 6.3.1 Python driver, as
+  proposed by Dependabot. The bundled Neo4j server stays at 5.26.28 and no
+  stored graph data is migrated.
+
+### Planned delivery after 1.6.0
+
+Automatic ontology for document ingestion is planned for **1.7.0**. Its existing
+`options.ontology="auto"` / `--ontology auto` path is available for experimental
+qualification, not included in supported 1.6.0 document ingestion. It constructs
+and freezes one catalogue from the initial batch of an empty document memory;
+validated calls resume on identical resubmission. The
+[ingestion contract](docs/MCP_TOOLS_SPEC.md) records the implemented behavior.
+
+Office/PDF preparation, scheduled backup policies per space, Pocket AI,
+ontology/fact evolution, and Mesh support for MID, LONG and ontologies are
+planned for **V2**. The earlier Hivemind 1.8.0 target is cancelled; no V2 date
+or precise version number is committed. Supported automatic documentary
+ontology, optional agent onboarding and Portal follow-ups remain planned for
+1.7.0. These are future capabilities, outside the delivered 1.6.0 scope.
+
+### Ingestion and recovery limits
+
+The document queue is in-memory best effort. After interruption, resubmit the
+same sources; indexed documents with the same path and hash are skipped.
+Validated ontology-construction calls are checkpointed, but document extraction
+is not persisted before embeddings. Retrying a document that failed at that
+stage repeats its extraction. Empty, damaged or unsupported sources remain
+explicit failures. Rich Office/PDF preparation and continuous catalogue
+evolution are separate work.
+
+## [1.5.3] — 2026-09-17
 
 Hivemind 1.5.3 addresses all seven application findings from the 16 September
 2026 source security review and updates DOMPurify, alongside fixes for Gemini

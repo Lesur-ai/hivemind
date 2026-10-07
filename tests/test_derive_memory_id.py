@@ -81,6 +81,15 @@ def test_derived_names_are_reserved_without_changing_the_algorithm(space_id):
     assert error["recovery_required"] is True
 
 
-@pytest.mark.parametrize("space_id", ["ordinary", "hm-team", "hm-team-0123", "hm-team-0123456789abcdeg"])
+@pytest.mark.parametrize("space_id", [
+    "ordinary", "hm-team", "hm-team-0123", "hm-team-0123456789abcdeg",
+    "mid_team", "mid_" + "a" * 39, "mid_" + "a" * 41,
+    "mid_" + "g" * 40, "mid_" + "A" * 40,
+])
 def test_ordinary_names_are_not_reserved(space_id):
     assert memory_id.reserved_space_error(space_id) is None
+
+
+@pytest.mark.parametrize("digest", ["0" * 40, "0123456789abcdef" * 2 + "01234567"])
+def test_exact_mid_archive_namespace_is_reserved(digest):
+    assert memory_id.reserved_space_error("mid_" + digest)["recovery_required"] is True

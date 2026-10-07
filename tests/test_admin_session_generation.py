@@ -4,6 +4,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).parent.parent
 API_PATH = ROOT / "src/live_mem/static/js/admin-api.js"
@@ -53,3 +55,21 @@ def test_disabled_login_button_is_enforced_inside_handler():
     end = source.index("async function doLogout()", start)
     body = source[start:end]
     assert "if (btn.disabled) return;" in body
+
+
+@pytest.mark.parametrize("guard", [
+    "if (_portalHealthFlight) return _portalHealthFlight;",
+    "if (!sessionGenerationIsCurrent(generation)) return null;",
+])
+def test_portal_service_probe_guards_are_mutation_proven(tmp_path, guard):
+    source = APP_PATH.read_text(encoding="utf-8")
+    assert source.count(guard) == 1
+    mutant = tmp_path / "admin-app.js"
+    mutant.write_text(source.replace(guard, "// removed guard", 1), encoding="utf-8")
+    node = shutil.which("node")
+    assert node is not None
+    completed = subprocess.run(
+        [node, str(RUNTIME_PATH), str(API_PATH), str(mutant)],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode != 0, f"Runtime did not detect removal of {guard}"

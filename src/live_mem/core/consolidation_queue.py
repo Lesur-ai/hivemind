@@ -240,6 +240,7 @@ class ConsolidationQueueService:
 
                 job = self._jobs[active_id]
 
+            completed_result = None
             try:
                 async def progress_callback(progress: dict) -> None:
                     await self._update_progress(job.job_id, progress)
@@ -251,6 +252,17 @@ class ConsolidationQueueService:
                         enforce_cooldown=False,
                         progress_callback=progress_callback,
                     )
+                    if (type(result) is dict and result.get('status') == 'ok'
+                            and type(result.get('notes_processed')) is int
+                            and result['notes_processed'] > 0):
+                        # Separate follow-up stage under the same existing lock.
+                        # SHORT is already acknowledged; never report its work as
+                        # failed merely because maintenance failed afterwards.
+                        from .mid_automation import compact_after_consolidation
+                        completed_result = _sanitize_failure_diagnostics_in_result(result)
+                        await progress_callback({'phase': 'compacting'})
+                        result = {**completed_result, 'auto_compaction':
+                                  await compact_after_consolidation(space_id)}
                 if type(result) is dict:
                     result = _sanitize_failure_diagnostics_in_result(result)
                 async with self._state_lock:
@@ -298,21 +310,37 @@ class ConsolidationQueueService:
                 )
 
                 # A queued job must never stay "running" after the consolidator
-                # raised a job-level cancellation (no compaction runs
-                # inside a consolidation any more, so no rollback state is relayed).
+                # raised a job-level cancellation. If only the subsequent
+                # maintenance was interrupted, SHORT was already acknowledged.
                 generic_message = (
                     "Consolidation was cancelled; bank recovery may be "
                     "incomplete. Check the server logs before retrying."
                 )
                 async with self._state_lock:
-                    job.status = "failed"
-                    job.error = generic_message
-                    job.result = {
+                    job.status = "succeeded" if completed_result is not None else "failed"
+                    job.error = None if completed_result is not None else generic_message
+                    job.result = {**completed_result, 'auto_compaction': getattr(
+                        cancelled, 'mid_auto_compaction_result',
+                        {'status': 'cancelled', 'recovery_required': True})
+                    } if completed_result is not None else {
                         "status": "partial",
                         "message": generic_message,
                         "failure_reason": "consolidation_cancelled",
                     }
-                    job.progress.update({"phase": "failed"})
+                    completed_progress = completed_result or {}
+                    job.progress.update({
+                        "phase": "done" if completed_result is not None else "failed",
+                        "batch_size": completed_progress.get(
+                            "batch_size", job.progress.get("batch_size")),
+                        "notes_total": completed_progress.get(
+                            "notes_total", job.progress.get("notes_total")),
+                        "notes_done": completed_progress.get(
+                            "notes_processed", job.progress.get("notes_done")),
+                        "batches_total": completed_progress.get(
+                            "batches_total", job.progress.get("batches_total")),
+                        "batches_done": completed_progress.get(
+                            "batches_completed", job.progress.get("batches_done")),
+                    })
                     job.finished_at = _now()
                     self._finish_active_locked(space_id, job.job_id)
                     if (

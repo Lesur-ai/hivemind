@@ -89,18 +89,18 @@ async function callTool(toolName, args = {}) {
         if (!sessionGenerationIsCurrent(requestSessionGeneration)) {
             throw new Error('Stale session');
         }
-        return { status: 'error', message: 'Invalid JSON: ' + e.message };
+        return { status: 'error', transport_unconfirmed: true, message: 'Invalid JSON: ' + e.message };
     }
     if (!sessionGenerationIsCurrent(requestSessionGeneration)) {
         throw new Error('Stale session');
     }
-    if (!text) return { status: 'error', message: 'Empty response' };
+    if (!text) return { status: 'error', transport_unconfirmed: true, message: 'Empty response' };
 
     let body;
     try {
         body = JSON.parse(text);
     } catch (e) {
-        return { status: 'error', message: 'Invalid JSON: ' + e.message };
+        return { status: 'error', transport_unconfirmed: true, message: 'Invalid JSON: ' + e.message };
     }
 
     // §5.0 truncation guard, body-flag variant (belt-and-suspenders with

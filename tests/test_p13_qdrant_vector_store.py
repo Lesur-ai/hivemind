@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """#277 integration locks for the real Graph Memory Qdrant consumer.
 
-The tests use qdrant-client 1.18's local persistence engine rather than a
+The tests use qdrant-client 1.19's local persistence engine rather than a
 hand-written fake, so collection metadata, exact counts, filters, payloads and
 restart round-trips exercise the same public client API as Qdrant 1.16.
 """
@@ -160,6 +160,30 @@ def store(client, profile):
 
 
 class TestCanonicalCollectionResolution:
+    async def test_status_exposes_persisted_model_and_current_profile_without_adopting_drift(self, store, client, profile):
+        from dataclasses import replace
+        await store.store_chunks("memory-provenance", "doc-1", "source.md", [_chunk()], embedding_result=_result())
+        status = await store.get_collection_info("memory-provenance", include_identity=True)
+        identity = status["embedding_identity"]
+        assert status["state"] == "ready"
+        assert identity["configured"] == {"provider": "openai-compatible", "model": "test-embedding-model", "dimensions": 3}
+        assert identity["persisted"]["model"] == "test-embedding-model"
+        assert identity["persisted"]["resolved_model"] == "provider-model"
+        assert identity["persisted"]["model_evidence"] == "provider_reported"
+        assert identity["persisted"]["dimensions"] == 3
+        assert identity["persisted"]["profile_fingerprint"] == status["profile_fingerprint"]
+        changed = replace(profile, configured_model="replacement-model")
+        restarted = VectorStoreService(client=client, profile=changed, legacy_prefix="memory_")
+        incompatible = await restarted.get_collection_info("memory-provenance", include_identity=True)
+        assert incompatible["state"] == "reindex_required"
+        assert incompatible["reason"] == "static_profile_mismatch"
+        assert incompatible["embedding_identity"]["configured"]["model"] == "replacement-model"
+        assert incompatible["embedding_identity"]["persisted"] == identity["persisted"]
+        with pytest.raises(EmbeddingCollectionReindexRequired):
+            await restarted.search("memory-provenance", embedding_result=_result())
+        assert (await store.get_collection_info("memory-provenance"))["points_count"] == 1
+        assert "endpoint" not in str(identity) and "api_key" not in str(identity)
+
     async def test_fresh_store_creates_exact_metadata_and_survives_restart(
         self, tmp_path, profile
     ):
@@ -1049,3 +1073,64 @@ class TestSingleResolverCoverage:
             await getattr(service, method_name)(*args, **kwargs)
 
         assert len(calls) == 1
+
+
+async def test_empty_active_document_set_excludes_populated_collection(store):
+    """An empty allowlist must never become a memory-wide candidate search."""
+    result = _result()
+    assert await store.store_chunks(
+        "memory-one", "candidate-doc", "candidate.md", [_chunk("candidate evidence")],
+        embedding_result=result,
+    ) == 1
+    # Positive control: the collection contains a searchable owned passage.
+    found = await store.search("memory-one", embedding_result=result, doc_ids=None)
+    assert [row.chunk.doc_id for row in found] == ["candidate-doc"]
+    assert await store.search("memory-one", embedding_result=result, doc_ids=[]) == []
+
+
+@pytest.mark.parametrize("question", ["How was #17 delivered?", "How are #17 and #28 related?"])
+async def test_explicit_reference_recovers_source_outside_dense_top8(store, question):
+    active = []
+    for index in range(9):
+        doc_id = f"ordinary-{index}"
+        active.append(doc_id)
+        await store.store_chunks("memory-one", doc_id, "ordinary.md", [_chunk("Similar delivery and review wording.")], embedding_result=_result())
+    active.append("answer-doc")
+    await store.store_chunks("memory-one", "answer-doc", "answer.md", [_chunk("#17 was delivered by #28 after review.")], embedding_result=_result((0.8, 0.6, 0.0)))
+    baseline = await store.search("memory-one", embedding_result=_result(), doc_ids=active, limit=8)
+    assert len(baseline) == 8 and all(row.chunk.doc_id != "answer-doc" for row in baseline)
+    found = await store.search("memory-one", embedding_result=_result(), doc_ids=active, limit=8, query_text=question)
+    assert found[0].chunk.doc_id == "answer-doc"
+    assert found[0].score == pytest.approx(0.8)
+    assert len(found) == 8 and len({row.chunk.doc_id for row in found}) == 8
+    # A reference match must not exclude ordinary context or alter its scores.
+    assert all(row.score == pytest.approx(1.0) for row in found[1:])
+    # The identical reference in an inactive source must stay excluded.
+    denied = await store.search("memory-one", embedding_result=_result(), doc_ids=active[:-1], limit=8, query_text=question)
+    assert len(denied) == 8 and all(row.chunk.doc_id != "answer-doc" for row in denied)
+
+
+@pytest.mark.parametrize("question", ["How was #999 delivered?", "What is the delivery process?"])
+async def test_unknown_or_missing_reference_keeps_semantic_results(store, question):
+    await store.store_chunks("memory-one", "answer-doc", "answer.md", [_chunk("#17 delivery process.")], embedding_result=_result())
+    found = await store.search("memory-one", embedding_result=_result(), doc_ids=["answer-doc"], limit=8, query_text=question)
+    assert [row.chunk.doc_id for row in found] == ["answer-doc"]
+    assert found[0].score == pytest.approx(1.0)
+
+
+async def test_reference_search_deduplicates_and_preserves_empty_and_model_guards(store, monkeypatch):
+    await store.store_chunks("memory-one", "answer-doc", "answer.md", [_chunk("#17 delivery process.")], embedding_result=_result())
+    found = await store.search("memory-one", embedding_result=_result(), doc_ids=["answer-doc"], query_text="#17")
+    assert len(found) == 1
+    monkeypatch.setattr(store._client, "query_points", lambda **kwargs: pytest.fail("Guard was bypassed before reference search"))
+    assert await store.search("memory-one", embedding_result=_result(), doc_ids=[], query_text="#17") == []
+    with pytest.raises(EmbeddingCollectionReindexRequired):
+        await store.search("memory-one", embedding_result=_result(resolved_model="changed-model"), doc_ids=["answer-doc"], query_text="#17")
+
+
+async def test_reference_prefix_is_not_promoted_as_an_exact_match(store):
+    await store.store_chunks("memory-one", "prefix-doc", "prefix.md", [_chunk("#170 delivery process.")], embedding_result=_result())
+    await store.store_chunks("memory-one", "answer-doc", "answer.md", [_chunk("#17 delivery process.")], embedding_result=_result((0.8, 0.6, 0.0)))
+    found = await store.search("memory-one", embedding_result=_result(), doc_ids=["prefix-doc", "answer-doc"], limit=2, query_text="#17")
+    assert [row.chunk.doc_id for row in found] == ["answer-doc", "prefix-doc"]
+    assert [row.score for row in found] == pytest.approx([0.8, 1.0])

@@ -188,6 +188,53 @@ identity, schema, legacy, or ownership evidence that the service never repairs
 automatically. Non-empty legacy state also blocks memory deletion; migrate or
 reindex it before use rather than treating deletion as a cleanup bypass.
 
+#### Readable embedding provenance and retrieval (RC3)
+
+Choose embeddings with `LLMAAS_EMBEDDING_MODEL` and its existing dimensions
+setting, or the complete `INFERENCE_EMBEDDING_*` role profile. Never mix profile
+families. The same frozen role serves ingestion and search; runtime identity
+checks reject drift even when the replacement model has the same dimensions.
+
+`long_status` / `graph_status` adds `embedding_identity`: `configured` holds
+`provider`, `model`, `dimensions`; `persisted` holds the stored `provider`, `model`,
+`resolved_model`, `model_evidence`, `dimensions`, `profile_fingerprint`, or is null
+when no owned identity can be verified. These fields reuse collection metadata;
+they do not create an index or change its identity. Endpoints and credentials are
+excluded. `embedding_collection.state` retains the existing compatibility and
+failure vocabulary. `ready` validates the stored profile; each actual embedding
+call must still pass dynamic evidence checks. `reindex_required` blocks search.
+
+`mid_archive_index` returns the same `embedding_collection` and `embedding_identity`
+fields under `status="ok"` for the verified pinned archive. Otherwise it returns
+the existing archive error envelope, including `archive_not_configured` before
+the first capture. No archive is provisioned by a status read. A null identity
+from an older or malformed backend is unknown, not a claim of compatibility.
+
+`space status <space>` and `graph status <space>` show the stored model and a
+changed configuration. `graph job <space> <job-id> --archive` inspects a capture
+indexing job's real step and progress; omit `--archive` for document ingestion.
+Append `--json` for the unchanged response fields. Job history remains volatile;
+use the durable document catalog and source hashes to verify successful indexing.
+
+Graph Memory no longer applies a default cosine cutoff to the eight ranked
+active passages. Scores depend on the model and do not certify factual support.
+When a question names explicit numeric references such as `#17`, passages
+containing those references are prioritized before the remaining semantic
+matches. Results are deduplicated within the same eight-passage limit, with
+unchanged cosine scores and the same active-document, ownership and model guards.
+This uses an additional bounded Qdrant read, no embedding call or reindex.
+Archive passages and source documents also expose the existing `provenance`,
+`preimage_id`, `bank_path` and `captured_at` metadata alongside source SHA and
+`ingested_at`. Q&A receives document/capture identities and timestamps with
+each retained excerpt. Capture and ingestion dates are distinct from dates
+of events or validity stated in the source. Removal from MID alone does not
+invalidate a historical fact. Legacy documents with no capture metadata keep
+these optional fields empty; no metadata or embedding migration is required.
+An existing explicit `RAG_SCORE_THRESHOLD` continues to filter both query and Q&A;
+remove that environment assignment to use the new default (do not set it blank).
+Use a cutoff only after corpus/model validation. Q&A requires source evidence;
+absent-answer and historical/current-state behavior must be qualified separately.
+
 #### Bounded embedding reindex
 
 `long_reindex(space_id)` is a hidden, exact-name, `manage`-only maintenance

@@ -1,11 +1,5 @@
 # -*- coding: utf-8 -*-
-"""The CLI reports oversized bank files as an advisory, nothing more.
-
-Compaction is a human decision (``bank_compact``): a consolidation never runs
-it, so a job result never carries a compaction envelope. The CLI shows the
-``bank_size_advisory`` list the server projected, literally and escaped, and
-stays silent when there is none. Tested by EXECUTION of the display code.
-"""
+"""CLI size advisories and automatic maintenance outcomes, executed offline."""
 
 import sys
 from pathlib import Path
@@ -42,7 +36,7 @@ def test_a_succeeded_job_shows_the_bank_size_advisory():
     }))
     assert "Bank size advisory" in out
     assert "progress.md" in out and "42553" in out and "35000" in out
-    assert "human decision" in out
+    assert "measured before consolidation" in out
     assert "refused" not in out.lower()
 
 
@@ -96,3 +90,39 @@ def test_a_stale_compaction_envelope_from_an_old_server_renders_nothing():
     }))
     assert "refused" not in out.lower() and "Compaction" not in out
     assert "demo-space/2026-09-05" not in out
+
+
+@pytest.mark.parametrize('status', ['ok', 'not_needed', 'disabled', 'not_applicable', 'error', 'partial', 'cancelled'])
+def test_automatic_compaction_has_a_separate_outcome(status):
+    out = _render(_job({'status': 'ok', 'notes_processed': 3, 'auto_compaction': {
+        'status': status, 'dry_run': False, 'started_at': '2026-09-24T08:00:00Z',
+        'finished_at': '2026-09-24T08:01:00Z', 'recovery_required': status == 'partial',
+        'failure_reason': 'compaction_apply_recovery_unverified',
+    }}))
+    assert 'Consolidation Job — succeeded' in out
+    assert 'Automatic MID compaction' in out and f'Outcome: {status}' in out
+    assert 'Originals retained; LONG indexing has its own status.' not in out
+    assert cli_display._format_local_timestamp('2026-09-24T08:00:00Z') in out
+
+
+def test_automatic_compaction_with_verified_capture_reports_retention():
+    out = _render(_job({'status': 'ok', 'notes_processed': 3, 'auto_compaction': {
+        'status': 'ok', 'preimage_id': 'space/preimage',
+    }}))
+    assert 'Originals retained; LONG indexing has its own status.' in out
+
+
+def test_disabled_archive_and_backlog_are_visible_before_connection(monkeypatch):
+    from rich.console import Console
+    console = Console(record=True, width=200, no_color=True)
+    monkeypatch.setattr(cli_display, 'console', console)
+    cli_display.show_graph_status({'connected': False, 'mid_automation': {
+        'compaction_enabled': True, 'archive_enabled': False,
+    }, 'mid_archive_projection': {'pending': 3, 'error': '[bold]literal[/bold]',
+                                'oldest_at': '2026-09-24T08:00:00Z'}})
+    out = console.export_text()
+    assert 'Automatic compaction: Enabled' in out
+    assert 'Automatic transfer to LONG: Disabled by configuration' in out
+    assert 'Captures pending indexing: 3' in out
+    assert '[bold]literal[/bold]' in out
+    assert 'A zero backlog does not mean every current MID file is indexed.' in out

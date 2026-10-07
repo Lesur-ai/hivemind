@@ -77,6 +77,18 @@ def get_graph():
     return _graph_service
 
 
+def _retrieval_source_fields(meta):
+    """Closed source evidence shared by structured retrieval and Q&A."""
+    return {
+        "uri": meta.get("uri"), "source_path": meta.get("source_path"), "repo_path": meta.get("repo_path"),
+        "hash": meta.get("hash"), "sha256": meta.get("sha256"),
+        "ingestion_status": meta.get("ingestion_status", "unknown"), "chunk_count": meta.get("chunk_count", 0),
+        "last_ingest_job_id": meta.get("last_ingest_job_id"), "ingested_at": meta.get("ingested_at"),
+        "provenance": meta.get("provenance"), "captured_at": meta.get("captured_at"),
+        "preimage_id": meta.get("preimage_id"), "bank_path": meta.get("bank_path"),
+    }
+
+
 def get_storage():
     """Lazy-load StorageService."""
     global _storage_service
@@ -508,13 +520,14 @@ async def memory_stats(
         stats = await get_graph().get_memory_stats(memory_id)
         try:
             embedding_collection = await get_vector_store().get_collection_info(
-                memory_id
+                memory_id, include_identity=True
             )
         except Exception:
             embedding_collection = {
                 "state": "unavailable",
                 "reason": "qdrant_unreadable",
             }
+        embedding_identity = embedding_collection.pop("embedding_identity", None)
         return {
             "status": "ok",
             "memory_id": memory_id,
@@ -524,6 +537,7 @@ async def memory_stats(
             "entity_types": getattr(stats, "entity_types", {}),
             "top_entities": stats.top_entities,
             "embedding_collection": embedding_collection,
+            "embedding_identity": embedding_identity,
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -859,7 +873,7 @@ async def memory_ingest_batch_async(
     memory_id: Annotated[str, Field(description="Target memory identifier")],
     documents: Annotated[List[Dict[str, Any]], Field(description="Documents, each containing {content_base64, filename, source_path, sha256, metadata?, source_modified_at?}")],
     replace_existing: Annotated[bool, Field(default=False, description="Replace documents with changed checksums across the entire batch")] = False,
-    ontology: Annotated[Optional[str], Field(default=None, description="Optional ontology schema name or YAML override for extraction")] = None,
+    ontology: Annotated[Optional[str], Field(default=None, description="Ontology name/YAML, or auto to construct one from the complete initial batch")] = None,
 ) -> dict:
     """
     Soumet un LOT de documents à l'ingestion asynchrone.
@@ -891,7 +905,7 @@ async def memory_ingest_batch_async(
             from .core.ontology import get_ontology_manager
             from .core.ontology_validator import _validate_and_parse_ontology
             mgr = get_ontology_manager()
-            if not mgr.is_registered_name(trimmed_ont):
+            if trimmed_ont != "auto" and not mgr.is_registered_name(trimmed_ont):
                 val_res, _ = _validate_and_parse_ontology(trimmed_ont)
                 if not val_res.get("valid"):
                     err_msg = "; ".join(val_res.get("errors", ["Invalid ontology YAML"]))
@@ -913,6 +927,75 @@ async def memory_ingest_batch_async(
         items = []
         counts = {k: 0 for k in ("queued", "running", "succeeded", "failed", "skipped", "changed_skipped", "error", "queue_full")}
         errors = []
+
+        if ontology is not None and ontology.strip() == "auto":
+            # Decode and validate the complete corpus before any queue admission.
+            # Text parsing and every LLM call remain in the background worker.
+            decoded = []
+            seen = set()
+            try:
+                for doc in documents:
+                    if not isinstance(doc, dict):
+                        raise ValueError("document must be a mapping")
+                    fname = validate_filename(doc.get("filename", ""))
+                    sp = doc.get("source_path")
+                    sha = doc.get("sha256")
+                    if not isinstance(sp, str) or not sp.strip().lstrip("/"):
+                        raise ValueError("source_path required")
+                    sp = sp.strip().lstrip("/")
+                    if sp in seen:
+                        raise ValueError("duplicate source_path")
+                    seen.add(sp)
+                    if not isinstance(sha, str) or len(sha.strip()) != 64:
+                        raise ValueError("sha256 required")
+                    content = base64.b64decode(doc.get("content_base64", ""), validate=True)
+                    validate_document_size(content, settings.max_document_size_bytes)
+                    computed = get_storage().compute_hash(content)
+                    if computed.lower() != sha.strip().lower():
+                        raise ValueError("checksum mismatch")
+                    decoded.append({"filename": fname, "source_path": sp,
+                                    "content": content, "sha256": computed,
+                                    "metadata": doc.get("metadata"),
+                                    "source_modified_at": doc.get("source_modified_at")})
+            except Exception:
+                return {"status": "error", "code": "invalid_automatic_batch",
+                        "message": "Automatic mode requires a valid complete batch with unique source paths and matching checksums."}
+            from .core.ingest_queue import AutomaticBatchAdmittedError
+            from .core.maintenance import MaintenanceAdmissionError
+            from .core.ontology_construction import OntologyConstructionError
+            warning = None
+            try:
+                results = await queue.submit_automatic_batch(
+                    memory_id=memory_id, documents=decoded, batch_id=batch_id,
+                    replace_existing=replace_existing, requested_by=requested_by,
+                )
+            except AutomaticBatchAdmittedError as exc:
+                # Jobs already exist: return their IDs even if release failed.
+                results = exc.results
+                warning = "automatic_batch_admitted_release_failed"
+            except Exception as exc:
+                refusal_codes = {
+                    "automatic_ontology_memory_missing", "automatic_ontology_memory_changed",
+                    "automatic_ontology_batch_mismatch", "automatic_ontology_requires_empty_memory",
+                    "automatic_ontology_queue_full",
+                }
+                if (isinstance(exc, MaintenanceAdmissionError)
+                        or isinstance(exc, OntologyConstructionError) and str(exc) in refusal_codes):
+                    return {"status": "error", "code": "automatic_batch_not_admitted",
+                            "message": "Automatic batch not admitted: use an idle, empty memory or resubmit the same initial batch."}
+                return {"status": "error", "code": "automatic_batch_infrastructure_failed",
+                        "message": "Automatic batch admission failed: check Graph storage and maintenance availability."}
+            for idx, res in enumerate(results):
+                st = res.get("status", "error")
+                counts[st] = counts.get(st, 0) + 1
+                items.append({"index": idx, "source_path": decoded[idx]["source_path"],
+                              "job_id": res.get("job_id"), "status": st})
+            return {"status": "ok", "batch_id": batch_id, "memory_id": memory_id,
+                    "total": len(documents), "counts": counts, "errors": [], "items": items,
+                    "ontology_mode": "auto",
+                    **({"warning": warning} if warning else {}),
+                    "message": ("Batch admitted, but maintenance release failed; inspect the returned jobs and service health."
+                                if warning else "Initial batch queued; ontology construction runs before document ingestion. Resubmit the same batch after interruption.")}
 
         for idx, doc in enumerate(documents):
             try:
@@ -1172,6 +1255,7 @@ async def question_answer(
         context_parts = []
         entity_names = []
         source_documents = {}  # doc_id -> {filename, id}
+        meta = {}
 
         for entity in entities:
             entity_names.append(entity["name"])
@@ -1184,15 +1268,16 @@ async def question_answer(
                     doc_id = doc.get('id', '')
                     doc_filename = doc.get('filename', doc_id)
                     if doc_id:
+                        meta.setdefault(doc_id, doc)
                         if doc_id not in source_documents:
                             source_documents[doc_id] = {
                                 "id": doc_id,
                                 "filename": doc_filename,
                             }
-                        entity_doc_names.append(doc_filename)
+                        entity_doc_names.append(doc_id)
 
             # Construire le contexte texte AVEC le document source
-            doc_ref = f" [Source: {', '.join(entity_doc_names)}]" if entity_doc_names else ""
+            doc_ref = f" [Source document ids: {', '.join(entity_doc_names)}]" if entity_doc_names else ""
             ctx_text = f"- {entity['name']} ({entity.get('type', '?')}){doc_ref}"
             if entity.get('description'):
                 ctx_text += f": {entity['description']}"
@@ -1206,10 +1291,10 @@ async def question_answer(
 
             context_parts.append(ctx_text)
 
-        # 3. === RAG vectoriel : Graph-Guided si entités trouvées, sinon RAG-only ===
+        # 3. === RAG across active documents, with additive graph context ===
         rag_context_parts = []
         rag_chunks_used = 0
-        rag_mode = "graph-guided" if entities else "rag-only"
+        rag_mode = "graph+rag" if entities else "rag-only"
         from .core.vector_store import (
             EmbeddingCollectionReindexRequired,
             EmbeddingCollectionUnavailable,
@@ -1222,41 +1307,47 @@ async def question_answer(
             # Vectoriser la question
             query_result = await get_embedder().embed_query_result(question)
 
-            # Recherche Qdrant :
-            # - Graph-Guided : filtrée par les documents actifs identifiés par le graphe
-            # - RAG-only : filtrée par TOUS les documents actifs de la mémoire (exclut les candidats non promus)
+            # Search all active documents in this memory, regardless of graph matches.
+            # Unpromoted candidates remain excluded.
             score_threshold = settings.rag_score_threshold
             chunk_limit = settings.rag_chunk_limit
 
             get_active_fn = getattr(get_graph(), "get_active_doc_ids", None)
             active_doc_ids = await get_active_fn(memory_id) if callable(get_active_fn) else None
-            target_doc_ids: Optional[list[str]] = None
-            if graph_doc_ids:
-                if active_doc_ids is not None:
-                    target_doc_ids = [d for d in graph_doc_ids if d in active_doc_ids]
-                else:
-                    target_doc_ids = graph_doc_ids
-            else:
-                target_doc_ids = active_doc_ids
+            # Graph matches add context; they must not exclude other active evidence.
+            # None preserves the vector store's memory ownership filter for legacy graphs.
+            target_doc_ids: Optional[list[str]] = active_doc_ids
 
             chunk_results = await get_vector_store().search(
                 memory_id=memory_id,
                 embedding_result=query_result,
                 doc_ids=target_doc_ids,
                 limit=chunk_limit,
+                query_text=question,
             )
 
             # Sauver tous les résultats avant filtrage (pour diagnostic)
             all_chunk_results = list(chunk_results)
             
-            # Filtrer par seuil de score (en dessous = non pertinent)
+            # An operator may explicitly opt into a model-specific cutoff.
             total_before = len(chunk_results)
-            chunk_results = [cr for cr in chunk_results if cr.score >= score_threshold]
+            if score_threshold is not None:
+                chunk_results = [cr for cr in chunk_results if cr.score >= score_threshold]
             filtered_out = total_before - len(chunk_results)
 
             # Construire le contexte RAG (chunks pertinents)
+            missing = {cr.chunk.doc_id for cr in chunk_results if cr.chunk.doc_id and cr.chunk.doc_id not in meta}
+            if missing:
+                meta.update(await get_graph().get_documents_meta(memory_id, list(missing)))
             for cr in chunk_results:
-                rag_context_parts.append(cr.context_text)
+                source = meta.get(cr.chunk.doc_id, {})
+                evidence = [f"Document id: {cr.chunk.doc_id}"]
+                for label, key in (("Source path", "source_path"), ("SHA256", "sha256"),
+                                   ("Capture id", "preimage_id"), ("Captured at", "captured_at"),
+                                   ("Ingested at", "ingested_at")):
+                    if source.get(key):
+                        evidence.append(f"{label}: {source[key]}")
+                rag_context_parts.append("[" + "; ".join(evidence) + "]\n" + cr.context_text)
                 rag_chunks_used += 1
                 # Ajouter les docs trouvés par RAG au source_documents
                 if cr.chunk.doc_id and cr.chunk.doc_id not in source_documents:
@@ -1267,7 +1358,7 @@ async def question_answer(
 
             print(f"🔍 [Q&A] RAG ({rag_mode}): {rag_chunks_used} retained chunks"
                   f" (threshold={score_threshold}, filtered {filtered_out} of {total_before})"
-                  f"{f' | graph-guided: {len(graph_doc_ids)} docs' if graph_doc_ids else ' | all documents'}", 
+                  f" | all active documents; {len(graph_doc_ids)} graph source docs", 
                   file=sys.stderr)
             
             # Log détaillé : score + section + aperçu texte de chaque chunk RETENU
@@ -1305,9 +1396,17 @@ async def question_answer(
             }
         
         # 4. Construire la liste des documents pour le prompt
-        doc_list = "\n".join(
-            f"  - {doc['filename']}" for doc in source_documents.values()
-        )
+        doc_list_parts = []
+        for doc_id, doc in source_documents.items():
+            evidence = [f"{doc['filename']}; Document id: {doc_id}"]
+            source = meta.get(doc_id, {})
+            for label, key in (("Source path", "source_path"), ("SHA256", "sha256"),
+                               ("Capture id", "preimage_id"), ("Captured at", "captured_at"),
+                               ("Ingested at", "ingested_at")):
+                if source.get(key):
+                    evidence.append(f"{label}: {source[key]}")
+            doc_list_parts.append("  - " + "; ".join(evidence))
+        doc_list = "\n".join(doc_list_parts)
         
         # 5. Assembler le contexte final (graphe + RAG)
         graph_context = "\n".join(context_parts)
@@ -1336,9 +1435,13 @@ INSTRUCTIONS:
 - Answer concisely and precisely using only the supplied context.
 - Prefer document excerpts (CONTEXT 2) for factual details and citations.
 - Use the graph (CONTEXT 1) for overview and relationships between concepts.
+- An entity's source list is not proof that every claim appears in every source; verify each claim and its version against individual document excerpts.
 - Cite the source document for every factual claim.
 - Name every source when information comes from multiple documents.
 - Clearly say when the context is insufficient for a complete answer.
+- Cite document and capture identities when filenames are shared by several versions.
+- A capture time is not a fact's validity date; use dates stated in the source for current versus historical facts.
+- Removal from MID does not invalidate a historical fact or supersede it without source evidence.
 - Structure the response with Markdown.
 """
         
@@ -1349,7 +1452,8 @@ INSTRUCTIONS:
             "answer": answer,
             "entities": entity_names,
             "rag_chunks_used": rag_chunks_used,
-            "source_documents": list(source_documents.values()),
+            "source_documents": [{**doc, **_retrieval_source_fields(meta.get(doc_id, {}))}
+                                 for doc_id, doc in source_documents.items()],
             "context_used": graph_context
         }
         
@@ -1373,7 +1477,7 @@ async def memory_query(
     Pipeline :
     1. Recherche d'entités dans le graphe (fulltext + CONTAINS)
     2. Récupération du contexte de chaque entité (voisins, relations, documents)
-    3. Recherche RAG vectorielle (graph-guided ou rag-only)
+    3. Recherche RAG vectorielle sur tous les documents actifs de la mémoire
     4. Retour des données structurées (pas d'appel LLM)
     
     Args:
@@ -1449,9 +1553,9 @@ async def memory_query(
             }
             enriched_entities.append(enriched_entity)
         
-        # 3. RAG vectoriel : Graph-Guided si entités, sinon RAG-only
+        # 3. Vector retrieval across active documents, with additive graph context
         rag_chunks = []
-        rag_mode = "graph-guided" if entities else "rag-only"
+        rag_mode = "graph+rag" if entities else "rag-only"
         rag_chunks_filtered = 0
         retained = []  # défini hors du try : utilisé plus bas même si le RAG échoue
 
@@ -1469,24 +1573,20 @@ async def memory_query(
 
             get_active_fn = getattr(get_graph(), "get_active_doc_ids", None)
             active_doc_ids = await get_active_fn(memory_id) if callable(get_active_fn) else None
-            target_doc_ids: Optional[list[str]] = None
-            if graph_doc_ids:
-                if active_doc_ids is not None:
-                    target_doc_ids = [d for d in graph_doc_ids if d in active_doc_ids]
-                else:
-                    target_doc_ids = graph_doc_ids
-            else:
-                target_doc_ids = active_doc_ids
+            # Graph matches add context; they must not exclude other active evidence.
+            # None preserves the vector store's memory ownership filter for legacy graphs.
+            target_doc_ids: Optional[list[str]] = active_doc_ids
 
             chunk_results = await get_vector_store().search(
                 memory_id=memory_id,
                 embedding_result=query_result,
                 doc_ids=target_doc_ids,
                 limit=chunk_limit,
+                query_text=query,
             )
             
             total_before = len(chunk_results)
-            retained = [cr for cr in chunk_results if cr.score >= score_threshold]
+            retained = [cr for cr in chunk_results if score_threshold is None or cr.score >= score_threshold]
             rag_chunks_filtered = total_before - len(retained)
             
             for cr in retained:
@@ -1530,21 +1630,8 @@ async def memory_query(
                 print(f"⚠️ [Query] source_path enrichment failed: {e}", file=sys.stderr)
         print(f"🧭 [Query] {len(meta)} enriched documents (source_path)", file=sys.stderr)
 
-        def _doc_fields(m):
-            """Contrat commun de métadonnées document (hash ET sha256 conservés)."""
-            return {
-                "uri": m.get("uri"),
-                "source_path": m.get("source_path"),
-                "repo_path": m.get("repo_path"),
-                "hash": m.get("hash"),
-                "sha256": m.get("sha256"),
-                "ingestion_status": m.get("ingestion_status", "unknown"),
-                "chunk_count": m.get("chunk_count", 0),
-                "last_ingest_job_id": m.get("last_ingest_job_id"),
-            }
-
         # Enrichir source_documents (contrat complet) — la valeur de meta fait autorité
-        enriched_sources = [{**base, **_doc_fields(meta.get(doc_id, {}))}
+        enriched_sources = [{**base, **_retrieval_source_fields(meta.get(doc_id, {}))}
                             for doc_id, base in source_documents.items()]
 
         # Enrichir rag_chunks (source_path + repo_path suffisent pour ouvrir le fichier Git)
@@ -1552,6 +1639,8 @@ async def memory_query(
             m = meta.get(ch.get("doc_id"), {})
             ch["source_path"] = m.get("source_path")
             ch["repo_path"] = m.get("repo_path")
+            for key in ("sha256", "provenance", "captured_at", "preimage_id", "bank_path", "ingested_at"):
+                ch[key] = m.get(key)
 
         # 4. Retourner les données structurées (PAS d'appel LLM)
         return {
@@ -2073,9 +2162,11 @@ async def document_get(
         }
 
         # Télécharger le contenu S3 seulement si demandé
-        if include_content and doc_info.get("uri"):
+        if include_content:
             try:
-                uri = doc_info["uri"]
+                uri = doc_info.get("uri")
+                if not uri:
+                    raise ValueError("Document storage reference missing")
                 content_bytes = await get_storage().download_document(memory_id, uri)
 
                 # Distinguer fichiers texte vs binaires

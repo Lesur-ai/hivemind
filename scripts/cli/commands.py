@@ -32,15 +32,20 @@ from .display import (
     show_space_invite_result,
     show_space_list,
     show_space_info,
+    show_space_memory_status,
+    space_status_needs_recovery,
+    consolidation_job_needs_recovery,
     show_rules,
     show_notes,
     show_bank_list,
     show_bank_content,
-    show_consolidation_result,
+    show_consolidation_response,
+    show_consolidation_job,
     show_bank_compact_result,
     show_bank_compact_failure,
     show_graph_connected,
     show_graph_status,
+    show_ingest_job,
     show_graph_push_result,
     show_graph_disconnected,
     show_graph_local,
@@ -72,28 +77,26 @@ def _run_tool(
         try:
             client = MCPClient(ctx.obj["url"], ctx.obj["token"])
             result = await client.call_tool(tool_name, args)
+            status = result.get("status")
+            success = status in (
+                "ok", "healthy", "degraded", "created", "deleted",
+                "grants_cleaned", "connected", "disconnected", "running", "queued",
+                "succeeded", "skipped",
+            )
             if json_flag:
                 show_json(result)
+                return 0 if success else 1
             elif (
-                result.get("status") == "partial"
+                status == "partial"
                 and result.get("recovery_required") is True
                 and on_recovery_required is not None
             ):
                 on_recovery_required(result)
-            elif result.get("status") in (
-                "ok",
-                "healthy",
-                "degraded",
-                "created",
-                "deleted",
-                "grants_cleaned",
-                "connected",
-                "disconnected",
-                "running",
-                "queued",
-            ):
+                return 1
+            elif success:
                 on_success(result)
-            elif result.get("status") == "conflict":
+                return 0
+            elif status == "conflict":
                 # A consolidation lock is an expected, retryable contention
                 # outcome—not a failed/partial compaction or recovery event.
                 show_error(result.get("message", "Operation is currently busy"))
@@ -103,10 +106,14 @@ def _run_tool(
                 show_error(
                     result.get("message", f"Error: {result.get('status', '?')}")
                 )
+            return 1
         except Exception as e:
             show_error(f"Connection failed: {e}")
+            return 1
 
-    asyncio.run(_run())
+    exit_code = asyncio.run(_run())
+    if exit_code:
+        ctx.exit(exit_code)
 
 
 def _run_token_create(
@@ -424,6 +431,73 @@ def space_info_cmd(ctx, space_id, jflag):
     _run_tool(ctx, "space_info", {"space_id": space_id}, show_space_info, jflag)
 
 
+@space_grp.command("status")
+@click.argument("space_id")
+@click.option("--json", "-j", "jflag", is_flag=True)
+@click.pass_context
+def space_status_cmd(ctx, space_id, jflag):
+    """Show SHORT, MID and LONG progress for one space."""
+
+    async def _run():
+        try:
+            client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+            info = await client.call_tool("space_info", {"space_id": space_id})
+            if info.get("status") != "ok":
+                (show_json if jflag else show_error)(info if jflag else info.get("message", "Space unavailable"))
+                return 1
+            long_status = await client.call_tool("graph_status", {"space_id": space_id})
+            running_jobs = queued_jobs = None
+            if (long_status.get("status") == "ok" and long_status.get("connected")
+                    and long_status.get("reachable") is not False):
+                running_jobs = await client.call_tool(
+                    "long_ingest_list", {"space_id": space_id, "status": "running", "limit": 10}
+                )
+                queued_jobs = await client.call_tool(
+                    "long_ingest_list", {"space_id": space_id, "status": "queued", "limit": 10}
+                )
+            archive_running = archive_queued = None
+            projection = long_status.get("mid_archive_projection")
+            if (long_status.get("status") == "ok" and isinstance(projection, dict)
+                    and long_status.get("reachable") is not False
+                    and (projection.get("pending") != 0 or projection.get("error"))):
+                archive_running = await client.call_tool(
+                    "long_ingest_list", {"space_id": space_id, "status": "running", "limit": 10, "archive": True}
+                )
+                if archive_running.get("status") == "ok":
+                    archive_queued = await client.call_tool(
+                        "long_ingest_list", {"space_id": space_id, "status": "queued", "limit": 10, "archive": True}
+                    )
+            job_reads_ok = all(
+                response is None or response.get("status") == "ok" or response.get("reason") == "archive_not_configured"
+                for response in (running_jobs, queued_jobs, archive_running, archive_queued)
+            )
+            recovery_required = space_status_needs_recovery(info)
+            if jflag:
+                show_json({
+                    "status": "ok" if long_status.get("status") == "ok" and long_status.get("reachable") is not False and job_reads_ok and not recovery_required else "partial",
+                    "space_id": space_id, "space_info": info, "long_status": long_status,
+                    "ingest_running": running_jobs, "ingest_queued": queued_jobs,
+                    "archive_ingest_running": archive_running, "archive_ingest_queued": archive_queued,
+                    "recovery_required": recovery_required,
+                })
+            else:
+                show_space_memory_status(info, long_status, running_jobs, queued_jobs,
+                                         archive_running, archive_queued)
+            return 0 if (
+                long_status.get("status") == "ok"
+                and long_status.get("reachable") is not False
+                and job_reads_ok
+                and not recovery_required
+            ) else 1
+        except Exception as exc:
+            show_error(f"Connection failed: {exc}")
+            return 1
+
+    exit_code = asyncio.run(_run())
+    if exit_code:
+        ctx.exit(exit_code)
+
+
 @space_grp.command("rules")
 @click.argument("space_id")
 @click.option("--json", "-j", "jflag", is_flag=True)
@@ -638,7 +712,7 @@ def bank_consolidate_cmd(ctx, space_id, all_agents, jflag):
         ctx,
         "bank_consolidate",
         args,
-        show_consolidation_result,
+        show_consolidation_response,
         jflag,
     )
 
@@ -649,15 +723,26 @@ def bank_consolidate_cmd(ctx, space_id, all_agents, jflag):
 @click.pass_context
 def bank_consolidation_status_cmd(ctx, job_id, jflag):
     """🔄 Track an in-memory consolidation job."""
-    from .display import show_consolidation_job
 
-    _run_tool(
-        ctx,
-        "bank_consolidation_status",
-        {"job_id": job_id},
-        show_consolidation_job,
-        jflag,
-    )
+    async def _run():
+        try:
+            client = MCPClient(ctx.obj["url"], ctx.obj["token"])
+            result = await client.call_tool("bank_consolidation_status", {"job_id": job_id})
+            status = result.get("status")
+            if jflag:
+                show_json(result)
+            elif status in ("queued", "running", "succeeded", "failed", "cancelled"):
+                show_consolidation_job(result)
+            else:
+                show_error(result.get("message", f"Error: {status or '?'}"))
+            return 0 if status in ("queued", "running", "succeeded") and not consolidation_job_needs_recovery(result) else 1
+        except Exception as exc:
+            show_error(f"Connection failed: {exc}")
+            return 1
+
+    exit_code = asyncio.run(_run())
+    if exit_code:
+        ctx.exit(exit_code)
 
 
 @bank_grp.command("consolidation-queues")
@@ -741,13 +826,15 @@ def bank_stale_spaces_cmd(
                 show_stale_spaces(result)
             else:
                 show_error(result.get("message", "?"))
-                return
+            if result.get("status") != "ok":
+                return 1
 
             if not consolidate:
-                return
+                return 0
             stale = result.get("spaces", [])
             if not stale:
-                return
+                return 0
+            failed = False
             for entry in stale:
                 sid = entry.get("space_id")
                 if not sid:
@@ -759,15 +846,20 @@ def bank_stale_spaces_cmd(
                 if jflag:
                     show_json(job)
                 elif job.get("status") in ("running", "queued"):
-                    show_consolidation_result(job)
+                    show_consolidation_response(job)
                 else:
                     show_error(
                         f"{sid}: {job.get('message', job.get('status', '?'))}"
                     )
+                failed = failed or job.get("status") not in ("running", "queued")
+            return 1 if failed else 0
         except Exception as e:
             show_error(f"Connection failed: {e}")
+            return 1
 
-    asyncio.run(_run())
+    exit_code = asyncio.run(_run())
+    if exit_code:
+        ctx.exit(exit_code)
 
 
 @bank_grp.command("write")
@@ -1506,6 +1598,21 @@ def graph_push_cmd(ctx, space_id, jflag):
 def graph_status_cmd(ctx, space_id, jflag):
     """📊 Graph Memory connection status (stats, documents, entities)."""
     _run_tool(ctx, "graph_status", {"space_id": space_id}, show_graph_status, jflag)
+
+
+@graph_grp.command("job")
+@click.argument("space_id")
+@click.argument("job_id")
+@click.option("--archive", is_flag=True, help="Inspect a MID archive indexing job.")
+@click.option("--json", "-j", "jflag", is_flag=True)
+@click.pass_context
+def graph_job_cmd(ctx, space_id, job_id, archive, jflag):
+    """Read an ingestion job's status, step and actual progress."""
+    _run_tool(
+        ctx, "long_ingest_status",
+        {"space_id": space_id, "job_id": job_id, "archive": archive},
+        show_ingest_job, jflag, on_failure=show_ingest_job,
+    )
 
 
 @graph_grp.command("query")

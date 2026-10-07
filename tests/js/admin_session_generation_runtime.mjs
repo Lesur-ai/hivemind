@@ -20,6 +20,11 @@ globalThis.__sessionHarness = {
     logout: doLogout,
     boot: _bootAuthenticated,
     identity: () => _currentIdentity,
+    matchRoute: _matchRoute,
+    dispatch: () => AdminRouter._dispatch(),
+    setIdentity: identity => { _currentIdentity = identity; },
+    checkServices: checkPortalServices,
+    health: () => _dashHealth,
 };`;
 
 function deferred() {
@@ -95,6 +100,8 @@ function createHarness() {
         sidebarNav: element(),
         sidebarNavOperator: element(),
         logoutBtn: element(),
+        portalCheckServices: element({ disabled: true }),
+        portalHealth: element(),
     };
 
     const document = {
@@ -102,6 +109,7 @@ function createHarness() {
         querySelectorAll() { return []; },
         querySelector() { return null; },
         addEventListener(type, handler) { listeners[type] = handler; },
+        dispatchEvent(event) { listeners[event.type]?.(event); },
         createElement() { return element(); },
         body: element({ appendChild() {} }),
     };
@@ -117,6 +125,7 @@ function createHarness() {
         window,
         location,
         navigator: {},
+        CustomEvent: class { constructor(type) { this.type = type; } },
         setTimeout() { return 0; },
         clearTimeout() {},
         fetch(url, options) {
@@ -375,6 +384,75 @@ async function staleMeshSuccessCannotCrossSession() {
     assert.equal(result.message, 'Stale session');
 }
 
+function portalRoutesUseTheRealRouter() {
+    const h = createHarness();
+    const match = h.session.matchRoute;
+    for (const tier of ['short', 'mid']) {
+        const route = match(`#/spaces/demo/memory/${tier}`);
+        assert.equal(route.view, 'space-detail');
+        assert.equal(route.params.spaceId, 'demo');
+        assert.equal(route.params.tab, 'memory');
+        assert.equal(route.params.tier, tier);
+    }
+    for (const tab of ['consolidation', 'rules', 'access', 'backups', 'maintenance']) {
+        assert.equal(match(`#/spaces/demo/${tab}`).params.tab, tab);
+    }
+    for (const panel of ['overview', 'ontology', 'documents', 'jobs', 'graph']) {
+        assert.equal(match(`#/spaces/demo/long/${panel}`).params.panel, panel);
+    }
+    for (const [old, canonical] of [
+        ['', '/memory/short'], ['/short', '/memory/short'],
+        ['/mid', '/memory/mid'], ['/long', '/long/overview'],
+    ]) {
+        h.api.location.hash = '#/spaces/demo' + old;
+        h.session.dispatch();
+        assert.equal(h.api.location.hash, '#/spaces/demo' + canonical);
+    }
+    assert.equal(match('#/spaces/%zz/memory/short').view, null);
+    assert.equal(match('#/spaces/a%2Fb/memory/short').params.spaceId, 'a/b', 'invalid decoded IDs reach the view guard');
+    for (const path of ['memory/nope', 'long/nope', 'rules/extra', 'backups/', 'memory/short?token=x']) {
+        assert.equal(match('#/spaces/demo/' + path).view, null);
+    }
+    for (const [path, view] of [['/consolidation/demo', 'consolidation'], ['/operator/backups', 'operator'], ['/operator/maintenance', 'operator'], ['/audit', 'audit']]) {
+        assert.equal(match('#' + path).view, view);
+    }
+}
+
+async function portalHealthIsExplicitSingleFlightAndSessionBound() {
+    const h = createHarness();
+    assert.equal(await h.session.checkServices(), null, 'no probe without a resolved identity');
+    assert.equal(h.fetches.length, 0);
+    h.session.begin();
+    h.session.setIdentity({ client_name: 'operator' });
+    const old = h.enqueueFetch();
+    const oldProbe = h.session.checkServices();
+    assert.equal(h.session.checkServices(), oldProbe, 'all controls share one probe');
+    assert.equal(h.fetches.length, 1);
+    assert.equal(h.elements.portalCheckServices.disabled, true);
+    h.session.showLogin();
+    assert.equal(h.elements.portalCheckServices.disabled, true);
+    h.session.setIdentity({ client_name: 'next-operator' });
+    const fresh = h.enqueueFetch();
+    const freshProbe = h.session.checkServices();
+    old.resolve(response(200, { status: 'healthy', service_name: 'previous-session' }));
+    await oldProbe;
+    assert.equal(h.elements.portalHealth.textContent, 'Checking services…');
+    assert.equal(h.session.checkServices(), freshProbe, 'stale result cannot clear the new flight');
+    fresh.resolve(response(200, { status: 'degraded' }));
+    await freshProbe;
+    assert.equal(h.elements.portalHealth.textContent, 'Services degraded');
+    assert.equal(h.elements.portalCheckServices.disabled, false);
+    assert.equal(h.session.health().status, 'degraded');
+    const fail = h.enqueueFetch();
+    const failedProbe = h.session.checkServices();
+    fail.reject(new Error('transport failed'));
+    await failedProbe;
+    assert.equal(h.elements.portalHealth.textContent, 'Service check failed');
+    assert.equal(h.session.health().status, 'error', 'do not present an old healthy result as current');
+}
+
+portalRoutesUseTheRealRouter();
+await portalHealthIsExplicitSingleFlightAndSessionBound();
 await current401InvalidatesSynchronously();
 await stale401CannotWipeNewerSession();
 await staleSuccessCannotCrossSession();

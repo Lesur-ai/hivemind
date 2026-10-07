@@ -194,6 +194,8 @@ class ExtractorService:
         content: str,
         known_relation_types: Optional[set] = None,
         known_entity_types: Optional[set] = None,
+        *,
+        strict: bool = False,
     ) -> ExtractionResult:
         """
         Parse la réponse JSON du LLM.
@@ -216,6 +218,20 @@ class ExtractorService:
                 content = content[start:end]
             
             data = json.loads(content)
+            if strict:
+                if (type(data) is not dict or type(data.get("entities")) is not list
+                        or type(data.get("relations")) is not list):
+                    raise ValueError("invalid extraction shape")
+                entities_allowed = {t.lower() for t in (known_entity_types or set())} | {"other"}
+                relations_allowed = {t.upper().replace(" ", "_").replace("-", "_") for t in (known_relation_types or set())} | {"OTHER", "RELATED_TO"}
+                for item in data["entities"]:
+                    if (type(item) is not dict or type(item.get("type")) is not str
+                            or item["type"].strip().lower() not in entities_allowed):
+                        raise ValueError("invalid entity label")
+                for item in data["relations"]:
+                    if (type(item) is not dict or type(item.get("type")) is not str
+                            or item["type"].strip().upper().replace(" ", "_").replace("-", "_") not in relations_allowed):
+                        raise ValueError("invalid relation label")
             
             # Parser les entités
             entities = []
@@ -252,6 +268,8 @@ class ExtractorService:
             )
             
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as e:
+            if strict:
+                raise ValueError("Invalid extraction for frozen ontology") from None
             # ADR-0027 : AUCUN fragment de complétion dans les logs. Un JSON
             # syntaxiquement valide peut encore violer le contrat structurel
             # (racine non-objet, collections/scalaires inattendus, validation
@@ -319,12 +337,53 @@ class ExtractorService:
         
         if normalized in valid_types:
             return normalized
+        for known in valid_types:
+            if known.upper().replace(" ", "_").replace("-", "_") == normalized:
+                return known.upper()
         
         # Accepter tout type au format valide (MAJ + underscores) — le LLM peut inventer
         if normalized.replace("_", "").isalpha() and normalized == normalized.upper():
             return normalized
         
         return "RELATED_TO"
+
+    async def _extract_frozen_catalogue(
+        self, prompt: str, entity_types: set[str], relation_types: set[str],
+    ) -> ExtractionResult:
+        """Validate closed vocabularies; permit one explicit output correction."""
+        entity_types = entity_types | {"Other"}
+        relation_types = relation_types | {"OTHER", "RELATED_TO"}
+        vocabulary = (
+            "Use only these entity labels: " + json.dumps(sorted(entity_types))
+            + ". Use only these relation labels: " + json.dumps(sorted(relation_types))
+            + ". Preserve the catalogue definitions; use Other or RELATED_TO only when needed."
+        )
+        messages = [
+            {"role": "system", "content": "You specialize in structured information extraction. Reply with valid JSON only. " + vocabulary},
+            {"role": "user", "content": prompt},
+        ]
+        for attempt in range(2):
+            chat_result = await self._complete(messages)
+            try:
+                return self._parse_extraction(
+                    chat_result.text or "", known_entity_types=entity_types,
+                    known_relation_types=relation_types, strict=True,
+                )
+            except ValueError:
+                if attempt:
+                    raise
+                # Keep correction context private and bounded; never log the
+                # rejected output or expand the caller's catalogue.
+                excerpt = redact_proxy_secrets(chat_result.text or "").encode("utf-8")[:16_384]
+                excerpt = excerpt.decode("utf-8", errors="ignore")
+                if excerpt.strip():
+                    messages.append({"role": "assistant", "content": excerpt})
+                messages.append({"role": "user", "content": (
+                    "The output did not conform to the frozen catalogue or JSON structure. "
+                    "Return a corrected complete JSON object with entities and relations arrays. "
+                    + vocabulary
+                )})
+        raise AssertionError("unreachable")
     
     @redact_proxy_errors_async
     async def extract_with_ontology(
@@ -361,36 +420,16 @@ class ExtractorService:
         try:
             print(f"🔍 [Extractor] Extracting with ontology '{ontology.name}' ({len(text)} chars)...", file=sys.stderr)
             
-            chat_result = await self._complete(
-                [
-                    {
-                        "role": "system",
-                        "content": "You specialize in structured information extraction. Reply with valid JSON only."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            )
-
-            content = chat_result.text
-            if not content:
-                print("⚠️ [Extractor] Empty LLM response", file=sys.stderr)
-                return ExtractionResult(summary=None)
-
             # Extraire les types depuis l'ontologie chargée
             ontology_relation_types = {
                 rt.name.upper() for rt in ontology.relation_types
-            } | self.BASE_RELATION_TYPES  # Union avec les types de base
+            }
             ontology_entity_types = {et.name for et in ontology.entity_types}
             
             print(f"🔗 [Extractor] Ontology '{ontology.name}' types: {len(ontology_entity_types)} entities, {len(ontology_relation_types)} relations", file=sys.stderr)
             
-            result = self._parse_extraction(
-                content,
-                known_relation_types=ontology_relation_types,
-                known_entity_types=ontology_entity_types,
+            result = await self._extract_frozen_catalogue(
+                prompt, ontology_entity_types, ontology_relation_types,
             )
             
             print(f"✅ [Extractor] Extracted ({ontology.name}): {len(result.entities)} entities, {len(result.relations)} relations", file=sys.stderr)
@@ -493,7 +532,7 @@ class ExtractorService:
         # Types depuis l'ontologie (entités et relations)
         ontology_relation_types = {
             rt.name.upper() for rt in ontology.relation_types
-        } | self.BASE_RELATION_TYPES
+        }
         ontology_entity_types = {et.name for et in ontology.entity_types}
         
         # Extraction séquentielle avec contexte cumulatif
@@ -518,28 +557,8 @@ class ExtractorService:
             prompt = ontology.build_prompt(chunk_text, cumulative_context=cumulative_context)
             
             try:
-                chat_result = await self._complete(
-                    [
-                        {
-                            "role": "system",
-                            "content": "You specialize in structured information extraction. Reply with valid JSON only."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ]
-                )
-
-                content = chat_result.text
-                if not content:
-                    print(f"⚠️ [Extractor] Chunk {chunk_num}: empty LLM response", file=sys.stderr)
-                    continue
-
-                result = self._parse_extraction(
-                    content,
-                    known_relation_types=ontology_relation_types,
-                    known_entity_types=ontology_entity_types,
+                result = await self._extract_frozen_catalogue(
+                    prompt, ontology_entity_types, ontology_relation_types,
                 )
                 
                 print(f"✅ [Extractor] Chunk {chunk_num}: +{len(result.entities)} entities, "
@@ -564,10 +583,8 @@ class ExtractorService:
                     })
                 
             except InferenceError as e:
-                if e.category == "timeout":
-                    print(f"⏰ [Extractor] Chunk {chunk_num}/{len(chunks)} timed out — continuing", file=sys.stderr)
-                    # On continue avec les chunks suivants au lieu de tout perdre
-                    continue
+                # Every chunk is required. Let the caller retain/retry the
+                # document instead of publishing an incomplete extraction.
                 print(f"❌ [Extractor] Provider error for chunk {chunk_num}/{len(chunks)}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
                 raise
         

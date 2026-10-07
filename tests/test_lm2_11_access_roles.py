@@ -163,11 +163,12 @@ def _stored_tokens(storage: FakeStorage) -> TokensStore:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("graph_first", [False, True])
-async def test_derived_graph_namespace_cannot_be_created_as_space(wired, graph_first):
+@pytest.mark.parametrize("archive", [False, True])
+async def test_derived_graph_namespace_cannot_be_created_as_space(wired, graph_first, archive):
     from live_mem.core.memory_id import derive_memory_id
     storage, _ = wired
     _seed_store(storage)
-    target = derive_memory_id("victim-space")
+    target = "mid_" + "a" * 40 if archive else derive_memory_id("victim-space")
     if graph_first:
         storage.objects[f"{target}/documents/source.txt"] = "private graph document"
     before = dict(storage.objects)
@@ -180,11 +181,12 @@ async def test_derived_graph_namespace_cannot_be_created_as_space(wired, graph_f
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["export", "delete", "unsafe_delete", "backup", "download", "restore", "unsafe_restore"])
-async def test_historical_graph_collision_never_reads_or_deletes_payload(wired, operation):
+@pytest.mark.parametrize("archive", [False, True])
+async def test_historical_graph_collision_never_reads_or_deletes_payload(wired, operation, archive):
     from live_mem.core.memory_id import derive_memory_id
     storage, _ = wired
     _seed_store(storage)
-    target = derive_memory_id("victim-space")
+    target = "mid_" + "a" * 40 if archive else derive_memory_id("victim-space")
     storage.objects[f"{target}/_meta.json"] = json.dumps({"space_id": target})
     storage.objects[f"{target}/documents/source.txt"] = "private graph document"
     backup_id = f"{target}/2026-09-16T00-00-00"
@@ -208,9 +210,10 @@ async def test_historical_graph_collision_never_reads_or_deletes_payload(wired, 
 
 
 @pytest.mark.parametrize("permissions", [["read"], ["manage"], ["admin"]])
-def test_derived_namespace_is_not_an_authorizable_hivemind_space(permissions):
+@pytest.mark.parametrize("archive", [False, True])
+def test_derived_namespace_is_not_an_authorizable_hivemind_space(permissions, archive):
     from live_mem.core.memory_id import derive_memory_id
-    target = derive_memory_id("victim-space")
+    target = "mid_" + "a" * 40 if archive else derive_memory_id("victim-space")
     result = auth_context._evaluate_access({"permissions": permissions, "allowed_resources": [target]}, target)
     assert result is not None and result["status"] == "error"
     assert result.get("recovery_required") is True

@@ -1,10 +1,3 @@
-// ADMIN_CONSOLE_DESIGN §5.5.1 (owner decision 2026-09-05) — runtime proof of the
-// bounded live refresh of the Consolidation view: while a lane shows a running
-// or queued job the lanes reload every 60 s; otherwise nothing is scheduled.
-// The tick drops on a route-epoch change or a lost session, re-arms without a
-// network call while the tab is hidden, and a new render cancels a pending
-// timer. The job inspector does the same for a running/queued job and stops on
-// a terminal status, a closed modal or a superseded modal instance.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -20,14 +13,14 @@ const stateStub = kind => options => {
     return `<div class="state-${kind}">${escapeHtml(o.title || '')}</div>`;
 };
 
-function fakeElement() { return { innerHTML: '', classList: { contains: () => true } }; }
+function fakeElement() { return { innerHTML: '', isConnected: true, contains: () => false, querySelector: () => null, querySelectorAll: () => [], classList: { contains: () => true } }; }
 
-function harness() {
+function harness(enabled = true) {
     const timers = [];            // scheduled callbacks: {id, fn, ms, cancelled}
     const calls = [];             // callTool invocations: {name, args}
     const modal = { style: { display: 'none' }, shows: [] };
     let nextResponse = () => ({});
-    const actions = {};
+    const actions = {}, listeners = {};
     let generation = 1;
     const elements = { consolJobFreshness: fakeElement(), consolFreshness: fakeElement(), consolPickerActions: fakeElement(), consolPickSpace: { value: '' }, consolStaleResults: fakeElement(), consolStaleMinNotes: { value: '5' }, consolStaleMinAge: { value: '5' }, consolLanes: fakeElement(), consolSubtitle: fakeElement(), consolStale: fakeElement(), adminModal: modal };
     const ctx = {
@@ -47,34 +40,48 @@ function harness() {
         stateLoading: stateStub('loading'), stateUnavailable: stateStub('unavailable'),
         registerAction(name, fn) { actions[name] = fn; }, showToast() {}, showDestructiveModal() {},
         currentSessionGeneration: () => generation, sessionGenerationIsCurrent: g => g === generation,
-        showModal(title, body, confirmLabel, onConfirm) { modal.style.display = 'flex'; modal.shows.push(String(body)); modal.confirm = onConfirm; },
+        showModal(title, body, confirmLabel, onConfirm) { if (elements.consolJobSnapshot) elements.consolJobSnapshot.isConnected = false; elements.consolJobSnapshot = fakeElement(); modal.style.display = 'flex'; modal.shows.push(String(body)); modal.confirm = onConfirm; },
         closeModal() { modal.style.display = 'none'; },
+        openConsolidationLauncher(options) { modal.shows.push(JSON.stringify(options.spaces)); },
         callTool: async (name, args) => { calls.push({ name, args }); return nextResponse(name, args); },
         AdminViews: { register() {} },
         AdminRouter: { epoch: 1, go() {}, refresh() {}, current: () => ({}) },
         document: {
             hidden: false,
-            addEventListener() {},
+            addEventListener(name, fn) { listeners[name] = fn; },
+            dispatchEvent() {},
             querySelector() { return null; },
             querySelectorAll() { return []; },
             getElementById(id) { return elements[id] || null; },
         },
         window: {},
+        CustomEvent: function(name) { this.type = name; },
+        localStorage: { getItem: () => JSON.stringify({ enabled, intervalSeconds: 15 }), setItem() {} },
         setTimeout(fn, ms) { const id = timers.length + 1; timers.push({ id, fn, ms, cancelled: false }); return id; },
         clearTimeout(id) { const t = timers.find(x => x.id === id); if (t) t.cancelled = true; },
     };
     vm.createContext(ctx);
+    vm.runInContext(fs.readFileSync(new URL('../../src/live_mem/static/js/admin/portal-refresh.js', import.meta.url), 'utf8') + '\nglobalThis.__refresh = PortalRefresh;', ctx);
+    ctx.__refresh.beginSession();
+    // Load the actual shared renderer, as the browser shell does. Keep this
+    // seam present even in fixtures with no automatic-maintenance outcome.
+    const appSource = fs.readFileSync(new URL('../../src/live_mem/static/js/admin-app.js', import.meta.url), 'utf8');
+    const helperStart = appSource.indexOf('function renderAutoCompaction(');
+    const helperEnd = appSource.indexOf('\nfunction ', helperStart + 1);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, 'shared maintenance renderer is missing');
+    vm.runInContext(appSource.slice(helperStart, helperEnd), ctx);
+
     const source = fs.readFileSync(consolidationPath, 'utf8');
     const instrumented = source.replace(
         "AdminViews.register('consolidation', render);",
-        'globalThis.__live = { render, loadLanes, inspectJob, state, paintLanes, progressBar };',
+        'globalThis.__live = { render, loadLanes, inspectJob, state, paintLanes, progressBar, renderJob };',
     );
     assert.notEqual(instrumented, source, 'consolidation instrumentation anchor missing');
     vm.runInContext(instrumented, ctx, { filename: consolidationPath });
     assert.ok(ctx.__live, 'consolidation instrumentation failed');
     const pending = () => timers.filter(t => !t.cancelled && !t.fired);
     const fire = async t => { t.fired = true; await t.fn(); await new Promise(r => setImmediate(r)); };
-    return { ctx, elements, actions, setGeneration(g) { generation = g; }, timers, calls, modal, pending, fire, setResponse(fn) { nextResponse = fn; } };
+    return { ctx, elements, actions, visibility(hidden) { ctx.document.hidden = hidden; listeners.visibilitychange(); }, setGeneration(g) { generation = g; }, timers, calls, modal, pending, fire, setResponse(fn) { nextResponse = fn; } };
 }
 
 const RUNNING = { status: 'ok', parallelism_model: 'one_worker_per_space', service_config: { batch_size: 2 },
@@ -84,169 +91,123 @@ const IDLE = { status: 'ok', lanes: [{ space_id: 'demo', lane_state: 'idle', run
 
 const settle = () => new Promise(r => setImmediate(r));
 
-// ── 1. a running lane schedules exactly one 60 s reload; firing it reloads ──
+// A degraded identity must not leave the user waiting for a read that cannot run.
 {
-    const h = harness();
+    const h = harness(false);
+    h.ctx.__refresh.endSession();
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} });
+    await settle();
+    assert.equal(h.calls.length, 0);
+    assert.match(h.elements.consolLanes.innerHTML, /Refresh unavailable.*sign in again/);
+    await h.ctx.__live.inspectJob('unavailable');
+    assert.match(h.modal.shows.at(-1), /Refresh unavailable.*sign in again/);
+    assert.equal(h.calls.length, 0);
+}
+
+// Space embeds the same view, reusing its already-authorized lane snapshot.
+{
+    const h = harness(false), root = fakeElement();
     h.setResponse(() => RUNNING);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    assert.equal(h.calls.filter(c => c.name === 'bank_consolidation_queues').length, 1, 'initial load');
-    assert.equal(h.calls[0].args.space_ids, '', 'the full load lets the server resolve the visible spaces');
-    assert.equal(h.pending().length, 1, 'exactly one live timer while a job runs');
-    assert.equal(h.pending()[0].ms, 60000, 'live period is one minute (owner arbitration 2026-09-05)');
-    assert.ok(h.ctx.__live.state.liveTimer !== null, 'the pending timer is tracked in view state');
-    const sub = h.ctx.document.getElementById('consolSubtitle').innerHTML;
-    assert.ok(sub.includes('Live · refreshes every 60 s while a job runs'), 'the subtitle announces the live refresh');
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls.filter(c => c.name === 'bank_consolidation_queues').length, 2, 'the tick reloads the lanes');
-    assert.equal(h.calls[1].args.space_ids, 'demo', 'the tick re-reads the painted lanes by explicit id — in-memory path, never the storage scan');
-    assert.equal(h.pending().length, 1, 'still running → re-armed once');
+    h.ctx.__live.render(root, { spaceId: 'demo', embedded: true, initialLane: { ...RUNNING.lanes[0], parallelism_model: 'one_worker_per_space', service_config: { batch_size: 2 } } }, { epoch: 1, identity: {} });
+    await settle();
+    assert.equal(h.calls.length, 0, 'embedded initial lane avoids a redundant read');
+    assert.equal(root.innerHTML.includes('All spaces'), false);
+    assert.equal(root.innerHTML.includes('consolStale'), false);
+    assert.match(h.elements.consolLanes.innerHTML, /data-job-id="j1"/);
+    assert.match(h.elements.consolSubtitle.innerHTML, /1 worker per space/);
+    assert.match(h.elements.consolSubtitle.innerHTML, /batch size:.*2/);
+    assert.equal(h.elements.consolSubtitle.innerHTML.includes('Worker configuration unavailable'), false);
+    h.ctx.__refresh.configure({ enabled: true, intervalSeconds: 15 });
+    await h.fire(h.pending()[0]);
+    assert.equal(h.calls[0].args.space_ids, 'demo');
 }
 
-// ── 1b. the tick carries every painted lane (idle ones included), in paint order ──
+// Fresh browser is manual; enabling follows real progress using explicit IDs.
 {
-    const h = harness();
-    const TWO = { status: 'ok', lanes: [
-        { space_id: 'alpha', lane_state: 'idle', running_job: null, queued_count: 0, latest_jobs: [] },
-        { space_id: 'beta', lane_state: 'running', running_job: { job_id: 'j2' }, queued_count: 0, latest_jobs: [] },
-    ] };
-    h.setResponse(() => TWO);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls[1].args.space_ids, 'alpha,beta', 'idle lanes stay watched: a job enqueued on them is seen by the next tick');
+    const h = harness(false); h.setResponse(() => RUNNING);
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    assert.equal(h.calls.length, 1); assert.equal(h.pending().length, 0, 'off means no periodic request');
+    h.ctx.__refresh.configure({ enabled: true, intervalSeconds: 15 });
+    assert.equal(h.pending()[0].ms, 15000);
+    await h.fire(h.pending()[0]);
+    assert.equal(h.calls[1].args.space_ids, 'demo', 'tick never runs global inventory');
+    for (const seconds of [30, 60]) {
+        h.ctx.__refresh.configure({ enabled: true, intervalSeconds: seconds });
+        assert.equal(h.pending()[0].ms, seconds * 1000);
+    }
 }
-
-// ── 2. a queued lane also arms; an idle lane arms nothing and stops the loop ──
 {
     const h = harness();
-    let response = QUEUED;
+    let response = { ...RUNNING, lanes: [...RUNNING.lanes, { ...IDLE.lanes[0], space_id: 'idle' }] };
     h.setResponse(() => response);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    assert.equal(h.pending().length, 1, 'queued job arms the live refresh');
-    response = IDLE;
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.pending().length, 0, 'idle lanes: nothing scheduled, the loop stops');
-    assert.equal(h.ctx.__live.state.liveTimer, null);
-    assert.equal(h.ctx.document.getElementById('consolSubtitle').innerHTML.includes('Live ·'), false, 'no live marker when idle');
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    await h.fire(h.pending()[0]);
+    assert.equal(h.calls[1].args.space_ids, 'demo,idle', 'all painted lanes remain in scope');
+    response = IDLE; await h.fire(h.pending()[0]);
+    assert.equal(h.pending().length, 0, 'terminal activity stops detail/lane follow');
 }
-
-// ── 3. a route-epoch change or a lost session drops the tick without a call ──
-{
-    const h = harness();
-    h.setResponse(() => RUNNING);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    h.ctx.AdminRouter.epoch = 2;
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls.length, 1, 'stale epoch: no reload');
-    assert.equal(h.pending().length, 0, 'stale epoch: not re-armed');
+for (const change of ['route', 'session']) {
+    const h = harness(); h.setResponse(() => RUNNING);
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    if (change === 'route') h.ctx.AdminRouter.epoch = 2; else h.setGeneration(2);
+    await h.fire(h.pending()[0]); assert.equal(h.calls.length, 1, change + ' stops reads');
 }
 {
-    const h = harness();
-    h.setResponse(() => RUNNING);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    // session lost: the shell's login overlay is visible (classList.contains('hidden') → false)
-    h.ctx.document.getElementById = id => id === 'loginOverlay' ? { classList: { contains: () => false } } : fakeElement();
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls.length, 1, 'lost session: no reload');
-    assert.equal(h.pending().length, 0, 'lost session: not re-armed');
-}
-
-// ── 4. hidden tab: the tick re-arms without a network call ─────────────────
-{
-    const h = harness();
-    h.setResponse(() => RUNNING);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    h.ctx.document.hidden = true;
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls.length, 1, 'hidden tab: no reload');
-    assert.equal(h.pending().length, 1, 'hidden tab: re-armed');
-    h.ctx.document.hidden = false;
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls.length, 2, 'visible again: reload resumes');
-}
-
-// ── 5. a new render cancels the pending timer (no duplicate loops) ─────────
-{
-    const h = harness();
-    h.setResponse(() => RUNNING);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    const first = h.pending()[0];
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle(); await settle();
-    assert.ok(first.cancelled, 'the previous timer is cancelled by the new render');
-    assert.equal(h.pending().length, 1, 'exactly one live timer after re-render');
-}
-
-// ── 6. job inspector: running → 60 s re-read repainting the same modal; terminal → stop ──
-{
-    const h = harness();
-    let job = { status: 'running', job_id: 'j1', space_id: 'demo', scope_label: 'All agents', progress: { phase: 'running', batch_size: 2, notes_total: 4, notes_done: 2, batches_total: 2, batches_done: 1, current_batch: 2 } };
-    h.setResponse(name => name === 'bank_consolidation_status' ? job : IDLE);
-    await h.ctx.__live.inspectJob('j1'); await settle();
-    assert.equal(h.modal.style.display, 'flex');
-    assert.equal(h.pending().length, 1, 'running job: one 60 s re-read armed');
-    assert.equal(h.pending()[0].ms, 60000);
-    job = { ...job, status: 'succeeded', result: { status: 'ok', notes_total: 4, notes_processed: 4, notes_deleted: 4, notes_remaining: 0, bank_files_updated: 1, batches_completed: 2, batches_total: 2 } };
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls.filter(c => c.name === 'bank_consolidation_status').length, 2, 'the tick re-reads the job');
-    assert.ok(h.modal.shows.length >= 2, 'the modal is repainted with the new payload');
-    assert.equal(h.pending().length, 0, 'terminal job: no further re-read');
-}
-
-// ── 7. job inspector: closed or superseded modal stops the loop ────────────
-{
-    const h = harness();
-    const running = { status: 'running', job_id: 'j1', space_id: 'demo', scope_label: 'All agents', progress: { phase: 'running' } };
-    h.setResponse(() => running);
-    await h.ctx.__live.inspectJob('j1'); await settle();
+    const h = harness(); h.setResponse(() => RUNNING);
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    h.visibility(true); assert.equal(h.pending().length, 0);
+    assert.equal(h.calls.length, 1);
+    h.visibility(false); await settle(); assert.equal(h.calls.length, 2, 'one fresh read on visibility return');
     assert.equal(h.pending().length, 1);
-    h.ctx.closeModal();
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.calls.filter(c => c.name === 'bank_consolidation_status').length, 1, 'closed modal: no re-read');
-    assert.equal(h.pending().length, 0, 'closed modal: not re-armed');
 }
+// The lane payload updates an open detail; it is already the full job payload.
 {
     const h = harness();
-    const running = { status: 'running', job_id: 'j1', space_id: 'demo', scope_label: 'All agents', progress: { phase: 'running' } };
-    h.setResponse(() => running);
-    await h.ctx.__live.inspectJob('j1'); await settle();
-    const first = h.pending()[0];
-    await h.ctx.__live.inspectJob('j2'); await settle();   // a newer modal instance supersedes j1
-    await h.fire(first); await settle();
-    const statusCalls = h.calls.filter(c => c.name === 'bank_consolidation_status');
-    assert.equal(statusCalls.filter(c => c.args.job_id === 'j1').length, 1, 'superseded modal: j1 is never re-read');
-    assert.equal(h.pending().length, 1, 'only the newest modal keeps its loop');
+    let job = { status: 'running', job_id: 'j1', progress: { notes_done: 1, notes_total: 4 }, polling: { recommended: false } };
+    let response = () => ({ status: 'ok', lanes: [{ space_id: 'demo', running_job: job.status === 'running' ? job : null, latest_jobs: [job] }] });
+    h.setResponse(name => name === 'bank_consolidation_status' ? job : response());
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    await h.ctx.__live.inspectJob('j1');
+    const calls = h.calls.filter(c => c.name === 'bank_consolidation_status').length;
+    job = { ...job, progress: { notes_done: 3, notes_total: 4 } };
+    let focusRestored = 0;
+    h.ctx.document.activeElement = { dataset: { action: 'copy-value', value: 'j1' } };
+    h.elements.consolJobSnapshot.contains = () => true;
+    h.elements.consolJobSnapshot.querySelectorAll = () => [{ dataset: { action: 'copy-value', value: 'j1' }, focus() { focusRestored++; } }];
+    await h.fire(h.pending()[0]);
+    assert.equal(focusRestored, 1, 'updating the detail preserves focus on its matching action');
+    assert.match(h.elements.consolJobSnapshot.innerHTML, /3\/4/);
+    assert.equal(h.calls.filter(c => c.name === 'bank_consolidation_status').length, calls, 'no duplicate status read');
+    assert.equal(h.modal.shows.length, 1, 'read paints the body without reopening the modal');
+    job = { ...job, status: 'failed', error: '<failure>', result: { notes_total: 4, auto_compaction: { status: 'partial', recovery_required: true } } };
+    await h.fire(h.pending()[0]);
+    assert.match(h.elements.consolJobSnapshot.innerHTML, /Compaction incomplete/);
+    assert.match(h.elements.consolJobSnapshot.innerHTML, /&lt;failure&gt;/);
+    assert.equal(h.pending().length, 0);
 }
-
-// ── 8. job inspector: a typed error or a thrown re-read keeps the snapshot and re-arms ──
+for (const change of ['close', 'replace']) {
+    const h = harness(); const job = { status: 'running', job_id: 'j1' };
+    h.setResponse(name => name === 'bank_consolidation_status' ? job : IDLE);
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    await h.ctx.__live.inspectJob('j1'); const count = h.calls.length;
+    if (change === 'close') h.ctx.closeModal(); else h.ctx.showModal('Other', 'unrelated');
+    await h.fire(h.pending()[0]);
+    assert.equal(h.calls.length, count, change + ' stops hidden inspector');
+    assert.equal(h.pending().length, 0);
+}
 {
-    const h = harness();
-    const running = { status: 'running', job_id: 'j1', space_id: 'demo', scope_label: 'All agents', progress: { phase: 'running' } };
-    let response = () => running;
-    h.setResponse((name, args) => response(name, args));
-    await h.ctx.__live.inspectJob('j1'); await settle();
-    const shownBefore = h.modal.shows.length;
-    response = () => ({ status: 'error', message: 'registry unavailable' });
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.modal.shows.length, shownBefore, 'typed error: the last good snapshot stays on screen');
-    assert.ok(h.elements.consolJobFreshness.innerHTML.includes('stale') && h.elements.consolJobFreshness.innerHTML.includes('<time>'), 'job refresh error has last-success timestamp');
-    assert.equal(h.pending().length, 1, 'typed error: re-armed');
-    response = () => { throw new Error('network'); };
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.modal.shows.length, shownBefore, 'thrown re-read: the last good snapshot stays on screen');
-    assert.equal(h.pending().length, 1, 'thrown re-read: re-armed');
-    response = () => ({ status: 'rate_limited', message: 'slow down' });
-    await h.fire(h.pending()[0]); await settle();
-    assert.equal(h.modal.shows.length, shownBefore, 'sentinel: no repaint');
-    assert.equal(h.pending().length, 0, 'sentinel: the loop ends');
+    const h = harness(); let failing = false;
+    const job = { status: 'running', job_id: 'j1' };
+    h.setResponse(name => name === 'bank_consolidation_status' ? (failing ? { status: 'error', message: 'read failed' } : job) : IDLE);
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    await h.ctx.__live.inspectJob('j1'); const before = h.elements.consolJobSnapshot.innerHTML;
+    failing = true; await h.fire(h.pending()[0]);
+    assert.equal(h.elements.consolJobSnapshot.innerHTML, before, 'detail read error retains snapshot');
+    assert.match(h.elements.consolJobFreshness.innerHTML, /stale/);
+    assert.equal(h.pending()[0].ms, 30000, 'first failure backs off');
+    await h.fire(h.pending()[0]); assert.equal(h.pending()[0].ms, 60000);
+    failing = false; await h.fire(h.pending()[0]); assert.equal(h.pending()[0].ms, 15000);
 }
-
 
 // Job-first layout, valid terminal history, active exclusion and honest unknowns.
 {
@@ -312,25 +273,16 @@ const settle = () => new Promise(r => setImmediate(r));
     assert.ok(h.modal.shows.at(-1).includes('demo') && !h.modal.shows.at(-1).includes('<li><code>other'), 'bulk confirmation captures only the visible scope');
 }
 
-// No overlapping lane requests, even when manual refresh arrives during a tick.
+// Manual read during the same view's tick shares its outstanding cycle.
 {
-    const h = harness();
-    h.setResponse(() => RUNNING);
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 1 });
-    await settle();
-    let resolve;
-    h.setResponse(() => new Promise(r => { resolve = r; }));
-    const tick = h.fire(h.pending()[0]);
-    await settle();
-    h.ctx.AdminRouter.epoch = 2;
-    h.ctx.__live.render(fakeElement(), {}, { identity: { token_hash: 'sha256:a' }, epoch: 2 });
-    await settle();
-    assert.equal(h.calls.length, 2, 'new render waits for the outstanding request');
-    h.setResponse(() => IDLE);
-    resolve(RUNNING);
-    await tick; await settle();
-    assert.equal(h.calls.length, 3, 'latest full refresh starts after the old request settles');
-    assert.equal(h.pending().length, 0, 'only current response can re-arm the timer');
+    const h = harness(); h.setResponse(() => RUNNING);
+    h.ctx.__live.render(fakeElement(), {}, { epoch: 1, identity: {} }); await settle();
+    let resolve; h.setResponse(() => new Promise(r => { resolve = r; }));
+    const tick = h.fire(h.pending()[0]); await settle();
+    const manual = h.ctx.__refresh.refresh(); await settle();
+    assert.equal(h.calls.length, 2, 'same view has only one in-flight cycle');
+    resolve(IDLE); await tick; await manual;
+    assert.equal(h.pending().length, 0);
 }
 
 // Errors retain the last successful snapshot, clearly labeled with update time.

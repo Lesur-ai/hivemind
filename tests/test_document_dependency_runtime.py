@@ -1,7 +1,9 @@
-"""Real parser compatibility checks for the locked document dependencies."""
+"""Real parser and JWT compatibility checks for the locked dependencies."""
 
+import base64
 from io import BytesIO
 
+import jwt
 import pytest
 from h2.config import H2Configuration
 from h2.connection import H2Connection
@@ -9,6 +11,44 @@ from h2.events import RequestReceived
 from h2.exceptions import ProtocolError
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+
+@pytest.mark.parametrize("path", ["decode", "jwks"])
+def test_jwt_recursive_payload_keeps_documented_error_boundary(path, monkeypatch):
+    """CVE-2026-101918: an unsigned payload must not leak RecursionError."""
+    def b64url(value):
+        return base64.urlsafe_b64encode(value).rstrip(b"=")
+
+    token = b".".join((
+        b64url(b'{"alg":"HS256","typ":"JWT"}'),
+        # Python 3.14 can parse 20k levels; 100k reaches the recursion boundary.
+        b64url(b"[" * 100_000 + b"]" * 100_000),
+        b64url(b"forged-signature"),
+    )).decode()
+    client = jwt.PyJWKClient("https://jwks.example.invalid")
+
+    def unexpected_network(*args, **kwargs):
+        pytest.fail("recursive payload must be rejected before JWKS access")
+
+    monkeypatch.setattr(client, "fetch_data", unexpected_network)
+    with pytest.raises(jwt.DecodeError) as excinfo:
+        if path == "jwks":
+            client.get_signing_key_from_jwt(token)
+        else:
+            jwt.decode(token, options={"verify_signature": False})
+    assert isinstance(excinfo.value.__cause__, RecursionError)
+
+
+def test_jwt_normal_and_padded_signatures_keep_verification_contract():
+    """PyJWT 2.15.1 restores library padding compatibility and verification."""
+    key = "test-jwt-compatibility-key-32-bytes"
+    payload = {"sub": "dependency-test"}
+    token = jwt.encode(payload, key, algorithm="HS256")
+    for candidate in (token, token + "="):
+        assert jwt.decode(candidate, key, algorithms=["HS256"]) == payload
+        with pytest.raises(jwt.InvalidSignatureError):
+            jwt.decode(candidate, "different-test-jwt-key-32-bytes!!", algorithms=["HS256"])
+    assert jwt.decode(token, options={"verify_signature": False}) == payload
 
 
 @pytest.fixture

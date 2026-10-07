@@ -79,7 +79,7 @@ def _settings():
     )
 
 
-async def _long_status(embedding_collection: object, *, include_field: bool = True):
+async def _long_status(embedding_collection: object, *, include_field: bool = True, embedding_identity=None):
     memory_stats = {
         "status": "ok",
         "document_count": 2,
@@ -90,6 +90,8 @@ async def _long_status(embedding_collection: object, *, include_field: bool = Tr
     }
     if include_field:
         memory_stats["embedding_collection"] = embedding_collection
+    if embedding_identity is not None:
+        memory_stats["embedding_identity"] = embedding_identity
 
     bridge = GraphBridgeService(
         client_factory=FakeGraphTransport.factory(
@@ -108,6 +110,25 @@ async def _long_status(embedding_collection: object, *, include_field: bool = Tr
         ),
     ):
         return await bridge.status(_SPACE_ID)
+
+
+async def test_readable_index_identity_preserves_frozen_and_current_models():
+    identity = {
+        "configured": {"provider": "openai-compatible", "model": "new-model", "dimensions": 1024},
+        "persisted": {"provider": "openai-compatible", "model": "old-model", "resolved_model": "old-model-v1",
+                      "model_evidence": "provider_reported", "dimensions": 1024, "profile_fingerprint": _FINGERPRINT},
+    }
+    response = await _long_status({"state": "reindex_required", "reason": "static_profile_mismatch"}, embedding_identity=identity)
+    assert response["embedding_identity"] == identity
+    assert response["embedding_collection"]["state"] == "reindex_required"
+
+
+@pytest.mark.parametrize("bad", ["https://secret.example/key", "model\nsecret", "sk-very-private-secret", "[bold]model", "x" * 257])
+async def test_index_identity_rejects_unsafe_models(bad):
+    identity = {"configured": {"provider": "openai-compatible", "model": bad, "dimensions": 1024}, "persisted": None}
+    response = await _long_status({"state": "missing"}, embedding_identity=identity)
+    assert response["embedding_identity"] is None
+    assert bad not in json.dumps(response)
 
 
 @pytest.mark.parametrize(

@@ -1,11 +1,53 @@
-"""#540: exercise Graph's public static boundary with isolated marker files."""
+"""Exercise Graph's public static boundary and reviewed browser assets."""
 
+import base64
+import hashlib
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from urllib.parse import quote, unquote
 
 import httpx
 import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+GRAPH_STATIC = ROOT / "services/graph-memory/src/mcp_memory/static"
+CANONICAL_VENDOR = ROOT / "src/live_mem/static/vendor"
+DOMPURIFY_SHA384 = "uUMu9JDY09vBzRf9SPcK2VgUj+W/70J6Soc+Dded5P474ElQ63iv9j5N3DE7Kp3N"
+DOMPURIFY_LICENSE_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+GRAPH_VENDOR_SHA384 = {
+    "marked.min.js": "948ahk4ZmxYVYOc+rxN1H2gM1EJ2Duhp7uHtZ4WSLkV4Vtx5MUqnV+l7u9B+jFv+",
+    "marked.LICENSE": "61EZB/aHzoKVT71zYfgKtxFiu+RWPSi9UH34kVJPMyzaTcFdbvH0liFiUwpiBNqY",
+    "purify.min.js": DOMPURIFY_SHA384,
+    "purify.LICENSE": "II9e1ieUDl5AxyiVq3/FflTua1Sr0kMJ25e6imG7rXg7SiAsA2VemsvEqVsLqM7/",
+    "vis-network.min.js": "RDdG1CLOxjNlTHh4JYx/rnAueaMHbkBHmeHwrEyljMQw3LF0it4SkuNotIY/FPxD",
+    "vis-network.LICENSE": "SgirdiWFoNFzo0m97+ao5+Gx0Sp3Chon9YHKkIDFLGtjPK/Ch2exIPbsuksnCsBg",
+}
+GRAPH_VENDOR_VERSIONS = {
+    "marked.min.js": "marked v15.0.12",
+    "purify.min.js": "DOMPurify 3.4.15",
+    "vis-network.min.js": "@version 10.1.2",
+}
+
+
+class _BrowserAssetParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.assets = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        attribute = {"script": "src", "link": "href", "img": "src"}.get(tag)
+        if attribute and values.get(attribute):
+            self.assets.append((tag, values[attribute]))
+
+
+def _local_browser_assets(html):
+    parser = _BrowserAssetParser()
+    parser.feed(html)
+    assert all(url.startswith("/static/") for _, url in parser.assets)
+    return parser.assets
 
 
 @pytest.fixture
@@ -184,10 +226,104 @@ async def test_file_open_error_is_constant_and_does_not_echo_path(static_site):
 @pytest.mark.parametrize("path", ["/graph", "/admin", "/static/css/graph.css", "/static/js/app.js"])
 async def test_shipped_graph_assets_are_still_served(static_site, path):
     middleware, app, fallback, _, _ = static_site
-    root = Path(__file__).resolve().parents[1] / "services/graph-memory/src/mcp_memory/static"
-    middleware._static_dir = str(root)
+    middleware._static_dir = str(GRAPH_STATIC)
     filename = {"/graph": "graph.html", "/admin": "admin.html"}.get(path, path.removeprefix("/static/"))
     status, _, body = _response(await _request(app, path))
     assert status == 200
-    assert body == (root / filename).read_bytes()
+    assert body == (GRAPH_STATIC / filename).read_bytes()
     fallback.assert_not_awaited()
+
+
+def test_graph_dompurify_copy_matches_reviewed_canonical_vendor():
+    graph_bundle = (GRAPH_STATIC / "vendor/purify.min.js").read_bytes()
+    graph_license = (GRAPH_STATIC / "vendor/purify.LICENSE").read_bytes()
+
+    assert graph_bundle == (CANONICAL_VENDOR / "purify.min.js").read_bytes()
+    assert graph_license == (CANONICAL_VENDOR / "purify.LICENSE").read_bytes()
+    digest = base64.b64encode(hashlib.sha384(graph_bundle).digest()).decode("ascii")
+    assert digest == DOMPURIFY_SHA384
+    assert hashlib.sha256(graph_license).hexdigest() == DOMPURIFY_LICENSE_SHA256
+
+
+def test_graph_browser_vendor_inventory_pins_every_distributed_artifact():
+    vendor = GRAPH_STATIC / "vendor"
+    inventory = (vendor / "README.md").read_text(encoding="utf-8")
+
+    for filename, expected in GRAPH_VENDOR_SHA384.items():
+        artifact = (vendor / filename).read_bytes()
+        digest = base64.b64encode(hashlib.sha384(artifact).digest()).decode("ascii")
+        assert digest == expected
+        assert f"`{filename}`" in inventory
+        assert f"`{expected}`" in inventory
+    for filename, version_marker in GRAPH_VENDOR_VERSIONS.items():
+        assert version_marker.encode() in (vendor / filename).read_bytes()[:1000]
+    assert "`marked.min.js` | 15.0.12" in inventory
+    assert "`vis-network.min.js` | 10.1.2" in inventory
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [
+        ("/static/vendor/marked.min.js", b"application/javascript; charset=utf-8"),
+        ("/static/vendor/marked.LICENSE", b"application/octet-stream"),
+        ("/static/vendor/purify.min.js", b"application/javascript; charset=utf-8"),
+        ("/static/vendor/purify.LICENSE", b"application/octet-stream"),
+        ("/static/vendor/vis-network.min.js", b"application/javascript; charset=utf-8"),
+        ("/static/vendor/vis-network.LICENSE", b"application/octet-stream"),
+    ],
+)
+async def test_graph_vendor_bundles_and_licenses_are_served(
+    static_site, path, content_type
+):
+    middleware, app, fallback, _, _ = static_site
+    middleware._static_dir = str(GRAPH_STATIC)
+
+    status, headers, body = _response(await _request(app, path))
+
+    assert status == 200
+    assert headers[b"content-type"] == content_type
+    assert body == (GRAPH_STATIC / path.removeprefix("/static/")).read_bytes()
+    fallback.assert_not_awaited()
+
+
+def test_graph_loads_dompurify_before_answer_renderer():
+    html = (GRAPH_STATIC / "graph.html").read_text(encoding="utf-8")
+    purify_script = '<script src="/static/vendor/purify.min.js"></script>'
+    answer_script = '<script src="/static/js/ask.js"></script>'
+
+    assert purify_script in html
+    assert html.index(purify_script) < html.index(answer_script)
+
+
+def test_graph_loads_only_reviewed_local_browser_dependencies():
+    html = (GRAPH_STATIC / "graph.html").read_text(encoding="utf-8")
+    assets = _local_browser_assets(html)
+    script_sources = [url for tag, url in assets if tag == "script"]
+    reviewed_dependencies = [
+        "/static/vendor/vis-network.min.js",
+        "/static/vendor/marked.min.js",
+        "/static/vendor/purify.min.js",
+    ]
+
+    for source in reviewed_dependencies:
+        assert source in script_sources
+        assert (GRAPH_STATIC / source.removeprefix("/static/")).is_file()
+    assert [script_sources.index(source) for source in reviewed_dependencies] == sorted(
+        script_sources.index(source) for source in reviewed_dependencies
+    )
+
+
+@pytest.mark.parametrize(
+    "injected_asset",
+    [
+        "<script defer src='https://cdn.example/extra.js'></script>",
+        "<link rel='stylesheet' href='https://cdn.example/extra.css'>",
+        "<img alt='probe' src='https://cdn.example/extra.svg'>",
+    ],
+)
+def test_graph_local_dependency_guard_detects_additive_external_asset(
+    injected_asset,
+):
+    html = (GRAPH_STATIC / "graph.html").read_text(encoding="utf-8")
+    with pytest.raises(AssertionError):
+        _local_browser_assets(f"{html}\n{injected_asset}")

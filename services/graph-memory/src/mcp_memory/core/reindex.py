@@ -339,6 +339,13 @@ class ReindexService:
             ):
                 raise ReindexValidationError("source_object_mismatch")
             expected_unreferenced.add(ontology_uri)
+        elif len(unreferenced_uris) == 1:
+            # Automatic freeze clears the effective catalogue URI, but retains
+            # memory_create's original configuration as provenance. Admit only
+            # that single strict configuration shape, never arbitrary orphans.
+            config_uri = next(iter(unreferenced_uris))
+            if self._is_ontology_config(memory_id, config_uri, object_by_uri[config_uri]):
+                expected_unreferenced.add(config_uri)
         if unreferenced_uris != expected_unreferenced:
             raise ReindexValidationError("source_object_mismatch")
 

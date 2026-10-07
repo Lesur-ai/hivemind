@@ -207,8 +207,8 @@ class Settings(BaseSettings):
     consolidation_transient_retries: int = 3
     # LM2-14 fix : limite revue à la baisse pour brider la conso budget LLM.
     # 200 = ~1 MB d'input LLM si chaque note fait 5 KB ; ~10 MB si 50 KB.
-    # Au-delà, un fichier bank trop gros n'est que signalé (`bank_size_advisory`) ;
-    # la compaction est manuelle (`bank_compact`). Une note massive reste
+    # Les tailles bank sont signalées avant consolidation ; la compaction
+    # automatique vient ensuite. Une note massive reste
     # bornée par MAX_NOTE_CONTENT_SIZE (100 KB) côté live.py.
     consolidation_max_notes: int = 200  # Max notes traitées par consolidation
     # Notes per LLM batch. The internal default is 3; the deployment example
@@ -240,14 +240,12 @@ class Settings(BaseSettings):
 
 
 
-    # ─── Bank size advisory / manual compaction ──────────────
-    # La compaction est une décision humaine (`bank_compact`) ;
-    # la consolidation ne la déclenche jamais. Cette
-    # limite par fichier (octets UTF-8 persistés) n'est qu'un INDICATEUR : un
-    # dépassement est journalisé et rapporté (`bank_size_advisory`), jamais
-    # agi. Elle reste le seuil de candidature et la cible de la compaction
-    # manuelle. L'ancien COMPACT_THRESHOLD (admission de l'auto-compaction)
-    # n'existe plus ; une variable d'environnement résiduelle est ignorée.
+    # ─── Automatic MID maintenance (1.6.0) ────────────────────
+    # Independent operator opt-outs; raw preimages remain retained either way.
+    mid_auto_compact: bool = True
+    mid_auto_archive: bool = True
+    # Existing UTF-8 threshold is also used after successful consolidation.
+    # It is not a hard size cap. COMPACT_THRESHOLD remains a removed legacy key.
     bank_file_max_size: int = (
         35000  # Universal per-file persisted UTF-8-byte advisory / compaction target
     )
@@ -255,8 +253,8 @@ class Settings(BaseSettings):
     # ─── Graph Push — Volatile-file guardrail (P4-8) ──────────
     # Fichiers bank "volatils" que `graph_push` SAUTE par défaut : ce sont des
     # snapshots transitoires (focus de session, journal récent borné) que le
-    # consolidateur réécrit en continu et qu'une compaction manuelle
-    # (`bank_compact`, décision humaine) peut réécrire. Les indexer dans Graph
+    # consolidateur réécrit en continu et que la compaction peut réécrire.
+    # Les indexer dans Graph
     # Memory enseigne au graphe du contenu déjà périmé, et une compaction
     # ultérieure les laisse orphelins (voir
     # DESIGN/live-mem/EVOLUTION_LIVE_GRAPH_INTEGRATION.md, Vague B).
@@ -390,7 +388,7 @@ class Settings(BaseSettings):
                 f"CONSOLIDATION_BATCH_SIZE={self.consolidation_batch_size} must be ≥1"
             )
 
-        # Bank size advisory / manual compaction target (persisted UTF-8 bytes).
+        # Bank size advisory / compaction target (persisted UTF-8 bytes).
         if self.bank_file_max_size < 1:
             errors.append(
                 "BANK_FILE_MAX_SIZE="

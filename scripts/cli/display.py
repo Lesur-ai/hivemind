@@ -7,6 +7,7 @@ These functions are imported in both commands.py and shell.py (DRY).
 """
 
 import json
+from datetime import datetime, timezone
 from rich.console import Console
 from rich.markup import escape as escape_markup
 from rich.table import Table
@@ -23,7 +24,7 @@ console = Console()
 
 def show_error(msg: str):
     """Displays an error message."""
-    console.print(f"[red]❌ {msg}[/red]")
+    console.print(f"[red]❌ {escape_markup(str(msg))}[/red]")
 
 
 def show_success(msg: str):
@@ -43,6 +44,59 @@ def show_json(data: dict):
     when output is redirected or piped to another process.
     """
     print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _format_local_timestamp(value, *, date_only: bool = False) -> str:
+    """Format a server UTC timestamp in the CLI process's local timezone.
+
+    Unknown values are returned verbatim. This is presentation-only: JSON
+    output and identifiers keep their canonical server representation.
+    """
+    if value is None or value == "":
+        return ""
+    raw = str(value)
+    if len(raw) == 10:
+        try:
+            datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            pass
+        else:
+            return raw
+    parsed = None
+    compact_raw = raw
+    if (
+        len(raw) == 52
+        and raw[19] == "-"
+        and all(character in "0123456789abcdef" for character in raw[20:])
+    ):
+        compact_raw = raw[:19]
+    for compact_format in ("%Y-%m-%dT%H-%M-%S", "%Y%m%dT%H%M%S"):
+        try:
+            parsed = datetime.strptime(compact_raw, compact_format).replace(
+                tzinfo=timezone.utc
+            )
+            break
+        except ValueError:
+            pass
+    if parsed is None:
+        normalized = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return raw[:10] if date_only else raw
+        if parsed.tzinfo is None:
+            # Historical naïve server timestamps were emitted in UTC.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+    local = parsed.astimezone()
+    if date_only:
+        return local.strftime("%Y-%m-%d")
+    offset = local.utcoffset()
+    assert offset is not None
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    return f"{local:%Y-%m-%d %H:%M:%S} UTC{sign}{hours:02d}:{minutes:02d}"
 
 
 # =============================================================================
@@ -140,10 +194,10 @@ def show_whoami_result(result: dict):
     if result.get("token_hash"):
         lines.append(f"[bold]Hash     :[/bold] [dim]{result['token_hash']}[/dim]")
     if result.get("created_at"):
-        lines.append(f"[bold]Created  :[/bold] {result['created_at'][:19]}")
+        lines.append(f"[bold]Created  :[/bold] {_format_local_timestamp(result['created_at'])}")
     expires = result.get("expires_at")
     if expires:
-        lines.append(f"[bold]Expire   :[/bold] {expires[:19]}")
+        lines.append(f"[bold]Expire   :[/bold] {_format_local_timestamp(expires)}")
     elif result.get("auth_type") == "token":
         lines.append("[bold]Expires  :[/bold] never")
     if result.get("note"):
@@ -216,7 +270,7 @@ def show_space_created(result: dict):
             f"[bold]Space ID :[/bold] [cyan]{result.get('space_id', '?')}[/cyan]\n"
             f"[bold]Description :[/bold] {result.get('description', '')}\n"
             f"[bold]Rules :[/bold] {result.get('rules_size', 0)} bytes\n"
-            f"[bold]Created:[/bold] {result.get('created_at', '')}",
+            f"[bold]Created:[/bold] {_format_local_timestamp(result.get('created_at'))}",
             title="✅ Space Created",
             border_style="green",
         )
@@ -363,7 +417,7 @@ def show_space_info(result: dict):
             f"[bold]Live notes :[/bold] {live.get('notes_count', 0)} ({live.get('total_size', 0)} bytes)\n"
             f"[bold]Bank files :[/bold] {bank.get('files_count', 0)} ({bank.get('total_size', 0)} bytes)\n"
             f"[bold]Consolidations :[/bold] {result.get('consolidation_count', 0)}\n"
-            f"[bold]Last:[/bold] {result.get('last_consolidation', 'never')}",
+            f"[bold]Last:[/bold] {_format_local_timestamp(result.get('last_consolidation')) or 'never'}",
             title="📋 Space",
             border_style="blue",
         )
@@ -403,7 +457,7 @@ def show_notes(result: dict):
             n.get("agent", "?"),
             f"[{color}]{cat}[/{color}]",
             n.get("content", "")[:60],
-            n.get("timestamp", "")[:19],
+            _format_local_timestamp(n.get("timestamp")),
         )
     console.print(table)
 
@@ -543,6 +597,14 @@ def show_consolidation_result(result: dict):
             border_style="green",
         )
     )
+
+
+def show_consolidation_response(result: dict):
+    """Show an async acknowledgement as a job, never as completed counters."""
+    if result.get("status") in ("queued", "running"):
+        show_consolidation_job(result)
+    else:
+        show_consolidation_result(result)
 
 
 def _utf8_bytes_or_unasserted(value: object) -> str:
@@ -842,20 +904,23 @@ def show_consolidation_job(result: dict):
         "queued": "yellow",
         "succeeded": "green",
         "failed": "red",
+        "cancelled": "yellow",
     }.get(status, "white")
-    progress = result.get("progress", {})
+    progress = result.get("progress") if isinstance(result.get("progress"), dict) else {}
 
     lines = [
-        f"[bold]Job ID     :[/bold] [cyan]{result.get('job_id', '?')}[/cyan]",
-        f"[bold]Space      :[/bold] {result.get('space_id', '?')}",
-        f"[bold]Status     :[/bold] [{color}]{status}[/{color}]",
-        f"[bold]Agent      :[/bold] {result.get('agent', '*')}",
-        f"[bold]Requested  :[/bold] {result.get('requested_by', '?')}",
-        f"[bold]Position   :[/bold] {result.get('queue_position', '?')}",
+        f"[bold]Job ID     :[/bold] [cyan]{escape_markup(str(result.get('job_id', '?')))}[/cyan]",
+        f"[bold]Space      :[/bold] {escape_markup(str(result.get('space_id', '?')))}",
+        f"[bold]Status     :[/bold] [{color}]{escape_markup(str(status))}[/{color}]",
+        f"[bold]Agent      :[/bold] {escape_markup(str(result.get('agent', '*') or 'all agents'))}",
+        f"[bold]Requested  :[/bold] {escape_markup(str(result.get('requested_by', '?')))}",
+        f"[bold]Position   :[/bold] {escape_markup(str(result.get('queue_position', '?')))}",
     ]
     if progress:
         phase = progress.get("phase", "?")
-        lines.append(f"[bold]Phase      :[/bold] {phase}")
+        lines.append(f"[bold]Phase      :[/bold] {escape_markup(str(phase))}")
+        if phase == "compacting":
+            lines.append("[dim]MID compaction in progress; no per-file percentage available.[/dim]")
         if progress.get("notes_total") is not None:
             lines.append(
                 f"[bold]Notes      :[/bold] {progress.get('notes_done', 0)}/{progress.get('notes_total', '?')}"
@@ -865,10 +930,9 @@ def show_consolidation_job(result: dict):
                 f"[bold]Batches    :[/bold] {progress.get('batches_done', 0)}/{progress.get('batches_total', '?')}"
             )
     if result.get("error"):
-        lines.append(f"[bold]Error      :[/bold] [red]{result['error']}[/red]")
+        lines.append(f"[bold]Error      :[/bold] [red]{escape_markup(str(result['error']))}[/red]")
     job_result = result.get("result")
-    # Compaction is a human decision: a consolidation never runs
-    # it; oversized bank files are only reported, as an advisory.
+    # The advisory is measured before consolidation; maintenance has its own outcome.
     advisory_lines = _bank_size_advisory_lines(
         job_result.get("bank_size_advisory") if isinstance(job_result, dict) else None
     )
@@ -876,7 +940,7 @@ def show_consolidation_job(result: dict):
         lines.extend(
             [
                 "[bold yellow]Bank size advisory[/bold yellow] "
-                "(compaction is a human decision: bank_compact, MCP tool with manage):",
+                "(measured before consolidation; automatic maintenance is reported separately):",
                 *advisory_lines,
             ]
         )
@@ -903,6 +967,287 @@ def show_consolidation_job(result: dict):
             border_style=color,
         )
     )
+    if status in ("queued", "running") and result.get("job_id"):
+        console.print(
+            "[dim]Accepted, not completed. Check later: "
+            f"bank consolidation-status {escape_markup(str(result['job_id']))}[/dim]"
+        )
+
+    if isinstance(job_result, dict):
+        maintenance = job_result.get("auto_compaction")
+        if isinstance(maintenance, dict):
+            lines = [f"Outcome: {escape_markup(str(maintenance.get('status', 'unknown')))}"]
+            reason = maintenance.get("reason") or maintenance.get("failure_reason")
+            if reason:
+                lines.append(f"Reason: {escape_markup(str(reason))}")
+            if maintenance.get("failed_phase"):
+                lines.append(f"Phase: {escape_markup(str(maintenance['failed_phase']))}")
+            if maintenance.get("recovery_required") is True:
+                lines.append("[bold red]RECOVERY REQUIRED[/bold red]")
+            for label, key in (("Started", "started_at"), ("Finished", "finished_at")):
+                if maintenance.get(key):
+                    lines.append(f"{label}: {escape_markup(_format_local_timestamp(maintenance[key]))}")
+            if isinstance(maintenance.get("preimage_id"), str) and maintenance["preimage_id"]:
+                lines.append("Originals retained; LONG indexing has its own status.")
+            if maintenance.get("status") == "not_needed" and maintenance.get("files_over_limit") == 0:
+                lines.append("No MID file exceeded the threshold; no new LONG capture from this job.")
+            elif maintenance.get("status") == "disabled":
+                lines.append("Automatic MID compaction is disabled by configuration.")
+            elif maintenance.get("status") == "not_applicable":
+                lines.append("This space is not eligible for automatic MID compaction.")
+            console.print(Panel.fit("\n".join(lines), title="Automatic MID compaction"))
+            if maintenance.get("status") == "ok":
+                show_bank_compact_result(maintenance)
+            elif maintenance.get("status") in ("error", "partial", "cancelled"):
+                show_bank_compact_failure(maintenance)
+
+
+def _space_status_jobs(info: dict):
+    queue = info.get("consolidation_queue")
+    queue = queue if isinstance(queue, dict) else {}
+    jobs = queue.get("latest_jobs")
+    jobs = jobs if isinstance(jobs, list) else []
+    waiting = queue.get("queued_jobs")
+    waiting = waiting if isinstance(waiting, list) else []
+    active = queue.get("running_job")
+    if not isinstance(active, dict):
+        active = waiting[0] if waiting and isinstance(waiting[0], dict) else None
+    if active is None and jobs and isinstance(jobs[0], dict):
+        if jobs[0].get("status") in ("queued", "running"):
+            active = jobs[0]
+    terminal = next(
+        (job for job in jobs if isinstance(job, dict)
+         and job.get("status") in ("succeeded", "failed", "cancelled")),
+        None,
+    )
+    return queue, active, terminal
+
+
+def space_status_needs_recovery(info: dict) -> bool:
+    """Whether the latest terminal compaction reports required recovery."""
+    _, _, terminal = _space_status_jobs(info)
+    return consolidation_job_needs_recovery(terminal)
+
+
+def consolidation_job_needs_recovery(job: dict | None) -> bool:
+    """Recovery signal from a consolidation job's separate compaction result."""
+    result = job.get("result") if isinstance(job, dict) else None
+    maintenance = result.get("auto_compaction") if isinstance(result, dict) else None
+    return isinstance(maintenance, dict) and maintenance.get("recovery_required") is True
+
+
+def _append_embedding_status(lines: list[str], label: str, status: dict):
+    identity = status.get("embedding_identity")
+    collection = status.get("embedding_collection")
+    if not isinstance(identity, dict) or not isinstance(collection, dict):
+        return
+    persisted = identity.get("persisted")
+    configured = identity.get("configured") or {}
+    state = escape_markup(str(collection.get("state", "unknown")))
+    if isinstance(persisted, dict):
+        lines.append(f"{label} index: {escape_markup(str(persisted.get('model', '?')))} · {persisted.get('dimensions', '?')} dimensions · {state}")
+    else:
+        lines.append(f"{label} index: no verified stored model · {state}")
+    if not persisted or any(persisted.get(key) != configured.get(key) for key in ("model", "provider", "dimensions")):
+        lines.append(f"Configured: {escape_markup(str(configured.get('model', '?')))} · {configured.get('dimensions', '?')} dimensions")
+    if collection.get("state") == "reindex_required":
+        lines.append("Explicit reindex required before search; no model fallback")
+
+
+def show_ingest_job(result: dict):
+    """Display actual job fields; unknown progress remains unknown."""
+    job = result.get("job") or result
+    if not isinstance(job, dict) or not job.get("job_id"):
+        show_error(result.get("message", "Job unavailable"))
+        return
+    lines = [f"Job: {escape_markup(str(job.get('job_id', '?')))}",
+             f"Status: {escape_markup(str(job.get('status', 'unknown')))}"]
+    if job.get("current_step"):
+        lines.append(f"Step: {escape_markup(str(job['current_step']))}")
+    progress = job.get("progress_percent")
+    if type(progress) in (int, float) and 0 <= progress <= 100:
+        lines.append(f"Progress: {progress:g}%")
+    for key, label in (("started_at", "Started"), ("finished_at", "Finished")):
+        if job.get(key):
+            lines.append(f"{label}: {escape_markup(_format_local_timestamp(job[key]))}")
+    if job.get("error"):
+        lines.append(f"Error: {escape_markup(str(job['error']))}")
+    console.print(Panel("\n".join(lines), title="LONG ingestion job", border_style="cyan"))
+
+
+def _append_ingest_jobs(lines: list[str], label: str, running: dict, queued: dict):
+    active_count = running.get("total")
+    queued_count = queued.get("total")
+    active_count = active_count if type(active_count) is int and active_count >= 0 else "unknown"
+    queued_count = queued_count if type(queued_count) is int and queued_count >= 0 else "unknown"
+    lines.append(f"         {label}: {active_count} running · {queued_count} queued")
+    for job in (running.get("jobs") or [])[:3]:
+        if isinstance(job, dict):
+            step = escape_markup(str(job.get("current_step") or "step unknown"))
+            pct = job.get("progress_percent")
+            progress_text = f" · {pct}%" if type(pct) is int and 0 <= pct <= 100 else ""
+            lines.append(f"         {escape_markup(str(job.get('job_id', '?')))} · {step}{progress_text}")
+    for job in (queued.get("jobs") or [])[:2]:
+        if isinstance(job, dict):
+            lines.append(f"         Queued: {escape_markup(str(job.get('job_id', '?')))}")
+
+
+def show_space_memory_status(
+    info: dict, long_status: dict, running_jobs: dict | None = None, queued_jobs: dict | None = None,
+    archive_running: dict | None = None, archive_queued: dict | None = None,
+):
+    """One compact operator reading of existing SHORT, MID and LONG status."""
+    space_id = escape_markup(str(info.get("space_id", "?")))
+    live = info.get("live") if isinstance(info.get("live"), dict) else {}
+    bank = info.get("bank") if isinstance(info.get("bank"), dict) else {}
+    queue, active, terminal = _space_status_jobs(info)
+    notes = live.get("notes_count", "unknown")
+    files = bank.get("files_count", "unknown")
+    size = bank.get("total_size", "unknown")
+    lines = [
+        f"[bold cyan]SHORT[/bold cyan]  {escape_markup(str(notes))} notes awaiting consolidation",
+        f"[bold cyan]MID[/bold cyan]    {escape_markup(str(files))} files · {escape_markup(str(size))} bytes",
+    ]
+    queued_count = queue.get("queued_count")
+    if type(queued_count) is int and queued_count > 0:
+        noun = "job" if queued_count == 1 else "jobs"
+        lines.append(f"         {queued_count} consolidation {noun} queued")
+
+    if active:
+        job_status = escape_markup(str(active.get("status", "unknown")))
+        started = active.get("started_at") or active.get("requested_at")
+        when = _format_local_timestamp(started) if started else "time unavailable"
+        agent = active.get("agent")
+        scope = "all agents" if agent == "" else str(agent or "scope unknown")
+        lines.append(f"         Current job: {job_status} · {escape_markup(scope)}")
+        lines.append(f"         At: {escape_markup(when)}")
+        progress = active.get("progress")
+        if isinstance(progress, dict):
+            phase = progress.get("phase")
+            if phase:
+                lines.append(f"         Phase: {escape_markup(str(phase))}")
+            for label, done_key, total_key in (
+                ("notes", "notes_done", "notes_total"),
+                ("batches", "batches_done", "batches_total"),
+            ):
+                done, total = progress.get(done_key), progress.get(total_key)
+                if type(done) is int and type(total) is int:
+                    lines.append(f"         {done}/{total} {label}")
+            if phase == "compacting":
+                lines.append("         MID compaction in progress; no per-file percentage")
+    if terminal:
+        status = escape_markup(str(terminal.get("status", "unknown")))
+        finished = terminal.get("finished_at") or terminal.get("started_at")
+        when = _format_local_timestamp(finished) if finished else "time unavailable"
+        lines.append(f"         Last result: {status} · {escape_markup(when)}")
+        if terminal.get("error"):
+            lines.append(f"         Error: {escape_markup(str(terminal['error']))}")
+        result = terminal.get("result") if isinstance(terminal.get("result"), dict) else {}
+        if type(result.get("notes_processed")) is int:
+            lines.append(f"         {result['notes_processed']} notes processed")
+        maintenance = result.get("auto_compaction")
+        if isinstance(maintenance, dict):
+            outcome = maintenance.get("status")
+            if outcome == "not_needed" and maintenance.get("files_over_limit") == 0:
+                lines.append("         No MID file exceeded threshold; no LONG capture")
+            elif outcome == "ok":
+                lines.append("         MID compaction completed")
+                if maintenance.get("preimage_id"):
+                    lines.append("         Original capture retained")
+            elif outcome == "disabled":
+                lines.append("         MID compaction disabled by configuration")
+            elif outcome == "not_applicable":
+                lines.append("         MID compaction not applicable to this space")
+            elif outcome in ("error", "partial", "cancelled"):
+                lines.append(f"         MID compaction {escape_markup(str(outcome))}; consolidation is separate")
+            else:
+                lines.append(f"         MID compaction: {escape_markup(str(outcome or 'unknown'))}")
+            reason = maintenance.get("reason") or maintenance.get("failure_reason")
+            if reason:
+                lines.append(f"         Reason: {escape_markup(str(reason))}")
+            if maintenance.get("failed_phase"):
+                lines.append(f"         Phase: {escape_markup(str(maintenance['failed_phase']))}")
+            if maintenance.get("rollback_outcome"):
+                lines.append(f"         Rollback: {escape_markup(str(maintenance['rollback_outcome']))}")
+            if maintenance.get("recovery_required") is True:
+                lines.append("         [bold red]RECOVERY REQUIRED[/bold red] — inspect the job receipt")
+            if (maintenance.get("recovery_required") is True or outcome in ("error", "partial", "cancelled")) and terminal.get("job_id"):
+                lines.append(f"         bank consolidation-status {escape_markup(str(terminal['job_id']))}")
+        elif terminal.get("status") in ("succeeded", "failed", "cancelled"):
+            lines.append("         No automatic compaction outcome recorded for this job")
+    if not active and not terminal:
+        lines.append("         No recent job in this server process")
+    elif active and not terminal and len(queue.get("latest_jobs") or []) >= 10:
+        lines.append("         Last result: not among the 10 most recent jobs")
+
+    policy = long_status.get("mid_automation")
+    policy = policy if isinstance(policy, dict) else {}
+    projection = long_status.get("mid_archive_projection")
+    projection = projection if isinstance(projection, dict) else {}
+    if long_status.get("status") != "ok":
+        lines.append("[bold cyan]LONG[/bold cyan]   Status unavailable; check graph status for details")
+    else:
+        archive = policy.get("archive_enabled")
+        transfer = "enabled" if archive is True else "disabled" if archive is False else "unknown"
+        pending = projection.get("pending")
+        if projection.get("error") == "projection_unavailable":
+            pending_text = "capture backlog unknown"
+        elif type(pending) is int and pending >= 0:
+            noun = "capture" if pending == 1 else "captures"
+            pending_text = f"{pending} {noun} pending indexing"
+        else:
+            pending_text = "capture backlog unknown"
+        lines.append(f"[bold cyan]LONG[/bold cyan]   Transfer {transfer} · {pending_text}")
+        if type(pending) is int and pending > 0 and projection.get("oldest_at"):
+            lines.append(
+                f"         Oldest capture: {escape_markup(_format_local_timestamp(projection['oldest_at']))}"
+            )
+            age = projection.get("oldest_age_seconds")
+            if type(age) in (int, float) and age >= 0:
+                hours, remainder = divmod(int(age), 3600)
+                minutes = remainder // 60
+                lines.append(f"         Age: {hours}h {minutes}m")
+        if projection.get("error"):
+            lines.append(f"         Indexing problem: {escape_markup(str(projection['error']))}")
+        if long_status.get("connected") is False:
+            if long_status.get("embedded") is True or long_status.get("bound") is False:
+                lines.append("         Waiting for first ingestion; LONG binds automatically")
+            else:
+                lines.append("         Graph is not connected")
+        elif long_status.get("reachable") is False:
+            lines.append("         Graph service unreachable")
+        lines.append("         Backlog count is not proof every MID file is indexed")
+        if running_jobs is not None or queued_jobs is not None:
+            if any(response is not None and response.get("status") != "ok"
+                   for response in (running_jobs, queued_jobs)):
+                failure = next(
+                    response for response in (running_jobs, queued_jobs)
+                    if response is not None and response.get("status") != "ok"
+                )
+                reason = failure.get("message") or failure.get("status") or "unknown"
+                lines.append(f"         Ingestion jobs unavailable: {escape_markup(str(reason))}")
+            else:
+                _append_ingest_jobs(lines, "Document ingestion", running_jobs or {}, queued_jobs or {})
+        if (type(pending) is int and pending > 0) or archive_running is not None:
+            if archive_running and archive_running.get("reason") == "archive_not_configured":
+                lines.append("         Capture indexing: archive not yet created")
+            elif archive_running is None:
+                lines.append("         Capture-indexing jobs unavailable")
+            elif archive_running.get("status") != "ok" or (archive_queued is not None and archive_queued.get("status") != "ok"):
+                failure = archive_running if archive_running.get("status") != "ok" else archive_queued
+                lines.append(f"         Capture indexing unavailable: {escape_markup(str(failure.get('message') or failure.get('reason') or 'unknown'))}")
+            elif archive_queued is not None:
+                _append_ingest_jobs(lines, "Capture indexing", archive_running, archive_queued)
+    _append_embedding_status(lines, "LONG", long_status)
+    archive_index = long_status.get("mid_archive_index")
+    if isinstance(archive_index, dict) and archive_index.get("status") == "ok":
+        _append_embedding_status(lines, "MID archive", archive_index)
+    if active and active.get("job_id"):
+        lines.append(f"[dim]Next: bank consolidation-status {escape_markup(str(active['job_id']))}[/dim]")
+    elif type(notes) is int and notes > 0:
+        lines.append(f"[dim]Own notes: bank consolidate {space_id} (write token)[/dim]")
+        lines.append(f"[dim]All agents: bank consolidate {space_id} --all-agents (manage)[/dim]")
+    console.print(Panel("\n".join(lines), title=f"Memory · {space_id}", border_style="cyan"))
 
 
 def show_stale_spaces(result: dict):
@@ -941,7 +1286,7 @@ def show_stale_spaces(result: dict):
             s.get("space_id", "?"),
             str(s.get("live_notes_count", 0)),
             f"[{age_style}]{age_str}[/{age_style}]",
-            (s.get("oldest_note_timestamp", "") or "")[:19].replace("T", " "),
+            _format_local_timestamp(s.get("oldest_note_timestamp")),
         )
     console.print(table)
 
@@ -1035,7 +1380,7 @@ def show_token_created(result: dict):
             f"{hash_line}"
             f"[bold]Perms:[/bold] {', '.join(permissions)}\n"
             f"[bold]Spaces:[/bold] {spaces_label}\n"
-            f"[bold]Expires:[/bold] {result.get('expires_at', 'never')}\n\n"
+            f"[bold]Expires:[/bold] {_format_local_timestamp(result.get('expires_at')) or 'never'}\n\n"
             f"{recovery_warning}"
             f"{server_notes}\n"
             f"[bold yellow]{result.get('warning', '')}[/bold yellow]",
@@ -1063,12 +1408,12 @@ def show_token_list(result: dict):
     table.add_column("Hash (ID)", style="dim")
     table.add_column("Permissions")
     table.add_column("Spaces")
-    table.add_column("Created")
-    table.add_column("Expires")
+    table.add_column("Created (local)")
+    table.add_column("Expires (local)")
     for t in tokens:
-        created = t.get("created_at", "?")[:10] if t.get("created_at") else "?"
+        created = _format_local_timestamp(t.get("created_at"), date_only=True) or "?"
         expires = t.get("expires_at") or None
-        expires = expires[:10] if expires else "never"
+        expires = _format_local_timestamp(expires, date_only=True) if expires else "never"
         is_admin_token = "admin" in t.get("permissions", [])
         spaces = ", ".join(t.get("space_ids", [])) or ("all" if is_admin_token else "none")
         name = t.get("name", "?")
@@ -1245,6 +1590,32 @@ def show_graph_connected(result: dict):
 
 def show_graph_status(result: dict):
     """Displays the graph_status result."""
+    embedding_lines = []
+    _append_embedding_status(embedding_lines, "LONG", result)
+    archive_index = result.get("mid_archive_index")
+    if isinstance(archive_index, dict) and archive_index.get("status") == "ok":
+        _append_embedding_status(embedding_lines, "MID archive", archive_index)
+    if embedding_lines:
+        console.print(Panel("\n".join(embedding_lines), title="Embedding models", border_style="cyan"))
+    policy = result.get("mid_automation")
+    if isinstance(policy, dict):
+        def mode(key):
+            value = policy.get(key)
+            return "Enabled" if value is True else "Disabled by configuration" if value is False else "Unknown"
+        lines = [f"Automatic compaction: {mode('compaction_enabled')}",
+                 f"Automatic transfer to LONG: {mode('archive_enabled')}",
+                 "Compaction: after successful consolidation, oversized files only (DirectLocal)."]
+        backlog = result.get("mid_archive_projection")
+        if isinstance(backlog, dict):
+            pending = backlog.get("pending")
+            if type(pending) is int and pending >= 0:
+                lines.append(f"Captures pending indexing: {pending}")
+            if backlog.get("oldest_at"):
+                lines.append(f"Oldest capture: {escape_markup(_format_local_timestamp(backlog['oldest_at']))}")
+            if backlog.get("error"):
+                lines.append(f"Indexing problem: {escape_markup(str(backlog['error']))}")
+            lines.append("A zero backlog does not mean every current MID file is indexed.")
+        console.print(Panel.fit("\n".join(lines), title="MID → LONG automation", border_style="blue"))
     connected = result.get("connected", False)
     if not connected:
         console.print(
@@ -1273,7 +1644,7 @@ def show_graph_status(result: dict):
 
     # Section pushs
     if result.get("last_push"):
-        lines.append(f"[bold]Last push   :[/bold] {result['last_push'][:19]}")
+        lines.append(f"[bold]Last push   :[/bold] {_format_local_timestamp(result['last_push'])}")
         lines.append(f"[bold]Total pushes:[/bold] {result.get('push_count', 0)}")
         lines.append(f"[bold]Files      :[/bold] {result.get('files_pushed', 0)}")
 
@@ -1391,9 +1762,11 @@ def show_backup_list(result: dict):
     table = Table(title=f"💾 {result.get('total', 0)} backups", show_header=True)
     table.add_column("Backup ID", style="cyan bold")
     table.add_column("Space", style="dim")
-    table.add_column("Timestamp")
+    table.add_column("Timestamp (local)")
     for b in backups:
         table.add_row(
-            b.get("backup_id", "?"), b.get("space_id", "?"), b.get("timestamp", "?")
+            b.get("backup_id", "?"),
+            b.get("space_id", "?"),
+            _format_local_timestamp(b.get("timestamp")) or "?",
         )
     console.print(table)

@@ -33,11 +33,13 @@ from .display import (
     show_rules_updated,
     show_space_list,
     show_space_info,
+    show_space_memory_status,
+    space_status_needs_recovery,
     show_rules,
     show_notes,
     show_bank_list,
     show_bank_content,
-    show_consolidation_result,
+    show_consolidation_response,
     show_bank_write_result,
     show_bank_delete_result,
     show_bank_repair_result,
@@ -45,6 +47,7 @@ from .display import (
     show_bank_compact_failure,
     show_graph_connected,
     show_graph_status,
+    show_ingest_job,
     show_graph_push_result,
     show_graph_disconnected,
     show_graph_local,
@@ -71,6 +74,7 @@ SHELL_COMMANDS = {
     "space update-rules": "Update rules (space update-rules <id> -f <rules.md>) manage",
     "space list": "List spaces",
     "space info": "Space details (space info <id>)",
+    "space status": "SHORT → MID → LONG progress (space status <id>)",
     "space rules": "Space rules (space rules <id>)",
     "space summary": "Full summary (space summary <id>)",
     "space export": "Export as tar.gz (space export <id>)",
@@ -103,6 +107,7 @@ SHELL_COMMANDS = {
     "graph push": "Push bank to graph (graph push <space>)",
     "graph status": "Graph Memory connection status (graph status <space>)",
     "graph query": "Semantic long-tier query (graph query <space> <query> [--limit 10])",
+    "graph job": "Ingestion job details (graph job <space> <job-id> [--archive])",
     "graph disconnect": "Disconnect from Graph Memory (graph disconnect <space>)",
     "graph use-local": "Replace a legacy override with the embedded/local graph (graph use-local <space>) manage",
     "backup create": "Create a backup (backup create <space> or backup create --all)",
@@ -442,6 +447,52 @@ async def _handle_space(client, args, json_out):
             "status"
         ) == "ok" else show_error(result.get("message", "?"))
 
+    elif sub == "status" and len(args) >= 2:
+        info = await client.call_tool("space_info", {"space_id": args[1]})
+        if info.get("status") != "ok":
+            (show_json if json_out else show_error)(
+                info if json_out else info.get("message", "Space unavailable")
+            )
+            return
+        long_status = await client.call_tool("graph_status", {"space_id": args[1]})
+        running_jobs = queued_jobs = None
+        if (long_status.get("status") == "ok" and long_status.get("connected")
+                and long_status.get("reachable") is not False):
+            running_jobs = await client.call_tool(
+                "long_ingest_list", {"space_id": args[1], "status": "running", "limit": 10}
+            )
+            queued_jobs = await client.call_tool(
+                "long_ingest_list", {"space_id": args[1], "status": "queued", "limit": 10}
+            )
+        archive_running = archive_queued = None
+        projection = long_status.get("mid_archive_projection")
+        if (long_status.get("status") == "ok" and isinstance(projection, dict)
+                and long_status.get("reachable") is not False
+                and (projection.get("pending") != 0 or projection.get("error"))):
+            archive_running = await client.call_tool(
+                "long_ingest_list", {"space_id": args[1], "status": "running", "limit": 10, "archive": True}
+            )
+            if archive_running.get("status") == "ok":
+                archive_queued = await client.call_tool(
+                    "long_ingest_list", {"space_id": args[1], "status": "queued", "limit": 10, "archive": True}
+                )
+        job_reads_ok = all(
+            response is None or response.get("status") == "ok" or response.get("reason") == "archive_not_configured"
+            for response in (running_jobs, queued_jobs, archive_running, archive_queued)
+        )
+        recovery_required = space_status_needs_recovery(info)
+        if json_out:
+            show_json({
+                "status": "ok" if long_status.get("status") == "ok" and long_status.get("reachable") is not False and job_reads_ok and not recovery_required else "partial",
+                "space_id": args[1], "space_info": info, "long_status": long_status,
+                "ingest_running": running_jobs, "ingest_queued": queued_jobs,
+                "archive_ingest_running": archive_running, "archive_ingest_queued": archive_queued,
+                "recovery_required": recovery_required,
+            })
+        else:
+            show_space_memory_status(info, long_status, running_jobs, queued_jobs,
+                                     archive_running, archive_queued)
+
     elif sub == "rules" and len(args) >= 2:
         result = await client.call_tool("space_rules", {"space_id": args[1]})
         (show_json if json_out else show_rules)(result) if result.get(
@@ -503,7 +554,7 @@ async def _handle_space(client, args, json_out):
 
     else:
         show_warning(
-            "Usage: space [create|invite|update|list|info|rules|summary|export|delete] ..."
+            "Usage: space [create|invite|update|list|info|status|rules|summary|export|delete] ..."
         )
 
 
@@ -577,12 +628,11 @@ async def _handle_bank(client, args, json_out):
             show_error(result.get("message", "?"))
 
     elif sub == "consolidate" and len(args) >= 2:
-        console.print("[dim]Consolidation in progress...[/dim]")
         consolidate_args = {"space_id": args[1]}
         if "--all-agents" in args[2:]:
             consolidate_args["agent"] = ""
         result = await client.call_tool("bank_consolidate", consolidate_args)
-        (show_json if json_out else show_consolidation_result)(result) if result.get(
+        (show_json if json_out else show_consolidation_response)(result) if result.get(
             "status"
         ) in ("ok", "running", "queued") else show_error(result.get("message", "?"))
 
@@ -701,11 +751,11 @@ async def _handle_bank(client, args, json_out):
         )
         if json_out:
             show_json(result)
-        elif result.get("status") == "not_found":
-            show_error(result.get("message", "Job not found"))
-        else:
+        elif result.get("status") in ("queued", "running", "succeeded", "failed", "cancelled"):
             from .display import show_consolidation_job
             show_consolidation_job(result)
+        else:
+            show_error(result.get("message", "Job unavailable"))
 
     elif sub == "consolidation-queues":
         space_ids_arg = args[1] if len(args) >= 2 else ""
@@ -776,7 +826,6 @@ async def _handle_bank(client, args, json_out):
             show_error(result.get("message", "?"))
             return
         if consolidate and result.get("status") == "ok":
-            from .display import show_consolidation_result
             for entry in result.get("spaces", []):
                 sid = entry.get("space_id")
                 if not sid:
@@ -788,7 +837,7 @@ async def _handle_bank(client, args, json_out):
                 if json_out:
                     show_json(job)
                 elif job.get("status") in ("running", "queued"):
-                    show_consolidation_result(job)
+                    show_consolidation_response(job)
                 else:
                     show_error(
                         f"{sid}: {job.get('message', job.get('status', '?'))}"
@@ -1144,6 +1193,16 @@ async def _handle_graph(client, args, json_out):
         (show_json if json_out else show_graph_status)(result) if result.get(
             "status"
         ) == "ok" else show_error(result.get("message", "?"))
+
+    elif sub == "job":
+        if len(args) not in (3, 4) or (len(args) == 4 and args[3] != "--archive"):
+            show_warning("Usage: graph job <space> <job-id> [--archive]")
+            return
+        result = await client.call_tool("long_ingest_status", {"space_id": args[1], "job_id": args[2], "archive": len(args) == 4})
+        if json_out:
+            show_json(result)
+        else:
+            show_ingest_job(result)
 
     elif sub == "query" and len(args) >= 3:
         limit = 10

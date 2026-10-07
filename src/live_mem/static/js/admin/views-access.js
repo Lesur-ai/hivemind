@@ -68,13 +68,39 @@
     // cannot select a row left over from a previous render while a new list is
     // still loading.
     var _tokenListEpoch = -1;
+    var _accessCleanup = null;
+    var _handoffRoute = '';
+
+    function clearAccessHandoff() {
+        var cleanup = _accessCleanup;
+        _accessCleanup = null;
+        if (cleanup) cleanup();
+    }
+
+    function ownAccessHandoff(cleanup, refreshOnDismiss) {
+        _accessCleanup = cleanup;
+        _handoffRoute = location.hash;
+        var session = _sessionIdentity();
+        var route = _handoffRoute;
+        var modal = document.getElementById('adminModal');
+        if (modal) modal.querySelectorAll('[data-action="close-modal"]').forEach(function (button) {
+            button.addEventListener('click', function () {
+                if (_accessCleanup !== cleanup) return;
+                var refresh = refreshOnDismiss && route === location.hash && !_sessionEnded(session);
+                clearAccessHandoff();
+                if (refresh) AdminRouter.refresh();
+            });
+        });
+    }
 
     function _openModal(title, body, verb, onConfirm) {
+        clearAccessHandoff();
         _modalGen += 1;
         showModal(title, body, verb, onConfirm);
     }
 
     function _openDestructive(opts) {
+        clearAccessHandoff();
         _modalGen += 1;
         showDestructiveModal(opts);
     }
@@ -206,6 +232,10 @@
     }
 
     window.addEventListener('hashchange', function () {
+        if (!_navLock && _accessCleanup && location.hash !== _handoffRoute) {
+            clearAccessHandoff();
+            closeModal();
+        }
         if (!_navLock || location.hash === _navLock.hash) return;
         if (!_navLockSessionCurrent(_navLock)) {
             // Orphaned by a session wipe: drop it and let navigation proceed —
@@ -333,8 +363,9 @@
         }
         var t = fmtTimestamp(token.expires_at);
         var word = isExpired(token.expires_at) ? 'expired' : 'expires';
+        var zone = t.zone ? ' <span class="unit-timezone">' + esc(t.zone) + '</span>' : '';
         return '<div class="cell-sub" title="' + esc(t.title) + '">' +
-            esc(word + ' ' + t.text) + ' <span class="unit-utc">UTC</span></div>';
+            esc(word + ' ' + t.text) + zone + '</div>';
     }
 
     // ─────────────────────────── render ───────────────────────────
@@ -648,7 +679,7 @@
                 ? 'The old token remains revoked.'
                 : 'Creating a replacement does not revoke the old token.') + '</span></div>'
             : '';
-        var body = replacementNotice +
+        var body = (prefill.message ? serverMessage(prefill.message) : '') + replacementNotice +
             '<div class="form-group">' +
             '<label class="form-label" for="ctName">Name <span class="req">*</span></label>' +
             '<input class="form-input mono" id="ctName" autocomplete="off" data-1p-ignore data-lpignore="true"' +
@@ -687,7 +718,7 @@
 
         _openModal(replacementFor ? 'Create replacement token' : 'Create token', body,
             replacementFor ? 'Create replacement' : 'Create token', function () {
-            return onCreateConfirm(adminMode, identityAtOpen);
+            return onCreateConfirm(adminMode, identityAtOpen, prefill);
         });
 
         // Token-store v2 forbids dormant admin allowlists. Keep any typed value
@@ -733,7 +764,7 @@
         }
     }
 
-    async function onCreateConfirm(adminMode, identityAtOpen) {
+    async function onCreateConfirm(adminMode, identityAtOpen, prefill) {
         var nameEl = document.getElementById('ctName');
         var name = (nameEl ? nameEl.value : '').trim();
         var errEl = document.getElementById('ctNameErr');
@@ -891,7 +922,7 @@
                 return false; // never recreate secret DOM in a dead/other session
             }
             _navLockRelease(navLock);  // end the pending-phase lock…
-            showTokenSecret(res);      // …the secret step takes its own nav lock
+            showTokenSecret(res, prefill); // …the secret step takes its own nav lock
             return false;              // the secret step owns the modal + navigation now
         }
 
@@ -928,21 +959,19 @@
     // destroyed — the DOM node emptied AND the closure value zeroed so the Copy
     // button can no longer recover it — on EVERY exit path (acknowledge, Cancel,
     // the × close), so no later copy operation can recover the plaintext.
-    function showTokenSecret(res) {
+    function showTokenSecret(res, prefill) {
         // The secret display takes its OWN nav lock: while the
         // one-time plaintext is on screen, Back/Forward and hash edits are pinned
         // to this route so the secret can never be left rendered over a route the
         // operator navigated to. It is a fresh lock (not the create's), so the
         // display is protected even when the create's pending lock was released
         // early by the "Stop waiting" escape. destroySecret() releases it on
-        // every teardown path; a session wipe self-heals it via _navLockAcquire's
-        // captured session (the frozen wipeSession removes the modal without
-        // running destroySecret).
+        // every teardown path, including the shell's explicit session cleanup.
         var navLock = _navLockAcquire();
         var holder = { value: String(res.token || '') };
         var hashHolder = { value: String(res.token_hash || '') };
         var extra = '';
-        var uncertain = res.status === 'partial' && res.recovery_required === true;
+        var uncertain = res.status === 'partial' || res.recovery_required === true;
         if (uncertain) {
             extra += '<div class="destructive-note">' + icon('alert') +
                 '<span><strong>Creation state is uncertain.</strong> Do not discard either value. ' +
@@ -980,7 +1009,7 @@
             '<div class="mono-block secret" id="ctSecret">' + esc(holder.value) + '</div>' +
             '<div class="secret-actions">' +
             '<button type="button" class="btn btn-secondary btn-sm" id="ctCopyBtn">' +
-            icon('copy') + '<span>Copy plaintext</span></button>' +
+            icon('copy') + '<span>Copy token</span></button>' +
             '</div>' +
             hashBlock +
             '<div class="token-meta">' +
@@ -1009,28 +1038,27 @@
             _navLockRelease(navLock);
         }
 
+        var targetIsAdmin = Array.isArray(res.permissions) && res.permissions.indexOf('admin') !== -1;
+        var grantedSpaces = Array.isArray(res.space_ids) ? res.space_ids.slice() : [];
+        var sessionAtSecret = _sessionIdentity();
         _openModal(
-            uncertain ? 'Token creation uncertain — preserve both values' : 'Token created — save it now',
+            uncertain ? 'Creation needs checking — preserve both values' : 'Token created — save it now',
             body,
             uncertain ? 'I saved both values' : 'I have saved it',
             async function () {
-            destroySecret();
-            AdminRouter.refresh();
-            return true;
+                if (_sessionEnded(sessionAtSecret) || !holder.value) return false;
+                var fullHash = hashHolder.value;
+                clearAccessHandoff();
+                if (uncertain || !/^sha256:[0-9a-f]{64}$/.test(fullHash)) {
+                    AdminRouter.refresh();
+                    return true;
+                }
+                if (targetIsAdmin) showClientConfiguration(true);
+                else await showGrantAccess(fullHash, grantedSpaces, prefill && prefill.spaceId);
+                return false;
             }
         );
-
-        // The shell's Cancel and × controls only hide the modal (closeModal sets
-        // display:none), leaving its DOM — and this closure's Copy listener — in
-        // place until the next modal replaces it. Attach the teardown to both so
-        // dismissing also destroys the plaintext. The element-level listener
-        // fires before the document-level [data-action="close-modal"] delegation.
-        var modalEl = document.getElementById('adminModal');
-        if (modalEl) {
-            modalEl.querySelectorAll('[data-action="close-modal"]').forEach(function (c) {
-                c.addEventListener('click', destroySecret);
-            });
-        }
+        ownAccessHandoff(destroySecret);
 
         var copyBtn = document.getElementById('ctCopyBtn');
         if (copyBtn) {
@@ -1054,6 +1082,207 @@
                 _copySecret(hashHolder, AdminRouter.epoch, _modalGen, _sessionIdentity(), 'Token ID copied');
             });
         }
+    }
+
+    // Only the full hash survives acknowledgement. Grants are existing
+    // idempotent additions; server recovery instructions are never replayed.
+    async function showGrantAccess(fullHash, grantedSpaces, selectedSpace) {
+        var session = _sessionIdentity();
+        var adminMode = hasGlobalAdmin(session);
+        var flow = { live: true, busy: false, loaded: false, hash: fullHash, rows: Object.create(null), spaces: [] };
+        var hashHolder = { value: fullHash };
+        var granted = new Set(grantedSpaces);
+        var body = '<p>Choose the spaces this token may access. Access is granted only when you click Grant access.</p>' +
+            '<p class="micro-label">Token ID (full hash)</p>' +
+            '<div class="mono-block secret" id="aoTokenHash">' + esc(fullHash) + '</div>' +
+            '<div class="secret-actions"><button type="button" class="btn btn-secondary btn-sm" id="aoCopyHashBtn">' +
+            icon('copy') + '<span>Copy Token ID</span></button></div>' +
+            '<div id="aoSpaces">' + stateLoading('Loading accessible spaces…') + '</div>' +
+            '<div class="form-error" id="aoGrantError" hidden></div>' +
+            '<div class="secret-actions"><button type="button" class="btn btn-primary" id="aoGrant" disabled>Grant access</button>' +
+            '<button type="button" class="btn btn-secondary" id="aoRetry" disabled>Retry failed grants</button></div>' +
+            '<div id="aoResults" aria-live="polite"></div>' +
+            '<p class="form-hint">You may configure the client now and grant access later. A token without space access cannot read its memory. Closing does not cancel an access request already sent.</p>';
+        _openModal('Grant space access', body, 'Configure client', function () {
+            if (!owns() || flow.busy) return false;
+            showClientConfiguration(false);
+            return false;
+        });
+        var epoch = AdminRouter.epoch;
+        var gen = _modalGen;
+        var resultsElement = document.getElementById('aoResults');
+        ownAccessHandoff(function () {
+            flow.live = false;
+            flow.hash = '';
+            hashHolder.value = '';
+            flow.rows = Object.create(null);
+            flow.spaces = [];
+            granted.clear();
+            ['aoTokenHash', 'aoResults', 'aoSpaces', 'aoGrantError'].forEach(function (id) {
+                var el = document.getElementById(id);
+                if (el) el.textContent = '';
+            });
+            var copy = document.getElementById('aoCopyHashBtn');
+            if (copy) copy.disabled = true;
+        }, true);
+        function owns() {
+            var modal = document.getElementById('adminModal');
+            return flow.live && modal && modal.style.display !== 'none' &&
+                document.getElementById('aoResults') === resultsElement &&
+                !_isStale(epoch, gen, session) && hasManage(_sessionIdentity()) &&
+                hasGlobalAdmin(_sessionIdentity()) === adminMode;
+        }
+        function paintResults() {
+            if (!owns()) return;
+            document.getElementById('aoResults').innerHTML = Object.keys(flow.rows).map(function (sid) {
+                var row = flow.rows[sid];
+                var label = { granted: 'Granted', noop: 'Already has access', failed: 'Not confirmed — retry available',
+                    refused: 'Refused by server — retry available',
+                    recovery: 'Needs checking', pending: 'Granting…' }[row.state];
+                return '<div class="access-banner"><span><strong>' + esc(sid) + '</strong>: ' + esc(label) +
+                    (row.message ? serverMessage(row.message) : '') + '</span></div>';
+            }).join('');
+            document.getElementById('aoGrant').disabled = flow.busy || !flow.loaded;
+            document.getElementById('aoRetry').disabled = flow.busy || !Object.keys(flow.rows).some(function (sid) {
+                return flow.rows[sid].state === 'failed' || flow.rows[sid].state === 'refused';
+            });
+            var confirm = document.getElementById('modalConfirmBtn');
+            if (confirm) confirm.disabled = flow.busy;
+            document.querySelectorAll('.ao-space').forEach(function (box) {
+                box.disabled = flow.busy || granted.has(box.value) || Boolean(flow.rows[box.value]);
+            });
+        }
+        async function submit(retry) {
+            if (!owns() || flow.busy || !flow.loaded || !/^sha256:[0-9a-f]{64}$/.test(flow.hash)) return;
+            var selected = retry ? Object.keys(flow.rows).filter(function (sid) {
+                return flow.rows[sid].state === 'failed' || flow.rows[sid].state === 'refused';
+            }) :
+                Array.from(document.querySelectorAll('.ao-space')).filter(function (box) {
+                    return box.checked && flow.spaces.indexOf(box.value) !== -1 && !granted.has(box.value) && !flow.rows[box.value];
+                }).map(function (box) { return box.value; });
+            if (!selected.length) return;
+            flow.busy = true;
+            paintResults();
+            for (var i = 0; i < selected.length; i++) {
+                if (!owns()) return;
+                var sid = selected[i];
+                flow.rows[sid] = { state: 'pending' };
+                paintResults();
+                var res;
+                try {
+                    res = adminMode
+                        ? await callTool('admin_update_token', { token_hash: flow.hash, space_ids_add: sid })
+                        : await callTool('space_invite_token', { token_hash: flow.hash, space_id: sid });
+                } catch (_) {
+                    res = { status: 'unconfirmed', message: 'No response received. Retry sends the same additive grant.' };
+                }
+                if (!owns()) return;
+                var recovery = res && (res.status === 'partial' || res.recovery_required === true);
+                var success = res && res.status === 'ok' && !recovery;
+                var noop = success && (res.added === false || (Array.isArray(res.space_ids_noop) && res.space_ids_noop.indexOf('add:' + sid) !== -1));
+                flow.rows[sid] = { state: recovery ? 'recovery' : success ? (noop ? 'noop' : 'granted') :
+                    (res && res.status === 'error' && res.transport_unconfirmed !== true ? 'refused' : 'failed'),
+                    message: res && res.message ? String(res.message) : '' };
+                if (success) granted.add(sid);
+                paintResults();
+            }
+            flow.busy = false;
+            paintResults();
+        }
+        document.getElementById('aoGrant').addEventListener('click', function () { return submit(false); });
+        document.getElementById('aoRetry').addEventListener('click', function () { return submit(true); });
+        document.getElementById('aoCopyHashBtn').addEventListener('click', function () {
+            if (owns() && hashHolder.value) _copySecret(hashHolder, epoch, gen, session, 'Token ID copied');
+        });
+        var result;
+        try { result = await callTool('space_list', {}); }
+        catch (_) { result = { status: 'error', message: 'Could not load accessible spaces. Finish later and use Invite token or Edit token.' }; }
+        if (!owns()) return;
+        if (!result || result.status !== 'ok' || !Array.isArray(result.spaces)) {
+            document.getElementById('aoSpaces').textContent = '';
+            var error = document.getElementById('aoGrantError');
+            error.textContent = result && result.message || 'Could not load accessible spaces.';
+            error.hidden = false;
+            return;
+        }
+        flow.spaces = result.spaces.map(function (space) { return space.space_id; }).filter(function (sid) { return typeof sid === 'string' && sid; });
+        flow.loaded = true;
+        document.getElementById('aoSpaces').innerHTML = flow.spaces.length ? flow.spaces.map(function (sid) {
+            if (granted.has(sid)) flow.rows[sid] = { state: 'noop' };
+            return '<label class="form-label"><input type="checkbox" class="ao-space" value="' + esc(sid) + '"' +
+                (sid === selectedSpace || granted.has(sid) ? ' checked' : '') + (granted.has(sid) ? ' disabled' : '') + '> ' + esc(sid) + '</label>';
+        }).join('') : '<p>No accessible spaces. You can grant access later.</p>';
+        paintResults();
+    }
+
+    function showClientConfiguration(globalAccess) {
+        var holder = { value: '' };
+        var session = _sessionIdentity();
+        var body = (globalAccess ? '<p>This admin token has global access. No space grant is needed.</p>' : '') +
+            '<p>Enter the MCP URL reachable from your agent’s machine, including its proxy path. The Portal address may be different.</p>' +
+            '<div class="form-group"><label class="form-label" for="aoUrl">External MCP URL</label>' +
+            '<input class="form-input" id="aoUrl" type="url" placeholder="https://your-server/mcp" autocomplete="off"></div>' +
+            '<div class="form-group"><label class="form-label" for="aoClient">Client</label>' +
+            '<select class="form-input" id="aoClient"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></div>' +
+            '<p>Set <code>HIVEMIND_TOKEN</code> in the environment that launches your client, using the token you saved. Keep the value in your secret manager; do not put it in source control.</p>' +
+            '<pre class="mono-block" id="aoSnippet"></pre><div class="form-error" id="aoConfigError" hidden></div>' +
+            '<div class="secret-actions"><button type="button" class="btn btn-secondary" id="aoCopyConfig">Copy configuration</button>' +
+            '<button type="button" class="btn btn-ghost" id="aoFinishLater">Finish later</button></div>' +
+            '<p class="form-hint">Test the connection from your client. Done and Finish later only close these instructions; they do not verify a connection.</p>';
+        _openModal('Configure client', body, 'Done', function () {
+            if (!owns()) return false;
+            clearAccessHandoff();
+            AdminRouter.refresh();
+            return true;
+        });
+        var epoch = AdminRouter.epoch;
+        var gen = _modalGen;
+        var snippetElement = document.getElementById('aoSnippet');
+        var live = true;
+        ownAccessHandoff(function () {
+            live = false;
+            holder.value = '';
+            var snippet = document.getElementById('aoSnippet');
+            if (snippet) snippet.textContent = '';
+            var url = document.getElementById('aoUrl');
+            if (url) url.value = '';
+        }, true);
+        function owns() { return live && document.getElementById('aoSnippet') === snippetElement && !_isStale(epoch, gen, session); }
+        function buildConfig() {
+            if (!owns()) return false;
+            var error = document.getElementById('aoConfigError');
+            var snippet = document.getElementById('aoSnippet');
+            holder.value = '';
+            snippet.textContent = '';
+            try {
+                var url = new URL(document.getElementById('aoUrl').value.trim());
+                if (['http:', 'https:'].indexOf(url.protocol) === -1 || url.username || url.password) throw new Error('Invalid endpoint');
+                if (document.getElementById('aoClient').value === 'claude') {
+                    holder.value = JSON.stringify({ mcpServers: { hivemind: { type: 'http', url: url.href,
+                        headers: { Authorization: 'Bearer ${HIVEMIND_TOKEN}' } } } }, null, 2);
+                } else {
+                    holder.value = '[mcp_servers.hivemind]\nurl = ' + JSON.stringify(url.href) + '\nbearer_token_env_var = "HIVEMIND_TOKEN"';
+                }
+                snippet.textContent = holder.value;
+                error.hidden = true;
+                return true;
+            } catch (_) {
+                error.textContent = 'Enter an absolute HTTP(S) MCP URL without embedded credentials.';
+                error.hidden = false;
+                return false;
+            }
+        }
+        document.getElementById('aoUrl').addEventListener('input', buildConfig);
+        document.getElementById('aoClient').addEventListener('change', buildConfig);
+        document.getElementById('aoCopyConfig').addEventListener('click', function () {
+            if (buildConfig()) return _copySecret(holder, epoch, gen, session, 'Configuration copied');
+        });
+        document.getElementById('aoFinishLater').addEventListener('click', function () {
+            if (!owns()) return;
+            clearAccessHandoff();
+            closeModal();
+            AdminRouter.refresh();
+        });
     }
 
     // ─────────────────────────── manager invite ───────────────────────────
@@ -1655,7 +1884,9 @@
         if (hasGlobalAdmin(_sessionIdentity())) AdminRouter.refresh();
         else clearAdminTokenCache();
     });
-    registerAction('access-create', function () { openCreateModal(); });
+    window.openAccessOnboarding = openCreateModal;
+    window.clearAccessHandoff = clearAccessHandoff;
+    registerAction('access-create', function () { window.openAccessOnboarding(); });
     registerAction('access-invite', function () { openInviteModal(); });
     registerAction('access-edit', function (data, btn) {
         if (!requireGlobalAdmin()) return;

@@ -399,7 +399,7 @@ class TestSecretDeliveryAndSessionIsolation:
         body = _fn_body(src, "onCreateConfirm")
         assert body, "onCreateConfirm not found."
         created_idx = body.index("status === 'created'")
-        secret_idx = body.index("showTokenSecret(res)")
+        secret_idx = body.index("showTokenSecret(res, prefill)")
         # The error path's ownership bail guards only the non-created branch. It
         # excludes epoch (see TestCreateFlowOwnership), but the
         # ORDERING invariant is unchanged: created-handling comes first, so a
@@ -428,11 +428,11 @@ class TestSecretDeliveryAndSessionIsolation:
         )
         m = re.search(r"if \(returnedCredential\) \{(.*?)\n        \}", body, re.DOTALL)
         branch = m.group(1)
-        assert "_sessionEnded(sessionAtCall)" in branch and "showTokenSecret(res)" in branch, (
+        assert "_sessionEnded(sessionAtCall)" in branch and "showTokenSecret(res, prefill)" in branch, (
             "the created branch must drop via _sessionEnded (overlay OR identity "
             "change) before repainting the secret."
         )
-        assert branch.index("_sessionEnded(sessionAtCall)") < branch.index("showTokenSecret(res)"), (
+        assert branch.index("_sessionEnded(sessionAtCall)") < branch.index("showTokenSecret(res, prefill)"), (
             "the session-end guard must run BEFORE showTokenSecret."
         )
 
@@ -498,7 +498,7 @@ class TestSecretDeliveryAndSessionIsolation:
         and the × close — DOM node emptied AND the closure value neutralized so
         the Copy button can no longer recover it."""
         src = _access()
-        m = re.search(r"function showTokenSecret\(res\)\s*\{.*?\n    \}", src, re.DOTALL)
+        m = re.search(r"function showTokenSecret\(res, prefill\)\s*\{.*?\n    \}", src, re.DOTALL)
         assert m, "showTokenSecret not found."
         body = m.group(0)
         assert "function destroySecret()" in body
@@ -507,15 +507,13 @@ class TestSecretDeliveryAndSessionIsolation:
         assert re.search(r"if \(btn\) btn\.disabled = true", body), (
             "destroySecret must disable the Copy button so it can't recover the token."
         )
-        # ack path calls destroySecret.
-        assert re.search(r"async function \(\) \{\s*destroySecret\(\);", body), (
-            "the acknowledge handler must call destroySecret()."
-        )
-        # Cancel/× close controls are wired to destroySecret.
-        assert 'querySelectorAll(\'[data-action="close-modal"]\')' in body
-        assert "addEventListener('click', destroySecret)" in body, (
-            "the Cancel and × controls must run destroySecret on dismissal."
-        )
+        assert "clearAccessHandoff();" in body
+        assert "ownAccessHandoff(destroySecret);" in body
+        owner = _fn_body(src, "ownAccessHandoff")
+        assert 'querySelectorAll(\'[data-action="close-modal"]\')' in owner
+        assert "if (_accessCleanup !== cleanup) return;" in owner
+        assert "clearAccessHandoff();" in owner
+        assert "if (refresh) AdminRouter.refresh();" in owner
 
     def test_secret_copy_gated_on_liveness_and_full_staleness(self):
         """The one-time-secret Copy must have a
@@ -631,7 +629,7 @@ class TestGatingAndEpoch:
         """
         src = _access()
         awaiting = [
-            fn for fn in re.findall(r"(?:async )?function (\w+)\(", src)
+            fn for fn in re.findall(r"\n    (?:async )?function (\w+)\(", src)
             if "await callTool(" in _fn_body(src, fn)
         ]
         # The Access view's awaiting continuations (guard against silent drift).
@@ -749,7 +747,7 @@ class TestEscaping:
         # Current icon-bearing buttons pair the glyph with a visible text label.
         assert "icon('plus') + '<span>Create token</span>" in src
         assert "icon('refresh') + '<span>Refresh</span>" in src
-        assert "icon('copy') + '<span>Copy plaintext</span>" in src  # ctCopyBtn
+        assert "icon('copy') + '<span>Copy token</span>" in src  # ctCopyBtn
         assert "icon('copy') + '<span>Copy Token ID</span>" in src  # ctCopyHashBtn
         # General guard over every button fragment in the source.
         buttons = re.findall(r"<button\b.*?</button>", src, re.DOTALL)
@@ -953,7 +951,7 @@ class TestSessionBoundNavigationRecovery:
             "since the escape released the nav lock and the route can now change."
         )
         # In-context (not stale) still reaches the secret step; stale returns first.
-        assert created.index("if (abandoned)") < created.index("showTokenSecret(res)")
+        assert created.index("if (abandoned)") < created.index("showTokenSecret(res, prefill)")
 
     def test_abandoned_created_dropped_after_dialog_dismissed(self):
         """After 'Stop waiting' re-enables ×/Cancel, a dialog dismissal
@@ -990,7 +988,7 @@ class TestSessionBoundNavigationRecovery:
         releases it in destroySecret on every teardown path (acknowledge/Cancel/×).
         A session wipe self-heals the lock via its captured session."""
         src = _access()
-        assert "function showTokenSecret(res)" in src, (
+        assert "function showTokenSecret(res, prefill)" in src, (
             "showTokenSecret must self-pin (no handed-in lock parameter)."
         )
         body = _fn_body(src, "showTokenSecret")
@@ -1028,7 +1026,7 @@ class TestP85AsyncLifecycleRuntime:
     See the module docstring for the pytest-vs-JS-target decision and rationale.
     """
 
-    def test_deferred_promise_lifecycle_invariants_a_through_i(self):
+    def test_deferred_promise_lifecycle_invariants(self):
         node = shutil.which("node")
         assert node is not None, (
             "Node.js is required for the Access async-lifecycle harness "
@@ -1043,3 +1041,16 @@ class TestP85AsyncLifecycleRuntime:
         )
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert completed.stdout.strip() == "admin access lifecycle runtime: ok"
+
+    def test_runtime_detects_missing_secret_cleanup(self, tmp_path: Path):
+        node = shutil.which("node")
+        assert node is not None
+        source = _access()
+        guard = "ownAccessHandoff(destroySecret);"
+        assert source.count(guard) == 1
+        subject = tmp_path / "missing-secret-cleanup.js"
+        subject.write_text(source.replace(guard, "ownAccessHandoff(function () {});"), encoding="utf-8")
+        completed = subprocess.run([node, str(_RUNTIME_HARNESS), str(subject)],
+                                   capture_output=True, text=True, check=False)
+        assert completed.returncode != 0
+        assert "logout clears the held secret node" in completed.stderr

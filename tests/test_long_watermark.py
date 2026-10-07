@@ -72,7 +72,7 @@ from live_mem.core.models import (
     meta_local_complement,
     meta_shared_projection,
 )
-from tests.fakes import FakeGraphTransport, GraphLongFakeStorage
+from tests.fakes import FakeGraphTransport, GraphLongFakeStorage, validate_fake_graph_url
 
 # A frozen instant for the injected clock — every push in this module records
 # provenance/recorded-at against THIS, so timestamps are reproducible and tests
@@ -204,7 +204,9 @@ def _build(**factory_kwargs):
     care about orphans override ``responses``.
     """
     factory = FakeGraphTransport.factory(**factory_kwargs)
-    bridge = GraphBridgeService(client_factory=factory)
+    bridge = GraphBridgeService(
+        client_factory=factory, url_validator=validate_fake_graph_url,
+    )
     return bridge, factory
 
 
@@ -264,7 +266,10 @@ async def test_push_with_committed_coord_records_matching_watermark(
     await _seed_committed(storage, bank_version=7, commit_id="c-7-deadbeef", term=3)
 
     bridge, _factory = _build()
-    with _patch_env(storage):
+    with _patch_env(storage), patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        side_effect=AssertionError("fake transport must not resolve DNS"),
+    ):
         result = await bridge.push(_SPACE)
 
     assert result["status"] == "ok"
@@ -479,7 +484,12 @@ def test_push_reads_committed_coords_without_importing_commit_decision() -> None
                 f"from {prefix}{node.module or ''} import "
                 + ", ".join(a.name for a in node.names)
             )
-    blob = "\n".join(imports).lower()
+    # The independent inference package never imports the commit path (pinned
+    # by test_p13_inference_package.py). Exempt only this immutable ID import.
+    blob = "\n".join(
+        imp for imp in imports
+        if imp != "from hivemind_inference.registry import EMBEDDING_PROVIDER_IDS"
+    ).lower()
     for bad in forbidden:
         assert bad not in blob, f"graph_bridge imports commit-path module {bad!r}"
 

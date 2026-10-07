@@ -20,6 +20,7 @@ import pytest
 
 _STATIC = Path(__file__).resolve().parents[1] / "src" / "live_mem" / "static"
 _CONSOL = _STATIC / "js" / "admin" / "views-consolidation.js"
+_APP = _STATIC / "js" / "admin-app.js"
 _OPER = _STATIC / "js" / "admin" / "views-operator.js"
 _CSS = _STATIC / "css" / "admin.css"
 _GC_RUNTIME = Path(__file__).resolve().parent / "js" / "admin_gc_runtime.mjs"
@@ -41,6 +42,13 @@ _FORBIDDEN_TOKENS = (
 @pytest.fixture(scope="module")
 def consol() -> str:
     return _CONSOL.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def launcher() -> str:
+    source = _APP.read_text(encoding="utf-8")
+    start = source.index("function openConsolidationLauncher(")
+    return source[start:source.index("\nfunction ", start + 1)]
 
 
 @pytest.fixture(scope="module")
@@ -131,67 +139,40 @@ class TestRealToolBinding:
             assert "space_info" not in src, f"{name} calls space_info (N+1 hazard)"
             assert "graph_status" not in src, f"{name} calls graph_status"
 
-    def test_no_polling(self, consol, oper):
-        # D8: no automatic polling / timer-based coordination anywhere — with the
-        # one bounded exception of §5.5.1: the
-        # Consolidation view may re-read while a job is running or queued, from
-        # exactly two functions, each carrying its bounding guards.
-        for src, name in ((consol, "consolidation"), (oper, "operator")):
-            assert "setInterval" not in src, f"{name} uses setInterval (polling banned)"
-        assert "setTimeout" not in oper, "operator uses setTimeout (D8 / §3.3.2 r5)"
-        lanes = _extract_fn(consol, "function scheduleLive(epoch, data)")
-        inspector = _extract_fn(consol, "function scheduleJobLive(jobId, op, epoch, data)")
-        assert consol.count("setTimeout(") == 2, "the live refresh is the only setTimeout allowed (§5.5.1)"
-        assert lanes.count("setTimeout(") == 1 and inspector.count("setTimeout(") == 1, (
-            "setTimeout must live only inside scheduleLive and scheduleJobLive"
-        )
-        assert "60000" in consol.split("LIVE_REFRESH_MS = ", 1)[1].split(";", 1)[0], "period is one minute"
-        # Bounding guards of the lanes loop: idle gate, route epoch, session, hidden tab.
-        assert "if (!anyLaneActive(data)) return;" in lanes
-        assert "AdminRouter.epoch !== epoch" in lanes and "sessionActive()" in lanes
-        assert "document.hidden" in lanes
-        # Bounding guards of the inspector loop: running/queued only, same modal
-        # instance still open, route epoch, session, hidden tab.
-        assert "if (st !== 'running' && st !== 'queued') return;" in inspector
-        assert "modalOpCurrent(op)" in inspector and "modalOpen()" in inspector
-        assert "AdminRouter.epoch !== epoch" in inspector and "document.hidden" in inspector
-        # Dashboard / Space Detail keep D8 untouched (pinned by their own tests).
+    def test_only_shared_controller_schedules_reads(self, consol, oper):
+        # Portal §17 replaces both view-local loops with one shared controller.
+        # Runtime proof exercises defaults, backoff and lifecycle in the browser code.
+        for src in (consol, oper):
+            assert "setInterval" not in src
+            assert "setTimeout" not in src
+        assert consol.count("PortalRefresh.register(") == 1
+        assert "anyLaneActive(state.data) || detailActive()" in consol
 
 
 # ─────────────────────────── scope-widening guard (§4.5 E4) ───────────────────────────
 
 
 class TestConsolidateScope:
-    def test_mine_sends_agent(self, consol):
-        # scope 'mine' MUST always send a non-empty agent.
-        assert "args.agent = String(agent)" in consol
+    def test_mine_sends_agent(self, launcher):
+        assert "agent: scope === 'all' ? '' : agent" in launcher
 
-    def test_mine_hard_refuses_empty_client_name(self, consol):
-        # A missing client_name must HARD-REFUSE instead of silently changing
-        # the caller-scoped request.
-        enqueue = _extract_fn(consol, "async function enqueue(")
-        assert "if (!agent)" in enqueue, "enqueue has no empty-agent guard"
-        # the guard must return before args.agent is set / the tool is called
-        after_guard = enqueue.split("if (!agent)", 1)[1]
-        assert "return" in after_guard[:220], "empty-agent guard does not return early"
-        assert after_guard.index("return") < after_guard.index("args.agent"), (
-            "guard return comes after args.agent assignment — widening still possible"
-        )
-        assert "Cannot determine your agent identity" in consol
+    def test_mine_hard_refuses_empty_client_name(self, launcher):
+        guard = launcher.index("(scope === 'mine' && !agent.trim())")
+        call = launcher.index("callTool('bank_consolidate'")
+        assert guard < call
+        assert "return false;" in launcher[guard:call]
 
-    def test_all_scope_is_manage_gated(self, consol):
-        assert "hasManage()" in consol
-        # the consol-all action is gated behind a manage check
-        assert re.search(r"consol-all'.*hasManage\(\)", consol, re.DOTALL)
-        enqueue = _extract_fn(consol, "async function enqueue(")
-        assert "else if (scope === 'all')" in enqueue
-        assert "args.agent = '';" in enqueue
+    def test_all_scope_is_manage_gated(self, launcher):
+        assert "permissions.includes('manage') || permissions.includes('admin')" in launcher
+        assert "(scope === 'all' && !canManage)" in launcher
+        assert "agent: scope === 'all' ? '' : agent" in launcher
 
     def test_stale_paths_make_privileged_global_scope_explicit(self, consol):
-        for fn in ("function confirmStaleRow(", "async function submitAllStale("):
-            body = _extract_fn(consol, fn)
-            assert "bank_consolidate" in body
-            assert "if (hasManage()) args.agent = '';" in body
+        # Individual stale rows use the shared explicit scope selector.
+        assert "openPicker(d.space, spaces)" in consol
+        body = _extract_fn(consol, "async function submitAllStale(")
+        assert "bank_consolidate" in body
+        assert "if (hasManage()) args.agent = '';" in body
 
     def test_bulk_stale_confirmation_names_the_exact_scope(self, consol):
         body = _extract_fn(consol, "async function startConsolidateAllStale(")
@@ -203,8 +184,6 @@ class TestConsolidateScope:
         # or error must return false — returning true lets the shell's confirm
         # wrapper closeModal() the just-shown modal.
         assert "await submitAllStale(captured, epoch, confirmOp); return false;" in consol
-        hr = _extract_fn(consol, "function handleEnqueueResult(")
-        assert "return false" in hr, "handleEnqueueResult must keep the refusal modal open"
 
     def test_stale_epoch_guards_return_false_not_true(self, consol):
         # A stale continuation must NOT return true: the shell's confirm
@@ -236,12 +215,9 @@ class TestConsolidateScope:
         for field in ("requested_by", "guarantee", "requested_at", "started_at", "finished_at"):
             assert field in body, f"job inspector omits {field}"
 
-    def test_all_notes_control_visible_but_disabled_without_manage(self, consol):
-        # LOW fix (§4.5 E3): "Consolidate all notes" stays visible, disabled with
-        # a manage/admin hint for non-managers, rather than being hidden.
-        body = _extract_fn(consol, "function laneActions(")
-        assert "disabled" in body
-        assert "Requires manage or admin permission" in body
+    def test_all_notes_control_visible_but_disabled_without_manage(self, launcher):
+        assert "canManage ? '' : ' disabled'" in launcher
+        assert "All agents requires manage or admin permission." in launcher
 
 
 # ─────────────────────────── typed-confirmation & destructive UX (§7.4) ───────────────────────────
@@ -481,15 +457,13 @@ class TestCompactionDiagnostics:
         assert "Target resolution" in paint
 
     def test_job_inspector_reports_the_bank_size_advisory_and_no_compaction_envelope(self, consol, oper):
-        """Compaction is a human decision: a consolidation never runs
-        it, so no job result carries a compaction envelope any more; oversized
-        bank files are only reported, as an advisory, on succeeded AND failed jobs."""
+        """The pre-consolidation advisory appears on succeeded AND failed jobs."""
         render = _extract_fn(consol, "function renderBankSizeAdvisory(")
         job = _extract_fn(consol, "function renderJob(")
         assert "result.bank_size_advisory" in render
         assert "Number.isSafeInteger(item.utf8_bytes)" in render and "Number.isSafeInteger(item.max_size)" in render
         assert "esc(item.filename)" in render and "esc(String(item.utf8_bytes))" in render
-        assert "Compaction is optional" in render
+        assert "automatic compaction result" in render
         assert job.count("renderBankSizeAdvisory(job.result)") == 2
         for banned in ("renderCompactionAdvisory", "renderSafeCompactionFailures", "compaction_advisory", "compaction_failures"):
             assert banned not in consol, banned

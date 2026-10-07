@@ -389,7 +389,13 @@ result is deterministic and independent of clock drift between agents.
 
 ### What is bank compaction (`bank_compact`)?
 
-When bank files grow too large (> `BANK_FILE_MAX_SIZE`, default 35 000 bytes), a consolidation only **reports** them: one WARNING log line and a `bank_size_advisory` list in the job result (console job inspectors, CLI). Compaction is a **human decision**: you choose when to summarize your files further; a size warning never triggers compaction automatically.
+When bank files grow too large (> `BANK_FILE_MAX_SIZE`, default 35 000 bytes),
+the consolidation first **reports** them in one WARNING log line and a
+`bank_size_advisory` list. In 1.6.0, a successful queued consolidation that
+processed notes then runs one automatic DirectLocal compaction pass by default.
+The advisory itself is only an indicator; jobs with no processed notes and
+shared/unsafe routes do not compact. `MID_AUTO_COMPACT=false` disables this
+follow-up while leaving manual `bank_compact` available.
 
 `bank_compact` asks the LLM to summarize oversized files while preserving key
 decisions and milestones. This is not a guarantee of semantic preservation:
@@ -405,7 +411,13 @@ uv run python scripts/mcp_cli.py bank compact my-space
 uv run python scripts/mcp_cli.py bank compact my-space --apply
 ```
 
-`bank_compact` is an MCP tool (manage permission): any MCP client — an agent acting on a human instruction, the console's Compact button or the CLI above — can run it. There is no automatic compaction any more; the former `COMPACT_THRESHOLD` setting is gone and a leftover value is ignored.
+`bank_compact` is an MCP tool (manage permission): any MCP client — an agent
+acting on a human instruction, the console's Compact button or the CLI above —
+can run it manually. `MID_AUTO_ARCHIVE=true` independently transfers retained
+captures to LONG in the background; setting it to false keeps them pending.
+Repeated automatic passes can retain multiple captures of a still-oversized
+file; this release has no cross-capture deduplication or retention policy.
+The former `COMPACT_THRESHOLD` setting is gone and a leftover value is ignored.
 
 ### Can I use an HTTP proxy for outbound connections?
 
@@ -625,7 +637,7 @@ Normal consolidation already attempts one model correction.
 **Next steps**:
 
 1. Inspect the job's `failure_reason`, `failed_batch` and safe diagnostics, then verify provider credentials, context/output limits and the effective model profile.
-2. Check bank sizes and `bank_size_advisory`. If compaction is appropriate, back up first and inspect a dry-run with `uv run python scripts/mcp_cli.py bank compact my-space`; apply is a separate human decision and is DirectLocal-only.
+2. Check bank sizes and `bank_size_advisory`. For an additional **manual** compaction, back up first and inspect a dry-run with `uv run python scripts/mcp_cli.py bank compact my-space`; manual apply is a separate human decision and is DirectLocal-only. A later successful queued consolidation may also compact automatically if `MID_AUTO_COMPACT` is enabled.
 3. Inspect any `partial` result and retained notes before deliberately starting another consolidation. Do not repeatedly resubmit a failed job or assume a timeout rolled back earlier work.
 
 ### Why does manual compaction find no candidate files?

@@ -1519,7 +1519,7 @@ def test_click_space_create_surfaces_actionable_partial_recovery(monkeypatch):
         ["space", "create", "project-a", "--rules", "# Rules"],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert recovery_rendered == [payload]
     assert success_rendered == []
 
@@ -1568,7 +1568,7 @@ def test_click_bank_compact_uses_structured_failure_renderer(monkeypatch):
     partial_result = runner.invoke(cli, ["bank", "compact", "project-a"])
     failed_result = runner.invoke(cli, ["bank", "compact", "project-a"])
 
-    assert partial_result.exit_code == failed_result.exit_code == 0
+    assert partial_result.exit_code == failed_result.exit_code == 1
     assert structured == [partial, failed]
     assert successes == []
     assert generic_errors == []
@@ -1601,7 +1601,7 @@ def test_click_bank_compact_conflict_is_not_rendered_as_failure(monkeypatch):
 
     result = CliRunner().invoke(cli, ["bank", "compact", "project-a"])
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert structured == []
     assert successes == []
     assert generic_errors == [conflict["message"]]
@@ -1623,7 +1623,11 @@ def test_click_generic_conflict_fallback_is_operation_neutral(monkeypatch):
     monkeypatch.setattr(commands, "MCPClient", ConflictClient)
     monkeypatch.setattr(commands, "show_error", generic_errors.append)
 
-    ctx = type("Context", (), {"obj": {"url": "http://localhost", "token": "token"}})()
+    exit_codes = []
+    ctx = type("Context", (), {
+        "obj": {"url": "http://localhost", "token": "token"},
+        "exit": lambda _self, code: exit_codes.append(code),
+    })()
     commands._run_tool(
         ctx,
         "bank_consolidate",
@@ -1633,6 +1637,7 @@ def test_click_generic_conflict_fallback_is_operation_neutral(monkeypatch):
 
     assert successes == []
     assert generic_errors == ["Operation is currently busy"]
+    assert exit_codes == [1]
 
 
 def test_bank_compact_failure_renderer_keeps_recovery_non_success_and_safe(
@@ -1689,8 +1694,7 @@ def test_bank_compact_failure_renderer_keeps_recovery_non_success_and_safe(
 
 
 def test_consolidation_job_renderer_shows_the_bank_size_advisory_only(monkeypatch):
-    """A consolidation result carries no compaction envelope; the CLI
-    shows the server-owned size advisory (indicator only) and nothing else."""
+    """An older result without automatic maintenance still shows its size advisory."""
     stream = io.StringIO()
     monkeypatch.setattr(
         display,
@@ -1722,7 +1726,7 @@ def test_consolidation_job_renderer_shows_the_bank_size_advisory_only(monkeypatc
     output = stream.getvalue()
     assert "Bank size advisory" in output
     assert "facts.md" in output and "40000" in output and "35000" in output
-    assert "human decision" in output
+    assert "measured before consolidation" in output
     assert "Compaction failures" not in output
     assert "CLI_JOB_RAW_COMPLETION_SECRET_9a31" not in output
 
@@ -1943,7 +1947,7 @@ def test_click_space_delete_partial_uses_only_recovery_renderer(monkeypatch):
         ],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert calls == [
         (
             "space_delete",

@@ -825,7 +825,9 @@ def register(mcp: FastMCP) -> int:
                 Optional fields are metadata and source_modified_at (ISO 8601).
                 This async path does not convert plain content and
                 does not compute a missing checksum for the caller.
-            options: Ingestion options (e.g. replace_existing: bool).
+            options: replace_existing: bool; ontology: registered name/YAML, or
+                "auto" to construct a shared catalogue from the complete initial
+                batch in an empty memory. Omission uses the current memory default.
             include_volatile: Allow configured volatile basenames.
 
         Returns:
@@ -899,12 +901,17 @@ def register(mcp: FastMCP) -> int:
             str,
             Field(description="Ingestion job identifier"),
         ],
+        archive: Annotated[
+            bool,
+            Field(description="Read a job in the pinned MID archive instead of the primary memory"),
+        ] = False,
     ) -> dict:
         """Return the status and progress of an asynchronous ingestion job.
 
         Args:
             space_id: Target space identifier.
             job_id: Job identifier returned by long_ingest_async.
+            archive: Select the pinned MID archive, as with long_ingest_list.
 
         Returns:
             Job status dictionary with progress, step, entity/relation counts and error if any.
@@ -923,7 +930,12 @@ def register(mcp: FastMCP) -> int:
                     "message": "job_id must be a non-empty string",
                 }
 
-            return await get_engine_registry().long_engine().ingest_status(
+            if type(archive) is not bool:
+                return {"status": "error", "message": "archive must be a boolean"}
+
+            engine = get_engine_registry().long_engine()
+            read_status = engine.archive_ingest_status if archive else engine.ingest_status
+            return await read_status(
                 space_id=space_id,
                 job_id=job_id.strip(),
             )
@@ -952,6 +964,10 @@ def register(mcp: FastMCP) -> int:
             int,
             Field(description="Number of jobs to skip"),
         ] = 0,
+        archive: Annotated[
+            bool,
+            Field(description="List jobs in the pinned MID-capture archive instead of the primary LONG memory"),
+        ] = False,
     ) -> dict:
         """List asynchronous ingestion jobs for a space.
 
@@ -961,6 +977,7 @@ def register(mcp: FastMCP) -> int:
             status: Optional filter by status.
             limit: Maximum items to return.
             offset: Items offset.
+            archive: Read the pinned MID-capture archive job queue.
 
         Returns:
             List of job status dictionaries and pagination metadata.
@@ -983,14 +1000,11 @@ def register(mcp: FastMCP) -> int:
                     "status": "error",
                     "message": "offset must be a non-negative integer",
                 }
-
-            return await get_engine_registry().long_engine().ingest_list(
-                space_id=space_id,
-                batch_id=batch_id,
-                status=status,
-                limit=limit,
-                offset=offset,
-            )
+            arguments = dict(space_id=space_id, batch_id=batch_id, status=status,
+                             limit=limit, offset=offset)
+            if archive:
+                arguments["archive"] = True
+            return await get_engine_registry().long_engine().ingest_list(**arguments)
         except Exception as e:
             return safe_error(e, "graph")
 

@@ -17,6 +17,13 @@ _MEMORY_ID = "memory-a"
 _BUCKET = "source-bucket"
 
 
+def _header_key(key: str, key_format: str) -> str:
+    if key_format == "legacy":
+        return key
+    key = key.replace("_", "-")
+    return key.title() if key_format == "capitalized" else key
+
+
 class _Body:
     def __init__(self, content: bytes) -> None:
         self._content = content
@@ -121,11 +128,19 @@ def _source_fixture():
     return document_key, content, pages, heads, contents
 
 
+@pytest.mark.parametrize("key_format", ["legacy", "hyphen", "capitalized"])
 async def test_storage_inventory_is_exhaustive_and_returns_config_for_matching(
     monkeypatch: pytest.MonkeyPatch,
+    key_format: str,
 ) -> None:
     document_key, content, pages, heads, contents = _source_fixture()
     client = _InventoryClient(pages=pages, heads=heads, contents=contents)
+    if key_format != "legacy":
+        for head in client.heads.values():
+            head["Metadata"] = {
+                _header_key(key, key_format): value
+                for key, value in head["Metadata"].items()
+            }
     storage = _storage(client, _storage_class(monkeypatch))
 
     result = await storage.list_reindex_objects(_MEMORY_ID)
@@ -156,6 +171,38 @@ async def test_storage_inventory_is_exhaustive_and_returns_config_for_matching(
     ]
     assert client.head_calls == list(heads)
     assert client.get_calls == [document_key]
+
+
+@pytest.mark.parametrize("field", ["memory_id", "doc_hash", "original_filename"])
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_storage_inventory_rejects_conflicting_metadata_aliases(
+    monkeypatch, field, reverse,
+):
+    key, _, pages, heads, contents = _source_fixture()
+    metadata = heads[key]["Metadata"]
+    metadata[field.replace("_", "-").title()] = "conflicting-value"
+    if reverse:
+        heads[key]["Metadata"] = dict(reversed(list(metadata.items())))
+    client = _InventoryClient(pages=pages, heads=heads, contents=contents)
+    storage = _storage(client, _storage_class(monkeypatch))
+
+    with pytest.raises(RuntimeError, match="conflicting source metadata"):
+        await storage.list_reindex_objects(_MEMORY_ID)
+    assert client.get_calls == []
+    assert client.put_calls == []
+
+
+async def test_storage_inventory_accepts_identical_metadata_aliases(monkeypatch):
+    key, _, pages, heads, contents = _source_fixture()
+    expected = dict(heads[key]["Metadata"])
+    heads[key]["Metadata"].update({
+        name.replace("_", "-").title(): value for name, value in expected.items()
+    })
+    client = _InventoryClient(pages=pages, heads=heads, contents=contents)
+    storage = _storage(client, _storage_class(monkeypatch))
+
+    result = await storage.list_reindex_objects(_MEMORY_ID)
+    assert result[0]["metadata"] == expected
 
 
 async def test_storage_reindex_calls_are_offloaded_from_the_event_loop(
@@ -330,8 +377,10 @@ async def test_storage_read_rejects_boolean_content_length(
         await storage.read_reindex_object(_MEMORY_ID, document_key, 1)
 
 
+@pytest.mark.parametrize("key_format", ["legacy", "hyphen", "capitalized"])
 async def test_upload_cannot_override_retained_source_ownership_metadata(
     monkeypatch: pytest.MonkeyPatch,
+    key_format: str,
 ) -> None:
     client = _InventoryClient(pages={}, heads={}, contents={})
     storage = _storage(client, _storage_class(monkeypatch))
@@ -342,21 +391,54 @@ async def test_upload_cannot_override_retained_source_ownership_metadata(
         filename="source.txt",
         content=content,
         metadata={
-            "memory_id": "victim",
-            "original_filename": "forged.txt",
-            "doc_hash": "0" * 64,
-            "uploaded_at": "forged",
-            "type": "user-type",
+            _header_key(name, key_format): value
+            for name, value in {
+                "memory_id": "victim",
+                "original_filename": "forged.txt",
+                "doc_hash": "0" * 64,
+                "uploaded_at": "forged",
+                "type": "user-type",
+                "ontology_name": "general",
+                "source_title": "Mémoire",
+            }.items()
         },
     )
 
     assert result["hash"] == hashlib.sha256(content).hexdigest()
     metadata = client.put_calls[0]["Metadata"]
-    assert metadata["memory_id"] == _MEMORY_ID
-    assert metadata["original_filename"] == "source.txt"
-    assert metadata["doc_hash"] == result["hash"]
-    assert metadata["uploaded_at"] != "forged"
+    assert all("_" not in key and key == key.lower() for key in metadata)
+    assert metadata["memory-id"] == _MEMORY_ID
+    assert metadata["original-filename"] == "source.txt"
+    assert metadata["doc-hash"] == result["hash"]
+    assert metadata["uploaded-at"] != "forged"
     assert metadata["type"] == "user-type"
+    assert metadata["ontology-name"] == "general"
+    assert metadata["source-title"] == "M%C3%A9moire"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_upload_rejects_conflicting_metadata_aliases_before_put(monkeypatch, reverse):
+    client = _InventoryClient(pages={}, heads={}, contents={})
+    storage = _storage(client, _storage_class(monkeypatch))
+    metadata = {"Source_Title": "FIRST", "source-title": "SECOND"}
+    if reverse:
+        metadata = dict(reversed(list(metadata.items())))
+
+    with pytest.raises(ValueError, match="conflicting document metadata"):
+        await storage.upload_document(_MEMORY_ID, "source.txt", b"source", metadata=metadata)
+    assert client.put_calls == []
+
+
+async def test_upload_accepts_identical_metadata_aliases(monkeypatch):
+    client = _InventoryClient(pages={}, heads={}, contents={})
+    storage = _storage(client, _storage_class(monkeypatch))
+    await storage.upload_document(
+        _MEMORY_ID, "source.txt", b"source",
+        metadata={"Source_Title": "Mémoire", "source-title": "Mémoire"},
+    )
+    metadata = client.put_calls[0]["Metadata"]
+    assert metadata["source-title"] == "M%C3%A9moire"
+    assert "Source_Title" not in metadata
 
 
 class _Rows:

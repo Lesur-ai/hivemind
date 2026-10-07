@@ -32,6 +32,11 @@
         return identity.auth_type === 'bootstrap' || identity.permissions.includes('manage') || _isAdmin(identity);
     }
 
+    function _canConsolidate(identity) {
+        const permissions = identity && Array.isArray(identity.permissions) ? identity.permissions : [];
+        return permissions.some(permission => ['write', 'manage', 'admin'].includes(permission));
+    }
+
     function _liveIdentity() {
         return (typeof _ctx === 'function' && _ctx().identity) || {};
     }
@@ -153,7 +158,8 @@
                 <span class="spaces-memory-line">${esc(String(_number(space.live_notes_count) ?? '—'))} notes <span class="text-faint">SHORT</span></span>
                 <span class="spaces-memory-line">${esc(String(_number(space.bank_files_count) ?? '—'))} bank files <span class="text-faint">MID</span></span></div></td>
             <td data-label="Consolidation" class="spaces-activity-cell" data-space="${esc(space.space_id)}">
-                <a class="spaces-activity-link" href="${esc('#/consolidation/' + encodeURIComponent(space.space_id))}" title="${esc(BEST_EFFORT_TOOLTIP)}">${_activityHtml(_lanesById && _lanesById[space.space_id])}</a></td>
+                <a class="spaces-activity-link" href="${esc('#/consolidation/' + encodeURIComponent(space.space_id))}" title="${esc(BEST_EFFORT_TOOLTIP)}">${_activityHtml(_lanesById && _lanesById[space.space_id])}</a>
+                ${_canConsolidate(_identity) ? `<button type="button" class="btn btn-secondary btn-sm" data-action="spaces-start-consolidation" data-space="${esc(space.space_id)}">Start a consolidation</button>` : ''}</td>
         </tr>`).join('');
     }
 
@@ -279,6 +285,20 @@
 
     registerAction('spaces-refresh', () => {
         _loadTable(AdminRouter.epoch);
+    });
+
+    registerAction('spaces-start-consolidation', data => {
+        if (!_current(_epoch) || !_canConsolidate(_identity)) return;
+        const spaces = _spacesData && _spacesData.status === 'ok' && Array.isArray(_spacesData.spaces) ? _spacesData.spaces : [];
+        const spaceId = data.space;
+        if (typeof spaceId !== 'string' || !SPACE_ID_RE.test(spaceId) || !spaces.some(space => space.space_id === spaceId)) return;
+        const ctx = { epoch: _epoch, sessionGeneration: _sessionGeneration, identity: _identity };
+        openConsolidationLauncher({ spaces, lanes: Object.values(_lanesById || {}), spaceId, ctx,
+            onSubmitted: result => {
+                if (!_current(ctx.epoch, ctx.sessionGeneration) || !result || !spaces.some(space => space.space_id === result.space_id)) return;
+                AdminRouter.go(`/spaces/${encodeURIComponent(result.space_id)}/consolidation`);
+            },
+        });
     });
 
     // ═══════════════ Create-space form ═══════════════
@@ -417,23 +437,9 @@
 
         if (resp && resp.status === 'created') {
             AdminRouter.refresh();
-            if (resp.token_message) {
-                // §5.3: token_message is shown verbatim in the server-message
-                // slot, not a toast. showModal's single-modal architecture
-                // (§2.4.6) supports this as a multi-step flow: replace the
-                // body with a message-only view (no confirm button) instead
-                // of auto-closing. Returning false leaves the already-
-                // replaced content in place (the original confirm button no
-                // longer exists in the DOM, so its post-click cleanup is a
-                // harmless no-op).
-                showModal(
-                    'Space created',
-                    `<p class="body-small">Space <code class="mono-data">${esc(resp.space_id)}</code> created.</p>${serverMessage(resp.token_message)}`,
-                );
-                return false;
-            }
             showToast('ok', 'Space created');
-            return true;
+            window.openAccessOnboarding({ spaceId: resp.space_id, message: resp.token_message || '' });
+            return false; // The shared token form owns the modal; it creates nothing until confirmed.
         }
         if (resp && resp.status === 'already_exists') {
             if (idError) { idError.hidden = false; idError.innerHTML = `${icon('alert')} ${esc(resp.message || 'This space id already exists.')}`; }

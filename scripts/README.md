@@ -1,7 +1,7 @@
 # 🖥️ Hivemind CLI, Shell & Tests
 
 > Scriptable CLI, interactive shell, and operational test scripts for Hivemind
-> `1.5.3`.
+> `1.6.0`.
 
 🇫🇷 [Version française](README.fr.md)
 
@@ -55,13 +55,14 @@ uv run python scripts/mcp_cli.py whoami                              # Current t
 uv run python scripts/mcp_cli.py about                               # Service version, capabilities
 ```
 
-### Space (10 MCP tools)
+### Space (10 MCP tools + one combined status view)
 
 ```bash
 uv run python scripts/mcp_cli.py space list                          # List accessible spaces
 uv run python scripts/mcp_cli.py space create my-proj -d "Desc" --rules-file RULES/live-mem.standard.memory.bank.md  # manage
 uv run python scripts/mcp_cli.py space invite my-proj sha256:<64-lowercase-hex>  # manage + access; add-only
 uv run python scripts/mcp_cli.py space info my-proj                  # Details (counts, owner, dates, queue summary)
+uv run python scripts/mcp_cli.py space status my-proj                # SHORT → MID → LONG progress and next action
 uv run python scripts/mcp_cli.py space rules my-proj                 # Memory Bank rules of this space
 uv run python scripts/mcp_cli.py space summary my-proj               # Full synthesis (rules + bank + notes counts)
 uv run python scripts/mcp_cli.py space update my-proj -d "New desc"  # Update description / owner
@@ -70,6 +71,30 @@ uv run python scripts/mcp_cli.py space export my-proj                # Export as
 uv run python scripts/mcp_cli.py space delete my-proj --confirm      # Irreversible; removes all token grants (manage)
 uv run python scripts/mcp_cli.py space delete my-proj --confirm --recover-access-grants  # Known older/interrupted deletion only
 ```
+
+For the memory journey, start with `space status <id>`. It reads `space_info`
+and `graph_status`, plus two bounded `long_ingest_list` calls when the primary
+LONG memory is reachable. It shows pending SHORT notes, the current and latest
+terminal MID jobs with compaction phase/outcome, the archive-capture backlog,
+and primary-memory documentary ingestion jobs with their reported steps and
+percentages. When captures are pending or the backlog is unmeasured, up to two
+bounded `long_ingest_list` reads with `archive=true` show active/queued jobs
+from the pinned archive memory, separately from documentary jobs. The queued
+read is skipped if the first read fails. An absent archive, read failure, or
+unreported step is shown as such; the oldest pending capture time is also shown.
+The latest job history is process-local; an empty LONG backlog is **not** proof
+that every current MID file was indexed. If notes need consolidation, run
+`bank consolidate <id>` and inspect its returned job ID with
+`bank consolidation-status <job_id>`; the initial reply only queues work.
+`space status <id> --json` returns an envelope with the original tool responses
+(`ingest_running`/`ingest_queued` for documents and
+`archive_ingest_running`/`archive_ingest_queued` for captures, null when not
+read), plus `recovery_required`, without changing their timestamps. Human
+timestamps use the CLI machine's timezone.
+This RC does not start consolidations automatically.
+Automatic MID compaction appears as the `compacting` phase of its consolidation
+job; manual `bank compact --apply` remains synchronous and has no separate
+background job or per-file progress endpoint.
 
 Before `space delete`, quiesce every writer and background job for that space.
 The CLI renders `status: partial` with exact deletion counts, failed keys,
@@ -341,4 +366,4 @@ scripts/
 
 ---
 
-*Hivemind CLI — 1.5.3*
+*Hivemind CLI — 1.6.0*

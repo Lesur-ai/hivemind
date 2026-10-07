@@ -7,7 +7,7 @@ import dataclasses
 import hashlib
 import json
 import logging
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -49,6 +49,14 @@ class CompactionStorage(WriteSinkFakeStorage):
         # an existing space; model that fact without forcing every focused
         # test to add unrelated metadata objects.
         return key == "space-a/_meta.json" or await super().exists(key)
+
+    async def get_json(self, key: str):
+        value = await super().get_json(key)
+        if value is None and key == "space-a/_meta.json":
+            # Same existing-space premise as exists(): isolated apply tests
+            # bypass space creation, which supplies this real incarnation.
+            return {"space_id": "space-a", "created_at": "2026-09-16T08:00:00+00:00"}
+        return value
 
 
 class RecordingChat:
@@ -321,6 +329,296 @@ async def test_apply_persists_every_verified_preimage_before_the_first_bank_put(
         if key.startswith("_backups/space-a/")
     }
     assert archive_values == {"a" * 120, "b" * 120}
+
+
+@pytest.mark.parametrize("fault", ["none", "write_failed", "readback_corrupt"])
+async def test_archive_intent_is_verified_before_any_mid_replacement(fault) -> None:
+    class IntentStorage(CompactionStorage):
+        async def put(self, key, content, content_type="text/plain"):
+            if "/_mid_archive_pending/" in key:
+                if fault == "write_failed":
+                    raise OSError("storage unavailable")
+                if fault == "readback_corrupt":
+                    content = "{}"
+            await super().put(key, content, content_type)
+
+    storage = IntentStorage()
+    source = "A sourced historical decision. " * 12
+    storage.objects["space-a/bank/facts.md"] = source
+    service = make_service(max_size=100)
+    service._plan_single_file_compaction = AsyncMock(
+        return_value=("# Retained summary", _prepared_plan_details())
+    )
+    batch, failures = await service._prepare_compaction_batch(
+        "space-a", await storage.list_and_get("space-a/bank/"), "# Rules"
+    )
+    assert not failures and batch is not None
+    result = await service._apply_prepared_compaction_batch(
+        "space-a", batch, DirectLocalWriteSink(storage)
+    )
+    if fault != "none":
+        assert result["status"] == "error"
+        assert result["failure_reason"] == "compaction_preimage_intent_unverified"
+        assert storage.objects["space-a/bank/facts.md"] == source
+        assert not any(e.startswith("put:space-a/bank/") for e in storage.events)
+    else:
+        assert result["status"] == "ok"
+        intent = next(k for k in storage.objects if "/_mid_archive_pending/" in k)
+        record = await storage.get_json(intent)
+        assert record["preimage_id"] == result["preimage_id"]
+        assert record["documents"] == [{"bank_path": "facts.md", "size_bytes": len(source.encode()),
+                                          "sha256": hashlib.sha256(source.encode()).hexdigest()}]
+        assert storage.events.index("put:" + intent) < storage.events.index("put:space-a/bank/facts.md")
+
+
+@pytest.mark.parametrize("binding", [
+    None,
+    {"url": "https://gm.example.com/mcp?tenant=x"},
+    {"url": "https://user:private-password@gm.example.com"},
+    {"url": "https://gm.example.com/#frag"},
+    {"url": "http://[malformed"},
+    {"binding": "unknown", "url": None, "memory_id": [], "ontology": {}},
+    "malformed-binding",
+], ids=["empty-embedded", "query", "userinfo", "fragment", "malformed-url",
+        "malformed-fields", "malformed-block"])
+async def test_mid_compaction_does_not_validate_long_configuration(monkeypatch, binding):
+    from live_mem.config import get_settings
+    from live_mem.core import mid_archive
+    from live_mem.core.graph_bridge import GraphBridgeService
+
+    monkeypatch.setattr(get_settings(), "long_embedded_url", "")
+    resolve = AsyncMock(side_effect=AssertionError("MID must not resolve LONG"))
+    client = Mock(side_effect=AssertionError("MID must not construct a LONG client"))
+    monkeypatch.setattr(GraphBridgeService, "_resolve_or_embedded", resolve)
+    monkeypatch.setattr(GraphBridgeService, "_make_client", client)
+    storage = CompactionStorage()
+    source = "# History\nAn independently retained MID assertion.\n" * 12
+    storage.objects["space-a/bank/facts.md"] = source
+    # Real stored metadata, not CompactionStorage's isolated-test fallback.
+    meta = {"space_id": "space-a", "created_at": "2026-09-16T08:00:00+00:00"}
+    if binding is not None:
+        meta["graph_memory"] = ({
+            "binding": "explicit", "memory_id": "memory-a", "ontology": "general",
+            "token": "private-token", **binding,
+        } if isinstance(binding, dict) else binding)
+    await storage.put_json("space-a/_meta.json", meta)
+    service = make_service(max_size=100)
+    service._plan_single_file_compaction = AsyncMock(
+        return_value=("# Retained summary", _prepared_plan_details())
+    )
+    batch, failures = await service._prepare_compaction_batch(
+        "space-a", await storage.list_and_get("space-a/bank/"), "# Rules"
+    )
+    assert not failures and batch is not None
+    result = await service._apply_prepared_compaction_batch(
+        "space-a", batch, DirectLocalWriteSink(storage)
+    )
+    assert result["status"] == "ok"
+    assert storage.objects["space-a/bank/facts.md"] == "# Retained summary"
+    key = next(k for k in storage.objects if "/_mid_archive_pending/" in k)
+    record = mid_archive.validate_record(await storage.get_json(key), "space-a", key)
+    if binding is None:
+        assert record["binding_sha256"] is None
+    assert record["preimage_id"] == result["preimage_id"]
+    assert await mid_archive.archive_bytes(storage, record, record["documents"][0]) == source.encode()
+    assert storage.events.index("put:" + key) < storage.events.index("put:space-a/bank/facts.md")
+    assert "private-token" not in storage.objects[key]
+    assert "private-password" not in storage.objects[key]
+    assert "https://" not in storage.objects[key]
+    resolve.assert_not_called()
+    client.assert_not_called()
+
+
+def test_archive_binding_identity_waits_for_real_binding_and_allows_token_rotation(monkeypatch):
+    from live_mem.config import get_settings
+    from live_mem.core import mid_archive
+    from live_mem.core.memory_id import derive_memory_id
+    from live_mem.core.models import EMBEDDED_TOKEN_SENTINEL
+
+    url = "http://graph-memory:8002/mcp"
+    monkeypatch.setattr(get_settings(), "long_embedded_url", "")
+    meta = {"space_id": "space-a", "created_at": "2026-09-16T08:00:00+00:00"}
+    assert mid_archive.space_identity(meta, "space-a") == (meta["created_at"], None)
+    monkeypatch.setattr(get_settings(), "long_embedded_url", url)
+    assert mid_archive.space_identity(meta, "space-a") == (meta["created_at"], None)
+    meta["graph_memory"] = {
+        "binding": "embedded", "url": url, "memory_id": derive_memory_id("space-a"),
+        "ontology": "general", "token": EMBEDDED_TOKEN_SENTINEL,
+    }
+    expected = mid_archive.space_identity(meta, "space-a")
+    assert isinstance(expected[1], str) and len(expected[1]) == 64
+    # Legacy sentinel bindings have the same identity without an explicit kind.
+    meta["graph_memory"].pop("binding")
+    assert mid_archive.space_identity(meta, "space-a") == expected
+    meta["graph_memory"].update(binding="explicit", token="old-token")
+    explicit = mid_archive.space_identity(meta, "space-a")
+    meta["graph_memory"].update(token="rotated-token", last_sync="later")
+    assert mid_archive.space_identity(meta, "space-a") == explicit
+    for field, value in (("url", url + "/another"), ("memory_id", "other-memory"),
+                         ("ontology", "other-ontology"), ("binding", "embedded")):
+        changed = {**meta, "graph_memory": {**meta["graph_memory"], field: value}}
+        assert mid_archive.space_identity(changed, "space-a") != explicit
+
+
+@pytest.mark.parametrize("initial_binding", ["explicit", "unconfigured", "changed-setting"])
+async def test_compacted_away_fact_is_projected_with_its_immutable_source(monkeypatch, initial_binding) -> None:
+    from types import SimpleNamespace
+    from live_mem.config import get_settings
+    from live_mem.core import graph_bridge, mid_archive, tokens
+    from live_mem.core.engines import EngineRegistry
+    from live_mem.core.engines.long_engine import LongEngine
+    from live_mem.core.graph_bridge import GraphBridgeService
+    from live_mem.core.locks import LockManager
+    from live_mem.core.memory_id import derive_memory_id
+    from live_mem.core.mid_archive_projection import MidArchiveProjector
+    from live_mem.core.models import EMBEDDED_TOKEN_SENTINEL
+    import base64
+
+    storage = CompactionStorage()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "long_embedded_url", "" if initial_binding == "unconfigured"
+                        else "http://graph-memory:8002")
+    source = "# Decision\nThe discontinued project used archive identifier PHOENIX-174.\n" + "Repeated detail. " * 30
+    sources = {
+        "facts.md": source,
+        "other.md": "# Decision\nThe retired workspace used ORION-256.\n" + "Other detail. " * 30,
+    }
+    for path, content in sources.items():
+        storage.objects[f"space-a/bank/{path}"] = content
+    meta = {"space_id": "space-a", "created_at": "2026-09-16T08:00:00+00:00"}
+    if initial_binding == "explicit":
+        meta["graph_memory"] = {"binding": "explicit", "url": "https://graph.example/mcp",
+                                "memory_id": "memory-a", "ontology": "general", "token": "test"}
+    await storage.put_json("space-a/_meta.json", meta)
+    service = make_service(max_size=100)
+    service._plan_single_file_compaction = AsyncMock(return_value=("# Current\nProject discontinued.", _prepared_plan_details()))
+    batch, failures = await service._prepare_compaction_batch(
+        "space-a", await storage.list_and_get("space-a/bank/"), "# Rules"
+    )
+    assert not failures
+    applied = await service._apply_prepared_compaction_batch("space-a", batch, DirectLocalWriteSink(storage))
+    assert applied["status"] == "ok"
+    assert "PHOENIX-174" not in storage.objects["space-a/bank/facts.md"]
+    key = next(k for k in storage.objects if "/_mid_archive_pending/" in k)
+    captured = await storage.get_json(key)
+    assert captured["version"] == 2
+    assert {document["bank_path"] for document in captured["documents"]} == set(sources)
+
+    # Exercise real projector -> LongEngine -> guarded bridge; only the
+    # external graph transport is deterministic, with persisted documents.
+    documents = {}
+    calls = []
+    memory_id = "memory-a" if initial_binding == "explicit" else derive_memory_id("space-a")
+    memories = {}
+    if initial_binding == "explicit":
+        memories[memory_id] = {"memory_id": memory_id, "ontology": "general",
+                               "created_at": "2026-09-16T08:00:00+00:00"}
+    search_targets = []
+    class GraphTransport:
+        async def call_tool(self, name, args):
+            calls.append(name)
+            if name == "system_health":
+                return {"status": "healthy"}
+            if name == "memory_list":
+                return {"status": "ok", "memories": [dict(row) for row in memories.values()]}
+            target = args["memory_id"]
+            if name == "memory_create":
+                assert target not in memories
+                memories[target] = {"memory_id": target, "ontology": args["ontology"],
+                                    "created_at": "2026-09-16T09:00:00+00:00"}
+                return {"status": "created", "memory_id": target}
+            assert target in memories
+            if name in ("document_get", "memory_ingest_batch_async"):
+                # The real bridge must bind, and the real worker must pin and
+                # read back that destination before any document operation.
+                persisted = await storage.get_json("space-a/_meta.json")
+                pinned = await storage.get_json(key)
+                assert pinned["binding_sha256"] is not None
+                assert pinned["binding_sha256"] == mid_archive.space_identity(
+                    persisted, "space-a", archive=True)[1]
+                archive_binding = await storage.get_json(
+                    f"space-a/_mid_archive_bindings/{target}.json")
+                assert archive_binding["memory_id"] == target
+                assert target != memory_id
+            if name == "document_get":
+                doc = documents.get((target, args["source_path"]))
+                return {"status": "ok", "document": doc} if doc else {"status": "not_found"}
+            if name == "memory_ingest_batch_async":
+                assert args["ontology"] == "auto"
+                assert memories[target]["ontology"] == "general"
+                assert {doc["source_path"] for doc in args["documents"]} == {
+                    mid_archive.source_path(captured, doc) for doc in captured["documents"]}
+                for doc in args["documents"]:
+                    bank_path = doc["metadata"]["bank_path"]
+                    content = base64.b64decode(doc["content_base64"]).decode()
+                    assert content == sources[bank_path]
+                    assert doc["metadata"]["provenance"] == "mid_archive"
+                    assert doc["metadata"]["preimage_id"] == captured["preimage_id"]
+                    assert doc["sha256"] == hashlib.sha256(content.encode()).hexdigest()
+                    documents[target, doc["source_path"]] = {**doc, "hash": doc["sha256"],
+                        "ingestion_status": "succeeded", "content": content}
+                memories[target]["ontology"] = "auto_0123456789abcdef"
+                return {"status": "ok", "items": [
+                    {"status": "skipped", "source_path": doc["source_path"]}
+                    for doc in args["documents"]]}
+            if name == "memory_search":
+                search_targets.append(target)
+                return {"status": "ok", "results": [{"source_path": path, "text": d["content"]}
+                    for (namespace, path), d in documents.items()
+                    if namespace == target and args["query"] in d["content"]]}
+            raise AssertionError(name)
+    transport = GraphTransport()
+    monkeypatch.setattr(graph_bridge, "get_storage", lambda: storage)
+    monkeypatch.setattr(graph_bridge, "resolve_embedded_token", lambda *a, **kw: "live-test-token")
+    token_service = SimpleNamespace(register_internal_long_token=AsyncMock(
+        return_value={"status": "ok", "current_active": True}
+    ))
+    monkeypatch.setattr(tokens, "get_token_service", lambda: token_service)
+    bridge = GraphBridgeService(client_factory=lambda *a, **kw: transport, url_validator=lambda *a, **kw: None)
+    long = LongEngine(bridge)
+    now = [2_000_000_000.0]
+    worker = MidArchiveProjector(storage, long, EngineRegistry(storage=storage), LockManager(),
+                                clock=lambda: now[0])
+    if initial_binding == "unconfigured":
+        await worker.run_once()
+        assert not calls
+        assert await storage.get_json(key) is not None
+        assert "graph_memory" not in await storage.get_json("space-a/_meta.json")
+        now[0] += 4000
+    if initial_binding != "explicit":
+        # Activation or cosmetic setting change after compaction must not pin
+        # a destination that never existed in the space metadata.
+        monkeypatch.setattr(settings, "long_embedded_url", "http://graph-memory:8002/")
+    await worker.run_once()
+    bound = (await storage.get_json("space-a/_meta.json")).get("graph_memory")
+    if initial_binding != "explicit":
+        assert bound, await storage.get_json(key)
+        assert captured["binding_sha256"] is None
+        assert bound["binding"] == "embedded" and bound["token"] == EMBEDDED_TOKEN_SENTINEL
+        assert bound["memory_id"] == memory_id
+        token_service.register_internal_long_token.assert_awaited_once_with("live-test-token")
+    assert bound["memory_id"] == memory_id and bound["ontology"] == "general"
+    archive_id = next(namespace for namespace in memories if namespace != memory_id)
+    archive_binding = await storage.get_json(f"space-a/_mid_archive_bindings/{archive_id}.json")
+    assert archive_binding["memory_id"] == archive_id
+    assert "mid_archive" not in bound
+    assert archive_id != memory_id
+    assert set(memories) == {memory_id, archive_id}
+    assert memories[memory_id]["ontology"] == "general"
+    assert memories[archive_id]["ontology"] == "auto_0123456789abcdef"
+    assert len(documents) == len(sources), await storage.get_json(key)
+    assert {namespace for namespace, _ in documents} == {archive_id}
+    for path, content in sources.items():
+        assert storage.objects[f"_backups/{captured['preimage_id']}/bank/{path}"] == content
+    assert not any("/_mid_archive_pending/" in key for key in storage.objects)
+    found = await long.search("space-a", "PHOENIX-174")
+    assert found["status"] == "ok" and len(found["results"]) == 1
+    assert set(search_targets) == {memory_id, archive_id}
+    assert "PHOENIX-174" in found["results"][0]["text"]
+    assert applied["preimage_id"] in found["results"][0]["source_path"]
+    assert not any("/_mid_archive_pending/" in key for key in storage.objects)
+    await worker.run_once()
+    assert calls.count("memory_ingest_batch_async") == 1
 
 
 async def test_apply_prewrite_drift_restores_earlier_owned_results_only() -> None:
@@ -963,7 +1261,7 @@ async def test_prepare_rejects_normalized_target_collisions_before_provider() ->
 async def test_manual_prepare_failure_is_global_not_partial_success() -> None:
     storage = CompactionStorage()
     storage.objects = {
-        "space-a/_meta.json": "{}",
+        "space-a/_meta.json": '{"space_id":"space-a","created_at":"2026-01-01T00:00:00+00:00"}',
         "space-a/_rules.md": "# Rules",
         "space-a/bank/a.md": "a" * 120,
         "space-a/bank/b.md": "b" * 120,
@@ -1002,7 +1300,7 @@ async def test_manual_dry_run_reports_snapshot_collision_without_planning(
 
     storage = CompactionStorage()
     storage.objects = {
-        "space-a/_meta.json": "{}",
+        "space-a/_meta.json": '{"space_id":"space-a","created_at":"2026-01-01T00:00:00+00:00"}',
         "space-a/_rules.md": "# Rules",
         "space-a/bank/facts.md": "# Facts\n\n## Detail\n" + "f" * 120,
         "space-a/bank/facts\u200b.md": "# Facts\n\n## Detail\n" + "g" * 120,
@@ -1034,7 +1332,7 @@ async def test_manual_dry_run_reports_all_provider_free_preflight_failures(
 
     storage = CompactionStorage()
     storage.objects = {
-        "space-a/_meta.json": "{}",
+        "space-a/_meta.json": '{"space_id":"space-a","created_at":"2026-01-01T00:00:00+00:00"}',
         "space-a/_rules.md": "# Rules",
         "space-a/bank/a.md": "## No level-one heading\n\n" + "a" * 120,
         "space-a/bank/b.md": "# Broken\n\n```\n" + "b" * 120,
@@ -1078,7 +1376,7 @@ async def test_manual_dry_run_keeps_provider_free_preflights_after_snapshot_fail
 
     storage = CompactionStorage()
     storage.objects = {
-        "space-a/_meta.json": "{}",
+        "space-a/_meta.json": '{"space_id":"space-a","created_at":"2026-01-01T00:00:00+00:00"}',
         "space-a/_rules.md": "# Rules",
         "space-a/bank/a.md": "# Facts\n\n## Detail\n" + "a" * 120,
         "space-a/bank/a\u200b.md": "# Facts\n\n## Detail\n" + "b" * 120,
@@ -1193,7 +1491,7 @@ async def test_manual_apply_failure_restores_verified_preimages() -> None:
 
     storage = FailSecondPutStorage()
     storage.objects = {
-        "space-a/_meta.json": "{}",
+        "space-a/_meta.json": '{"space_id":"space-a","created_at":"2026-01-01T00:00:00+00:00"}',
         "space-a/_rules.md": "# Rules",
         "space-a/bank/a.md": "a" * 120,
         "space-a/bank/b.md": "b" * 120,
@@ -1578,13 +1876,22 @@ async def test_balanced_source_fence_with_a_pseudo_close_remains_valid():
     ("source", "max_size", "replacement", "reduction_label"),
     [
         # 1 % de réduction : jetée avant par le plancher de 5 %.
-        ("# Bank\n\n## Details\n" + "x" * 1_000, 10_000, "y" * 990, "1 %"),
+        pytest.param(
+            "# Bank\n\n## Details\n" + "x" * 1_000, 10_000, "y" * 990, "1 %",
+            id="one-percent-reduction",
+        ),
         # Réduction réelle mais résultat encore TRÈS au-dessus de la limite :
         # jetée avant par la cible à 75 % puis par la limite dure.  C'est le cas
         # de `progress.md`, où aucun résultat réaliste ne passait, donc où le
         # fichier ne pouvait jamais être amélioré.
-        ("# Bank\n\n## Details\n" + "x" * 20_000, 1_000, "y" * 8_000, "60 %"),
-        ("# Bank\n\n## Details\n" + "x" * 2_000, 1_000, "y" * 1_800, "10 %"),
+        pytest.param(
+            "# Bank\n\n## Details\n" + "x" * 20_000, 1_000, "y" * 8_000, "60 %",
+            id="sixty-percent-reduction-above-limit",
+        ),
+        pytest.param(
+            "# Bank\n\n## Details\n" + "x" * 2_000, 1_000, "y" * 1_800, "10 %",
+            id="ten-percent-reduction-above-limit",
+        ),
     ],
 )
 async def test_a_real_reduction_is_accepted_even_when_the_ideal_is_out_of_reach(
@@ -1728,7 +2035,7 @@ async def test_manual_compaction_dry_run_reports_utf8_limits_without_writing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = CompactionStorage()
-    await storage.put_json("space-a/_meta.json", {"created_at": "2026-01-01"})
+    await storage.put_json("space-a/_meta.json", {"space_id": "space-a", "created_at": "2026-01-01T00:00:00+00:00"})
     await storage.put("space-a/_rules.md", "# Rules")
     oversized = "# Facts\n\n## Detail\n" + "é" * 120
     await storage.put("space-a/bank/activeContext.md", oversized)
@@ -1760,7 +2067,7 @@ async def test_manual_compaction_writes_a_validated_smaller_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = CompactionStorage()
-    await storage.put_json("space-a/_meta.json", {"created_at": "2026-01-01"})
+    await storage.put_json("space-a/_meta.json", {"space_id": "space-a", "created_at": "2026-01-01T00:00:00+00:00"})
     await storage.put("space-a/_rules.md", "# Rules")
     await storage.put("space-a/bank/facts.md", "f" * 120)
     service = make_service(max_size=100)
@@ -1805,7 +2112,7 @@ async def test_manual_compaction_preserves_content_and_safe_plan_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     storage = CompactionStorage()
-    await storage.put_json("space-a/_meta.json", {"created_at": "2026-01-01"})
+    await storage.put_json("space-a/_meta.json", {"space_id": "space-a", "created_at": "2026-01-01T00:00:00+00:00"})
     await storage.put("space-a/_rules.md", "# Rules")
     await storage.put("space-a/bank/facts.md", "f" * 120)
     service = make_service(max_size=100)
@@ -1840,7 +2147,7 @@ async def test_manual_compaction_rejects_legacy_plan_without_leaking_its_content
     source = "# Bank\n\n## Details\n" + "obsolete detail " * 200
     storage = CompactionStorage()
     storage.objects = {
-        "space-a/_meta.json": "{}",
+        "space-a/_meta.json": '{"space_id":"space-a","created_at":"2026-01-01T00:00:00+00:00"}',
         "space-a/_rules.md": "# Rules",
         "space-a/bank/facts.md": source,
     }
@@ -1972,7 +2279,9 @@ def test_a_result_above_the_limit_survives_preparation_and_apply_revalidation():
         ("x" * 300, "x" * 300, "compaction_not_smaller"),
         ("x" * 300, "y" * 400, "compaction_not_smaller"),
         # An actually empty result is still rejected before durable writes.
-        ("x" * 2_000, "", "empty_compaction_candidate"),
+        pytest.param(
+            "x" * 2_000, "", "empty_compaction_candidate", id="empty-result",
+        ),
     ],
 )
 def test_preparation_still_refuses_what_the_envelope_forbids(
@@ -2031,7 +2340,7 @@ async def test_compaction_recovery_keeps_other_provider_errors_terminal(category
 async def test_manual_compaction_recovery_preserves_transaction_boundary(recover, invalid_response, monkeypatch):
     storage = CompactionStorage()
     storage.objects = {
-        "space-a/_meta.json": "{}", "space-a/_rules.md": "# Rules",
+        "space-a/_meta.json": '{"space_id":"space-a","created_at":"2026-01-01T00:00:00+00:00"}', "space-a/_rules.md": "# Rules",
         "space-a/bank/facts.md": _source(), "space-a/live/untouched.md": "pending note",
     }
     before = dict(storage.objects)

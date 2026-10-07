@@ -1651,7 +1651,7 @@ async def test_consolidate_never_runs_compaction_and_reports_a_size_advisory(
         assert banned not in result, banned
     warnings = [r for r in caplog.records if "Bank size advisory" in r.getMessage()]
     assert len(warnings) == 1
-    assert "compaction is a human decision" in warnings[0].getMessage()
+    assert "measured before consolidation" in warnings[0].getMessage()
     assert "progress.md=" in warnings[0].getMessage()
     assert oversized[:20] not in warnings[0].getMessage()
 
@@ -1714,7 +1714,7 @@ def test_size_advisory_helper_emits_exactly_one_warning_even_for_a_hostile_key(
     assert len(warnings) == 1, [r.getMessage()[:80] for r in warnings]
     assert advisory == [{"filename": "bank/progress-notes.md", "utf8_bytes": 150, "max_size": 100}]
     assert "\u200b" not in warnings[0].getMessage() and "\u2011" not in warnings[0].getMessage()
-    assert "compaction is a human decision" in warnings[0].getMessage()
+    assert "measured before consolidation" in warnings[0].getMessage()
 
 
 def test_bank_size_advisory_helper_is_pure_and_content_free() -> None:

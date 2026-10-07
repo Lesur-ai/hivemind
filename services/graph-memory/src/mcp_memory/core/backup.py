@@ -381,8 +381,8 @@ class BackupService:
                 Body=content,
                 ContentType=content_type,
                 Metadata={
-                    "backup_id": backup_id,
-                    "memory_id": memory_id,
+                    "backup-id": backup_id,
+                    "memory-id": memory_id,
                 }
             )
             await _log(f"  📁 {filename} ({self._human_size(len(content))})")
@@ -1020,9 +1020,9 @@ class BackupService:
                         Body=doc_content,
                         ContentType=content_type,
                         Metadata={
-                            "memory_id": memory_id,
-                            "original_filename": self._storage._sanitize_metadata_value(doc_filename),
-                            "restored_from": "archive",
+                            "memory-id": memory_id,
+                            "original-filename": self._storage._sanitize_metadata_value(doc_filename),
+                            "restored-from": "archive",
                         }
                     )
                     docs_uploaded += 1

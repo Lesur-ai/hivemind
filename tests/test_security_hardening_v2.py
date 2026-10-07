@@ -1012,6 +1012,8 @@ class TestLM2_26_DependencyBounds:
             "aiohttp": ((3, 14, 3), "CVE-2026-69244"),
             "pypdf": ((6, 16, 1), "GHSA-763m-79hh-57f2"),
             "h2": ((4, 4, 1), "GHSA-6hr6-w5qg-qmwg"),
+            "PyJWT": ((2, 15, 1), "CVE-2026-101918 / library padding regression"),
+            "urllib3": ((2, 8, 0), "CVE-2026-97687/97688/97689"),
         }
         for package, (minimum, cve) in expected.items():
             match = re.search(
@@ -1025,7 +1027,10 @@ class TestLM2_26_DependencyBounds:
                 f"Graph Memory demande {package} {match.group(1)}, vulnérable à {cve}"
             )
 
-    @pytest.mark.parametrize("package,minimum", [("pypdf", (6, 16, 1)), ("h2", (4, 4, 1))])
+    @pytest.mark.parametrize("package,minimum", [
+        ("pypdf", (6, 16, 1)), ("h2", (4, 4, 1)),
+        ("pyjwt", (2, 15, 1)), ("urllib3", (2, 8, 0)),
+    ])
     def test_document_dependency_floors_cover_root_and_embedded_locks(self, package, minimum):
         document = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))
         versions = [item["version"] for item in document["package"] if item["name"] == package]

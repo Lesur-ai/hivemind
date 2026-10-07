@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 from live_mem.core.engines.long_engine import LongEngine
 from live_mem.core.graph_bridge import GraphBridgeService
-from tests.fakes import FakeGraphTransport
+from tests.fakes import FakeGraphTransport, validate_fake_graph_url
 
 _SPACE = "space-a"
 _META = f"{_SPACE}/_meta.json"
@@ -69,7 +69,10 @@ def _meta_connected(extra_gm: dict | None = None) -> dict:
 
 def _build(**factory_kwargs):
     factory = FakeGraphTransport.factory(**factory_kwargs)
-    return LongEngine(bridge=GraphBridgeService(client_factory=factory)), factory
+    bridge = GraphBridgeService(
+        client_factory=factory, url_validator=validate_fake_graph_url,
+    )
+    return LongEngine(bridge=bridge), factory
 
 
 def _patch(storage: FakeStorage):
@@ -80,7 +83,10 @@ async def test_status_includes_protocol_derived_marker() -> None:
     storage = FakeStorage()
     await storage.put_json(_META, _meta_connected())
     engine, _ = _build(responses=_OK_STATS)
-    with _patch(storage):
+    with _patch(storage), patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        side_effect=AssertionError("fake transport must not resolve DNS"),
+    ):
         r = await engine.status(_SPACE)
     assert r["connected"] is True
     marker = r["long_authority"]

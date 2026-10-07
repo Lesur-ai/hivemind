@@ -62,7 +62,11 @@ from unittest.mock import patch
 import pytest
 
 from live_mem.core.graph_bridge import GraphBridgeService
-from tests.fakes import FakeGraphTransport, GraphLongFakeStorage as FakeStorage
+from tests.fakes import (
+    FakeGraphTransport,
+    GraphLongFakeStorage as FakeStorage,
+    validate_fake_graph_url,
+)
 
 
 # =============================================================================
@@ -104,7 +108,9 @@ def _meta_connected(
 def _build(storage: "FakeStorage", **factory_kwargs):
     """Real bridge wired with a fake transport factory. Returns (bridge, factory)."""
     factory = FakeGraphTransport.factory(**factory_kwargs)
-    bridge = GraphBridgeService(client_factory=factory)
+    bridge = GraphBridgeService(
+        client_factory=factory, url_validator=validate_fake_graph_url,
+    )
     return bridge, factory
 
 
@@ -201,7 +207,10 @@ async def test_push_never_deletes_canonical_source_path_doc() -> None:
     }
     bridge, factory = _build(storage, responses=responses)
 
-    with _patch_storage(storage):
+    with _patch_storage(storage), patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        side_effect=AssertionError("fake transport must not resolve DNS"),
+    ):
         result = await bridge.push(_SPACE)
 
     inst = factory.instances[-1]
