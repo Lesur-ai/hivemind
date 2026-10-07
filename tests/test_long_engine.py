@@ -39,8 +39,12 @@ import pytest
 
 from live_mem.core.graph_bridge import GraphBridgeService, GraphMemoryClient
 from live_mem.core.engines.long_engine import LongEngine
-from live_mem.core.url_guard import validate_gm_url
-from tests.fakes import FakeGraphTransport, GraphLongFakeStorage as FakeStorage, RecordedCall
+from tests.fakes import (
+    FakeGraphTransport,
+    GraphLongFakeStorage as FakeStorage,
+    RecordedCall,
+    validate_fake_graph_url,
+)
 
 
 # =============================================================================
@@ -66,18 +70,6 @@ def _meta_connected(url: str = _CONNECTED_URL, memory_id: str = "mem-1") -> dict
     }
 
 
-def _test_url_validator(url: str, *, allow_private_hosts: bool = False):
-    """Keep the fake transport suite hermetic without weakening SSRF coverage.
-
-    The sentinel endpoint has no real DNS record. Only that exact fake transport
-    URL bypasses resolution; every other value still uses the production SSRF
-    validator so hostile URL cases retain their security coverage.
-    """
-    if url == _CONNECTED_URL:
-        return None
-    return validate_gm_url(url, allow_private_hosts=allow_private_hosts)
-
-
 def _build(storage: FakeStorage, **factory_kwargs):
     """Wire a real bridge (fake client factory) under a real engine.
 
@@ -88,7 +80,7 @@ def _build(storage: FakeStorage, **factory_kwargs):
     factory = FakeGraphTransport.factory(**factory_kwargs)
     bridge = GraphBridgeService(
         client_factory=factory,
-        url_validator=_test_url_validator,
+        url_validator=validate_fake_graph_url,
     )
     engine = LongEngine(bridge=bridge)
     return engine, bridge, factory
@@ -354,6 +346,31 @@ async def test_fake_transport_never_resolves_sentinel_dns() -> None:
     assert factory.instances[-1].tool_names() == ["memory_query"]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://gm.example.com",
+        "https://gm.example.com/",
+        "https://gm.example.com.evil.invalid",
+        "https://other.example.com",
+    ],
+)
+@pytest.mark.parametrize("allow_private_hosts", [False, True])
+def test_fake_url_validator_delegates_non_sentinel_targets(
+    url: str, allow_private_hosts: bool,
+) -> None:
+    with patch(
+        "tests.fakes.fake_graph_transport.validate_gm_url",
+        return_value="production guard result",
+    ) as validator:
+        result = validate_fake_graph_url(
+            url, allow_private_hosts=allow_private_hosts,
+        )
+
+    assert result == "production guard result"
+    validator.assert_called_once_with(url, allow_private_hosts=allow_private_hosts)
+
+
 # =============================================================================
 # GROUP C — byte-for-byte for legacy methods (seam regression)
 # =============================================================================
@@ -578,6 +595,10 @@ def test_graph_bridge_no_commit_path_import_ast() -> None:
     # graph_bridge legitimately imports mcp (transport) — assert ONLY against
     # commit-path modules, never mcp.
     for imp in _imports_of(_BRIDGE_TREE):
+        # Pure frozen provider IDs belong to the independent inference package,
+        # not live_mem.core.hivemind (whose import loads commit authority).
+        if imp == "from hivemind_inference.registry import EMBEDDING_PROVIDER_IDS":
+            continue
         low = imp.lower()
         for marker in _COMMIT_MODULE_MARKERS:
             assert marker not in low, f"forbidden commit-path import: {imp}"
@@ -611,6 +632,11 @@ def test_long_engine_public_async_surface_is_canonical() -> None:
         "search",
         "reindex",
         "plan_ingest",
+        "prepare_ingest",
+        "prepare_archive_ingest",
+        "ingest_archive",
+        "archive_ingest_status",
+        "get_archive_document",
         "ingest_async",
         "ingest_status",
         "ingest_list",

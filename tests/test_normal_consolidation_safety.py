@@ -1721,10 +1721,13 @@ async def test_bounded_json_fence_passes_the_existing_prepare_apply_guards(
     [
         # The prefix bound is inclusive and counts the physical newline that
         # places the Markdown fence at the start of its line.
-        "p" * 1024
-        + "\n```json\n"
-        + json.dumps(_output(_create("new.md")))
-        + "\n```",
+        pytest.param(
+            "p" * 1024
+            + "\n```json\n"
+            + json.dumps(_output(_create("new.md")))
+            + "\n```",
+            id="prefix-exceeds-bound-with-newline",
+        ),
         "preface```json\n"
         + json.dumps(_output(_create("new.md")))
         + "\n```",

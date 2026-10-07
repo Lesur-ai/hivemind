@@ -1,9 +1,10 @@
 # Third-Party Notices
 
 Hivemind is licensed under the Apache License, Version 2.0 (see [`LICENSE`](LICENSE)).
-This file records third-party source vendored into this repository, with its
-provenance and license, as required by the Apache-2.0 redistribution terms and
-the embedded-runtime provenance contract (ADR-0019).
+This file records third-party source vendored into this repository and the
+standalone CLI's build dependency, with their provenance and licenses, as
+required by the Apache-2.0 redistribution terms and the embedded-runtime
+provenance contract (ADR-0019).
 
 ---
 
@@ -78,10 +79,26 @@ refreshed against a future upstream release:
   local PAX Unicode names and original documents with reserved basenames remain
   compatible within the documented limits. This adaptation does not change
   the archive format, direct S3 restore or the pinned upstream import.
+- **`src/mcp_memory/core/ontology_construction.py`** — Hivemind-owned D1/D2
+  construction core (#533): full-corpus sampling, source-bound open assertions,
+  complete catalogue replacement, bounded inference and caller-owned checkpoints.
+  It reuses the shared inference records and ontology validator. Product admission
+  and activation use `automatic_ontology.py`, the existing queue and a dedicated
+  JSON property on the Graph Memory node. Incomplete checkpoints include source
+  passages for resumption; freeze removes that ledger, and explicit memory
+  deletion removes abandoned checkpoints. Freeze also clears the superseded
+  ontology URI. The persisted default is preserved by backup/import without adding objects to the S3 document inventory. The simple
+  and chunked ontology extraction paths validate the effective vocabulary and
+  expose residue diagnostics before document graph writes (#533).
 - **Static asset confinement.** `src/mcp_memory/auth/middleware.py` validates
   static paths, resolves the packaged root and candidate canonically, and
   rejects escaping paths and symlinks before opening files. Missing or invalid
   assets return constant 404 responses with defensive headers.
+- **Graph UI HTML boundaries.** `static/js/ask.js`, `static/js/sidebar.js`, and
+  `static/js/graph.js` escape graph and API data before inserting it into HTML.
+  Q&A Markdown, including downloaded standalone answers, is sanitized with the
+  byte-identical DOMPurify 3.4.15 browser bundle stored under `static/vendor/`;
+  missing, unsupported, or failing sanitization falls back to escaped text.
 - **Document reference ownership.** `src/mcp_memory/core/validators.py`,
   `core/storage.py`, `core/graph.py`, `core/backup.py`, and `server.py` validate
   the exact configured bucket, canonical memory ID and `documents/` prefix
@@ -275,7 +292,38 @@ refreshed against a future upstream release:
 
 ---
 
-## DOMPurify — `src/live_mem/static/vendor/purify.min.js`
+## Marked — Hivemind and Graph browser bundles
+
+| Field | Value |
+| --- | --- |
+| Upstream repository | https://github.com/markedjs/marked |
+| Upstream package | `marked` 12.0.2 for Hivemind; `marked` 15.0.12 for Graph |
+| Import date | 2026-09-21 |
+| License | MIT; the upstream [license text](services/graph-memory/src/mcp_memory/static/vendor/marked.LICENSE) is included verbatim |
+| Modifications | None — the official minified browser bundle is served locally by Hivemind and the embedded Graph UI |
+
+The two surfaces preserve the versions they previously loaded: Hivemind's
+existing local bundle remains 12.0.2, while Graph pins the 15.0.12 version to
+which its former unversioned CDN URL resolved on 2026-09-21. Package provenance
+and SHA-384 are recorded in their respective vendor inventories.
+
+## vis-network — Graph browser bundle
+
+| Field | Value |
+| --- | --- |
+| Upstream repository | https://github.com/visjs/vis-network |
+| Upstream package | `vis-network` 10.1.2 |
+| Import date | 2026-09-21 |
+| License | Apache-2.0 or MIT, as offered by upstream; Hivemind redistributes this copy under the included [MIT license text](services/graph-memory/src/mcp_memory/static/vendor/vis-network.LICENSE) |
+| Modifications | None — the official standalone UMD minified browser bundle is served locally by the embedded Graph UI |
+
+The npm tarball integrity and extracted bundle checksum are recorded in the
+[Graph vendor inventory](services/graph-memory/src/mcp_memory/static/vendor/README.md).
+The official standalone bundle embeds its upstream `@egjs/hammerjs` and
+`core-js` runtime dependencies; their upstream notices are retained in the
+generated bundle.
+
+## DOMPurify — Hivemind and Graph browser bundles
 
 | Field | Value |
 | --- | --- |
@@ -283,13 +331,16 @@ refreshed against a future upstream release:
 | Upstream release | [3.4.15](https://github.com/cure53/DOMPurify/releases/tag/3.4.15) |
 | Import date | 2026-09-17 |
 | Copyright | Cure53 and other contributors (upstream bundle header retained verbatim) |
-| License | Apache-2.0 or MPL-2.0, as offered by upstream; the upstream [Apache-2.0 license text](src/live_mem/static/vendor/purify.LICENSE) is included verbatim |
-| Modifications | None — the official minified browser bundle is served locally by `/live` and `/admin` |
+| License | Apache-2.0 or MPL-2.0, as offered by upstream; the upstream [Apache-2.0 license text](src/live_mem/static/vendor/purify.LICENSE) is included verbatim beside each runtime copy |
+| Modifications | None — the official minified browser bundle is served locally by `/live`, `/admin`, and the embedded Graph UI |
 
 The exact distribution URL and SHA-384 checksum are recorded in the
 [vendor inventory](src/live_mem/static/vendor/README.md). The bytes match the
 official GitHub tag, the pinned CDN artifact and the integrity-checked npm
-tarball; no build or minification step was applied locally.
+tarball; no build or minification step was applied locally. The Graph copies
+at `services/graph-memory/src/mcp_memory/static/vendor/purify.min.js` and
+`services/graph-memory/src/mcp_memory/static/vendor/purify.LICENSE` are
+byte-identical to the reviewed canonical files.
 
 ## Vendored fonts (Hivemind admin console) — `src/live_mem/static/fonts/`
 
@@ -341,3 +392,18 @@ repository (linked below), which carries its `OFL.txt` verbatim.
 No italic styles are vendored (the console does not use italic styles). Total
 vendored size: 110,188 bytes (~107.6 KiB) across all seven files; no individual
 font exceeds 45 KiB.
+
+---
+
+## Standalone ingestion CLI — `gopkg.in/yaml.v3` v3.0.1
+
+`tools/hivemind-ingest` links this Go YAML parser at build time; its source is
+not vendored. The version and module checksums are pinned in `go.mod` and
+`go.sum`. Upstream: <https://github.com/go-yaml/yaml/tree/v3.0.1>.
+
+The upstream license is preserved verbatim in
+[`tools/hivemind-ingest/LICENSE.yaml-v3`](tools/hivemind-ingest/LICENSE.yaml-v3).
+The libyaml-derived files listed there are MIT-licensed (copyright Kirill
+Simonov); the remaining files are Apache-2.0-licensed (copyright Canonical
+Ltd). These licenses apply to different files, rather than offering a choice
+of license for the entire dependency.

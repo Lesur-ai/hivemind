@@ -51,6 +51,135 @@ async def test_backup_operation_id_creates_a_distinct_same_second_preimage() -> 
     assert timestamp == result["backup_id"].split("/", 1)[1]
 
 
+@pytest.mark.parametrize("metadata", [None, "not-json", "{}"])
+async def test_old_compaction_preimage_cannot_be_deleted(
+    monkeypatch: pytest.MonkeyPatch, metadata: str | None,
+) -> None:
+    storage = WriteSinkFakeStorage()
+    backup_id = "space-a/2026-08-19T00-00-00-" + "a" * 32
+    prefix = f"_backups/{backup_id}/"
+    storage.objects = {prefix + "bank/facts.md": "retained evidence 😀"}
+    if metadata is not None:
+        storage.objects[prefix + "_meta.json"] = metadata
+    before = dict(storage.objects)
+    monkeypatch.setattr(backup_module, "get_storage", lambda: storage)
+
+    result = await BackupService().delete(backup_id)
+
+    assert result["status"] == "error"
+    assert result["error"] == "compaction_preimage_protected"
+    assert storage.objects == before
+
+
+async def test_compaction_preimage_descendants_cannot_be_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = WriteSinkFakeStorage()
+    backup_id = "space-a/2026-08-19T00-00-00-" + "b" * 32
+    key = f"_backups/{backup_id}/bank/facts.md"
+    storage.objects[key] = "retained evidence"
+    monkeypatch.setattr(backup_module, "get_storage", lambda: storage)
+
+    result = await BackupService().delete(backup_id + "/bank")
+
+    assert result["status"] == "error"
+    assert result["error"] == "compaction_preimage_protected"
+    assert storage.objects == {key: "retained evidence"}
+
+
+async def test_compaction_preimage_refusal_requires_no_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_storage():
+        raise AssertionError("deletion must refuse from the reserved identity")
+
+    monkeypatch.setattr(backup_module, "get_storage", unexpected_storage)
+
+    result = await BackupService().delete(
+        "space-a/2026-08-19T00-00-00-" + "c" * 32
+    )
+
+    assert result["status"] == "error"
+    assert result["error"] == "compaction_preimage_protected"
+
+
+async def test_compaction_identity_is_protected_before_first_backup_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = WriteSinkFakeStorage()
+    storage.objects = {
+        "space-a/_meta.json": "{}",
+        "space-a/bank/facts.md": "exact source bytes",
+    }
+    monkeypatch.setattr(backup_module, "get_storage", lambda: storage)
+    copy_object = storage.copy_object
+    deletion_attempts = []
+
+    async def copy_with_concurrent_delete(source_key: str, dest_key: str) -> None:
+        backup_id = "/".join(dest_key.split("/")[1:3])
+        deletion_attempts.append(await BackupService().delete(backup_id))
+        await copy_object(source_key, dest_key)
+
+    monkeypatch.setattr(storage, "copy_object", copy_with_concurrent_delete)
+
+    result = await BackupService().create(
+        "space-a", operation_id="d" * 32, storage=storage,
+    )
+
+    assert result["status"] == "created"
+    assert len(deletion_attempts) == 2
+    assert all(item.get("error") == "compaction_preimage_protected"
+               for item in deletion_attempts)
+    assert storage.objects[f"_backups/{result['backup_id']}/_meta.json"] == "{}"
+    assert storage.objects[f"_backups/{result['backup_id']}/bank/facts.md"] == "exact source bytes"
+
+
+async def test_ordinary_backup_still_deletes_without_affecting_preimage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = WriteSinkFakeStorage()
+    backup_id = "space-a/2026-08-19T00-00-00"
+    protected_key = f"_backups/{backup_id}-{'e' * 32}/bank/facts.md"
+    storage.objects = {
+        f"_backups/{backup_id}/_meta.json": "{}",
+        f"_backups/{backup_id}/bank/facts.md": "ordinary copy",
+        protected_key: "retained evidence",
+    }
+    monkeypatch.setattr(backup_module, "get_storage", lambda: storage)
+
+    result = await BackupService().delete(backup_id)
+
+    assert result == {"status": "deleted", "backup_id": backup_id, "files_deleted": 2}
+    assert storage.objects == {protected_key: "retained evidence"}
+
+
+async def test_compaction_preimage_remains_listable_and_restorable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = WriteSinkFakeStorage()
+    backup_id = "space-a/2026-08-19T00-00-00-" + "f" * 32
+    prefix = f"_backups/{backup_id}/"
+    storage.objects = {
+        prefix + "_meta.json": '{"space_id":"space-a"}',
+        prefix + "bank/facts.md": "retained evidence 😀",
+    }
+    before = dict(storage.objects)
+    monkeypatch.setattr(backup_module, "get_storage", lambda: storage)
+
+    listing = await BackupService().list_backups("space-a")
+    restored = await BackupService().restore(backup_id)
+
+    assert listing["status"] == "ok"
+    assert listing["total"] == 1
+    assert listing["backups"][0]["backup_id"] == backup_id
+    assert restored == {
+        "status": "ok", "backup_id": backup_id,
+        "space_id": "space-a", "files_restored": 2,
+    }
+    assert {key: storage.objects[key] for key in before} == before
+    assert storage.objects["space-a/bank/facts.md"] == "retained evidence 😀"
+
+
 class _MissingSizeBackupStorage(WriteSinkFakeStorage):
     def __init__(self) -> None:
         super().__init__()

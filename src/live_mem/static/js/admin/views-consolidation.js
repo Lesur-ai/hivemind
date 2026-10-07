@@ -4,17 +4,9 @@
  * Jobs-first operation view with on-demand notes-to-consolidate scan
  * (contract §4.8 K1–K6, §5.5). Real data only: every widget consumes exactly
  * the fields the real tools return (bank_consolidation_queues / _status /
- * bank_consolidate / bank_stale_spaces). Refresh triggers are load, manual
- * Refresh, after-action, and — the one bounded exception to D8 (§5.5.1) —
- * a live refresh every LIVE_REFRESH_MS while a
- * space shows a running or queued job or while the open job
- * inspector shows a running/queued job. It stops by itself when no job is
- * active, when the route epoch or the session changes, when the modal is
- * closed, and it skips network calls while the tab is hidden. The live tick
- * re-reads only the lanes painted by the last full load (explicit space_ids:
- * an in-memory registry read, never the storage-backed space scan of the
- * full load); a space created or deleted meanwhile appears at the next full
- * load. Progress bars stay snapshots labeled "as of last refresh".
+ * bank_consolidate / bank_stale_spaces). One PortalRefresh registration owns
+ * optional lane/detail reads. Automatic cycles use explicit loaded IDs.
+ * Stale scans and mutations remain manual; job IDs are never persisted.
  *
  * Escaping (contract §7.3.3 R1–R6): every dynamic value passes through the
  * shell esc() at its interpolation site; dataset values re-escaped when reused
@@ -36,13 +28,9 @@
         scope: '',              // optional route spaceId; does not widen a request
         data: null, lastSuccess: null,
         sessionGeneration: null,
-        request: null, pendingLoad: null, renderSeq: 0,
-        liveTimer: null,        // pending lanes live-refresh timer (§5.5.1); one at a time
+        renderSeq: 0, ctx: null, inspector: null,
     };
 
-    // §5.5.1 — live refresh period while a job is running or queued.
-    // Period fixed at one minute by the owner (arbitration 2026-09-05, PR #489).
-    const LIVE_REFRESH_MS = 60000;
     const SPACE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
     function laneActive(lane) {
@@ -62,27 +50,45 @@
         return scopedItems(data && data.lanes).map(l => l.space_id).filter(Boolean);
     }
 
-    function clearLive() {
-        if (state.liveTimer !== null) {
-            clearTimeout(state.liveTimer);
-            state.liveTimer = null;
-        }
+    function inspectorCurrent(inspector) {
+        return !!(inspector && state.inspector === inspector && modalOpCurrent(inspector.op)
+            && inspector.node && inspector.node.isConnected && modalOpen());
     }
 
-    // Schedule ONE lanes reload while a job is active. The tick re-checks the
-    // route epoch and the session (§3.1.4), and only re-arms — without a
-    // network call — while the tab is hidden.
-    function scheduleLive(epoch, data) {
-        clearLive();
-        if (!anyLaneActive(data)) return;
-        const generation = state.sessionGeneration;
-        const seq = state.renderSeq;
-        state.liveTimer = setTimeout(() => {
-            state.liveTimer = null;
-            if (AdminRouter.epoch !== epoch || !sessionActive() || !sessionGenerationIsCurrent(generation) || seq !== state.renderSeq) return;
-            if (document.hidden) { scheduleLive(epoch, data); return; }
-            loadLanes(epoch, laneIds(data));
-        }, LIVE_REFRESH_MS);
+    function detailActive() {
+        const inspector = state.inspector;
+        return inspectorCurrent(inspector) && ['running', 'queued'].includes(inspector.data && inspector.data.status);
+    }
+
+    async function refreshView({ automatic, isCurrent }) {
+        if (!sessionActive()) return { follow: false };
+        const epoch = state.ctx.epoch;
+        let failure = null, lanesRead = false;
+        const manualDetail = !automatic && inspectorCurrent(state.inspector) && state.inspector.manual;
+        if (!manualDetail) {
+            try {
+                await loadLanes(epoch, automatic ? laneIds(state.data) : undefined, isCurrent);
+                lanesRead = true;
+            } catch (error) { failure = error; }
+        }
+        if (!isCurrent()) return;
+        const inspector = state.inspector;
+        if (inspectorCurrent(inspector)) {
+            const jobs = scopedItems(state.data && state.data.lanes).flatMap(lane =>
+                [lane.running_job, ...(Array.isArray(lane.queued_jobs) ? lane.queued_jobs : []),
+                    ...(Array.isArray(lane.latest_jobs) ? lane.latest_jobs : [])]);
+            const embedded = lanesRead && jobs.find(job => job && job.job_id === inspector.id);
+            if (inspector.manual || (lanesRead && detailActive() && !embedded)) {
+                try { await readInspector(inspector, isCurrent); }
+                catch (error) { failure = error; }
+            } else if (embedded && detailActive()) {
+                paintInspector(inspector, embedded);
+            } else if (!lanesRead && detailActive()) {
+                paintJobStale(failure);
+            }
+        }
+        if (failure) throw failure;
+        return { follow: anyLaneActive(state.data) || detailActive() };
     }
 
     function hasManage() {
@@ -120,7 +126,7 @@
 
     function headerActions() {
         return `<button type="button" class="btn btn-secondary btn-sm" data-action="consol-refresh">${icon('refresh')}<span>Refresh</span></button>
-            <button type="button" class="btn btn-primary btn-sm" data-action="consol-picker">${icon('plus')}<span>Consolidate notes</span></button>`;
+            <button type="button" class="btn btn-primary btn-sm" data-action="consol-picker">${icon('plus')}<span>Start a consolidation</span></button>`;
     }
 
     function scopedItems(items) {
@@ -128,8 +134,7 @@
     }
 
     function subtitle(data) {
-        const live = anyLaneActive(data)
-            ? `<span class="consol-live">Live · refreshes every ${esc(String(LIVE_REFRESH_MS / 1000))} s while a job runs</span>` : '';
+        const live = anyLaneActive(data) ? 'Jobs are in progress. Use Auto-refresh to follow them.' : '';
         const rawModel = data && data.parallelism_model;
         const model = rawModel === 'one_worker_per_space' ? '1 worker per space' : 'Worker configuration unavailable';
         const guarantee = scopedItems(data && data.lanes).map(lane => lane.guarantee).find(Boolean);
@@ -183,22 +188,44 @@
         state.renderSeq += 1;
         state.owner = owner;
         state.identity = identity;
-        clearLive();
+        state.inspector = null;
+        state.ctx = { ...ctx, sessionGeneration: generation };
         const epoch = ctx ? ctx.epoch : AdminRouter.epoch;
         if (scope && !SPACE_ID_RE.test(scope)) {
             contentEl.innerHTML = `<div class="page consolidation-page">${pageHeader('Consolidation')}${panel(stateError({ title: 'Invalid space id' }))}<a href="#/consolidation">All spaces</a></div>`;
             return;
         }
-        contentEl.innerHTML = `<div class="page consolidation-page">
-            ${pageHeader('Consolidation', headerActions())}
-            ${scope ? `<p class="consol-scope-filter body-small">Space: <strong>${esc(scope)}</strong> · <a href="#/consolidation">All spaces</a></p>` : ''}
+        const embedded = params && params.embedded === true && !!scope;
+        const initialLane = embedded && params.initialLane && typeof params.initialLane === 'object'
+            ? { ...params.initialLane, space_id: scope } : null;
+        if (initialLane) {
+            state.data = { status: 'ok', lanes: [initialLane],
+                parallelism_model: initialLane.parallelism_model, service_config: initialLane.service_config };
+            state.lastSuccess = new Date().toISOString();
+        }
+        contentEl.innerHTML = `<div class="${embedded ? 'consolidation-page' : 'page consolidation-page'}">
+            ${embedded ? `<div class="panel-header"><h2>Consolidation</h2><div class="page-header-actions">${headerActions()}</div></div>` : pageHeader('Consolidation', headerActions())}
+            ${scope && !embedded ? `<p class="consol-scope-filter body-small">Space: <strong>${esc(scope)}</strong> · <a href="#/consolidation">All spaces</a></p>` : ''}
             <div id="consolSubtitle"></div><div id="consolFreshness" class="consol-freshness"></div>
             <div id="consolLanes">${panel(stateLoading('Loading consolidation jobs…'))}</div>
-            <div id="consolStale"></div>
+            ${embedded ? '' : '<div id="consolStale"></div>'}
         </div>`;
-        renderStalePanel(epoch);
-        if (state.data) { paintLanes(state.data); paintFreshness(); }
-        loadLanes(epoch);
+        if (!embedded) renderStalePanel(epoch);
+        if (state.data) {
+            document.getElementById('consolSubtitle').innerHTML = subtitle(state.data);
+            paintLanes(state.data);
+            paintFreshness();
+        }
+        PortalRefresh.register({ refresh: refreshView, canAuto: () => sessionActive()
+            && (anyLaneActive(state.data) || detailActive()) }, state.ctx);
+        if (!PortalRefresh.state().available) {
+            const unavailable = stateUnavailable('Refresh unavailable. Sign out and sign in again.');
+            document.getElementById(state.data ? 'consolFreshness' : 'consolLanes').innerHTML = unavailable;
+            return;
+        }
+        if (!initialLane) void PortalRefresh.refresh().catch(() => {});
+        // #651: a Space Active work row opens this existing inspector once.
+        if (embedded && typeof params.inspectJobId === 'string' && params.inspectJobId) void inspectJob(params.inspectJobId);
     }
 
     // ───────────────────────── lanes ─────────────────────────
@@ -206,46 +233,33 @@
     // Full load (liveIds absent — load, manual Refresh, after-action): space_ids
     // "" lets the server resolve the visible spaces (storage-backed scan).
     // Live tick (liveIds present): the painted ids only — in-memory read.
-    async function loadLanes(epoch, liveIds) {
+    async function loadLanes(epoch, liveIds, isCurrent = () => true) {
         const generation = state.sessionGeneration;
         const seq = state.renderSeq;
-        const current = () => AdminRouter.epoch === epoch && sessionActive()
+        const current = () => isCurrent() && AdminRouter.epoch === epoch && sessionActive()
             && sessionGenerationIsCurrent(generation) && seq === state.renderSeq;
         if (!current()) return;
-        if (state.request) { state.pendingLoad = { epoch, liveIds, generation, seq }; return; }
-        clearLive();
-        const request = {};
-        state.request = request;
         const spaceIds = Array.isArray(liveIds) ? liveIds.join(',') : state.scope;
+        // Never turn an empty automatic scope into a storage inventory.
+        if (Array.isArray(liveIds) && !liveIds.length) return;
         let data;
-        try {
-            try { data = await callTool('bank_consolidation_queues', { space_ids: spaceIds }); }
-            catch (e) { data = { status: 'error', message: '' }; }
-            if (!current()) return;
-            if (!data || data.status !== 'ok' || !Array.isArray(data.lanes)) {
-                if (state.data) {
-                    paintFreshness(data || {});
-                    if (!['truncated', 'rate_limited', 'read_only'].includes(data && data.status)) scheduleLive(epoch, state.data);
-                } else paintLanesError(data || {});
-                return;
-            }
-            const retainedDenials = Array.isArray(liveIds) && state.data
-                ? scopedItems(state.data.denied_spaces).filter(item => !liveIds.includes(item.space_id)) : [];
-            data = { ...data, lanes: scopedItems(data.lanes), denied_spaces: retainedDenials.concat(scopedItems(data.denied_spaces)) };
-            state.data = data;
-            state.lastSuccess = new Date().toISOString();
-            const sub = document.getElementById('consolSubtitle');
-            if (sub) sub.innerHTML = subtitle(data);
-            paintLanes(data);
-            paintFreshness();
-            scheduleLive(epoch, data);
-        } finally {
-            if (state.request === request) state.request = null;
-            const pending = state.pendingLoad;
-            state.pendingLoad = null;
-            if (pending && pending.epoch === AdminRouter.epoch && pending.seq === state.renderSeq
-                && sessionGenerationIsCurrent(pending.generation) && sessionActive()) loadLanes(pending.epoch, pending.liveIds);
+        try { data = await callTool('bank_consolidation_queues', { space_ids: spaceIds }); }
+        catch (_) { data = { status: 'error', message: 'Request failed' }; }
+        if (!current()) return;
+        if (!data || data.status !== 'ok' || !Array.isArray(data.lanes)) {
+            if (state.data) paintFreshness(data || {});
+            else paintLanesError(data || {});
+            throw new Error(data && data.message || 'Consolidation read failed');
         }
+        const retainedDenials = Array.isArray(liveIds) && state.data
+            ? scopedItems(state.data.denied_spaces).filter(item => !liveIds.includes(item.space_id)) : [];
+        data = { ...data, lanes: scopedItems(data.lanes), denied_spaces: retainedDenials.concat(scopedItems(data.denied_spaces)) };
+        state.data = data;
+        state.lastSuccess = new Date().toISOString();
+        const sub = document.getElementById('consolSubtitle');
+        if (sub) sub.innerHTML = subtitle(data);
+        paintLanes(data);
+        paintFreshness();
     }
 
     function paintLanesError(data) {
@@ -336,7 +350,7 @@
         const inspect = jid ? `<button type="button" class="btn btn-secondary btn-sm" data-action="consol-job" data-job-id="${esc(jid)}" aria-label="Inspect job ${esc(jid)}">Details</button>` : '';
         return `<article class="consol-job-row">
             <div class="consol-job-heading"><a class="consol-space-name" href="${esc('#/spaces/' + encodeURIComponent(sid))}">${esc(sid)}</a>${phase}${inspect}</div>
-            <p class="consol-job-meta body-small">${esc(String(job.scope_label || 'Scope unavailable'))}${position} · ${time}</p>
+            <p class="consol-job-meta body-small">${esc(String(job.scope_label || 'Scope unavailable'))}${position} · ${time}${job.requested_by ? ` · Requested by ${esc(String(job.requested_by))}` : ''}</p>
             ${['running', 'queued'].includes(job.status) ? progressBar(job.progress) : ''}
             ${partial ? '<p class="consol-partial body-small">Partial completion</p>' : ''}
             ${job.error ? serverMessage(job.error) : ''}
@@ -344,44 +358,11 @@
         </article>`;
     }
 
-    function laneActions(lane) {
-        const sid = String(lane.space_id || '');
-        const enc = esc(sid);
-        const parts = [];
-        // "My notes" (scope mine) — ALWAYS sends agent (§4.5 E4). Only offered
-        // when the cached identity has a client_name to send as the agent.
-        if (state.identity && state.identity.client_name) {
-            parts.push(`<button type="button" class="btn btn-secondary btn-sm" data-action="consol-mine" data-space="${enc}">Consolidate my notes</button>`);
-        }
-        // "All notes" (scope all agents, §4.5 E3) — stays VISIBLE but disabled
-        // with a manage/admin hint for non-managers (client gate on the cached
-        // identity; the server stays authoritative and the handler re-checks).
-        if (hasManage()) {
-            parts.push(`<button type="button" class="btn btn-secondary btn-sm" data-action="consol-all" data-space="${enc}">Consolidate all notes</button>`);
-        } else {
-            parts.push(`<button type="button" class="btn btn-secondary btn-sm" disabled title="Requires manage or admin permission" aria-label="Consolidate all notes (requires manage or admin permission)">Consolidate all notes</button>`);
-        }
-        return parts.join(' ');
-    }
-
-    function openPicker() {
+    function openPicker(spaceId = state.scope, spaces = scopedItems(state.data && state.data.lanes)) {
         beginModalOp();
         const lanes = scopedItems(state.data && state.data.lanes);
-        if (!lanes.length) { showModal('Consolidate notes', stateUnavailable('No accessible spaces loaded. Refresh to try again.')); return; }
-        const options = lanes.map(lane => `<option value="${esc(lane.space_id)}">${esc(lane.space_id)}</option>`).join('');
-        showModal('Consolidate notes', `<div class="consol-picker form-group"><label class="form-label" for="consolPickSpace">Space</label>
-            <select id="consolPickSpace" class="form-input"><option value="">Select a space</option>${options}</select></div>
-            <div id="consolPickerActions"></div>`);
-        const select = document.getElementById('consolPickSpace');
-        if (!select) return;
-        const update = () => {
-            const el = document.getElementById('consolPickerActions');
-            const lane = lanes.find(item => item.space_id === select.value);
-            if (el) el.innerHTML = lane ? laneActions(lane) : '';
-        };
-        select.onchange = update;
-        if (state.scope) select.value = state.scope;
-        update();
+        openConsolidationLauncher({ spaces, lanes, spaceId, ctx: state.ctx,
+            onSubmitted: () => { void PortalRefresh.refresh().catch(() => {}); } });
     }
 
     function deniedFooter(denied) {
@@ -428,8 +409,7 @@
 
     // ───────────────────────── job inspector ─────────────────────────
 
-    // Compaction is a human decision (bank_compact): a consolidation
-    // never runs it. Oversized bank files are only REPORTED, as an advisory.
+    // Sizes precede consolidation; the automatic follow-up has its own result.
     function renderBankSizeAdvisory(result) {
         const items = result && Array.isArray(result.bank_size_advisory) ? result.bank_size_advisory : [];
         const rows = items.map(item => {
@@ -438,7 +418,7 @@
             return `<tr><td class="mono-data">${esc(item.filename)}</td><td class="num mono-data">${esc(String(item.utf8_bytes))}</td><td class="num mono-data">${esc(String(item.max_size))}</td></tr>`;
         }).join('');
         return rows
-            ? `<div class="consol-size-advisory">${statusDot('warn', 'Some bank files exceed the advisory size')}<p class="body-small">Compaction is optional. Open the space’s Memory Bank to check files for compaction.</p>${dataTable(['File', 'UTF-8 bytes', 'Advisory threshold'], rows)}</div>`
+            ? `<div class="consol-size-advisory">${statusDot('warn', 'Files above the threshold before consolidation')}<p class="body-small">Check the automatic compaction result for the subsequent maintenance outcome.</p>${dataTable(['File', 'UTF-8 bytes', 'Advisory threshold'], rows)}</div>`
             : '';
     }
 
@@ -499,8 +479,8 @@
         if (qp === 1) posLine = statusDot('warn', 'Running');
         else if (qp >= 2) posLine = statusDot('warn', `Position ${qp} in queue`);
         let statusBlock = '';
-        if (job.status === 'succeeded') statusBlock = renderResultMetrics(job.result) + renderBankSizeAdvisory(job.result);
-        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">Failed</div>${serverMessage(job.error)}</div></div>${renderResultMetrics(job.result)}${renderBankSizeAdvisory(job.result)}`;
+        if (job.status === 'succeeded') statusBlock = renderResultMetrics(job.result) + renderBankSizeAdvisory(job.result) + renderAutoCompaction(job.result);
+        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">Failed</div>${serverMessage(job.error)}</div></div>${renderResultMetrics(job.result)}${renderBankSizeAdvisory(job.result)}${renderAutoCompaction(job.result)}`;
         else if (job.message) statusBlock = serverMessage(job.message);
         return `<div class="consol-jobinspect">
             ${progressBar(job.progress)}
@@ -509,150 +489,67 @@
         </div>`;
     }
 
-    let jobLastSuccess = null;
-    function jobSnapshot(job) {
-        jobLastSuccess = new Date().toISOString();
-        return `<div id="consolJobFreshness" class="body-small text-muted">Last updated ${renderTimestamp(jobLastSuccess)}</div>${renderJob(job)}`;
+    function paintInspector(inspector, job) {
+        if (!inspectorCurrent(inspector)) return;
+        inspector.data = job;
+        inspector.lastSuccess = new Date().toISOString();
+        const focused = document.activeElement;
+        const restoreFocus = focused && inspector.node.contains(focused) && focused.dataset;
+        inspector.node.innerHTML = `<div id="consolJobFreshness" class="body-small text-muted">Last updated ${renderTimestamp(inspector.lastSuccess)}</div>${renderJob(job)}<button type="button" class="btn btn-secondary" data-action="consol-job-refresh">Refresh job</button>`;
+        if (restoreFocus) Array.from(inspector.node.querySelectorAll('[data-action]')).find(button =>
+            button.dataset.action === restoreFocus.action && button.dataset.value === restoreFocus.value)?.focus();
     }
 
     function paintJobStale(error) {
+        const inspector = state.inspector;
+        if (!inspectorCurrent(inspector)) return;
         const el = document.getElementById('consolJobFreshness');
-        if (el) el.innerHTML = `${statusDot('warn', 'Job data is stale')} Last updated ${renderTimestamp(jobLastSuccess)}${serverMessage(error && error.message || '')}`;
+        if (el) el.innerHTML = `${statusDot('warn', 'Job data is stale')} Last updated ${renderTimestamp(inspector.lastSuccess)}${serverMessage(error && error.message || '')}`;
+    }
+
+    async function readInspector(inspector, isCurrent) {
+        inspector.manual = false;
+        let data;
+        try { data = await callTool('bank_consolidation_status', { job_id: inspector.id }); }
+        catch (_) { data = { status: 'error', message: 'Request failed' }; }
+        if (!isCurrent() || !inspectorCurrent(inspector)) return;
+        if (!['running', 'queued', 'succeeded', 'failed', 'not_found'].includes(data && data.status)) {
+            if (inspector.data) paintJobStale(data);
+            else {
+                const error = data && ['read_only', 'rate_limited', 'truncated'].includes(data.status)
+                    ? stateUnavailable(data.message) : stateError({ title: 'Could not read job', message: data && data.message });
+                inspector.node.innerHTML = error + '<button type="button" class="btn btn-secondary" data-action="consol-job-refresh">Refresh job</button>';
+            }
+            throw new Error(data && data.message || 'Job read failed');
+        }
+        paintInspector(inspector, data);
+    }
+
+    async function refreshInspector() {
+        const inspector = state.inspector;
+        if (!inspectorCurrent(inspector)) return;
+        inspector.manual = true;
+        await PortalRefresh.refresh().catch(() => {});
+        // If the click arrived at the end of another cycle, read after it
+        // settles. Never run a detail request alongside the previous cycle.
+        if (inspectorCurrent(inspector) && inspector.manual) await PortalRefresh.refresh().catch(() => {});
     }
 
     async function inspectJob(jobId) {
-        const epoch = AdminRouter.epoch;
+        if (!jobId || !state.ctx || !sessionActive()) return;
+        if (!PortalRefresh.state().available) {
+            showModal('Consolidation job', stateUnavailable('Refresh unavailable. Sign out and sign in again.'));
+            return;
+        }
         const op = beginModalOp();
-        showModal('Consolidation job', stateLoading('Loading job status…'));
-        let data;
-        try {
-            data = await callTool('bank_consolidation_status', { job_id: jobId });
-        } catch (e) {
-            if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return;
-            showModal('Consolidation job', stateError({ title: 'Request failed' }));
-            return;
-        }
-        // Drop if navigated away OR a newer job/modal replaced this one (so two
-        // inspections resolving out of order can't overwrite the latest).
-        if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return;
-        // Sentinel guards (truncated/rate_limited/read_only) carry only a message.
-        if (data && (data.status === 'truncated' || data.status === 'rate_limited' || data.status === 'read_only')) {
-            showModal('Consolidation job', panel(stateUnavailable(data.message)));
-            return;
-        }
-        showModal('Consolidation job', jobSnapshot(data));
-        scheduleJobLive(jobId, op, epoch, data);
+        showModal('Consolidation job', '<div id="consolJobSnapshot">' + stateLoading('Loading job status…') + '</div>');
+        state.inspector = { id: jobId, op, node: document.getElementById('consolJobSnapshot'), data: null, lastSuccess: null, manual: true };
+        await refreshInspector();
     }
 
     function modalOpen() {
         const m = document.getElementById('adminModal');
         return !!(m && m.style && m.style.display === 'flex');
-    }
-
-    // §5.5.1 — while the inspected job is running or queued, re-read its status
-    // every LIVE_REFRESH_MS and repaint the SAME modal instance (no loading
-    // flash). Stops on a terminal job, a closed or replaced modal, a route or
-    // session change; skips the network call while the tab is hidden.
-    function scheduleJobLive(jobId, op, epoch, data) {
-        const st = data && data.status;
-        if (st !== 'running' && st !== 'queued') return;
-        setTimeout(async () => {
-            if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive() || !modalOpen()) return;
-            if (document.hidden) { scheduleJobLive(jobId, op, epoch, data); return; }
-            let next;
-            try {
-                next = await callTool('bank_consolidation_status', { job_id: jobId });
-            } catch (e) {
-                // Transport failure: keep the last snapshot on screen and re-arm.
-                if (AdminRouter.epoch === epoch && modalOpCurrent(op) && sessionActive() && modalOpen()) { paintJobStale(); scheduleJobLive(jobId, op, epoch, data); }
-                return;
-            }
-            if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive() || !modalOpen()) return;
-            const nextStatus = next && next.status;
-            // §5.0 sentinels end the loop without repainting. Any other non-job
-            // payload (typed `error`, unknown shape) keeps the last good snapshot
-            // and re-arms: a running job must never be replaced on screen by an
-            // error state because one status read failed.
-            if (nextStatus === 'truncated' || nextStatus === 'rate_limited' || nextStatus === 'read_only') { paintJobStale(next); return; }
-            if (!['running', 'queued', 'succeeded', 'failed', 'not_found'].includes(nextStatus)) {
-                paintJobStale(next);
-                scheduleJobLive(jobId, op, epoch, data);
-                return;
-            }
-            showModal('Consolidation job', jobSnapshot(next));
-            scheduleJobLive(jobId, op, epoch, next);
-        }, LIVE_REFRESH_MS);
-    }
-
-    // ───────────────────────── enqueue ─────────────────────────
-
-    // Renders an enqueue-ack from inside a confirm modal's onConfirm. Success →
-    // toast + refresh + close the modal (return true). Error/refusal/sentinel →
-    // REPLACE the modal with the verbatim server text and keep it open (return
-    // false): returning true would let the shell confirm-wrapper closeModal()
-    // the very error modal we just showed.
-    function handleEnqueueResult(data, epoch, op) {
-        // Drop before any effect if navigated away OR a newer modal replaced this
-        // confirm (returning true would closeModal() the newer one).
-        if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
-        if (!data || typeof data !== 'object') { showToast('error', 'No response'); return true; }
-        const qp = Number(data.queue_position);
-        if (data.status === 'running' || data.status === 'queued' || qp >= 1) {
-            showToast('ok', (data.status === 'running' || qp === 1)
-                ? 'Consolidation running'
-                : `Consolidation queued (position ${qp || '?'})`);
-            AdminRouter.refresh();
-            return true;
-        }
-        showModal('Consolidation refused', panel(serverMessage(data && data.message) || stateError({ title: 'The server refused or failed this operation.' })));
-        return false;
-    }
-
-    async function enqueue(spaceId, scope) {
-        // scope 'mine' MUST always send a NON-EMPTY agent (§4.5 E4 — load-bearing).
-        // A missing client_name must HARD-REFUSE. scope 'all' sends the
-        // historical empty-string sentinel explicitly; omission now means the
-        // caller's own notes for every permission level.
-        const args = { space_id: spaceId };
-        if (scope === 'mine') {
-            const agent = state.identity && state.identity.client_name;
-            if (!agent) {
-                showToast('error', 'Cannot determine your agent identity — reload and sign in again.');
-                return null;
-            }
-            args.agent = String(agent);
-        } else if (scope === 'all') {
-            args.agent = '';
-        }
-        try {
-            return await callTool('bank_consolidate', args);
-        } catch (e) {
-            return { status: 'error', message: '' };
-        }
-    }
-
-    function confirmEnqueue(spaceId, scope) {
-        // Guard the mine scope up front so we never show a confirm we cannot
-        // fulfil (defence in depth with the hard refuse inside enqueue()).
-        if (scope === 'mine' && !(state.identity && state.identity.client_name)) {
-            showToast('error', 'Cannot determine your agent identity — reload and sign in again.');
-            return;
-        }
-        const scopeCopy = scope === 'mine'
-            ? `Consolidates only your own live notes (agent <code>${esc(String(state.identity.client_name || ''))}</code>) in space <code>${esc(spaceId)}</code>.`
-            : `Consolidates <strong>all agents'</strong> live notes in space <code>${esc(spaceId)}</code> (requires manage/admin — the server enforces this).`;
-        // Capture the epoch + modal token at open: the shared modal can outlive
-        // a route change or be replaced by a newer modal, so a stale confirm
-        // must drop before touching the DOM.
-        const epoch = AdminRouter.epoch;
-        const op = beginModalOp();
-        showModal('Consolidate', `<p class="body-small">${scopeCopy}</p><p class="body-small">Consolidation is asynchronous and runs one worker per space.</p>`,
-            'Consolidate', async () => {
-                if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
-                const data = await enqueue(spaceId, scope);
-                if (!data) return true; // guard already toasted (missing identity)
-                return handleEnqueueResult(data, epoch, op);
-            });
     }
 
     // ───────────────────────── stale banks ─────────────────────────
@@ -749,24 +646,6 @@
         paintStale(data);
     }
 
-    // Direct per-space stale consolidation (§4.8 K4). Staleness is a whole-space
-    // property, so a confirmed manage/admin action explicitly sends the global
-    // sentinel; write tokens omit it and remain caller-scoped.
-    function confirmStaleRow(spaceId) {
-        const epoch = AdminRouter.epoch;
-        const op = beginModalOp();
-        showModal('Consolidate stale bank', `<p class="body-small">Submit a consolidation for space <code>${esc(spaceId)}</code>? This clears accumulated live notes into the mid bank.</p><p class="body-small">Scope depends on your permission and is enforced by the server: manage/admin consolidates <strong>all agents'</strong> notes; a write-only token consolidates <strong>only your own</strong> notes (the note count above counts all agents).</p>`,
-            'Consolidate', async () => {
-                if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
-                let data;
-                const args = { space_id: spaceId };
-                if (hasManage()) args.agent = '';
-                try { data = await callTool('bank_consolidate', args); }
-                catch (e) { data = { status: 'error', message: '' }; }
-                return handleEnqueueResult(data, epoch, op);
-            });
-    }
-
     // Scan-BEFORE-confirm all-stale (§4.8 K5): re-scan, show the exact current
     // stale set in the confirmation, then submit ONLY that captured set — a
     // space that becomes stale after the operator confirmed is never swept in.
@@ -851,10 +730,9 @@
     // ───────────────────────── action registration ─────────────────────────
 
     registerAction('consol-picker', () => { if (sessionActive() && sessionGenerationIsCurrent(state.sessionGeneration)) openPicker(); });
-    registerAction('consol-refresh', () => AdminRouter.refresh());
+    registerAction('consol-refresh', () => { void PortalRefresh.refresh().catch(() => {}); });
     registerAction('consol-job', (d) => { if (d.jobId) inspectJob(d.jobId); });
-    registerAction('consol-mine', (d) => { if (d.space) confirmEnqueue(d.space, 'mine'); });
-    registerAction('consol-all', (d) => { if (d.space && hasManage()) confirmEnqueue(d.space, 'all'); });
+    registerAction('consol-job-refresh', () => refreshInspector());
     registerAction('consol-stale-toggle', () => {
         const activating = !state.staleMode;
         state.staleMode = activating;
@@ -867,8 +745,13 @@
         if (activating) scanStale();
     });
     registerAction('consol-stale-scan', () => scanStale());
-    registerAction('consol-stale-row', (d) => { if (d.space) confirmStaleRow(d.space); });
+    registerAction('consol-stale-row', (d) => {
+        const spaces = scopedItems(state.staleData && state.staleData.spaces);
+        if (spaces.some(space => space.space_id === d.space)) openPicker(d.space, spaces);
+    });
     registerAction('consol-stale-all', () => startConsolidateAllStale());
 
+    // Pure presentation only: Home owns its own bounded reads and snapshots.
+    globalThis.PortalJobView = Object.freeze({ collectJobs, progressBar, renderJob });
     AdminViews.register('consolidation', render);
 })();

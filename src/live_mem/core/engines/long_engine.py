@@ -290,6 +290,26 @@ class LongEngine:
             space_id, documents, mode=mode, include_volatile=include_volatile
         )
 
+    async def prepare_ingest(self, space_id: str) -> dict:
+        """Establish the destination before pinning a deferred projection."""
+        return await self._bridge.prepare_ingest(space_id)
+
+    async def prepare_archive_ingest(self, space_id: str, *, preimage_id: str) -> dict:
+        """Prepare the automatic destination for retained MID captures."""
+        return await self._bridge.prepare_archive_ingest(space_id, preimage_id=preimage_id)
+
+    async def ingest_archive(self, space_id: str, *, documents: list[dict], automatic: bool) -> dict:
+        """Submit retained content using the initial or frozen archive catalogue."""
+        return await self._bridge.ingest_archive(space_id, documents=documents, automatic=automatic)
+
+    async def archive_ingest_status(self, space_id: str, job_id: str) -> dict:
+        """Read an archive-scoped asynchronous job."""
+        return await self._bridge.archive_ingest_status(space_id, job_id)
+
+    async def get_archive_document(self, space_id: str, *, source_path: str) -> dict:
+        """Read metadata for an already submitted archive document."""
+        return await self._bridge.get_archive_document(space_id, source_path=source_path)
+
     async def ingest_async(
         self,
         space_id: str,
@@ -316,15 +336,14 @@ class LongEngine:
         status: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        archive: bool = False,
     ) -> dict:
-        """List asynchronous ingestion jobs for space."""
-        return await self._bridge.ingest_list(
-            space_id=space_id,
-            batch_id=batch_id,
-            status=status,
-            limit=limit,
-            offset=offset,
-        )
+        """List asynchronous jobs for the chosen space memory."""
+        arguments = dict(space_id=space_id, batch_id=batch_id, status=status,
+                         limit=limit, offset=offset)
+        if archive:
+            arguments["archive"] = True
+        return await self._bridge.ingest_list(**arguments)
 
     async def ingest_cancel(self, space_id: str, job_id: str) -> dict:
         """Request cancellation of an asynchronous ingestion job."""

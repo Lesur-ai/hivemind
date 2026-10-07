@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.5.3-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.6.0-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -28,13 +28,13 @@ English · [README.md](README.md)
 
 ---
 
-> **Correctifs de sécurité de la 1.5.3.** Cette version corrige les sept constats
+> **Correctifs de sécurité de la 1.5.3.** Hivemind 1.5.3 corrige les sept constats
 > applicatifs de l'audit du code source du 16 septembre 2026 : frontières du
 > stockage Graph, limites des requêtes et archives, et commandes issues du
 > Markdown d'administration. Elle met aussi DOMPurify à jour en 3.4.15. Le
 > [rapport de sécurité en anglais](docs/SECURITY_AUDIT_1.5.3.md) présente les
 > vérifications et les travaux restants ; les
-> [notes de version](CHANGELOG.md#153--unreleased) détaillent les corrections.
+> [notes de version](CHANGELOG.md#153--2026-09-17) détaillent les corrections.
 
 ## 📋 Table des matières
 
@@ -549,7 +549,9 @@ en échec pour le diagnostic.
 | `CONSOLIDATION_COOLDOWN_SECONDS` | `60`      | Cooldown anti-spam par space pour `bank_consolidate` (`0` désactive) |
 | `CONSOLIDATION_VALIDATION_ENABLED` | `false` | Vérification optionnelle post-consolidation des claims non sourcés |
 | `CONSOLIDATION_VALIDATION_MAX_EXAMPLES` | `20` | Nombre max d'exemples retournés par la validation |
-| `BANK_FILE_MAX_SIZE`      | `35000`           | Seuil d'AVERTISSEMENT par fichier bank, en octets UTF-8 persistés, et seuil de candidature et repère de la compaction manuelle (outil bank compact, décision humaine). La consolidation ne compacte jamais : vous choisissez quand résumer davantage vos fichiers. Jamais un plafond dur |
+| `MID_AUTO_COMPACT` | `true` | Passe de compaction après consolidation en file réussie ayant traité des notes ; DirectLocal uniquement |
+| `MID_AUTO_ARCHIVE` | `true` | Transfert des captures MID vers LONG ; `false` suspend sans supprimer les captures ni la file |
+| `BANK_FILE_MAX_SIZE`      | `35000`           | Seuil par fichier bank en octets UTF-8 persistés, utilisé pour le signalement et la sélection des fichiers à compacter. Jamais un plafond dur |
 | ~~`COMPACT_THRESHOLD`~~   | retiré            | N'admettait que l'auto-compaction, supprimée ; une valeur résiduelle est ignorée. Ancien texte : signal agrégé de pression de contexte ; nombre fini dans `(0, 1]` (0.6 = bank > 60% du budget). Les plans restent soumis aux gardes par fichier et de contexte |
 | `RESPONSE_MAX_BYTES`      | `524288`          | Taille max des réponses non-MCP avant troncature |
 | `API_TOOL_MAX_BODY_BYTES` | `1048576`         | Taille max du corps accepté par `/api/tool` |
@@ -681,13 +683,19 @@ pour la spécification complète.
 | `space_create`       | `space_id`, `description`, `rules?`, `owner?` | **manage** : crée un space ; `_meta.json` commité en dernier et manager persistant auto-invité |
 | `space_update`       | `space_id`, `description?`, `owner?`         | Met à jour la description et/ou l'owner                      |
 | `space_update_rules` | `space_id`, `rules`                          | Met à jour les rules du space (manage)                        |
-| `space_list`         | —                                            | Liste les spaces accessibles par le token courant            |
+| `space_list`         | `include_counts` (bool, défaut `true`)        | Liste les spaces accessibles et leurs métadonnées ; `false` évite les comptages SHORT/MID |
 | `space_info`         | `space_id`                                   | Infos détaillées (notes, bank, consolidation)                |
 | `space_rules`        | `space_id`                                   | Lit les rules courantes du space                             |
 | `space_summary`      | `space_id`                                   | Résumé complet : rules + bank + stats (démarrage agent)      |
 | `space_export`       | `space_id`                                   | Export tar.gz en base64                                      |
 | `space_delete`       | `space_id`, `confirm`, `unsafe_recovery?`, `recover_access_grants?` | Supprime le space et ses grants d'allowlist token (⚠️ irréversible, manage ; flags avancés pour recovery Hivemind partagé/unsafe classifiable ou nettoyage des grants d'un space dont la suppression antérieure est connue) |
 | `space_invite_token` | `space_id`, `token_hash`                     | **manage + accès** : hash canonique exact, add-only/idempotent ; distinct de l'enrollment Project Mesh |
+
+`space_list` retourne aussi `last_consolidation`, `consolidation_count` et
+`total_notes_processed` pour chaque space accessible. Ces deux compteurs sont
+cumulatifs ; ils ne décrivent pas la dernière consolidation. Avec
+`include_counts=false`, les comptages de notes SHORT et de fichiers MID sont
+omis, tout en conservant les métadonnées et le filtrage du token courant.
 
 ### Token
 
@@ -741,9 +749,27 @@ grant concurrent ou ultérieur peut réintroduire la barrière fail-closed et do
 | `bank_write`                | `space_id`, `filename`, `content` | Écrit/remplace un fichier bank directement — contourne la consolidation LLM (**manage**)                         |
 | `bank_delete`               | `space_id`, `filename`, `confirm?=False` | Supprime un fichier bank et ses doublons Unicode (**manage**, irréversible) ; `confirm=True` est requis |
 
-La compaction reste une décision humaine : la consolidation signale les fichiers
-au-dessus de `BANK_FILE_MAX_SIZE`, sans les compacter automatiquement. En 1.5.1,
-`bank_compact` résume la mémoire de moyen terme pour qu'une nouvelle conversation
+En 1.6.0, compaction et transfert des archives MID vers LONG sont activés par
+défaut. Après une consolidation en file réussie ayant traité des notes, le
+serveur lance une seule passe du compacteur existant, sous le même verrou, sur
+les fichiers dépassant `BANK_FILE_MAX_SIZE`. `MID_AUTO_COMPACT=false` désactive
+cette passe ; `MID_AUTO_ARCHIVE=false` suspend le transfert en conservant les
+captures et la file pour une reprise ultérieure. Ces deux paramètres serveur
+indépendants sont chargés au démarrage. L'action manuelle `bank_compact` reste
+disponible avec la permission `manage`. Les routes partagées ou non sûres restent
+exclues. Une écriture MID directe ou un job sans notes ne déclenche pas de passe.
+
+`/admin` et `scripts/mcp_cli.py` affichent ces réglages, les captures en attente
+et les erreurs via `long_status`. Le résultat horodaté `auto_compaction` reste
+distinct de la consolidation réussie ; cet historique de jobs reste en mémoire
+du processus. Une file vide ne prouve pas que tous les fichiers MID courants sont
+indexés. Le graphe documentaire affiché est distinct des archives MID.
+Un fichier peut rester au-dessus du seuil et être compacté lors d'une
+consolidation ultérieure. Chaque tentative peut conserver une sauvegarde complète
+du space et une capture LONG distincte ; cette version n'ajoute ni déduplication
+entre captures ni politique de rétention.
+
+Le compacteur résume la mémoire de moyen terme pour qu'une nouvelle conversation
 retrouve l'état utile, les décisions et le travail ouvert. Le programme prépare
 les passages récents et non datés ; le modèle extrait les enseignements de
 l'historique ancien, puis rédige le résumé en anglais. Les dates guident la
@@ -761,8 +787,9 @@ résultats sont préparés avant la sauvegarde vérifiée, les écritures et leu
 relecture ; le rollback existant reste borné. Une route Project Mesh partagée
 est refusée avant l'inférence ou l'écriture. Une requête incompatible avec le
 contexte est refusée avant son envoi. La compaction ne fournit pas de stockage
-multipart, de reprise durable après crash ni de transfert des détails écartés
-vers Graph.
+multipart ni de reprise durable après crash. En 1.6.0, les captures vérifiées
+avant compaction sont conservées et projetées de manière asynchrone dans LONG
+avec une ontologie automatique.
 
 La séparation entre récent et historique conserve ensemble les passages d'une
 même date à la frontière, même au-delà du repère de volume ; la garde de contexte
@@ -792,6 +819,20 @@ jamais être relancé automatiquement après un timeout ambigu. Une erreur avec
 `phase="activated"` signifie que l'activation ne peut plus être exclue ; voir le
 [runbook de déploiement](docs/DEPLOYMENT.md#bounded-embedding-reindex).
 
+Pour les documents, le parcours pris en charge en 1.6.0 utilise une ontologie
+choisie (nom ou YAML) avec `long_ingest_async`. Le CLI `hivemind-ingest` fournit
+le découpage par lots, le suivi et la resoumission des sources inchangées ; voir
+son [guide d'utilisation](tools/hivemind-ingest/README.md).
+
+L'ontologie automatique pour l'ingestion documentaire est prévue en **1.7.0**.
+Son implémentation est déjà présente pour la qualification expérimentale, mais
+ne fait pas partie du support documentaire 1.6.0. Ce calendrier est distinct
+des captures historiques MID, qui utilisent une ontologie automatique en 1.6.0.
+Le [contrat d'ingestion](docs/MCP_TOOLS_SPEC.md) décrit le parcours expérimental
+`options={"ontology": "auto"}`, les formats, les limites de reprise et les
+diagnostics. `Other` et `RELATED_TO` mesurent les résidus, pas la justesse
+sémantique.
+
 ### Backup
 
 | Outil             | Paramètres                       | Description                                       |
@@ -800,7 +841,39 @@ jamais être relancé automatiquement après un timeout ambigu. Une erreur avec
 | `backup_list`     | `space_id?`                      | Liste les backups disponibles                     |
 | `backup_restore`  | `backup_id`, `confirm?=False`, `unsafe_recovery?=False` | **manage** ; `confirm=True` est toujours requis. Normalement le space ne doit pas exister. Sur un space partagé/non sûr, ajouter `unsafe_recovery=True` pour la recovery explicite en avant ; la corruption reste refusée fail-closed. |
 | `backup_download` | `backup_id`                      | Télécharge en tar.gz base64                       |
-| `backup_delete`   | `backup_id`, `confirm?=False`    | **manage** ; supprime irréversiblement un backup uniquement avec `confirm=True` |
+| `backup_delete`   | `backup_id`, `confirm?=False`    | **manage** ; supprime un backup ordinaire avec `confirm=True`. Les préimages de compaction sont conservées (`compaction_preimage_protected`). |
+
+La compaction DirectLocal conserve ses préimages vérifiées et inscrit
+leur projection historique dans une file durable. Un worker reprend cette
+projection vers LONG après interruption, sans faire dépendre MID du graphe.
+Pour les nouvelles captures, l'ontologie est calculée automatiquement sur la
+première capture complète, puis réutilisée sans recalcul pour les suivantes.
+Les documents gardent leur propre choix d'ontologie ; une recherche dans le
+même space retrouve documents et archives. Aucun service ou réglage supplémentaire
+n'est nécessaire. La liaison locale durable d'archives de chaque destination
+reste séparée de la configuration de connexion. Une reconnexion au même parent
+conserve la capture initiale et le catalogue ; les archives sont lisibles
+immédiatement, sans attendre le worker. Les anciennes captures en attente conservent leur destination
+initiale : aucun graphe existant n'est migré ou reclassé implicitement.
+`long_status.mid_archive_projection` expose les captures en attente, leur
+ancienneté et un éventuel code d'erreur. Si le premier catalogue est bloqué, les
+captures suivantes attendent aussi, avec leurs sources brutes conservées :
+consulter cet état et corriger les problèmes réparables de source ou de route.
+En cas de perte ou de corruption extérieure de l'état local, une archive orpheline
+dont le catalogue n'est pas gelé nécessite la restauration de sa liaison et de son
+checkpoint d'origine depuis un backup vérifié, ou une investigation opérateur ;
+les tentatives répétées ne réparent pas cet état.
+Le worker ne saute jamais une capture invalide pour démarrer depuis une autre.
+Si les archives sont indisponibles, les résultats documentaires de recherche,
+requête et liste restent disponibles avec `partial: true` et des avertissements
+de portée `mid_archive` ; ils ne représentent pas l'ensemble des archives.
+Les sources brutes restent conservées :
+chaque tentative de compaction laisse un snapshot complet, sans purge automatique
+ni suppression par l'outil produit. Le volume stocké et le coût de la liste des
+backups augmentent avec le nombre de snapshots ; la gestion directe du stockage
+reste une intervention opérateur distincte.
+L'évolution continue de l'ontologie et la compaction Mesh restent distinctes ;
+ce raccordement ne constitue pas une qualification des gros volumes ou du parsing.
 
 ### Admin
 
@@ -881,7 +954,9 @@ enseigne au graphe du contenu transitoire qu'une compaction ultérieure
 laissera bloqué en état obsolète. Les flux de routine doivent ingérer
 des **documents stables et canoniques** avec des clés `source_path`
 stables ; les fichiers de focus volatiles (ex. `activeContext.md`,
-`progress.md`) ne doivent **jamais** finir dans le graphe `long`.
+`progress.md`) ne sont pas poussés directement comme connaissances stables.
+Leurs captures historiques immuables suivent le parcours automatique d'archives
+MID décrit plus haut, avec leur provenance et leur propre ontologie.
 `graph_push` reste disponible pour un bootstrap one-shot et des
 opérations de debug / migration explicites.
 
@@ -970,9 +1045,9 @@ http://localhost:8080/live
 Les endpoints `/api/*` nécessitent un Bearer Token. La page `/live` et
 les fichiers `/static/*` sont publics.
 
-### Console d'administration (`/admin`)
+### Hivemind Portal (`/admin`)
 
-La console d'administration à routes hash est disponible sur `/admin` et
+Le Portal à routes hash est disponible sur `/admin` et
 utilise le proxy authentifié `/api/tool` pour ses workflows opérateur :
 
 ```
@@ -981,16 +1056,28 @@ http://localhost:8080/admin
 
 | Section | Fonctionnalités |
 | --- | --- |
-| **Dashboard** | Statut de santé (S3 / LLM / version / uptime), barre d'identité, nombre de spaces et de tokens, signaux de file/lane de consolidation |
+| **Dashboard** | Activité de consolidation sur une page de 20 spaces maximum, résultats récents et détails ; dernières notes de trois spaces choisis au maximum ; dernier contrôle explicite des services |
 | **Spaces** | Index des spaces avec compteurs short/mid/long et labels d'état ; point d'entrée vers Space Detail (création visible seulement pour manage/admin) |
-| **Space Detail** | Vue par space unifiée via sélecteurs de tier mémoire : notes `short`, fichiers bank `mid`, connaissances dérivées `long`, rules, résumé d'accès, et actions sûres par space (création/suppression de backups, suppression du space) |
+| **Space Detail** | Onglets Memory (Short / Mid), Consolidation, Long memory, Rules, Access, Backups et Maintenance selon les permissions ; lien Global audit vers l'audit de l'instance |
 | **Consolidation** | Lanes/jobs de consolidation (queued / running / succeeded / failed) et le filtre de planification stale-banks |
 | **Audit** | Événements console/auth récents via `admin_audit_recent` (admin uniquement, cette instance, en mémoire depuis le redémarrage) |
 | **Access** | Gestion des tokens et de l'accès aux spaces : création (manager-safe vs admin), invitation par hash exact, update / révocation / suppression / purge avec confirmations typées |
 | **Outils opérateur** | Backups (création / restauration / suppression) et Maintenance (compact, repair, GC, purge) derrière des confirmations explicites |
 
-- **Auth** : nécessite un token valide (comme `/live`), session via cookie HttpOnly
+- **Auth** : nécessite un token opérateur (`write` ou supérieur), session via cookie HttpOnly ; les tokens `read` utilisent le viewer `/live`, accessible depuis la connexion.
+- **Barre commune** : instance, contrôle explicite Check services et Refresh. Le rafraîchissement des données ne déclenche aucun contrôle de santé du modèle. Les anciens liens vers les tiers d'un space restent valides.
+- **Rafraîchissement** : le contrôle commun Auto-refresh est désactivé par défaut et propose 15/30/60 secondes aux vues qui l'intègrent. Les autres vues gardent leur fonctionnement actuel jusqu'à leur intégration Portal. Seule cette préférence est mémorisée dans le navigateur ; la déconnexion la désactive.
+- **Activité du Dashboard** : le suivi reste actif au repos lorsqu'il est activé, sur la page affichée. Les nouveaux spaces apparaissent après un rafraîchissement manuel. Les sélections de notes restent dans la session ; afficher 20 notes lit encore tout le préfixe SHORT du space, donc seuls les trois spaces choisis au maximum sont interrogés.
+- **Lecture dans Memory** : SHORT regroupe les notes en attente par jour local du navigateur. Les filtres agent, catégorie et Since… ne changent qu'après Apply filters. MID présente tous les fichiers par onglets et relit le fichier sélectionné sans perdre la position de lecture. Modification du fichier, dernière consolidation et dernier rafraîchissement ont des dates distinctes. Le viewer `/live` et ses accès en lecture seule restent disponibles.
+- **Long memory** : cinq panneaux distincts, Overview, Ontology, Documents,
+  Ingestion jobs et Graph. Consultez et validez les définitions YAML disponibles
+  sans changer l'ontologie configurée. Filtrez les documents et chargez leur
+  contenu explicitement. Suivez les jobs d'ingestion avec Auto-refresh optionnel
+  et demandez leur annulation après confirmation. Graph affiche une projection
+  limitée à 160 nœuds et 320 liens, avec recherche et sélection locales.
+  Chaque panneau charge ses propres données via les API existantes.
 - **Compatible CSP** : zéro handler inline, tout via `data-action` + délégation d'événements
+- **Connexion d'un client** : Access guide la création du token, la sauvegarde du secret, l'attribution des spaces et la configuration Codex ou Claude Code. L'URL MCP externe est saisie par l'opérateur ; le snippet utilise `HIVEMIND_TOKEN`, jamais le secret. Le rejeu reprend uniquement les accès non confirmés. Done et Finish later ferment les instructions sans certifier la connexion.
 - **Le tier long est dérivé, jamais autoritaire** : jamais une source de commit,
   rollback, audit, appartenance ni recovery — le panneau long de Space Detail
   rend son état réel (ou un échec honnête), jamais un « désactivé » neutre.
@@ -1157,10 +1244,9 @@ uv run pytest tests
 ## 🔒 Sécurité
 
 Le [rapport de sécurité de la 1.5.3](docs/SECURITY_AUDIT_1.5.3.md), en anglais,
-documente les sept corrections applicatives et la mise à jour de dépendance,
-ainsi que le périmètre et les limites de l'audit. Le suivi global de l'audit
-reste ouvert ; il ne s'agit pas d'une
-certification de sécurité.
+documente les sept corrections applicatives conservées dans la 1.6.0, la mise à
+jour de dépendance ainsi que le périmètre et les limites de cet audit. Le suivi
+global reste ouvert ; il ne s'agit pas d'une certification de sécurité.
 
 ### Authentification
 

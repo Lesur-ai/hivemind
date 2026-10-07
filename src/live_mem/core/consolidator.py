@@ -3335,10 +3335,10 @@ def _compaction_failure_payload(
 def _compaction_safe_abort_remediation(
     errors: Iterable[object], *, failure_reason: str | None = None
 ) -> str:
-    """Return safe operator guidance for a refused or reverted manual compaction.
+    """Return safe operator guidance for a refused or reverted compaction.
 
-    Only ``compact_bank`` (the MCP tool ``bank_compact``) calls this helper: a
-    consolidation never compacts.  The structured failure remains
+    Both manual ``bank_compact`` and queued automatic maintenance use
+    ``compact_bank``. The structured failure remains
     the authority for automation.  This text is deliberately bounded to safe
     recovery actions so a malformed, unavailable, or recovered compaction cannot
     turn an otherwise safe abort into an opaque repeated failure.
@@ -3821,7 +3821,7 @@ These rules are MANDATORY and take precedence over every other consideration:
   keeps one line in the history file (dated the same way) naming what it replaced. Items the batch does not
   touch stay exactly as they are: you have no source to judge them old or wrong, and deleting
   or condensing them is a loss; age alone is never a reason — age-based condensation is
-  compaction's job, a human decision, not this batch's. These files remain LIGHTWEIGHT by
+  compaction's job, not this batch's. These files remain LIGHTWEIGHT by
   retiring what a note supersedes, never by deleting what is merely old.
 - For HISTORY/PROGRESS files: append new entries — lines dated with the note's `date` when
   it has one, under the existing milestone heading when one covers the same work; a line
@@ -3898,9 +3898,9 @@ def _bank_size_advisory(
 ) -> list[dict[str, object]]:
     """Report the bank files above the advisory size threshold.
 
-    Compaction is a human decision (``bank_compact``): a consolidation never
-    runs it. This helper only measures the persisted UTF-8 size of each bank
-    file as read at job start, logs one WARNING when at least one file is
+    Automatic maintenance follows successful queued consolidation. This helper
+    only measures the persisted UTF-8 size of each bank file as read at job start,
+    logs one WARNING when at least one file is
     above ``BANK_FILE_MAX_SIZE`` and returns the list for the job result. It
     never mutates, refuses, or reads storage.
     """
@@ -3926,7 +3926,7 @@ def _bank_size_advisory(
     if advisory:
         logger.warning(
             "Bank size advisory — space=%s %d file(s) above %d bytes: %s — "
-            "compaction is a human decision (bank_compact); consolidation continues",
+            "measured before consolidation; maintenance is reported separately",
             space_id,
             len(advisory),
             max_size,
@@ -7521,6 +7521,33 @@ INSTRUCTION: Merge these versions into ONE coherent version.
                 "failures": preimage_failures,
             })
 
+        # F13: persist the historical capture before any replacement. This is
+        # storage-only bookkeeping: no projection call or LONG result can
+        # authorize, roll back, or delay an already-applied MID mutation.
+        from .locks import get_lock_manager
+        from .mid_archive import prepare_mid_archive
+
+        try:
+            async with get_lock_manager().space_lifecycle(space_id):
+                await prepare_mid_archive(
+                    direct_local_sink.storage,
+                    space_id=space_id,
+                    preimage_id=preimage_id,
+                    documents=[{
+                        "bank_path": bank_relpath(item.target.source_key, space_id),
+                        "sha256": item.target.source_sha256,
+                        "size_bytes": item.target.source_utf8_bytes,
+                    } for item in preimages],
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return with_preimage_id({
+                "status": "error",
+                "failure_reason": "compaction_preimage_intent_unverified",
+                "failures": [{"filename": "", "error": "compaction_preimage_intent_unverified"}],
+            })
+
         async def fail_or_recover(
             failure: dict[str, str],
             attempted: tuple[_PreparedCompactionPreimage, ...],
@@ -7910,7 +7937,7 @@ INSTRUCTION: Merge these versions into ONE coherent version.
         dry_run: bool = True,
     ) -> dict:
         """
-        Compaction manuelle de la bank d'un espace (outil MCP standalone).
+        Compaction de la bank (outil manuel ou maintenance après consolidation).
 
         En mode dry_run, rapporte les fichiers à compacter et leurs tailles
         sans modifier quoi que ce soit.

@@ -160,7 +160,7 @@ def test_readme_console_section_matches_shipped_console() -> None:
 
     Mutations: restore the "inherited implementation, not the target …"
     paragraph to README.md -> RED; remove a French IA label from
-    README.fr.md's "Console d'administration" section -> RED.
+    README.fr.md's "Hivemind Portal" section -> RED.
     """
     en = _normalise_markdown(_read("README.md"))
     fr = _normalise_markdown(_read("README.fr.md"))
@@ -179,23 +179,23 @@ def test_readme_console_section_matches_shipped_console() -> None:
     )
 
     # Positive (EN): the shipped IA labels must be present in the console section.
-    section_en = _console_section(_read("README.md"), "### Admin Console")
-    assert section_en is not None, "README.md must keep an '### Admin Console' section"
+    section_en = _console_section(_read("README.md"), "### Hivemind Portal (`/admin`)")
+    assert section_en is not None, "README.md must describe the shipped Hivemind Portal"
     missing_en = [lbl for lbl in _SHIPPED_CONSOLE_LABELS if lbl not in section_en]
     assert not missing_en, (
-        "README.md '### Admin Console' section is missing shipped IA "
+        "README.md Hivemind Portal section is missing shipped IA "
         f"label(s): {missing_en}."
     )
 
     # Positive (FR): the French console section must carry the French IA labels —
     # T-P87-2 claims an EN+FR contract, so the FR section is validated too.
-    section_fr = _console_section(_read("README.fr.md"), "### Console d'administration")
+    section_fr = _console_section(_read("README.fr.md"), "### Hivemind Portal (`/admin`)")
     assert section_fr is not None, (
-        "README.fr.md must keep a '### Console d'administration' section"
+        "README.fr.md must describe the shipped Hivemind Portal"
     )
     missing_fr = [lbl for lbl in _SHIPPED_CONSOLE_LABELS_FR if lbl not in section_fr]
     assert not missing_fr, (
-        "README.fr.md '### Console d'administration' section is missing shipped "
+        "README.fr.md Hivemind Portal section is missing shipped "
         f"IA label(s): {missing_fr}. Elle doit décrire Dashboard, Spaces, "
         "Space Detail, Consolidation, Audit, Access et Outils opérateur."
     )

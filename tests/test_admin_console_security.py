@@ -1571,7 +1571,7 @@ class TestP81SessionWipe:
         )
 
         wipe_idx = content.find("function wipeSession")
-        wipe_body = content[wipe_idx : wipe_idx + 900]
+        wipe_body = content[wipe_idx : content.index("async function doLogin", wipe_idx)]
         assert "adminModal" in wipe_body, (
             "P8-1 BROKEN: wipeSession() does not destroy #adminModal — a "
             "one-time token secret could remain in the DOM after logout."
@@ -1650,7 +1650,7 @@ class TestP81ForbiddenSinks:
     their stub-to-implementation lifecycle."""
 
     def _all_new_frontend_files(self):
-        files = [_ADMIN_APP_JS] + _VIEW_MODULE_FILES
+        files = [_ADMIN_APP_JS] + _VIEW_MODULE_FILES + ["js/admin/portal-refresh.js"]
         return {f: _read_admin_source(f) for f in files}
 
     def test_no_document_write(self):

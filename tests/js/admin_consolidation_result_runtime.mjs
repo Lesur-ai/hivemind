@@ -1,4 +1,4 @@
-// Runtime proof for the two admin consumers of a consolidation
+// Runtime proof for the shared admin renderer of a consolidation
 // result: a run that stopped at its first batch (notes_total > 0,
 // notes_processed = 0) must render its counters, never "nothing to
 // consolidate", and a failed job must still show its result block.
@@ -6,9 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-const spaceDetailPath = process.argv[2];
-const consolidationPath = process.argv[3];
-assert.ok(spaceDetailPath, 'space-detail view path is required');
+const consolidationPath = process.argv[2];
 assert.ok(consolidationPath, 'consolidation view path is required');
 
 const escapeHtml = value => String(value ?? '')
@@ -59,65 +57,16 @@ function context() {
         clearTimeout,
     };
     vm.createContext(ctx);
+    // Load the actual shared renderer, as the browser shell does. Keep this
+    // seam present even in fixtures with no automatic-maintenance outcome.
+    const appSource = fs.readFileSync(new URL('../../src/live_mem/static/js/admin-app.js', import.meta.url), 'utf8');
+    const helperStart = appSource.indexOf('function renderAutoCompaction(');
+    const helperEnd = appSource.indexOf('\nfunction ', helperStart + 1);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, 'shared maintenance renderer is missing');
+    vm.runInContext(appSource.slice(helperStart, helperEnd), ctx);
+
     return ctx;
 }
-
-// ── space-detail view ────────────────────────────────────────────────────────
-const sd = context();
-const sdSource = fs.readFileSync(spaceDetailPath, 'utf8');
-const sdInstrumented = sdSource.replace(
-    "AdminViews.register('space-detail', render);",
-    'globalThis.__jobResult = { renderJobResult, renderJobInspector };',
-);
-assert.notEqual(sdInstrumented, sdSource, 'space-detail instrumentation anchor missing');
-vm.runInContext(sdInstrumented, sd, { filename: spaceDetailPath });
-assert.ok(sd.__jobResult, 'space-detail instrumentation failed');
-
-const stoppedResult = {
-    status: 'error',
-    notes_total: 2,
-    notes_processed: 0,
-    notes_discarded_count: 0,
-    notes_deleted: 0,
-    notes_remaining: 2,
-    failed_batch: 1,
-    failure_reason: 'batch_write_failed',
-    batches_completed: 0,
-    batches_total: 1,
-    message: 'Consolidation stopped at batch 1/1 (batch_write_failed)',
-};
-
-const stopped = sd.__jobResult.renderJobResult({ status: 'failed', result: stoppedResult });
-assert.equal(stopped.includes('Nothing to consolidate'), false, 'a stopped run is not "nothing to consolidate"');
-assert.ok(stopped.includes('Notes total'), 'counters must include notes total');
-assert.ok(stopped.includes('Notes remaining'), 'counters must include notes remaining');
-assert.ok(stopped.includes('Failure reason'), 'counters must include the failure reason');
-assert.ok(stopped.includes('batch_write_failed'));
-
-const nothing = sd.__jobResult.renderJobResult({
-    status: 'succeeded',
-    result: { status: 'ok', notes_total: 0, notes_processed: 0, message: 'No new notes to consolidate' },
-});
-assert.ok(nothing.includes('Nothing to consolidate'), 'a zero-note run is "nothing to consolidate"');
-
-const inspector = sd.__jobResult.renderJobInspector({
-    jobLoading: false,
-    jobId: 'j1',
-    jobData: {
-        status: 'failed',
-        job_id: 'j1',
-        space_id: 'demo',
-        scope: 'all',
-        scope_label: 'All agents',
-        agent: '',
-        requested_by: 'admin',
-        error: 'Consolidation stopped at batch 1/1 (batch_write_failed)',
-        progress: { phase: 'failed', batch_size: 2, notes_total: 2, notes_done: 0, batches_total: 1, batches_done: 0, current_batch: 1 },
-        result: stoppedResult,
-    },
-});
-assert.ok(inspector.includes('Notes remaining'), 'a failed job must still render its result counters');
-assert.equal(inspector.includes('Nothing to consolidate'), false);
 
 // ── consolidation view ───────────────────────────────────────────────────────
 const cv = context();
@@ -168,7 +117,7 @@ assert.ok(failedJob.includes('Failed'));
 assert.ok(failedJob.includes('Notes remaining'), 'a failed job must render its counters in the consolidation view');
 
 
-// ── Some bank files exceed the advisory size (indicator only), both inspectors ───────────
+// ── Files above the threshold before consolidation (indicator only), shared inspector ───────────
 {
     const hostile = '<img src=x onerror=alert(1)>.md';
     const advisoryResult = {
@@ -183,25 +132,35 @@ assert.ok(failedJob.includes('Notes remaining'), 'a failed job must render its c
         ],
     };
     const okJob = cv.__consolidation.renderJob({ job_id: 'j-adv', status: 'succeeded', queue_position: 0, result: advisoryResult });
-    assert.ok(okJob.includes('Some bank files exceed the advisory size'), 'consolidation inspector must show the size advisory');
-    assert.ok(okJob.includes('Compaction is optional'), 'the advisory names the decision owner');
+    assert.ok(okJob.includes('Files above the threshold before consolidation'), 'consolidation inspector must show the size advisory');
+    assert.ok(okJob.includes('automatic compaction result'), 'the advisory distinguishes the follow-up outcome');
     assert.ok(okJob.includes('progress.md') && okJob.includes('42553') && okJob.includes('35000'));
     assert.ok(okJob.includes('&lt;img src=x onerror=alert(1)&gt;.md'), 'the filename is escaped');
     assert.equal(okJob.includes(hostile), false, 'no raw markup from a server-provided filename');
     assert.equal(okJob.includes('malformed.md'), false, 'a malformed item is skipped, not rendered');
     assert.equal(okJob.includes('Compaction refused'), false, 'no compaction envelope exists any more');
     const failedAdvisoryJob = cv.__consolidation.renderJob({ job_id: 'j-adv-f', status: 'failed', queue_position: 0, error: 'stopped', result: { ...advisoryResult, status: 'error', failure_reason: 'batch_llm_failed', failed_batch: 1 } });
-    assert.ok(failedAdvisoryJob.includes('Some bank files exceed the advisory size'), 'a failed job still shows the advisory');
+    assert.ok(failedAdvisoryJob.includes('Files above the threshold before consolidation'), 'a failed job still shows the advisory');
     const silent = cv.__consolidation.renderJob({ job_id: 'j-quiet', status: 'succeeded', queue_position: 0, result: { ...advisoryResult, bank_size_advisory: undefined } });
-    assert.equal(silent.includes('Some bank files exceed the advisory size'), false, 'no advisory → nothing rendered');
+    assert.equal(silent.includes('Files above the threshold before consolidation'), false, 'no advisory → nothing rendered');
 
-    // renderJobInspector takes the VIEW (jobLoading / jobData / jobId), not the job
-    const sdInspector = sd.__jobResult.renderJobInspector({ jobLoading: false, jobId: 'j-adv', jobData: { job_id: 'j-adv', status: 'succeeded', queue_position: 0, result: advisoryResult } });
-    assert.ok(sdInspector.includes('Some bank files exceed the advisory size'), 'space-detail inspector must show the size advisory');
-    assert.ok(sdInspector.includes('42553') && sdInspector.includes('35000'));
-    assert.ok(sdInspector.includes('&lt;img src=x onerror=alert(1)&gt;.md'));
-    assert.equal(sdInspector.includes(hostile), false);
-    assert.equal(sdInspector.includes('Compaction refused'), false);
+
 }
+
+
+// The shared renderer is exercised, not replaced with a no-op test stub.
+const maintenanceResult = { status: 'ok', notes_total: 2, notes_processed: 2,
+    auto_compaction: { status: 'partial', recovery_required: true,
+        preimage_id: '<capture>', started_at: '2026-09-24T08:00:00Z' } };
+for (const status of ['succeeded', 'failed']) {
+    const html = cv.__consolidation.renderJob({ job_id: 'maintenance', status, result: maintenanceResult });
+    assert.ok(html.includes('Compaction incomplete'));
+    assert.ok(html.includes('Recovery must be checked before retrying.'));
+    assert.ok(html.includes('&lt;capture&gt;'));
+    assert.equal(html.includes('<capture>'), false);
+    assert.ok(html.includes('Originals are retained before compaction.'));
+}
+assert.equal(cv.renderAutoCompaction({ auto_compaction: { status: 'disabled' } })
+    .includes('Originals are retained before compaction.'), false);
 
 console.log('admin consolidation result runtime: ok');

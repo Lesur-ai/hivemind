@@ -3,7 +3,8 @@
  * #/operator/maintenance, both dispatched here via params.tab.
  *
  * Backups (§4.6 B1–B5, §5.8.1): global inventory, single- and all-spaces
- * backup create, typed-confirmation restore/delete. Maintenance (§4.8 M1–M6,
+ * backup create, typed-confirmation restore/delete. A Space context restricts
+ * listing and creation to its target and removes the all-spaces action. Maintenance (§4.8 M1–M6,
  * §5.8.2): per-space compact / repair (dry-run default, two-step bound to the
  * reviewed target) and all three GC orphan-note modes. GC deletion is bound to
  * the exact opaque eligible-set token returned by a successful dry run for the
@@ -16,9 +17,9 @@
  * all actions via the shell [data-action] delegate (CSP-safe). Permission gates
  * read the cached identity (never a fresh probe); the server stays authoritative.
  *
- * Timestamp note: backup_list.timestamp and admin_gc_notes `oldest` are compact
- * non-ISO folder/filename forms — rendered as raw mono, never through the shared
- * UTC timestamp helper (which only handles ISO-8601).
+ * Timestamp note: the shared formatter recognizes the compact UTC forms used
+ * by backup_list.timestamp and admin_gc_notes `oldest`, then presents them in
+ * the browser's local time like the ISO-8601 fields.
  */
 (function () {
     'use strict';
@@ -26,6 +27,7 @@
     const state = {
         identity: {},
         tab: 'backups',
+        spaceId: '',        // optional Portal Space context; never stored
         spaces: null,       // last space_list payload (pickers)
         compactDry: null,   // space id of the last SUCCESSFUL compact dry run
         // The verified apply response stays visible beside its mandatory
@@ -116,6 +118,12 @@
         }
         state.sessionGeneration = nextSessionGeneration;
         state.identity = (ctx && ctx.identity) || {};
+        const scopedId = params && params.spaceId;
+        state.spaceId = typeof scopedId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(scopedId) ? scopedId : '';
+        if (scopedId !== undefined && !state.spaceId) {
+            contentEl.innerHTML = stateUnavailable('Invalid space identifier.');
+            return;
+        }
         state.tab = (params && params.tab) === 'maintenance' ? 'maintenance' : 'backups';
         const epoch = ctx ? ctx.epoch : AdminRouter.epoch;
         if (state.tab === 'maintenance') renderMaintenance(contentEl, epoch);
@@ -156,19 +164,28 @@
     }
 
     async function loadBackups(epoch) {
+        const spaceId = state.spaceId;
+        const generation = state.sessionGeneration;
+        const isCurrent = () => AdminRouter.epoch === epoch && state.tab === 'backups'
+            && state.spaceId === spaceId && state.sessionGeneration === generation
+            && sessionGenerationIsCurrent(generation) && sessionActive();
         let backups, spaces;
         try {
-            // ≤4 concurrent (§5.0): the global list + the picker source.
-            [backups, spaces] = await Promise.all([
-                callTool('backup_list', {}),
-                callTool('space_list', {}),
-            ]);
+            if (spaceId) {
+                backups = await callTool('backup_list', { space_id: spaceId });
+                spaces = { status: 'ok', spaces: [{ space_id: spaceId }] };
+            } else {
+                [backups, spaces] = await Promise.all([
+                    callTool('backup_list', {}),
+                    callTool('space_list', {}),
+                ]);
+            }
         } catch (e) {
-            if (AdminRouter.epoch !== epoch) return;
+            if (!isCurrent()) return;
             paintBackupsList({ status: 'error' });
             return;
         }
-        if (AdminRouter.epoch !== epoch) return;
+        if (!isCurrent()) return;
         state.spaces = spaces;
         paintBackupsActions();
         paintBackupsList(backups);
@@ -180,7 +197,7 @@
         const createBtn = `<button type="button" class="btn btn-primary btn-sm" data-action="op-backup-create">${icon('plus')}<span>New backup</span></button>`;
         // All-spaces backup is admin-only server-side (empty space_id); hide it
         // otherwise (§5.8.1) rather than showing an action that will 403.
-        const allBtn = isAdmin()
+        const allBtn = isAdmin() && !state.spaceId
             ? `<button type="button" class="btn btn-secondary btn-sm" data-action="op-backup-all">${icon('backups')}<span>Back up all spaces</span></button>`
             : '';
         el.innerHTML = createBtn + ' ' + allBtn;
@@ -198,7 +215,8 @@
             el.innerHTML = panel(stateError({ title: "Couldn't load backups", message: data && data.message, retryAction: 'op-backups-refresh' }));
             return;
         }
-        const backups = Array.isArray(data.backups) ? data.backups : [];
+        const backups = (Array.isArray(data.backups) ? data.backups : [])
+            .filter(backup => !state.spaceId || backup.space_id === state.spaceId);
         const filteredBanner = data.filtered_by_token === true
             ? `<div class="op-filtered-banner state-degraded" role="status">${icon('alert')}<span>List filtered to your token's space allowlist.</span></div>`
             : '';
@@ -207,8 +225,8 @@
             body = stateEmpty({ title: 'No backups', hint: 'No backup archives are visible to this token.' });
         } else {
             const rows = backups.map(backupRow).join('');
-            const table = dataTable(['Backup', 'Space', 'Timestamp', 'Files', 'Size', 'Actions'], rows);
-            body = `<div class="panel-header"><h2>Backups</h2><span class="count-pill mono">${esc(String(data.total ?? backups.length))}</span></div>${table}`;
+            const table = dataTable(['Backup', 'Space', 'Timestamp (local)', 'Files', 'Size', 'Actions'], rows);
+            body = `<div class="panel-header"><h2>Backups</h2><span class="count-pill mono">${esc(String(state.spaceId ? backups.length : (data.total ?? backups.length)))}</span></div>${table}`;
         }
         el.innerHTML = filteredBanner + panel(body);
     }
@@ -216,9 +234,7 @@
     function backupRow(b) {
         const bid = String(b.backup_id || '');
         const sid = String(b.space_id || '');
-        // timestamp is the compact S3 folder form (YYYY-MM-DDTHH-MM-SS) — not
-        // ISO; render as raw mono, never via renderTimestamp (would misparse).
-        const ts = b.timestamp ? `<span class="mono-data">${esc(String(b.timestamp))}</span>` : '<span class="text-faint">—</span>';
+        const ts = b.timestamp ? renderTimestamp(b.timestamp) : '<span class="text-faint">—</span>';
         const files = (typeof b.files_count === 'number') ? String(b.files_count) : '—';
         const size = (typeof b.total_size === 'number') ? fmtSize(b.total_size) : '—';
         const desc = b.description ? `<div class="op-backup-desc body-small">${esc(String(b.description))}</div>` : '';
@@ -236,6 +252,7 @@
 
     // ── create single backup ──
     function openCreateBackup() {
+        const spaceId = state.spaceId;
         const body = `${spacePicker('opBackupCreateSpace')}
             <div class="form-group">
                 <label class="form-label" for="opBackupCreateDesc">Description (optional)</label>
@@ -245,8 +262,9 @@
         const epoch = AdminRouter.epoch;
         const op = beginModalOp();
         showModal('New backup', body, 'Create backup', async () => {
+            if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
             const sel = document.getElementById('opBackupCreateSpace');
-            const sid = sel ? sel.value : '';
+            const sid = spaceId || (sel ? sel.value : '');
             const errEl = document.getElementById('opBackupCreateErr');
             if (!sid) { if (errEl) errEl.innerHTML = `<p class="form-error">${icon('alert')} Select a space.</p>`; return false; }
             const descEl = document.getElementById('opBackupCreateDesc');
@@ -267,10 +285,13 @@
             if (errEl) errEl.innerHTML = serverMessage(data && data.message) || `<p class="form-error">The server refused or failed this operation.</p>`;
             return false;
         });
+        const picker = document.getElementById('opBackupCreateSpace');
+        if (spaceId && picker) { picker.value = spaceId; picker.disabled = true; }
     }
 
     // ── all-spaces backup (admin) ──
     function backupAll() {
+        if (state.spaceId) return;
         const epoch = AdminRouter.epoch;
         const op = beginModalOp();
         showModal('Back up all spaces',
@@ -322,6 +343,7 @@
     // ── restore (typed confirmation) ──
     function confirmRestore(backupId, spaceId) {
         if (!backupId) { showToast('error', 'Missing backup id'); return; }
+        if (state.spaceId && !backupId.startsWith(state.spaceId + '/')) return;
         const body = `
             <p class="body-small">Restores backup <code>${esc(backupId)}</code>${spaceId ? ` into space <code>${esc(spaceId)}</code>` : ''}.</p>
             <p class="body-small">Restores over the target space. The server refuses to restore over a mesh-participating or fail-closed space (<code>hive_status_label</code> gate).</p>
@@ -331,6 +353,7 @@
         showDestructiveModal({
             title: 'Restore backup', bodyHtml: body, verb: 'Restore', typedConfirmation: backupId,
             onConfirm: async () => {
+                if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
                 let data;
                 // The unsafe-recovery flag is NEVER sent — that path is MCP-client only.
                 try { data = await callTool('backup_restore', { backup_id: backupId, confirm: true }); }
@@ -370,12 +393,14 @@
     // ── delete backup (typed confirmation) ──
     function confirmDeleteBackup(backupId) {
         if (!backupId) { showToast('error', 'Missing backup id'); return; }
+        if (state.spaceId && !backupId.startsWith(state.spaceId + '/')) return;
         const body = `<p class="body-small">Permanently deletes this backup archive.</p><p class="mono-block">${esc(backupId)}</p>`;
         const epoch = AdminRouter.epoch;
         const op = beginModalOp();
         showDestructiveModal({
             title: 'Delete backup', bodyHtml: body, verb: 'Delete', typedConfirmation: backupId,
             onConfirm: async () => {
+                if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false;
                 let data;
                 try { data = await callTool('backup_delete', { backup_id: backupId, confirm: true }); }
                 catch (e) { if (AdminRouter.epoch !== epoch || !modalOpCurrent(op) || !sessionActive()) return false; showToast('error', 'Request failed'); return true; }
@@ -400,6 +425,12 @@
     // ═════════════════════════ MAINTENANCE TAB (§5.8.2) ═════════════════════════
 
     function renderMaintenance(contentEl, epoch) {
+        // A new route has no visible dry-run report, even when its locked
+        // Space target matches an earlier visit. Require fresh review.
+        state.compactDry = null;
+        state.compactApplyEvidence = null;
+        state.repairDry = null;
+        invalidateGcProof();
         contentEl.innerHTML = `<div class="page">
             ${pageHeader('Maintenance', refreshBtn('op-maint-refresh'))}
             <p class="body-small op-maint-intro">Per-space operator tools. Compact and Repair require manage; garbage collection requires admin. Destructive actions never infer intent from an empty form.</p>
@@ -410,6 +441,14 @@
     }
 
     async function loadMaintenance(epoch) {
+        if (state.spaceId) {
+            // Space Detail already loaded and authorized this exact space.
+            // Reuse its ID rather than inventorying unrelated spaces.
+            state.spaces = { status: 'ok', spaces: [{ space_id: state.spaceId }] };
+            paintMaintPicker();
+            paintMaintPanels();
+            return;
+        }
         let spaces;
         try { spaces = await callTool('space_list', {}); }
         catch (e) { if (AdminRouter.epoch !== epoch) return; spaces = { status: 'error' }; }
@@ -427,6 +466,10 @@
         // space's report under another's name. CSP-safe (no inline handler).
         const sel = document.getElementById('opMaintSpace');
         if (sel) {
+            if (state.spaceId) {
+                sel.value = state.spaceId;
+                sel.disabled = true;
+            }
             sel.addEventListener('change', () => {
                 ['opCompactResults', 'opRepairResults', 'opGcResults'].forEach(id => {
                     const r = document.getElementById(id);
@@ -908,7 +951,8 @@
             el.innerHTML = gcFailureBlock("Couldn't scan orphan notes", data);
             return;
         }
-        const summary = `<p class="body-small">Cutoff ${esc(String(data.cutoff_date || ''))} (≥ ${esc(String(data.max_age_days ?? '?'))} days) · ${esc(numOr(data.total_old_notes))} orphan note(s) · ${esc(fmtSize(data.total_old_size))}.</p>`;
+        const cutoff = data.cutoff_date ? renderTimestamp(data.cutoff_date) : '<span class="text-faint">—</span>';
+        const summary = `<p class="body-small">Cutoff ${cutoff} (≥ ${esc(String(data.max_age_days ?? '?'))} days) · ${esc(numOr(data.total_old_notes))} orphan note(s) · ${esc(fmtSize(data.total_old_size))}.</p>`;
         // §5.0/§5(a): the dry run returns a `message` for every result shape —
         // render it verbatim always, not only on the empty branch.
         const msg = data.message ? serverMessage(data.message) : '';
@@ -923,8 +967,7 @@
                 const byAgent = (s.by_agent && typeof s.by_agent === 'object')
                     ? Object.keys(s.by_agent).map(a => `<span class="chip">${esc(String(a))}: ${esc(String(s.by_agent[a]))}</span>`).join(' ')
                     : '';
-                // `oldest` is a compact non-ISO filename form — raw mono only.
-                const oldest = s.oldest ? `<span class="mono-data">${esc(String(s.oldest))}</span>` : '<span class="text-faint">—</span>';
+                const oldest = s.oldest ? renderTimestamp(s.oldest) : '<span class="text-faint">—</span>';
                 return `<div class="op-gc-space">
                     <div class="mono-data">${esc(sid)}</div>
                     <p class="body-small">${esc(numOr(s.old_notes))}/${esc(numOr(s.total_notes))} old · ${esc(fmtSize(s.old_notes_size))} · oldest ${oldest} · keys ${esc(numOr(s.keys_count))}</p>

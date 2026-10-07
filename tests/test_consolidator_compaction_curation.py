@@ -136,7 +136,10 @@ def test_renderer_preserves_the_source_terminal_separator(eol):
     assert body == eol + 'Summary' + eol + 'Second line' + eol
 
 
-@pytest.mark.parametrize('body', ['x' * 2_000, 'x' * 2_001])
+@pytest.mark.parametrize('body', [
+    pytest.param('x' * 2_000, id='same-size-body'),
+    pytest.param('x' * 2_001, id='larger-body'),
+])
 async def test_summary_must_strictly_reduce_the_complete_file(body):
     service = make_service()
     service._complete_chat = AsyncMock(return_value=reply(body))

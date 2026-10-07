@@ -184,6 +184,18 @@ async def _close_core_process_resources() -> None:
     await close_consolidator_if_initialized()
 
 
+async def _start_mid_archive_projection() -> None:
+    from .core.mid_archive_projection import start_mid_archive_projector
+
+    await start_mid_archive_projector()
+
+
+async def _stop_mid_archive_projection() -> None:
+    from .core.mid_archive_projection import stop_mid_archive_projector
+
+    await stop_mid_archive_projector()
+
+
 def _validate_inference_startup() -> None:
     """Resolve the shared inference configuration fail-closed, once per window.
 
@@ -508,8 +520,10 @@ def create_app():
             on_startup=(
                 window.guard(_migrate_target_pairing_admission_anchors),
                 window.guard(_validate_inference_startup),
+                window.guard(_start_mid_archive_projection),
             ),
             on_shutdown=(
+                window.guard(_stop_mid_archive_projection),
                 window.guard(_close_core_process_resources),
                 window.guard(_close_inference_runtime),
             ),

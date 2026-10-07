@@ -33,6 +33,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 from hivemind_inference import EmbeddingResult
 
 from ..config import get_settings
+from .ontology import is_automatic_ontology_name
 
 
 class IngestCancelled(Exception):
@@ -376,6 +377,11 @@ async def run_ingest_pipeline(
         if not memory:
             return {"status": "error", "message": f"Memory '{memory_id}' not found"}
         ontology_to_use = ontology or memory.ontology
+        if ontology is None and is_automatic_ontology_name(memory.ontology):
+            automatic = await _graph().load_automatic_ontology(memory_id)
+            if not automatic or not automatic.get("ontology_yaml"):
+                raise ValueError("automatic ontology default is unavailable")
+            ontology_to_use = automatic["ontology_yaml"]
         if not ontology_to_use:
             return {
                 "status": "error",
@@ -588,6 +594,23 @@ async def run_ingest_pipeline(
             "relations_merged": graph_result.get("relations_merged", 0),
             "entity_types": dict(entity_types),
             "relation_types": dict(relation_types),
+            "ontology_diagnostics": {
+                "entity_other": {
+                    "count": entity_types.get("Other", 0),
+                    "denominator": len(extraction.entities),
+                    "rate": entity_types.get("Other", 0) / len(extraction.entities) if extraction.entities else None,
+                },
+                "relation_other": {
+                    "count": relation_types.get("OTHER", 0),
+                    "denominator": len(extraction.relations),
+                    "rate": relation_types.get("OTHER", 0) / len(extraction.relations) if extraction.relations else None,
+                },
+                "relation_related_to": {
+                    "count": relation_types.get("RELATED_TO", 0),
+                    "denominator": len(extraction.relations),
+                    "rate": relation_types.get("RELATED_TO", 0) / len(extraction.relations) if extraction.relations else None,
+                },
+            },
             "chunks_stored": chunks_stored,
             "summary": extraction.summary,
             "key_topics": extraction.key_topics,

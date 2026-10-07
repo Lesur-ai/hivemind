@@ -41,7 +41,11 @@ from live_mem.auth.context import current_token_info
 from live_mem.core.graph_bridge import GraphBridgeService
 from live_mem.core.engines.long_engine import LongEngine
 from live_mem.tools import graph as graph_tools
-from tests.fakes import FakeGraphTransport, GraphLongFakeStorage as FakeStorage
+from tests.fakes import (
+    FakeGraphTransport,
+    GraphLongFakeStorage as FakeStorage,
+    validate_fake_graph_url,
+)
 
 
 # =============================================================================
@@ -101,7 +105,9 @@ class _FakeRegistry:
     LongEngine over a real bridge wired to the fake transport factory."""
 
     def __init__(self, factory) -> None:
-        self._engine = LongEngine(bridge=GraphBridgeService(client_factory=factory))
+        self._engine = LongEngine(bridge=GraphBridgeService(
+            client_factory=factory, url_validator=validate_fake_graph_url,
+        ))
 
     def long_engine(self) -> LongEngine:
         return self._engine
@@ -290,7 +296,10 @@ async def test_graph_push_default_permission_surface_unchanged() -> None:
 
     reset = _set_token(_token("writer", ["read", "write"]))
     try:
-        with patches, storage_patch:
+        with patches, storage_patch, patch(
+            "live_mem.core.url_guard._resolve_bounded",
+            side_effect=AssertionError("fake transport must not resolve DNS"),
+        ):
             result = await graph_push(space_id=_SPACE)  # default
     finally:
         reset()

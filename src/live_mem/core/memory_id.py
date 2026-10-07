@@ -18,8 +18,10 @@ une mémoire Graph Memory interne. Le ``memory_id`` cible est **dérivé** du
   sur le corps sanitizé) garantit que deux ``space_id`` distincts qui se
   sanitizent au même corps gardent des suffixes distincts.
 
-Module PUR (stdlib only). La réservation lexicale ne consulte aucun état Graph
-et ne confère aucune autorité protocolaire au tier long (ADR-0010).
+Module PUR (stdlib only). La capture MID l'utilise pour ancrer sa destination
+embedded sans résoudre ni contacter LONG. La réservation lexicale ne consulte
+aucun état Graph. Aucun résultat Graph ne décide de l'application ou de la
+récupération MID (ADR-0010).
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ _BODY_MAX = _MAX - len(_PREFIX) - 1 - _HASH_HEX
 _DERIVED_NAMESPACE = re.compile(
     rf"{re.escape(_PREFIX)}[a-zA-Z0-9_-]{{1,{_BODY_MAX}}}-[0-9a-f]{{{_HASH_HEX}}}"
 )
+_MID_ARCHIVE_NAMESPACE = re.compile(r"mid_[0-9a-f]{40}")
 
 
 def reserved_space_error(space_id: str) -> dict | None:
@@ -49,7 +52,7 @@ def reserved_space_error(space_id: str) -> dict | None:
     contents. Legacy collisions require explicit operator recovery, including
     when the caller is an administrator or requests unsafe recovery.
     """
-    if _DERIVED_NAMESPACE.fullmatch(space_id):
+    if _DERIVED_NAMESPACE.fullmatch(space_id) or _MID_ARCHIVE_NAMESPACE.fullmatch(space_id):
         return {
             "status": "error",
             "recovery_required": True,

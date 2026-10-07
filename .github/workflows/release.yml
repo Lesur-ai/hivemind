@@ -60,10 +60,14 @@ jobs:
             echo "::error::Tag ${TAG_NAME} does not match VERSION (v${version})."
             exit 1
           fi
-          if ! grep -Fq "## [${version}] — " CHANGELOG.md; then
-            echo "::error::CHANGELOG.md has no release section for ${version}."
-            exit 1
-          fi
+          release_heading="$(awk '/^## Inherited Live Memory history \(provenance\)$/ { exit } /^## \[[0-9]/ { print; exit }' CHANGELOG.md)"
+          case "$release_heading" in
+            "## [${version}] — "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+            *)
+              echo "::error::CHANGELOG.md current release section must be dated and match ${version}."
+              exit 1
+              ;;
+          esac
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'source_sha=%s\n' "$commit" >> "$GITHUB_OUTPUT"
           case "$version" in

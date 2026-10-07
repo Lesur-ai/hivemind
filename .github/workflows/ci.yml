@@ -35,6 +35,19 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Go for the public ingestion CLI
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/hivemind-ingest/go.mod
+          cache-dependency-path: tools/hivemind-ingest/go.sum
+
+      - name: Build and test the public ingestion CLI
+        run: |
+          set -euo pipefail
+          bash scripts/build-hivemind-ingest.sh --test
+          test "$(./bin/hivemind-ingest version | awk '{print $2}')" = \
+            "v$(tr -d '\r\n' < VERSION)"
+
       - name: Install dependencies
         run: uv sync --locked --dev
 

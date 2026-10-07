@@ -70,7 +70,7 @@ class TestParseRetryAfter:
             # the length before conversion avoids OverflowError (~309 digits) and
             # the CPython integer-string digit-limit ValueError (~4300+ digits).
             ("9" * 309, None),
-            ("9" * 5000, None),
+            pytest.param("9" * 5000, None, id="5000-digit-retry-after"),
             ("007", None),   # 3 ASCII digits but 7 > the 5s cap
             ("005", 5.0),    # leading zeros within the cap are honored
         ],

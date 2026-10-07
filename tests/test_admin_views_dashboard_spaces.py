@@ -48,9 +48,8 @@ class TestRegistration:
 
 
 class TestDashboardRequestBudget:
-    """§5.2: route entry = 3 `/api/tool` calls for non-admin, 4 for admin
-    (system_health, space_list, bank_consolidation_queues [+ admin_list_tokens]).
-    Identity is read from the shell-cached ctx.identity — zero extra request."""
+    """§17 Home: inventory then one explicit-ID page; no tokens or health probe.
+    The runtime proves 20-space/3-note-space bounds and periodic cost."""
 
     def test_system_whoami_never_called_directly(self):
         content = _read(_DASHBOARD)
@@ -59,20 +58,11 @@ class TestDashboardRequestBudget:
             "system_whoami itself (§4.2 D7 / §5.2)."
         )
 
-    def test_admin_list_tokens_gated_on_admin_permission(self):
+    def test_home_does_not_read_tokens_and_uses_explicit_queue_scope(self):
         content = _read(_DASHBOARD)
-        body = _function_body(content, r"async function _loadRest\(epochAtCall, identity\)")
-        assert re.search(
-            r"if \(admin\) \{\s*calls\.push\(callTool\('admin_list_tokens'", body,
-        ), (
-            "admin_list_tokens must be called only inside an `if (admin)` "
-            "branch of the route-entry loader — never unconditionally."
-        )
-        # And the non-admin path must issue exactly the other two calls.
-        assert body.count("callTool(") == 3, (
-            "_loadRest must call exactly 2 unconditional tools (space_list, "
-            "bank_consolidation_queues) plus 1 admin-gated one (admin_list_tokens)."
-        )
+        assert "callTool('admin_list_tokens'" not in content
+        assert "callTool('bank_consolidation_queues', { space_ids: ids.join(',') })" in content
+        assert "PortalRefresh.register({ refresh: _refreshHome" in content
 
     def test_no_polling(self):
         content = _read(_DASHBOARD)
@@ -81,29 +71,28 @@ class TestDashboardRequestBudget:
 
     def test_health_refresh_disables_button_while_in_flight(self):
         content = _read(_DASHBOARD)
-        setter_body = _function_body(content, r"function _setHealthRefreshButton\(inFlight\)")
+        setter_body = _function_body(content, r"function _setHealthModalRefreshButton\(inFlight\)")
         assert "btn.disabled = inFlight;" in setter_body
-        load_body = _function_body(content, r"async function _loadHealth\(epochAtCall\)")
-        assert "_setHealthRefreshButton(true)" in load_body
-        assert "_setHealthRefreshButton(false)" in load_body
+        load_body = _function_body(content, r"function _applyHealth\(\)")
+        assert "_setHealthModalRefreshButton(!!_portalHealthFlight)" in load_body
 
-    def test_health_refresh_labeled_as_llm_probe(self):
-        content = _read(_DASHBOARD)
-        assert 'title="Checks storage and sends a request to the language model"' in content
+    def test_health_refresh_labels_the_explicit_availability_check(self):
+        content = _read(_STATIC_DIR / "admin.html")
+        assert 'title="Checks storage and model availability"' in content
 
     def test_health_load_and_refresh_are_epoch_guarded(self):
         content = _read(_DASHBOARD)
-        load_body = _function_body(content, r"async function _loadHealth\(epochAtCall\)")
-        assert "AdminRouter.epoch !== epochAtCall" in load_body
-        rest_body = _function_body(content, r"async function _loadRest\(epochAtCall, identity\)")
-        assert "AdminRouter.epoch !== epochAtCall" in rest_body
+        load_body = _function_body(content, r"function _applyHealth\(\)")
+        assert "AdminRouter.epoch !== _epoch" in load_body
+        rest_body = _function_body(content, r"async function _refreshHome\(\{ automatic, isCurrent \}\)")
+        assert "_home === view && _current(view.ctx) && isCurrent()" in rest_body
 
 
 class TestDashboardRecentActivity:
     def test_activity_bounded_to_top_10_from_queues_response_only(self):
         content = _read(_DASHBOARD)
-        body = _function_body(content, r"function _recentActivityBody\(resp\)")
-        assert "jobs.slice(0, 10)" in body
+        body = _function_body(content, r"function _paintQueues\(view, data\)")
+        assert "jobs.history.slice(0, 10)" in body
         assert "callTool(" not in body, (
             "Recent activity must be derived client-side from the already-"
             "fetched bank_consolidation_queues response — zero extra call."
@@ -141,13 +130,11 @@ class TestSpacesInventory:
         assert re.search(r"<a href=\"\$\{esc\(href\)\}\"", body)
         assert "AdminRouter.go(" not in body
         assert "data-action=\"spaces-open-detail\"" not in content
-        # The only mentions of AdminRouter.go( in this file are in the
-        # header doc-comment explaining why it is NOT used for row nav.
-        code_lines = [
-            line for line in content.splitlines()
-            if "AdminRouter.go(" in line and not line.strip().startswith("*")
-        ]
-        assert not code_lines, f"AdminRouter.go( used outside comments: {code_lines}"
+        # After a successful mutation the launcher may follow its returned
+        # space. Pure row navigation still remains a real anchor.
+        rows = _function_body(content, r"function _tableRowsHtml\(rows\)")
+        assert "AdminRouter.go(" not in rows
+        assert 'class="spaces-activity-link" href=' in rows
 
 
 class TestDashboardSpaceCreateGate:
@@ -155,8 +142,8 @@ class TestDashboardSpaceCreateGate:
         content = _read(_DASHBOARD)
         tile = _function_body(content, r"function _spacesTileBody\(resp, canManage\)")
         assert "actionHtml: canManage" in tile
-        loader = _function_body(content, r"async function _loadRest\(epochAtCall, identity\)")
-        assert "_applySpaces(spacesResp, _hasManage(identity))" in loader
+        loader = _function_body(content, r"async function _refreshHome\(\{ automatic, isCurrent \}\)")
+        assert "_applySpaces(spacesResp, _hasManage(view.ctx.identity))" in loader
 
 
 class TestSpacesInventoryRequests:
@@ -267,17 +254,13 @@ class TestPreCommitReviewFixes:
     """Overlapping loads and stale-session results must not replace current UI.
     These tests pin ordering, identity and rendering boundaries."""
 
-    def test_health_load_has_a_sequence_guard_against_out_of_order_completion(self):
-        """[MEDIUM] Two overlapping system_health calls issued in the SAME
-        epoch (e.g. route-entry load racing a fast manual-refresh click)
-        must resolve deterministically — only the most recently *issued*
-        call may ever apply its result, even if an older call happens to
-        resolve last."""
+    def test_health_uses_the_shared_probe_without_route_entry_requests(self):
+        """Shell owns single-flight/session guards (runtime-proven separately)."""
         content = _read(_DASHBOARD)
-        assert "let _healthSeq = 0;" in content
-        body = _function_body(content, r"async function _loadHealth\(epochAtCall\)")
-        assert "const seq = ++_healthSeq;" in body
-        assert "seq !== _healthSeq" in body
+        assert "callTool('system_health'" not in content
+        assert "document.addEventListener('portal:services-change', _applyHealth)" in content
+        render = _function_body(content, r"function render\(contentEl, params, ctx\)")
+        assert "checkPortalServices(" not in render
 
 
     def test_guarantee_badge_uses_verbatim_value_and_tooltip(self):
@@ -285,7 +268,8 @@ class TestPreCommitReviewFixes:
         verbatim (not paraphrased as "best-effort") with the mandated
         tooltip, on Dashboard activity and on Spaces lane chips."""
         dash = _read(_DASHBOARD)
-        assert "in_memory_best_effort" in dash
+        assert "lane.guarantee" in dash
+        assert "History guarantee: <code>${esc(value)}</code>" in dash
         assert "does not survive a restart and history is trimmed" in dash
         assert "'best-effort'" not in dash
         spaces = _read(_SPACES)
@@ -297,14 +281,15 @@ class TestPreCommitReviewFixes:
         """[MEDIUM] §5.2 names job_id as a consumed field of the activity
         widget; it must be present (copyable), not silently dropped."""
         content = _read(_DASHBOARD)
-        body = _function_body(content, r"function _recentActivityBody\(resp\)")
+        body = _function_body(content, r"function _jobRow\(job, view\)")
         assert "job.job_id" in body
 
     def test_missing_count_fields_render_dash_not_zero(self):
         """[MEDIUM] §2.7/§5.0: never render unknown/missing data as a fake
         0 — an em dash (or unavailable state) only."""
         dash = _read(_DASHBOARD)
-        assert "resp.total_spaces ?? '—'" in dash
+        assert "Number.isSafeInteger(value) && value >= 0" in dash
+        assert "'Unavailable'" in dash
         assert "resp.total_spaces ?? 0" not in dash
         spaces = _read(_SPACES)
         assert "_number(space.live_notes_count) ?? '—'" in spaces
@@ -323,7 +308,7 @@ class TestPreCommitReviewFixes:
         attribute must pass through esc() at the sink, even when a URI
         encoder already neutralizes breakout characters."""
         content = _read(_DASHBOARD)
-        body = _function_body(content, r"function _recentActivityBody\(resp\)")
+        body = _function_body(content, r"function _jobRow\(job, view\)")
         assert "esc('#/spaces/' + encodeURIComponent(job.space_id))" in body
 
     def test_spaces_has_a_manual_refresh_trigger(self):
@@ -339,7 +324,9 @@ class TestPreCommitReviewFixes:
         verbatim in the server-message slot, not a plain toast."""
         content = _read(_SPACES)
         body = _function_body(content, r"async function _submitCreateSpace\(\)")
-        assert "serverMessage(resp.token_message)" in body
+        assert "window.openAccessOnboarding({ spaceId: resp.space_id, message: resp.token_message || '' })" in body
+        access = _read(_STATIC_DIR / "js" / "admin" / "views-access.js")
+        assert "prefill.message ? serverMessage(prefill.message) : ''" in access
         assert "showToast('ok', resp.token_message)" not in body
 
 
@@ -347,15 +334,13 @@ class TestPreCommitReviewRound2Fixes:
     """REST loads and space-detail actions keep their own sequence guards.
     Older continuations must not overwrite newer results."""
 
-    def test_dashboard_rest_load_has_a_sequence_guard(self):
-        """[MEDIUM] _loadRest (space_list/queues/tokens) had only an epoch
-        guard: a route-entry load racing a fast manual-refresh click shares
-        the same epoch and could resolve out of order."""
+    def test_home_refresh_is_single_flight_and_owner_guarded(self):
+        """The real shared controller provides exclusivity; the consumer guards paint."""
         content = _read(_DASHBOARD)
-        assert "let _restSeq = 0;" in content
-        body = _function_body(content, r"async function _loadRest\(epochAtCall, identity\)")
-        assert "const seq = ++_restSeq;" in body
-        assert "seq !== _restSeq" in body
+        assert "PortalRefresh.register({ refresh: _refreshHome" in content
+        body = _function_body(content, r"async function _refreshHome\(\{ automatic, isCurrent \}\)")
+        assert "_home === view && _current(view.ctx) && isCurrent()" in body
+        assert body.count("if (!current()) return;") >= 3
 
     def test_spaces_table_load_has_a_sequence_guard(self):
         """[MEDIUM] Same race as above for _loadTable, plus the Refresh
@@ -379,7 +364,7 @@ class TestPreCommitReviewRound2Fixes:
         truncation rule (§2.4.7) requires truncateMiddle(value, 10, 6) with
         the full value in a title tooltip."""
         content = _read(_DASHBOARD)
-        body = _function_body(content, r"function _recentActivityBody\(resp\)")
+        body = _function_body(content, r"function _jobRow\(job, view\)")
         assert 'title="${esc(job.job_id)}"' in body
         assert "truncateMiddle(job.job_id, 10, 6)" in body
 
@@ -410,17 +395,14 @@ class TestPrLevelReviewFixes:
         assert "identity.expires_at" in body.group(1)
         assert "fmtTimestamp(identity.expires_at)" in body.group(1)
 
-    def test_f5_spaces_tile_shows_short_and_mid_aggregates(self):
-        """[MEDIUM] §5.2/#140 plan: the Spaces tile shows total plus the
-        client-side sums of live_notes_count / bank_files_count, with honest
-        unavailable handling (never a fabricated 0)."""
+    def test_dashboard_lightweight_inventory_has_no_count_aggregates(self):
+        """#633 owner contract supersedes #140 heavy Dashboard aggregates."""
         content = _read(_DASHBOARD)
         body = _function_body(content, r"function _spacesTileBody\(resp, canManage\)")
-        assert "live_notes_count" in body
-        assert "bank_files_count" in body
-        assert "shortSum ?? '—'" in body
-        assert "midSum ?? '—'" in body
-
+        assert 'Accessible spaces' in body
+        assert 'live_notes_count' not in body and 'bank_files_count' not in body
+        assert "callTool('space_list', { include_counts: false })" in content
+        assert 'Lifetime totals' in content
 
     def test_f7_space_id_error_wired_via_aria_describedby(self):
         """[LOW] The Space ID input's validation error must be programmatically

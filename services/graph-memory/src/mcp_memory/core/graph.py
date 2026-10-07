@@ -9,6 +9,8 @@ Gère toutes les opérations sur le graphe de connaissances :
 """
 
 import asyncio
+import hashlib
+import json
 import sys
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -19,6 +21,7 @@ from neo4j import AsyncGraphDatabase, AsyncDriver, AsyncSession, Query
 from neo4j.exceptions import ServiceUnavailable, AuthError
 
 from ..config import get_settings
+from .ontology import is_automatic_ontology_name
 from .models import (
     Memory, MemoryStats, Document, DocumentMetadata,
     ExtractedEntity, ExtractedRelation, ExtractionResult,
@@ -57,6 +60,55 @@ def _iso(v):
     if hasattr(v, "isoformat"):  # datetime natif
         return v.isoformat()
     return str(v)
+
+
+def _archive_source_fields(raw) -> dict:
+    """Project the existing capture metadata, never arbitrary ingestion metadata."""
+    try:
+        metadata = json.loads(raw or "{}")
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(metadata, dict) or metadata.get("provenance") != "mid_archive":
+        return {}
+    return {key: metadata[key] for key in ("provenance", "captured_at", "preimage_id", "bank_path")
+            if isinstance(metadata.get(key), str) and metadata[key]}
+
+
+def _automatic_ontology_state(node: dict) -> Optional[dict]:
+    """Validate derived calibration state without exposing any source content."""
+    raw = node.get("automatic_ontology_json")
+    name = node.get("ontology", "")
+    if raw is None:
+        if is_automatic_ontology_name(name):
+            raise ValueError("automatic ontology state is unavailable")
+        return None
+    try:
+        state = json.loads(raw)
+        if (type(state) is not dict or set(state) != {
+            "version", "created_at", "batch_fingerprint", "checkpoint", "ontology_yaml"
+        } or type(state["version"]) is not int or state["version"] != 1
+            or type(state["checkpoint"]) is not dict
+            or type(state["created_at"]) is not str or not state["created_at"]
+            or type(state["batch_fingerprint"]) is not str
+            or len(state["batch_fingerprint"]) != 64
+            or any(c not in "0123456789abcdef" for c in state["batch_fingerprint"])
+            or state["created_at"] != _iso(node.get("created_at"))):
+            raise ValueError
+        json.dumps(state, allow_nan=False)
+        ontology_yaml = state["ontology_yaml"]
+        if ontology_yaml is not None:
+            from .ontology_validator import _validate_and_parse_ontology
+            valid, _ = _validate_and_parse_ontology(ontology_yaml)
+            if not valid.get("valid"):
+                raise ValueError
+            label = "auto_" + hashlib.sha256(ontology_yaml.encode()).hexdigest()[:16]
+            if name != label:
+                raise ValueError
+        elif is_automatic_ontology_name(name):
+            raise ValueError
+        return state
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise ValueError("automatic ontology state is invalid") from None
 
 
 def _guard_graph_mutation(method):
@@ -342,6 +394,81 @@ class GraphService:
                 ontology=node.get("ontology", "default"),
                 created_at=node["created_at"].to_native() if node.get("created_at") else datetime.utcnow()
             )
+
+    async def load_automatic_ontology(self, memory_id: str) -> Optional[dict]:
+        """Load resumable crafting state or the frozen default of this memory."""
+        async with self.session() as session:
+            result = await session.run(
+                "MATCH (m:Memory {id: $id}) RETURN m", id=memory_id
+            )
+            record = await result.single()
+            if record is None:
+                raise ValueError("automatic ontology memory is unavailable")
+            return _automatic_ontology_state(dict(record["m"]))
+
+    @_guard_graph_mutation
+    async def save_automatic_ontology(
+        self, memory_id: str, *, expected_created_at: str,
+        batch_fingerprint: str, checkpoint: dict,
+        ontology_yaml: Optional[str] = None,
+    ) -> None:
+        """Checkpoint a virgin memory; atomically activate only a complete YAML.
+
+        The caller owns the existing exclusive maintenance admission. This
+        conditional write also verifies incarnation, previous state and the
+        absence of documents. After freeze only an exact replay is admitted.
+        """
+        async with self.session() as session:
+            result = await session.run(
+                "MATCH (m:Memory {id: $id}) RETURN m", id=memory_id
+            )
+            record = await result.single()
+            if record is None:
+                raise ValueError("automatic ontology memory is unavailable")
+            node = dict(record["m"])
+            if not expected_created_at or _iso(node.get("created_at")) != expected_created_at:
+                raise ValueError("automatic ontology memory incarnation changed")
+            previous = _automatic_ontology_state(node)
+            if previous and previous["batch_fingerprint"] != batch_fingerprint:
+                raise ValueError("automatic ontology initial batch differs")
+            candidate = {
+                "version": 1, "created_at": expected_created_at,
+                "batch_fingerprint": batch_fingerprint,
+                "checkpoint": checkpoint, "ontology_yaml": ontology_yaml,
+            }
+            try:
+                state_json = json.dumps(candidate, sort_keys=True, separators=(",", ":"), allow_nan=False)
+                label = ("auto_" + hashlib.sha256(ontology_yaml.encode()).hexdigest()[:16]
+                         if ontology_yaml is not None else node.get("ontology"))
+                _automatic_ontology_state({**node, "ontology": label, "automatic_ontology_json": state_json})
+            except (ValueError, TypeError, AttributeError):
+                raise ValueError("automatic ontology checkpoint is invalid") from None
+            if previous and previous["ontology_yaml"] is not None:
+                if previous != candidate:
+                    raise ValueError("automatic ontology catalogue is already frozen")
+                return
+            result = await session.run(
+                """
+                MATCH (m:Memory {id: $memory_id})
+                WHERE m.created_at.epochSeconds = $expected_node_created_at.epochSeconds
+                  AND m.created_at.nanosecond = $expected_node_created_at.nanosecond
+                  AND coalesce(m.automatic_ontology_json, '') = $previous
+                  AND NOT EXISTS { MATCH (:Document {memory_id: $memory_id}) }
+                  AND NOT EXISTS { MATCH (:Entity {memory_id: $memory_id}) }
+                SET m.automatic_ontology_json = $state_json, m.ontology = $ontology,
+                    m.ontology_uri = $ontology_uri
+                RETURN m
+                """,
+                # Compare the exact instant, including nanoseconds: Bolt can
+                # round-trip offset UTC as named UTC, which Neo4j zoned equality
+                # distinguishes. Native ISO identity above has microsecond precision.
+                memory_id=memory_id, expected_node_created_at=node["created_at"],
+                previous=node.get("automatic_ontology_json") or "",
+                state_json=state_json, ontology=label,
+                ontology_uri=None if ontology_yaml is not None else node.get("ontology_uri"),
+            )
+            if await result.single() is None:
+                raise ValueError("automatic ontology assignment refused: memory changed or populated")
     
     @_guard_graph_mutation
     async def update_memory(
@@ -1153,7 +1280,8 @@ class GraphService:
                        d.chunk_count as chunk_count,
                        d.size_bytes as size_bytes,
                        d.text_length as text_length,
-                       d.content_type as content_type
+                       d.content_type as content_type,
+                       d.metadata_json as metadata_json
                 """,
                 memory_id=memory_id,
                 doc_ids=list(doc_ids),
@@ -1177,6 +1305,7 @@ class GraphService:
                     "size_bytes": r["size_bytes"] or 0,
                     "text_length": r["text_length"] or 0,
                     "content_type": r["content_type"],
+                    **_archive_source_fields(r.get("metadata_json")),
                 }
             return out
 
@@ -1235,11 +1364,11 @@ class GraphService:
         """
 
         async with self.session() as session:
-            count_res = await session.run(count_cypher, **params)
+            count_res = await session.run(count_cypher, params)
             count_rec = await count_res.single()
             total_count = count_rec["total_count"] if count_rec else 0
 
-            docs_res = await session.run(docs_cypher, **params)
+            docs_res = await session.run(docs_cypher, params)
             docs = []
             async for r in docs_res:
                 sp = self.normalize_source_path(r["source_path"])
@@ -1805,10 +1934,10 @@ class GraphService:
             return ''.join(c for c in nfkd if not unicodedata.combining(c))
         
         # Tokeniser la requête (mots individuels, sans stop words, sans ponctuation)
-        raw_tokens_all = re.findall(r'[a-zA-ZÀ-ÿ]+', search_query.lower())
+        raw_tokens_all = re.findall(r'[a-zA-ZÀ-ÿ0-9]+', search_query.lower())
         
-        # Tokens significatifs (> 2 chars, pas de stop words)
-        meaningful_raw = [t for t in raw_tokens_all if len(t) > 2 and t not in STOP_WORDS]
+        # Preserve numeric references, including short IDs, alongside meaningful words.
+        meaningful_raw = [t for t in raw_tokens_all if (len(t) > 2 or t.isdigit()) and t not in STOP_WORDS]
         meaningful_normalized = [_normalize(t) for t in meaningful_raw]
         
         print(f"🔤 [Search] Tokenization: '{search_query}' → raw={meaningful_raw}, normalized={meaningful_normalized}", file=sys.stderr)
@@ -1917,6 +2046,8 @@ class GraphService:
                     "ingestion_status": d.get("ingestion_status") or "unknown",
                     "chunk_count": d.get("chunk_count") or 0,
                     "last_ingest_job_id": d.get("last_ingest_job_id"),
+                    "ingested_at": _iso(d.get("ingested_at")),
+                    **_archive_source_fields(d.get("metadata_json")),
                 })
             
             related_entities = []
@@ -2247,6 +2378,9 @@ class GraphService:
         """
         memory_props = data["memory"]
         memory_id = memory_props["id"]
+        # Export preserves all Memory properties. Validate and explicitly
+        # restore the automatic default too, before any import mutation.
+        _automatic_ontology_state(memory_props)
         
         # Vérifier que la mémoire n'existe pas
         existing = await self.get_memory(memory_id)
@@ -2275,6 +2409,7 @@ class GraphService:
                     description: $description,
                     ontology: $ontology,
                     ontology_uri: $ontology_uri,
+                    automatic_ontology_json: $automatic_ontology_json,
                     namespace: $namespace,
                     owner_token_hash: $owner_token_hash,
                     created_at: datetime($created_at)
@@ -2285,6 +2420,7 @@ class GraphService:
                 description=memory_props.get("description"),
                 ontology=memory_props.get("ontology", "default"),
                 ontology_uri=memory_props.get("ontology_uri"),
+                automatic_ontology_json=memory_props.get("automatic_ontology_json"),
                 namespace=memory_props.get("namespace", self._ns(memory_id)),
                 owner_token_hash=memory_props.get("owner_token_hash"),
                 created_at=memory_props.get("created_at", datetime.utcnow().isoformat())

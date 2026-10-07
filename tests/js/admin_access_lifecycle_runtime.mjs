@@ -44,9 +44,8 @@
  * `getElementById` returns null for any other ID — so a markup/ID drift or a
  * body the shell fails to insert surfaces as a null, not a phantom green. The
  * one-time-secret assertion reads the rendered `#ctSecret` text node, not the
- * captured body argument. `logout()` models the frozen shell's wipeSession:
- * it removes the modal (`#adminModal` hidden AND its rendered body dropped)
- * WITHOUT running the view's teardown, so a held nav lock is genuinely orphaned.
+ * captured body argument. `logout()` models the shell's wipeSession: it calls
+ * the Access cleanup then removes the modal (frame hidden and body dropped).
  * The acknowledge in scenario C goes through `confirmModal()`, which models the
  * shell's `if (ok) closeModal()` contract, so it asserts the modal actually
  * hides (not just that the secret cleared).
@@ -327,6 +326,7 @@ function createHarness() {
         lastModal() { return modals[modals.length - 1]; },
         secretModals() { return modals.filter(m => m.title === 'Token created — save it now'); },
         // drivers
+        clipboard(writeText) { context.navigator.clipboard = { writeText }; },
         openCreate() { actions['access-create'](); },
         confirm() { return this.lastModal().onConfirm(); },
         // Model showModal's confirm wiring: `const ok = await onConfirm(); if
@@ -363,10 +363,9 @@ function createHarness() {
             context.closeModal();
             return true;
         },
-        // wipeSession mimic: show the overlay, rebind the identity reference, and
-        // REMOVE the modal (hide the frame AND drop its rendered body) WITHOUT
-        // running the view's teardown — so a held nav lock is genuinely orphaned.
+        // wipeSession calls the Access cleanup before removing the modal.
         logout() {
+            if (context.window.clearAccessHandoff) context.window.clearAccessHandoff();
             loginOverlay.classList.remove('hidden');
             currentIdentity = { loggedOut: true };
             adminModal.style.display = 'none';
@@ -653,6 +652,41 @@ async function scenarioI() {
     assert.equal(h.location.hash, LOCKED_ROUTE, '[I] the secret is never rendered over the navigated-to route');
 }
 
+async function scenarioJ() {
+    const h = createHarness();
+    const create = startCreate(h);
+    h.settleTool('resolve', { status: 'created', token: 'LOGOUT-SECRET',
+        token_hash: 'sha256:' + 'a'.repeat(64), permissions: ['read'] });
+    await create;
+    const secretNode = h.el('ctSecret');
+    const hashNode = h.el('ctTokenHash');
+    const copied = deferred();
+    h.clipboard(value => { assert.equal(value, 'LOGOUT-SECRET'); return copied.promise; });
+    h.el('ctCopyBtn')._click[0]();
+    h.logout();
+    assert.equal(secretNode.textContent, '', '[J] logout clears the held secret node before detach');
+    assert.equal(hashNode.textContent, '', '[J] logout clears the held hash node before detach');
+    h.login('other-session');
+    const before = h.toasts.length;
+    copied.reject(new Error('clipboard denied late'));
+    await flushTasks();
+    assert.equal(h.toasts.length, before, '[J] late clipboard rejection cannot fallback or toast');
+
+    const pending = startCreate(h);
+    h.settleTool('resolve', { status: 'created', token: 'SECOND-SECRET',
+        token_hash: 'sha256:' + 'b'.repeat(64), permissions: ['read'] });
+    await pending;
+    const ack = h.confirm(); // space_list held pending after acknowledgement
+    assert.equal(h.lastModal().title, 'Grant space access');
+    assert.equal(h.el('ctSecret'), null, '[J] plaintext DOM gone before list request');
+    h.dismiss();
+    h.settleTool('resolve', { status: 'ok', spaces: [{ space_id: 'alpha' }] });
+    await ack;
+    assert.equal(h.modalOpen(), false, '[J] a late space list cannot reopen a dismissed handoff');
+    assert.equal(h.toolCalls.filter(call => call.tool === 'admin_update_token').length, 0);
+}
+
+await scenarioJ();
 await scenarioA();
 await scenarioB();
 await scenarioC();

@@ -16,7 +16,9 @@ Reused by P4-4 (this wave) and the downstream P4-5 / P4-7 / P4-8 / P4-9 suites.
 Usage::
 
     factory = FakeGraphTransport.factory(responses={"memory_query": {...}})
-    bridge = GraphBridgeService(client_factory=factory)
+    bridge = GraphBridgeService(
+        client_factory=factory, url_validator=validate_fake_graph_url,
+    )
     engine = LongEngine(bridge=bridge)
     ...
     assert factory.instances[-1].tool_names() == ["memory_query"]
@@ -36,6 +38,22 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
+
+from live_mem.core.url_guard import validate_gm_url
+
+
+def validate_fake_graph_url(
+    url: str, *, allow_private_hosts: bool = False,
+) -> Optional[str]:
+    """Avoid DNS only for the fake transport's exact sentinel endpoint.
+
+    Other URLs retain the real SSRF guard, including its operator-trust flag,
+    so a test cannot accidentally weaken rejection of hostile targets.
+    """
+    if url == "https://gm.example.com":
+        return None
+    return validate_gm_url(url, allow_private_hosts=allow_private_hosts)
+
 
 # A canned response is a fixed dict, a FIFO list of dicts, or a function of args.
 Response = Union[dict, list, Callable[[dict], dict]]

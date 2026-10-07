@@ -37,7 +37,7 @@ from live_mem.core.graph_bridge import (
 from live_mem.core.models import EMBEDDED_TOKEN_SENTINEL, INTERNAL_LONG_TOKEN_NAME
 from live_mem.core.memory_id import derive_memory_id
 from live_mem.core.tokens import TOKENS_KEY
-from tests.fakes import FakeGraphTransport
+from tests.fakes import FakeGraphTransport, validate_fake_graph_url
 
 _SPACE = "space-a"
 _META = f"{_SPACE}/_meta.json"
@@ -97,7 +97,9 @@ def _settings(**kw) -> Settings:
 
 def _bridge(**factory_kwargs):
     factory = FakeGraphTransport.factory(**factory_kwargs)
-    return GraphBridgeService(client_factory=factory), factory
+    return GraphBridgeService(
+        client_factory=factory, url_validator=validate_fake_graph_url,
+    ), factory
 
 
 def _patches(storage: FakeStorage, settings: Settings):
@@ -703,20 +705,24 @@ async def test_explicit_connect_marks_explicit_and_overrides_embedded() -> None:
     settings = _settings()
     bridge, _ = _bridge()
 
-    await _run(
-        lambda: bridge.connect(
-            _SPACE, url="https://ops.example.com", token="op-token", memory_id="op-mem"
-        ),
-        storage,
-        settings,
-    )
-    block = storage.raw_meta()["graph_memory"]
-    assert block["binding"] == _BINDING_EXPLICIT
-    assert block["token"] == "op-token"  # token opérateur conservé (masqué à l'egress)
-    assert block["url"] == "https://ops.example.com"
+    with patch(
+        "live_mem.core.url_guard._resolve_bounded",
+        side_effect=AssertionError("fake transport must not resolve DNS"),
+    ):
+        await _run(
+            lambda: bridge.connect(
+                _SPACE, url="https://gm.example.com", token="op-token", memory_id="op-mem"
+            ),
+            storage,
+            settings,
+        )
+        block = storage.raw_meta()["graph_memory"]
+        assert block["binding"] == _BINDING_EXPLICIT
+        assert block["token"] == "op-token"  # token opérateur conservé (masqué à l'egress)
+        assert block["url"] == "https://gm.example.com"
 
-    res = await _run(lambda: bridge.status(_SPACE), storage, settings)
-    assert res["config"]["url"] == "https://ops.example.com"
+        res = await _run(lambda: bridge.status(_SPACE), storage, settings)
+    assert res["config"]["url"] == "https://gm.example.com"
     assert res["config"]["memory_id"] == "op-mem"
 
 

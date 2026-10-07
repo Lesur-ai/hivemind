@@ -63,10 +63,10 @@ async function submitQuestion() {
                 highlightEntities(result.entities);
             }
         } else {
-            body.innerHTML = `<div class="text-error">❌ ${result.message || 'Error'}</div>`;
+            body.innerHTML = `<div class="text-error">❌ ${escapeHtml(result.message || 'Error')}</div>`;
         }
     } catch (err) {
-        body.innerHTML = `<div class="text-error">❌ Network error: ${err.message}</div>`;
+        body.innerHTML = `<div class="text-error">❌ Network error: ${escapeHtml(err.message)}</div>`;
     } finally {
         btn.disabled = false;
     }
@@ -76,8 +76,7 @@ async function submitQuestion() {
 function displayAnswer(result) {
     const body = document.getElementById('askBody');
 
-    // Convertir le markdown en HTML avec marked.js
-    const answerHtml = marked.parse(result.answer || '', { breaks: true, gfm: true });
+    const answerHtml = renderAnswerMarkdown(result.answer);
 
     let html = `<div class="ask-answer">${answerHtml}</div>`;
 
@@ -138,7 +137,7 @@ function exportAnswerHtml() {
     if (!lastAnswerResult) return;
 
     const result = lastAnswerResult;
-    const answerHtml = marked.parse(result.answer || '', { breaks: true, gfm: true });
+    const answerHtml = renderAnswerMarkdown(result.answer);
     const now = new Date();
     const dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const memoryId = appState.currentMemory || 'unknown';
@@ -357,7 +356,27 @@ function setupAskResize() {
 
 /** Échappe le HTML pour éviter les injections */
 function escapeHtml(str) {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+/** Treat model Markdown as untrusted in both the page and exported HTML. */
+function renderAnswerMarkdown(value) {
+    const text = String(value ?? '');
+    const fallback = () => `<pre>${escapeHtml(text)}</pre>`;
+    try {
+        if (typeof marked === 'undefined' || typeof marked.parse !== 'function' ||
+            typeof DOMPurify === 'undefined' || DOMPurify.isSupported !== true ||
+            typeof DOMPurify.sanitize !== 'function') {
+            return fallback();
+        }
+        return DOMPurify.sanitize(marked.parse(text, { breaks: true, gfm: true }), {
+            ALLOWED_TAGS: ['a', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'li', 'ol', 'p', 'pre', 'strong', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul'],
+            ALLOWED_ATTR: ['href', 'title'],
+            ALLOW_DATA_ATTR: false,
+        });
+    } catch {
+        return fallback();
+    }
 }
 
 // ═══════════════ SETUP ═══════════════

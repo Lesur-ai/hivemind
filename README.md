@@ -16,7 +16,7 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.5.3-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.6.0-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#requirements)
@@ -30,12 +30,12 @@ critical behavior but may trail this page's editorial structure.
 
 ---
 
-> **Security fixes in 1.5.3.** This version addresses all seven application
+> **Security fixes in 1.5.3.** Hivemind 1.5.3 addresses all seven application
 > findings from the 16 September 2026 source security review, including Graph
 > storage boundaries, request and archive limits, and admin Markdown commands.
 > It also updates DOMPurify to 3.4.15. See the
 > [security report](docs/SECURITY_AUDIT_1.5.3.md) for verification and remaining
-> work, and the [release notes](CHANGELOG.md#153--unreleased).
+> work, and the [release notes](CHANGELOG.md#153--2026-09-17).
 
 ## Why Hivemind?
 
@@ -66,7 +66,7 @@ short notes  →  mid synthesis  →  long connected knowledge
 
 `long` is included in the standard Hivemind stack. You do not install or bind a
 separate graph service: the first `long_push` prepares the space automatically.
-It is built from the organized `mid` memory and can always be rebuilt from it.
+It derives connected knowledge from source documents and retained MID captures.
 Put simply: `long` helps agents discover context; it does not decide what the
 project has committed or overwrite the project memory.
 
@@ -162,6 +162,8 @@ stop and diagnose the job. Do not build an automatic polling loop.
 uv run python scripts/mcp_cli.py bank read-all hivemind-demo --json
 uv run python scripts/mcp_cli.py graph push hivemind-demo --json
 uv run python scripts/mcp_cli.py graph status hivemind-demo --json
+# Replace ing_EXAMPLE with a job ID returned by long_ingest_list(archive=True).
+uv run python scripts/mcp_cli.py graph job hivemind-demo ing_EXAMPLE --archive --json
 uv run python scripts/mcp_cli.py graph query hivemind-demo "hello" --json
 
 unset MCP_TOKEN
@@ -173,6 +175,18 @@ dedicated `read,write` token per agent. Follow the
 [deployment guide](docs/DEPLOYMENT.md#quickstart-dev).
 
 ## Connect an MCP client
+
+For document ingestion, the supported 1.6.0 path uses a chosen ontology name or
+YAML with `long_ingest_async`. The `hivemind-ingest` CLI provides batching,
+progress tracking and resubmission of unchanged sources; see its
+[usage guide](tools/hivemind-ingest/README.md).
+
+Automatic ontology for document ingestion is planned for **1.7.0**. Its
+implementation is already present for experimental qualification, but is not
+part of supported 1.6.0 document ingestion. This delivery schedule is separate
+from historical MID captures, which use an automatic ontology in 1.6.0.
+See the [ingestion contract](docs/MCP_TOOLS_SPEC.md) for the experimental
+`options={"ontology": "auto"}` path, payloads, restart limits and diagnostics.
 
 Hivemind serves Streamable HTTP at `/mcp` through the WAF on port `8080`.
 
@@ -210,15 +224,56 @@ the [Codex](CODEX_INTEGRATION.md) or
 
 ## Web interface
 
-### Admin Console
+### Hivemind Portal (`/admin`)
 
-Open `http://localhost:8080/admin` with a valid token. The console covers the
+Open `http://localhost:8080/admin` with an operator token (`write` or higher).
+Read-only tokens use the linked `/live` viewer. The Portal covers the
 shipped operator workflow in seven areas: **Dashboard**, **Spaces**, **Space
 Detail**, **Consolidation**, **Audit**, **Access**, and **Operator tools**.
 
 Use it to inspect memory, manage space access, follow consolidation jobs, work
 with backups, and run maintenance actions. The older `/live` page remains a
 lightweight real-time viewer for notes and bank files.
+
+The Dashboard follows consolidation activity for up to 20 spaces per page,
+with recent results and their details. Optionally show the latest 20 notes from
+up to three selected spaces. Auto-refresh continues checking that page while
+idle; new spaces appear after a manual refresh. Note selection stays in this
+session only. Reading 20 notes still scans that space's full SHORT prefix, so
+notes are fetched only for the spaces you select.
+
+In **Space → Memory**, SHORT shows pending notes grouped by your browser's
+local day. Apply agent, category or **Since…** filters explicitly; auto-refresh
+keeps the applied filters while you edit their inputs. MID lists every bank
+file as a tab and updates the selected file without resetting your reading
+position. File modification, last consolidation and last refresh have separate
+timestamps. The existing `/live` viewer and its read-only access remain available.
+
+**Space → Long memory** has five separate panels: **Overview**, **Ontology**,
+**Documents**, **Ingestion jobs** and **Graph**. Browse available ontology YAML
+and validate it without changing the configured ontology. Filter documents and
+load their content explicitly. Follow ingestion jobs with optional Auto-refresh
+and request cancellation after confirmation. Graph shows a bounded snapshot
+(up to 160 nodes and 320 edges), with local search and selection. Each panel
+loads only its own data through the existing APIs; LONG remains derived memory.
+
+Inside a space, use **Memory** (Short / Mid), **Consolidation**, **Long memory**,
+**Rules**, **Access**, **Backups** and **Maintenance**. Permission-dependent
+tabs remain hidden when unavailable; **Global audit** opens the instance audit.
+Older Space links continue to work. The top bar shows the instance and an
+explicit **Check services** action; refreshing a page never probes model health.
+The shared **Auto-refresh** control is off by default and offers 15/30/60 seconds
+on views integrated with it. Existing views keep their current refresh behaviour
+until their Portal integration. Only this preference is stored in the browser;
+signing out disables it.
+
+In **Access**, create a token, save its one-time secret, grant access to the
+selected spaces, then copy the Codex or Claude Code configuration. Enter the
+MCP URL reachable from the client's machine; the configuration references
+`HIVEMIND_TOKEN` and never includes the secret. A failed grant can be retried
+without repeating successful grants or creating another token. **Done** and
+**Finish later** close the instructions; test the connection from your client.
+Creating a space opens this same token form with that space selected.
 
 ## Configuration
 
@@ -260,10 +315,47 @@ explicit authorization or confirmation gates:
 | `mid_write` (`bank_write`) | `manage`; writes a bank file directly |
 | `mid_delete` (`bank_delete`) | `manage`; requires `confirm=True` |
 | `backup_restore` | `manage`; requires `confirm=True`; shared/unsafe recovery also requires `unsafe_recovery=True` |
-| `backup_delete` | `manage`; requires `confirm=True` |
+| `backup_delete` | `manage`; requires `confirm=True`; compaction preimages are retained |
 | `admin_purge_tokens` | `admin`; destructive modes require confirmation |
 | `long_push` (`graph_push`) | `include_volatile=True` is opt-in and requires `manage` |
 | `long_status` (`graph_status`) | `include_graph` is opt-in |
+
+Compaction preimages use the existing `timestamp-<operation_id>` backup identity.
+They remain available through backup listing, download, and restore, including
+preimages created by 1.5.x. `backup_delete` refuses their deletion even when a
+compaction was interrupted or its backup metadata is incomplete. This retention
+protects the source for MID-to-LONG projection; it does not itself index it in LONG.
+Every attempt retains a full-space snapshot, without automatic purge or deletion
+through the backup tool. Stored volume and backup-listing work grow with the
+number of captures; direct storage maintenance remains a separate operator action.
+
+After a DirectLocal compaction captures verified preimages, a durable
+pending record lets the background worker project those historical MID sources
+into LONG. New captures use an automatically constructed ontology: the complete
+first capture supplies the initial catalogue, then later captures reuse it
+without recalculation. Documents keep their own ontology choice; both remain
+searchable within the same space. No extra service or configuration is needed.
+Each destination's durable local archive binding is separate from the connection
+configuration. Reconnecting to the same parent keeps the initial capture and
+catalogue, with archives readable immediately without waiting for the worker.
+Earlier pending records retain their original destination; this does not migrate
+or reclassify existing graphs. The worker resumes after restarts, checks document
+identity before retrying,
+and keeps the raw source even after successful indexing. A failed compaction
+attempt can also leave a historical capture; its provenance does not claim that
+MID was changed. `long_status.mid_archive_projection` reports pending captures,
+the age of the oldest one, and a safe failure code. If the first catalogue is
+blocked, later captures also wait with their raw sources retained: inspect that
+status and correct repairable source or route faults before retrying. If local
+state was lost or externally corrupted, an orphaned, unfrozen archive requires
+restoring its original binding/checkpoint from a verified backup or operator
+investigation; retries alone cannot repair it. The worker never skips an invalid
+capture to bootstrap from another one. If archives are
+unavailable, documentary query/search/list results remain available with
+`partial: true` and warnings scoped to `mid_archive`; they are not a complete
+archive result. LONG availability never decides MID apply or recovery.
+Continuous ontology evolution and shared-space compaction remain separate work;
+this wiring does not qualify large-volume ingestion.
 
 In v1.5.0, `CONSOLIDATION_TRANSIENT_RETRIES=0..3` (default `3`) controls
 normal consolidation retries for chat timeout, rate-limit and temporary
@@ -303,9 +395,27 @@ as it is updated. The removed French-prompt setting cannot restore French
 generation. Back up and review a representative copy before upgrading a
 language-sensitive workflow.
 
-Compaction is a human decision: consolidation only reports files above
-`BANK_FILE_MAX_SIZE` as a `bank_size_advisory`. The manual `bank_compact` tool
-refines medium-term memory so a new chat can understand the situation and resume
+For 1.6.0, automatic compaction and MID archive transfer are enabled by default.
+After a queued consolidation successfully processes notes, the server calls the
+existing compactor once, under the same space lock, for files exceeding
+`BANK_FILE_MAX_SIZE`. `MID_AUTO_COMPACT=false` disables this follow-up;
+`MID_AUTO_ARCHIVE=false` pauses LONG transfer while retaining raw captures and
+pending work for resumption. These are independent server settings loaded at
+startup. Manual `bank_compact` remains available with `manage` permission.
+Shared/unsafe routes remain ineligible. Direct MID edits and zero-note jobs do
+not trigger compaction.
+
+`long_status.mid_automation` exposes both settings; `/admin` and
+`scripts/mcp_cli.py` show them alongside pending captures and indexing errors.
+Consolidation jobs carry a separate timestamped `auto_compaction` outcome:
+completed consolidation is not undone by failed maintenance. This job history
+is process-local. Zero pending captures does not prove that every current MID
+file is indexed. The displayed documentary graph is separate from MID archives.
+A compacted file may remain above the threshold and be compacted again after a
+later consolidation. Each attempt can retain a full-space backup and a distinct
+LONG capture; this version adds neither cross-capture deduplication nor retention.
+
+Compaction refines medium-term memory so a new chat can understand the situation and resume
 useful work. It deliberately summarizes secondary detail. The program separates
 recent and undated passages from older dated history; the model extracts useful
 historical lessons, then writes a concise Markdown handoff. Dates guide reading
@@ -329,15 +439,17 @@ representative copy before applying it to an important bank.
 Apply is DirectLocal-only: all candidates are prepared before the existing
 verified backup, writes, readback and bounded rollback. Shared Project Mesh
 routes refuse before inference or mutation. Context-incompatible requests fail
-before that request is sent. There is no multipart persistence, crash-durable
-resume, or transfer of discarded detail to Graph in this version. See the
+before that request is sent. Compaction has no multipart persistence or
+crash-durable resume. In 1.6.0, verified pre-compaction captures are retained
+and projected asynchronously into LONG using an automatic ontology. See the
 [MCP tool specification](docs/MCP_TOOLS_SPEC.md) for the complete contract.
 
 ## Security and boundaries
 
 The [1.5.3 security report](docs/SECURITY_AUDIT_1.5.3.md) documents the seven
-application fixes, dependency maintenance, and the audit's scope and limitations.
-The broader audit follow-up remains open; this is not a security certification.
+application corrections inherited by 1.6.0, dependency maintenance, and the
+audit's scope and limitations. Broader audit follow-up remains open; this is not
+a security certification.
 
 - Every MCP request requires a bearer token.
 - Tokens are stored as SHA-256 hashes; plaintext is shown only at creation.

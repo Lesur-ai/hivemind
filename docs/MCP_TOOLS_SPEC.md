@@ -369,8 +369,16 @@ Lists all spaces accessible by the current token.
 
 ```python
 @mcp.tool()
-async def space_list() -> dict:
+async def space_list(include_counts: bool = True) -> dict:
 ```
+
+`include_counts` defaults to `True`, preserving short-note and bank-file
+counts. `False` skips those per-space listings and omits their counts while
+retaining the current credential's access filtering and space metadata.
+Each accessible space includes `last_consolidation`, `consolidation_count`,
+and `total_notes_processed` when available. The counters are cumulative
+lifetime totals, not the size of the last consolidation; a missing date does
+not establish that consolidation never happened.
 
 ---
 
@@ -811,7 +819,7 @@ async def bank_consolidate(
 - The per-space queue is in-memory only (`guarantee="in_memory_best_effort"`)
 - The response explicitly sets `next_action="return_to_user_without_polling"`
 - `polling.recommended=false`; `bank_consolidation_status` is manual-only for explicit status checks
-- If no live notes exist, the background job result is `{"status": "ok", "notes_processed": 0, "message": "No new notes to consolidate"}`, plus the optional `bank_size_advisory` list when a bank file exceeds `BANK_FILE_MAX_SIZE` (the advisory is computed before the zero-note return; compaction is a human decision through `bank_compact`)
+- If no live notes exist, the background job result is `{"status": "ok", "notes_processed": 0, "message": "No new notes to consolidate"}`, plus the optional `bank_size_advisory` list when a bank file exceeds `BANK_FILE_MAX_SIZE` (the advisory is computed before the zero-note return; zero-note jobs do not trigger automatic compaction)
 - Configurable per-call timeout (`CONSOLIDATION_TIMEOUT`, default 1800s — a slow model is not a fault)
 
 **Transient provider recovery (v1.5.0).**
@@ -894,10 +902,9 @@ automatic retry of those writes.
 **Job result contract (P12-1 — honest structured outcomes).** When the job
 finishes, its `result` carries a three-state status:
 
-- `status="ok"` — every selected **note** operation completed successfully. A
-  consolidation never compacts the bank (compaction is a human decision),
-  so the status describes the consolidation
-  only;
+- `status="ok"` — every selected **note** operation completed successfully. This status
+  describes consolidation only; subsequent automatic compaction has its own
+  `auto_compaction` outcome;
 - `status="error"` — a batch failed before any live bank, note, or metadata
   mutation; zero batches were applied;
 - `status="partial"` — work was already applied, a durable write started or
@@ -905,12 +912,26 @@ finishes, its `result` carries a three-state status:
 
 Additional result fields:
 
+- `auto_compaction` (1.6.0, optional) — after a successful queued consolidation
+  with `notes_processed > 0`, one call to the existing DirectLocal compactor
+  runs under the consolidation lock. `status` is `ok`, `not_needed`, `disabled`,
+  `not_applicable`, `error`, `partial`, or `cancelled`. An attempted pass carries
+  UTC `started_at`/`finished_at` and the compactor's safe report (files,
+  `preimage_id`, failure/recovery fields when applicable). Maintenance failure
+  or cancellation does not relabel completed consolidation as failed.
+  `MID_AUTO_COMPACT` defaults to true; false skips this stage. No same-job
+  automatic retry or crash-durable job history is added. Shared/unsafe routes
+  do not run compaction. Direct MID writes and GC consolidation bypass this
+  queue follow-up. While it runs, job progress has phase `compacting`; if
+  maintenance is interrupted after consolidation succeeded, the job remains
+  `succeeded`, phase finishes as `done`, and terminal counters reflect the
+  completed consolidation.
 - `bank_size_advisory` (optional) — present when at least one bank file, as
   read at job start, exceeds `BANK_FILE_MAX_SIZE`: a list of
   `{filename, utf8_bytes, max_size}` items (persisted UTF-8 bytes). It is an
   **indicator only** — nothing was compacted, refused or changed because of it;
-  the same fact is logged once as a WARNING. Compaction is the operator's
-  decision through `bank_compact`.
+  the same fact is logged once as a WARNING. Consult `auto_compaction` for
+  the subsequent maintenance outcome.
 - `failed_batch` (optional, one-based) — present only for an identifiable
   batch failure, including a batch whose bank integration was rejected or
   incomplete (`batch_write_failed`). Exact-selection truncation,
@@ -1114,8 +1135,8 @@ async def bank_delete(
 ### `bank_compact` 🛠️ (manage) — → no tiered alias (internal/ops)
 
 Refines oversized bank files into selective medium-term memory for a new chat.
-This is the **only** compaction path: a human initiates it, while
-consolidation only reports `bank_size_advisory`. `BANK_FILE_MAX_SIZE` (default
+This manual tool and the automatic post-consolidation stage reuse the same
+compactor. `BANK_FILE_MAX_SIZE` (default
 35 000 UTF-8 bytes) selects candidate files. `dry_run=True` scans and reports
 without inference or writes. With `dry_run=False`, the per-space consolidation
 lock covers preparation and apply; an active consolidation returns `conflict`.
@@ -1148,8 +1169,16 @@ resolved profile retains its reasoning/generation budget subject to remaining
 context. Every known stage input is preflighted; generated lessons and correction
 feedback are checked again before the next request. Context-incompatible inputs
 are refused without sending that request. No new configuration is introduced.
-The existing whole-file transaction is unchanged: no multipart persistence,
-crash-durable resume, or transfer of discarded detail to Graph is provided.
+The existing whole-file transaction is unchanged: neither multipart
+persistence nor crash-durable resume of the compaction job is provided.
+Verified complete preimages are queued for historical LONG indexing before
+MID replacement.
+`MID_AUTO_ARCHIVE` defaults to true; false pauses that worker without removing
+raw captures or pending work. It does not disable LONG search or documentary
+ingestion. `long_status` exposes `mid_automation` (effective booleans, trigger,
+byte threshold, DirectLocal scope) alongside `mid_archive_projection` (backlog,
+oldest capture, safe error), including when LONG is unbound or unreachable.
+Zero pending captures is not a claim that every current MID file is indexed.
 
 ```python
 @mcp.tool()
@@ -1220,9 +1249,9 @@ with `files_applied_before_failure`, `apply_may_have_mutated=true`,
 `recovery_required=true`, `preimage_id`, `failures`, and
 `total_size_after: null`. `preimage_id` is the opaque full-space backup
 identifier for manual operator inspection; clients must not automatically
-restore or retry it. It can be supplied as `backup_id` only to the existing
-manage-and-confirm-gated whole-space `backup_restore` or `backup_delete`
-operations; it does not introduce a targeted or automatic recovery API. A
+restore or retry it. It can be supplied as `backup_id` to the existing
+manage-and-confirm-gated whole-space `backup_restore` operation. `backup_delete`
+refuses retained compaction preimages; no targeted or automatic recovery API is added. A
 direct/manual verified apply may return the same additive field without
 requiring recovery.
 
@@ -1340,7 +1369,59 @@ Checks the Graph Memory connection status and retrieves graph stats. The
 optional `include_graph` flag adds a display-only graph preview for the admin
 console. That preview is server-whitelisted, uses synthetic node identifiers,
 omits document URIs/hashes/source paths, and is capped at 160 nodes and 320
-edges; the default status call remains lightweight and unchanged.
+edges. `mid_archive_projection` separately reports retained MID captures awaiting
+LONG indexing: `pending`, `oldest_at`, `oldest_age_seconds`, and a safe `error`
+code or null. These fields come from the local durable backlog even when LONG
+is unavailable; they do not attest MID commit, rollback, or recovery state.
+
+Captures made before any LONG connection remain unassigned. On the first
+projection, the worker establishes the space's connection and durably records
+that destination before submitting any document; enabling LONG later can
+therefore resume these captures.
+
+New MID captures use an internal archive namespace on that same guarded Graph
+connection/runtime. The complete first capture is submitted as one automatic
+ontology batch; its catalogue is frozen before archive documents are indexed.
+An interrupted bootstrap resubmits the same complete capture to reuse admitted
+construction calls. Later captures reuse the frozen catalogue without recrafting.
+The exact derived form `mid_[0-9a-f]{40}` is reserved against Hivemind space
+creation and space-scoped access, like documentary Graph identifiers. Before
+provisioning or using an archive on the embedded endpoint, the bridge also
+refuses prefixes containing Hivemind ownership markers. Historical collisions
+require separately authorized operator recovery; IDs and retained data are not
+migrated or deleted. Explicit connections to a different Graph endpoint do not
+probe the unrelated local prefix.
+The local archive binding is stored separately at
+`<space_id>/_mid_archive_bindings/<derived_archive_memory_id>.json`, one object
+per Graph destination, outside the `graph_memory` configuration replaced by
+push or disconnect. Reconnecting to the same parent preserves the
+initial capture and frozen catalogue; existing archives are immediately readable
+after remote verification, without waiting for another capture or worker pass.
+Document ingestion retains its independent name/YAML choice and its document
+namespace; automatic documentary ontology remains experimental, with supported
+delivery planned for 1.7.0. Both are read through the same public space; there is
+no new service, setting or user-selected archive destination. Existing version-1 pending
+records keep their original destination and projection behavior. They are not
+redirected or reclassified by this change. Continuous ontology evolution, Mesh
+projection, parsing improvements and large-volume qualification remain separate.
+
+The backlog also includes safely refused captures. `identity_changed` means the
+original space or LONG destination no longer matches; it never authorizes an
+automatic redirect. `document_unverified` means a job result lacks persisted
+document proof. These records remain visible and retry with capped backoff so
+repairing the original destination/document can resume them. If the first
+catalogue cannot finish, later captures also remain pending and retry; their raw
+sources are retained. Inspect `long_status.mid_archive_projection`, correct the
+repairable source or route problem, then let the worker retry. Actual loss or
+external corruption of local state is different: an orphaned namespace whose
+catalogue is not frozen requires restoration of the original binding/checkpoint
+from a verified backup, or operator investigation. Backoff alone cannot repair
+that state. Invalid captures are never skipped automatically to bootstrap from
+a different capture. Deliberate target migration or abandonment requires
+separate operator handling; this feature adds
+no automatic purge or retarget operation. Cumulative LONG waits per capture/pass
+are limited to 60 seconds. Local writes already started finish before the
+lifecycle lock is released and can extend that duration.
 
 ```python
 @mcp.tool()
@@ -1369,11 +1450,38 @@ async def graph_disconnect(
 
 ### `long_query` 🔑 — net-new long-tier tool (no `graph_*` twin)
 
+Vector retrieval searches all active documents within each authorized memory,
+including the separately bound MID archive memory. Graph matches add entities
+and relations without restricting the candidate document set. Inactive ingestion
+candidates remain excluded. Native `retrieval_mode` is `graph+rag` when graph
+entities are present, otherwise `rag-only`; this describes context composition,
+not a guarantee that relevant excerpts were found. The merged `long_query`
+response retains the documentary memory's native mode; archive entities may be
+present even when this field says `rag-only`. The universal embedding-score
+cutoff is removed by default; an explicitly configured `RAG_SCORE_THRESHOLD`
+still applies. Retrieval uses the configured `RAG_CHUNK_LIMIT` budget (eight
+passages by default), separately from the graph-entity `limit`. Scores and
+graph matches do not establish factual support; returned passages are candidates
+for the caller to assess. Explicit numeric references such as `#17` prioritize
+retrieved passages containing that reference within the configured budget, without
+changing cosine scores or access/model guards. Synthetic passage/source
+regression tests qualify these selection rules, not real-provider semantic
+accuracy, latency, or token cost. See the
+[embedding and retrieval upgrade guidance](DEPLOYMENT.md#readable-embedding-provenance-and-retrieval-rc3).
+
+
 Read-only structured query over the long-tier knowledge graph. It performs no
 generative/chat completion, but it does call the configured embedding endpoint
 to vectorize the query, so provider availability, latency, and cost still
-apply. A thin delegation to `LongEngine.query` → `memory_query`; returns the
-graph/ontology results verbatim. `readOnlyHint=True`, `check_access` only — no
+apply. `LongEngine.query` reads the documentary graph and, when present, the
+archive graph, retaining source provenance in the common space's results.
+If the archive is unavailable but the documentary query succeeds, its results
+remain available with `status: ok`, `partial: true` and explicit `warnings` whose
+`scope` is `mid_archive`, `reason` is `archive_unavailable`,
+`archive_destination_changed` or `archive_not_configured`, and `message` is "Archive evidence is unavailable;
+documentary results only." LONG search follows the same contract: these results
+must not be presented as covering all archives.
+Reads do not create either destination. `readOnlyHint=True`, `check_access` only — no
 `manage`, no audit, no write. Strictly downstream / non-authoritative
 (ADR-0010).
 
@@ -1468,6 +1576,82 @@ arguments = {
 `ontology_yaml` is a fallback alias when `ontology` is absent. Validate a
 custom schema with `ontology_validate` before submitting.
 
+**Delivery scope:** chosen-ontology document ingestion is supported in 1.6.0.
+Automatic document ingestion is implemented for experimental qualification;
+its supported delivery is planned for **1.7.0**. The contract below describes
+that existing experimental path, not a completed volume or quality qualification.
+Automatic ontology for MID archives is part of 1.6.0 and remains independent.
+
+This document-ingestion choice does not configure or replace the automatic
+catalogue for MID archives. For an empty document memory,
+`options={"ontology": "auto"}` constructs one catalogue
+from the **complete initial batch**. Hivemind inventories all supported text,
+selects up to eight diverse D1 passages and four complementary D2 passages,
+extracts sourced assertions, constructs O1, and replaces it with a complete O2.
+The validated catalogue is frozen before the first document enters the graph.
+Small corpora use the available distinct passages; a missing D2 adds no artificial
+call. Parsing and inference run in the existing background worker, not the
+submission request. Invalid batches are rejected before any document is queued.
+
+The frozen catalogue becomes the memory default. **Omit `ontology` on later
+batches** to use it without recalibration. Automatic mode requires an idle,
+empty memory, except for an identical resubmission of its initial batch. It
+does not change an existing populated graph or merge ontologies. Names matching
+`auto_[0-9a-f]{16}` identify persisted automatic defaults and are reserved.
+At freeze, the superseded `ontology_uri` is cleared; the effective YAML is
+retained on the Memory node and in its backup. The initial S3 ontology config
+remains as provenance: reindex recognizes exactly one object matching the
+original creation metadata and path, and still rejects other unreferenced
+objects. The library-only `ontology_get`
+and `ontology_export` tools do not resolve generated `auto_...` names.
+The existing exclusive maintenance boundary protects construction and each
+automatic document against concurrent deletion/recreation. Admission is fail-fast
+in both directions: another mutation can receive a busy refusal, or an automatic
+job can fail if a mutation is already active. Resubmit failed documents after the
+memory becomes idle.
+
+After an interruption, resubmit the same initial sources, filenames and checksums:
+successful construction calls are checkpointed in Graph storage and are reused;
+document idempotence then skips completed documents. During unfinished construction,
+checkpoints contain verbatim supporting passages and inherit the corpus's access
+and retention requirements. Freezing the catalogue removes the construction
+ledger and its source quotations. An abandoned, unfinished checkpoint remains
+until a successful resumed freeze or explicit deletion of that memory; there is
+no time-based expiry. The memory deletion path removes it with the Memory node.
+Cancelling the running construction job is cooperative: it stops before the next
+provider attempt or freeze, after preserving any completed call. An in-flight
+call may run until its configured extraction timeout (600 seconds by default),
+plus at most the next 8-second backoff. The cancelled job ends as `cancelled`;
+remaining jobs needing its unfinished catalogue fail with a resubmission code. An incomplete construction
+is tied to the resolved inference profile. Changing that profile or the initial
+batch is refused rather than mixing results. This does **not** turn the existing
+`in_memory_best_effort` document queue into a durable queue: its job history is
+lost on process restart. The existing document/queue capacity and supported
+format limits still apply. Plan for peak RAM containing the decoded batch plus
+its full parsed text and construction results: the 300 MB queued-byte default
+is not a process-RAM limit, and parsed text can exceed source size. A document
+with no extractable text fails automatic construction explicitly; there is no
+silent fallback to `general`.
+Admission refusals return `automatic_batch_not_admitted`; storage/coordinator
+failures return `automatic_batch_infrastructure_failed`. If all jobs were admitted
+before maintenance release failed, the response keeps their IDs and carries
+`warning=automatic_batch_admitted_release_failed`; inspect those jobs and service
+health rather than assuming the batch was rejected.
+
+Both chosen and automatic catalogues restrict extraction labels to their effective
+vocabulary, with explicit `Other`/`RELATED_TO` fallbacks. One correction is allowed
+for a nonconforming output; another failure stops before a document graph write.
+This also changes chosen-ontology ingestion: outputs previously degraded to generic
+labels or skipped (including empty responses and invalid chunks) now fail the
+document after one correction. The job reports `failed` with
+`Invalid extraction for frozen ontology`; inspect the provider output contract
+and resubmit after correcting the cause.
+Job results include `ontology_diagnostics` counts, denominators and rates (0–1,
+or null for an empty population). `Other` and `RELATED_TO` measure residue, not
+semantic correctness. Construction metadata reports native token usage and elapsed
+time; EUR cost is null when the provider supplies no price. Neither cost nor a
+zero-residue objective gates ingestion.
+
 Within one memory, duplicate handling uses the normalized `source_path` and
 content checksum: unchanged, successfully ingested documents are `skipped`;
 changed content is `changed_skipped` unless `replace_existing=true`. Matching
@@ -1496,8 +1680,14 @@ Retrieves the current execution status and progress of an asynchronous ingestion
 async def long_ingest_status(
     space_id: str,
     job_id: str,
+    archive: bool = False,
 ) -> dict:
 ```
+
+`archive=True` selects the already pinned MID archive, with the same access,
+ownership and incarnation checks as `long_ingest_list(archive=True)`. It never
+creates a destination or falls back to the primary memory. Missing bindings
+return `archive_not_configured`; job IDs remain scoped to the selected memory.
 
 ---
 
@@ -1505,6 +1695,13 @@ async def long_ingest_status(
 
 Returns a paginated list of asynchronous ingestion jobs for the target space.
 `readOnlyHint=True`, `idempotentHint=True`. Requires `read` permission on `space_id`.
+
+`archive=True` lists jobs of the space's already pinned MID-capture archive
+instead of the primary memory. It never provisions or rebinds an archive. A
+space without one returns `status:"error"` with `reason:"archive_not_configured"`,
+the normal first-use wait; `archive_unavailable` and
+`archive_destination_changed` are real failures. Job history is best-effort and
+never proves complete indexing.
 
 ```python
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
@@ -1514,6 +1711,7 @@ async def long_ingest_list(
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    archive: bool = False,
 ) -> dict:
 ```
 
@@ -1568,6 +1766,10 @@ ordinary mutation is active, or another maintenance request owns the memory;
 once requested, new same-memory mutation admissions fail fast. The gate is
 process-local and per exact `memory_id`, consistent with the one-active-Graph-
 runtime scope.
+
+This maintenance tool targets only the documentary namespace; it does not
+reindex MID archives. An unavailable archive does not prevent documentary
+query/search/list results, which are explicitly marked partial as described above.
 
 The rebuild never uses existing vectors as source truth. It requires an exact
 match between succeeded Neo4j `Document` rows and retained S3 source objects:
@@ -1730,7 +1932,8 @@ async def ontology_validate(space_id: str, content_yaml: str) -> dict:
 
 ### `long_document_list` 🔑 — net-new long memory document catalog tool
 
-Lists indexed documents in long memory for a space with pagination and filters.
+Lists indexed documents and MID archives in long memory for a space with
+pagination and filters. Reading this catalog does not provision an archive namespace.
 `readOnlyHint=True`, `idempotentHint=True`. Requires read permission on `space_id`.
 
 Parameters:
@@ -1741,6 +1944,10 @@ Parameters:
 - `query` (`str`, optional): Optional text search on filename or `source_path`.
 
 Returns `status: ok`, `space_id`, `count`, `total_count`, `limit`, `offset`, and a list of `documents` with their `document_id`, `filename`, `sha256`, `source_path`, `repo_path`, `source_modified_at`, `ingested_at`, `ingestion_status`, `chunk_count`, `size_bytes`, `text_length`, and `content_type`.
+
+If the archive is unavailable, the documentary listing is returned with
+`partial: true` and explicit `warnings` with `scope: mid_archive`. Its counts
+describe the available documentary listing, not a complete archive inventory.
 
 ```python
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True))
@@ -1757,8 +1964,12 @@ async def long_document_list(
 
 ### `long_document_get` 🔑 — net-new long memory document lookup tool
 
-Retrieves indexed document metadata and optional content by `document_id` or canonical `source_path`.
+Retrieves indexed document or MID archive metadata and optional content by
+`document_id` or canonical `source_path`, within the same space.
 `readOnlyHint=True`, `idempotentHint=True`. Requires read permission on `space_id`.
+A documentary match remains readable when archives are unavailable. If the
+lookup requires the archive and that namespace is unavailable, it returns an
+error rather than claiming the document does not exist.
 
 Parameters:
 - `space_id` (`str`, required): Target space identifier.
@@ -1773,10 +1984,12 @@ binary files use extracted text when available, or the original bytes in
 cannot read the file (including malformed PDFs). Content fields are also
 available at the top level. Metadata-only requests do not download the file.
 
-If the requested download fails or an unexpected extraction exception escapes,
-returns `{"status": "error", "message": "Document content could not be read."}`
-without document metadata or content fields. The read does not delete, change
-or reingest the indexed source. Document text is never interpreted as an error
+If content is requested but the storage URI is absent, null or empty, or if the
+download or extraction raises an exception, the tool returns
+`{"status": "error", "message": "Document content could not be read."}`
+without document metadata or content fields. Missing storage references cause no
+storage access; metadata-only requests still succeed. The read does not delete,
+change or reingest the indexed source. Document text is never interpreted as an error
 message: literal text such as `[S3 read error: example]` is preserved.
 
 This contract applies to the bundled Graph Memory backend shipped with this
@@ -1904,6 +2117,11 @@ async def backup_download(backup_id: str) -> dict:
 
 Deletes a backup. `destructiveHint=True`; requires `confirm=True`; gated by
 `check_manage_permission()`.
+
+Compaction preimages (`timestamp-<32hex operation_id>`) are retained, including
+existing 1.5.x preimages and incomplete attempts. Their deletion returns
+`{"status":"error","error":"compaction_preimage_protected",...}` before any
+storage operation. Ordinary timestamp-only snapshots remain deletable.
 
 ```python
 @mcp.tool()
@@ -2172,7 +2390,7 @@ Completion is explicit and count-honest:
   processed counts when that agent was selected; after a notice attempt they
   may also expose `notice_written`, `notice_processed`, `notice_cleaned`, and
   `notice_cleanup_reason`, plus bank-file counts and a server message. A
-  consolidation never compacts the bank, so a per-agent detail
+  GC consolidation does not invoke the queued automatic follow-up, so a per-agent detail
   carries no compaction envelope; a failed consolidation exposes its safe
   `failure_reason` only;
 - delete returns `status:"deleted"` or `status:"partial"` plus

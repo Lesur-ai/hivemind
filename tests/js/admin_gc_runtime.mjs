@@ -96,6 +96,7 @@ function createHarness() {
     const calls = [];
     const pendingGc = [];
     const pendingCompact = [];
+    const pendingBackups = [];
     const modals = [];
     const serverMessages = [];
     const toasts = [];
@@ -110,6 +111,11 @@ function createHarness() {
         opGcResults: element(),
         opCompactResults: element(),
         opRepairResults: element(),
+        opBackupsActions: element(),
+        opBackupsList: element(),
+        opBackupCreateSpace: element(),
+        opBackupCreateDesc: element(),
+        opBackupCreateErr: element(),
     };
 
     const document = {
@@ -150,12 +156,15 @@ function createHarness() {
                 pendingGc.push({ ...item, args });
             } else if (tool === 'bank_compact') {
                 pendingCompact.push({ ...item, args });
+            } else if (tool.startsWith('backup_')) {
+                pendingBackups.push({ ...item, tool, args });
             } else {
                 assert.fail(`unexpected tool ${tool}`);
             }
             return item.promise;
         },
         showModal(title, bodyHTML, btnLabel, onConfirm) {
+            if (bodyHTML.includes('id="opBackupCreateSpace"')) elements.opBackupCreateSpace = element();
             modals.push({ kind: 'neutral', title, bodyHTML, btnLabel, onConfirm });
         },
         showDestructiveModal(opts) {
@@ -175,7 +184,10 @@ function createHarness() {
             return `<SERVER>${escapeHtml(message)}</SERVER>`;
         },
         copyable: value => `<COPY>${escapeHtml(value)}</COPY>`,
+        truncateMiddle: value => value,
+        dataTable: (_headers, rows) => `<table>${rows}</table>`,
         fmtSize: value => `${String(value ?? '—')}B`,
+        renderTimestamp: value => `<TIME>${escapeHtml(value)}</TIME>`,
         statusDot: (_kind, label) => `<STATUS>${escapeHtml(label)}</STATUS>`,
     };
     vm.createContext(context);
@@ -190,11 +202,12 @@ function createHarness() {
         modals,
         pendingGc,
         pendingCompact,
+        pendingBackups,
         serverMessages,
         toasts,
-        async render(sessionGeneration) {
+        async render(sessionGeneration, params = { tab: 'maintenance' }) {
             shellSessionGeneration = sessionGeneration;
-            registeredRender(elements.content, { tab: 'maintenance' }, {
+            registeredRender(elements.content, params, {
                 epoch: context.AdminRouter.epoch,
                 sessionGeneration,
                 identity: {
@@ -210,9 +223,9 @@ function createHarness() {
             elements.opMaintSpace.value = spaceId;
             elements.opGcMaxAge.value = String(maxAgeDays);
         },
-        action(name) {
+        action(name, data = {}) {
             assert.equal(typeof actions[name], 'function', `missing action ${name}`);
-            return actions[name]({}, element());
+            return actions[name](data, element());
         },
         gcCalls() {
             return calls.filter(call => call.tool === 'admin_gc_notes');
@@ -297,6 +310,8 @@ async function exactDeleteProofAndEscaping() {
     assert.match(h.elements.opGcResults.innerHTML, /scan &lt;b&gt;verbatim&lt;\/b&gt;/);
     assert.doesNotMatch(h.elements.opGcResults.innerHTML, /scan <b>/);
     assert.doesNotMatch(h.elements.opGcResults.innerHTML, /opaque-equal-count-proof/);
+    assert.match(h.elements.opGcResults.innerHTML, /<TIME>2026-07-06T00:00:00\+00:00<\/TIME>/);
+    assert.match(h.elements.opGcResults.innerHTML, /<TIME>20260101T000000<\/TIME>/);
 
     h.action('op-gc-delete');
     const confirmation = h.lastModal('destructive');
@@ -686,6 +701,114 @@ async function compactTargetResolutionDiagnosticIsContentFree() {
     assert.equal(h.compactCalls().length, 1, 'target refusal must not auto-retry');
 }
 
+async function backupsStayScopedAndReturnToGlobal() {
+    const h = createHarness();
+    await h.render(90, { tab: 'backups', spaceId: 'alpha' });
+    assert.deepEqual(plain(h.calls), [{ tool: 'backup_list', args: { space_id: 'alpha' } }], 'Space backups never inventory all spaces');
+    h.pendingBackups[0].resolve({ status: 'ok', total: 2, backups: [
+        { backup_id: 'alpha/snapshot-A', space_id: 'alpha', files_count: 3 },
+        { backup_id: 'beta/snapshot-B', space_id: 'beta' },
+    ] });
+    await flushTasks();
+    assert.match(h.elements.opBackupsList.innerHTML, /alpha\/snapshot-A/);
+    assert.doesNotMatch(h.elements.opBackupsList.innerHTML, /beta\/snapshot-B/);
+    assert.doesNotMatch(h.elements.opBackupsActions.innerHTML, /op-backup-all/);
+    h.action('op-backup-all'); assert.equal(h.modals.length, 0, 'scoped views cannot open fleet backup');
+    h.action('op-backup-restore', { backupId: 'beta/snapshot-B', space: 'beta' });
+    h.action('op-backup-delete', { backupId: 'beta/snapshot-B' });
+    assert.equal(h.modals.length, 0, 'scoped views cannot act on another Space archive');
+    h.action('op-backup-create');
+    assert.equal(h.elements.opBackupCreateSpace.value, 'alpha');
+    assert.equal(h.elements.opBackupCreateSpace.disabled, true);
+    h.elements.opBackupCreateSpace.value = 'beta'; // disabled input is not the scope authority
+    const create = h.lastModal().onConfirm(); await flushTasks();
+    assert.deepEqual(plain(h.pendingBackups.at(-1).args), { space_id: 'alpha' });
+    h.pendingBackups.at(-1).resolve({ status: 'created' }); await create; await flushTasks();
+    assert.deepEqual(plain(h.pendingBackups.at(-1).args), { space_id: 'alpha' });
+    h.pendingBackups.at(-1).resolve({ status: 'ok', backups: [{ backup_id: 'alpha/snapshot-A', space_id: 'alpha' }] });
+    await flushTasks();
+    h.action('op-backup-restore', { backupId: 'alpha/snapshot-A', space: 'alpha' });
+    const modal = h.lastModal('destructive');
+    assert.equal(modal.typedConfirmation, 'alpha/snapshot-A');
+    assert.match(modal.bodyHtml, /restore never restores token allowlists/);
+    assert.match(modal.bodyHtml, /Never delete and recreate/);
+    assert.equal(h.calls.filter(call => call.tool === 'backup_restore').length, 0);
+    const restore = modal.onConfirm(); await flushTasks();
+    assert.deepEqual(plain(h.pendingBackups.at(-1).args), { backup_id: 'alpha/snapshot-A', confirm: true });
+    h.pendingBackups.at(-1).resolve({ status: 'ok', space_id: 'alpha', files_restored: 3 });
+    await restore; await flushTasks();
+    assert.equal(h.lastModal().title, 'Restore complete');
+    assert.match(h.lastModal().bodyHTML, /Access was not restored/);
+    assert.match(h.lastModal().bodyHTML, /space_invite_token/);
+    assert.deepEqual(plain(h.pendingBackups.at(-1).args), { space_id: 'alpha' });
+    assert.equal(h.calls.filter(call => call.tool === 'space_list').length, 0);
+
+    h.context.AdminRouter.epoch += 1;
+    const before = h.calls.length;
+    await h.render(90, { tab: 'backups' });
+    assert.deepEqual(plain(h.calls.slice(before)), [{ tool: 'backup_list', args: {} }, { tool: 'space_list', args: {} }]);
+    h.pendingBackups.at(-1).resolve({ status: 'ok', backups: [] }); await flushTasks();
+    assert.match(h.elements.opBackupsActions.innerHTML, /op-backup-all/);
+    h.action('op-backup-create');
+    assert.equal(h.elements.opBackupCreateSpace.disabled, false);
+    assert.equal(h.elements.opBackupCreateSpace.value, '');
+    assert.match(h.lastModal().bodyHTML, /value="beta"/);
+    h.action('op-backup-all');
+    assert.equal(h.lastModal().title, 'Back up all spaces');
+}
+
+async function backupReadsAndRestoreCompletionsKeepTheirOwner() {
+    const h = createHarness();
+    await h.render(91, { tab: 'backups', spaceId: 'alpha' });
+    const alpha = h.pendingBackups.at(-1);
+    h.context.AdminRouter.epoch += 1;
+    await h.render(91, { tab: 'backups', spaceId: 'beta' });
+    h.pendingBackups.at(-1).resolve({ status: 'ok', backups: [{ backup_id: 'beta/fresh', space_id: 'beta' }] }); await flushTasks();
+    const painted = h.elements.opBackupsList.innerHTML;
+    alpha.resolve({ status: 'ok', backups: [{ backup_id: 'alpha/stale', space_id: 'alpha' }] }); await flushTasks();
+    assert.equal(h.elements.opBackupsList.innerHTML, painted);
+    h.action('op-backup-restore', { backupId: 'beta/fresh', space: 'beta' });
+    const restore = h.lastModal('destructive').onConfirm(); await flushTasks();
+    const pending = h.pendingBackups.at(-1);
+    await h.render(92, { tab: 'backups', spaceId: 'beta' });
+    const calls = h.calls.length, modals = h.modals.length;
+    pending.resolve({ status: 'ok', space_id: 'beta', files_restored: 1 }); await restore; await flushTasks();
+    assert.equal(h.calls.length, calls, 'old restore cannot refresh the new session');
+    assert.equal(h.modals.length, modals, 'old restore cannot replace the new modal');
+    h.elements.loginOverlay.classList.remove('hidden');
+    const list = h.elements.opBackupsList.innerHTML;
+    h.pendingBackups.at(-1).resolve({ status: 'ok', backups: [{ backup_id: 'beta/after-logout', space_id: 'beta' }] });
+    await flushTasks(); assert.equal(h.elements.opBackupsList.innerHTML, list, 'logout drops pending backup reads');
+}
+
+async function invalidBackupScopeNeverFallsBackToInventory() {
+    for (const spaceId of ['', '../alpha', 'alpha/beta', null]) {
+        const h = createHarness();
+        await h.render(93, { tab: 'backups', spaceId });
+        assert.equal(h.calls.length, 0, 'invalid explicit scope must not broaden to all spaces');
+        assert.match(h.elements.content.innerHTML, /Invalid space identifier/);
+    }
+}
+
+async function returningFromBackupsNeedsFreshMaintenanceProof() {
+    const h = createHarness();
+    await h.render(94);
+    h.target('alpha'); h.action('op-compact-dry');
+    h.pendingCompact[0].resolve(compactResponse({ dryRun: true })); await flushTasks();
+    h.context.AdminRouter.epoch += 1;
+    await h.render(94, { tab: 'backups', spaceId: 'alpha' });
+    h.context.AdminRouter.epoch += 1;
+    await h.render(94, { tab: 'maintenance', spaceId: 'alpha' });
+    h.action('op-compact-apply');
+    assert.match(h.elements.opCompactResults.innerHTML.replace(/<[^>]*>/g, ''), /Check files for alpha before compaction/);
+    assert.equal(h.modals.length, 0);
+    assert.equal(h.compactCalls().length, 1);
+}
+
+await invalidBackupScopeNeverFallsBackToInventory();
+await returningFromBackupsNeedsFreshMaintenanceProof();
+await backupsStayScopedAndReturnToGlobal();
+await backupReadsAndRestoreCompletionsKeepTheirOwner();
 await exactDeleteProofAndEscaping();
 await neutralConsolidationAndPartialDetails();
 await typedConflictAndPartialDeleteAreHonest();

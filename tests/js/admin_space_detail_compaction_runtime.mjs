@@ -21,7 +21,7 @@ const escapeHtml = value => String(value ?? '')
 function node(value = '') {
     return {
         attributes: {},
-        innerHTML: '',
+        innerHTML: '', dataset: {},
         value,
         setAttribute(name, attributeValue) { this.attributes[name] = String(attributeValue); },
     };
@@ -29,6 +29,8 @@ function node(value = '') {
 
 const elements = {
     sdTierPanel: node(),
+    sdMidCompactionActions: node(), sdMidCompactionReport: node(),
+    sdMidListFreshness: node(), sdMidFileFreshness: node(),
     sdAuxiliary: node(),
     sdRulesPanel: node(),
     sdAccessPanel: node(),
@@ -38,10 +40,12 @@ const elements = {
     sdShortAgent: node(''),
     sdShortSince: node(''),
 };
+function tierHtml() { return elements.sdTierPanel.innerHTML + (elements.sdTierPanel.dataset.memoryTier === 'mid' ? elements.sdMidCompactionActions.innerHTML + elements.sdMidCompactionReport.innerHTML : ''); }
 const calls = [];
 const toasts = [];
 let modal = null;
 let compactMode = 'ok';
+let readFailureTool = null;
 let pendingCompactResolve = null;
 
 const spaceInfo = {
@@ -149,6 +153,11 @@ function compactionResult(dryRun) {
 
 const context = {
     console,
+    currentSessionGeneration: () => 1,
+    sessionGenerationIsCurrent: value => value === 1,
+    localStorage: { getItem: () => null, setItem() {} },
+    CustomEvent: function(type) { this.type = type; },
+    setTimeout() {}, clearTimeout() {},
     esc: shellEsc,
     icon: () => '',
     pill: (_kind, label) => String(label ?? ''),
@@ -169,6 +178,7 @@ const context = {
     SPACE_ID_RE: /^[a-z0-9][a-z0-9-]{0,63}$/,
     TIERS: new Set(['short', 'mid', 'long']),
     document: {
+        hidden: false, dispatchEvent() {},
         addEventListener() {},
         getElementById(id) { return elements[id] || null; },
         querySelector() { return null; },
@@ -182,6 +192,7 @@ const context = {
     },
     callTool: async (tool, args) => {
         calls.push({ tool, args });
+        if (tool === readFailureTool) return { status: 'error', message: `${tool} failed after compaction` };
         switch (tool) {
         case 'space_info': return spaceInfo;
         case 'live_read': return { status: 'ok', notes: [] };
@@ -199,6 +210,7 @@ const context = {
     },
 };
 vm.createContext(context);
+vm.runInContext(fs.readFileSync(new URL('../../src/live_mem/static/js/admin/portal-refresh.js', import.meta.url), 'utf8') + '\nPortalRefresh.beginSession();', context);
 const original = fs.readFileSync(viewPath, 'utf8');
 const instrumented = original.replace(
     "AdminViews.register('space-detail', render);",
@@ -224,13 +236,13 @@ render('demo-space', 19);
 await settle();
 let view = context.__spaceDetail.currentView();
 assert.ok(view);
-assert.match(elements.sdTierPanel.innerHTML, /data-action="sd-compact-dry"/);
-assert.match(elements.sdTierPanel.innerHTML, /Check files for compaction/);
-assert.equal(elements.sdTierPanel.innerHTML.includes('Compact files…'), false);
+assert.match(tierHtml(), /data-action="sd-compact-dry"/);
+assert.match(tierHtml(), /Check files for compaction/);
+assert.equal(tierHtml().includes('Compact files…'), false);
 
 view.tier = 'short';
 context.__spaceDetail.renderTier(view);
-assert.equal(elements.sdTierPanel.innerHTML.includes('sd-compact-dry'), false, 'compaction is MID-only');
+assert.equal(tierHtml().includes('sd-compact-dry'), false, 'compaction is MID-only');
 view.tier = 'mid';
 context.__spaceDetail.renderTier(view);
 
@@ -244,13 +256,13 @@ await settle();
 const dryCalls = calls.filter(call => call.tool === 'bank_compact');
 assert.equal(dryCalls.length, compactCallsBeforeDry + 1);
 assert.equal(JSON.stringify(dryCalls.at(-1).args), JSON.stringify({ space_id: 'demo-space', dry_run: true }));
-assert.match(elements.sdTierPanel.innerHTML, /Files eligible for compaction/);
-assert.match(elements.sdTierPanel.innerHTML, /No changes made/);
-assert.match(elements.sdTierPanel.innerHTML, /does not generate rewritten content/);
-assert.match(elements.sdTierPanel.innerHTML, /Compact files…/);
-assert.match(elements.sdTierPanel.innerHTML, /<details class="compaction-details"><summary>Technical details<\/summary>/);
-assert.doesNotMatch(elements.sdTierPanel.innerHTML.replace(/<details\b[\s\S]*?<\/details>/g, ''), /SHA-256|Ratio|UTF-8 bytes/);
-assert.match(elements.sdTierPanel.innerHTML, /a{64}/);
+assert.match(tierHtml(), /Files eligible for compaction/);
+assert.match(tierHtml(), /No changes made/);
+assert.match(tierHtml(), /does not generate rewritten content/);
+assert.match(tierHtml(), /Compact files…/);
+assert.match(tierHtml(), /<details class="compaction-details"><summary>Technical details<\/summary>/);
+assert.doesNotMatch(tierHtml().replace(/<details\b[\s\S]*?<\/details>/g, ''), /SHA-256|Ratio|UTF-8 bytes/);
+assert.match(tierHtml(), /a{64}/);
 
 context.__spaceDetail.confirmCompact(view);
 assert.equal(modal.title, 'Compact files');
@@ -262,8 +274,8 @@ await settle();
 const applyCalls = calls.filter(call => call.tool === 'bank_compact' && call.args.dry_run === false);
 assert.equal(applyCalls.length, 1);
 assert.equal(JSON.stringify(applyCalls[0].args), JSON.stringify({ space_id: 'demo-space', dry_run: false }));
-assert.match(elements.sdTierPanel.innerHTML, /Compaction applied/);
-assert.match(elements.sdTierPanel.innerHTML, /demo-space\/2026-09-09T120000Z/);
+assert.match(tierHtml(), /Compaction applied/);
+assert.match(tierHtml(), /demo-space\/2026-09-09T120000Z/);
 assert.equal(view.compactDry, null, 'Apply must revoke the dry-run authorization');
 assert.ok(toasts.some(toast => toast.kind === 'ok' && toast.message === 'Compaction applied.'));
 assert.ok(calls.filter(call => call.tool === 'bank_list').length >= 2, 'Apply must refresh the MID reader');
@@ -294,46 +306,46 @@ resolveApply(compactionResult(false));
 assert.equal(await protectedApply, true);
 await settle();
 assert.ok(calls.filter(call => call.tool === 'bank_list').length >= bankListsBeforePartialRefresh + 1, 'partial Apply must refresh the MID reader');
-assert.match(elements.sdTierPanel.innerHTML, /Compaction recovery required/);
-const visibleRecovery = elements.sdTierPanel.innerHTML.replace(/<details\b[\s\S]*?<\/details>/g, '');
+assert.match(tierHtml(), /Compaction recovery required/);
+const visibleRecovery = tierHtml().replace(/<details\b[\s\S]*?<\/details>/g, '');
 assert.match(visibleRecovery, /Files changed before failure:<\/strong> 1/);
 assert.match(visibleRecovery, /Final size could not be verified/);
 assert.match(visibleRecovery, /Bank content may have changed/);
 assert.match(visibleRecovery, /Rollback result:<\/strong> partial/);
-assert.match(elements.sdTierPanel.innerHTML, /Source SHA-256/);
-assert.match(elements.sdTierPanel.innerHTML, /target_resolution=missing/);
-assert.match(elements.sdTierPanel.innerHTML, /No automatic retry/);
-assert.match(elements.sdTierPanel.innerHTML, /role="status"/);
-assert.equal(elements.sdTierPanel.innerHTML.includes('Compaction not applied (partial)'), false);
+assert.match(tierHtml(), /Source SHA-256/);
+assert.match(tierHtml(), /target_resolution=missing/);
+assert.match(tierHtml(), /No automatic retry/);
+assert.match(tierHtml(), /role="status"/);
+assert.equal(tierHtml().includes('Compaction not applied (partial)'), false);
 
 compactMode = 'conflict';
 assert.equal(await context.__spaceDetail.runCompaction(view, true), true);
 await settle();
-assert.match(elements.sdTierPanel.innerHTML, /Consolidation in progress/);
-assert.match(elements.sdTierPanel.innerHTML, /retry when the lane is idle/);
-assert.equal(elements.sdTierPanel.innerHTML.includes('<img'), false);
+assert.match(tierHtml(), /Consolidation in progress/);
+assert.match(tierHtml(), /retry when the lane is idle/);
+assert.equal(tierHtml().includes('<img'), false);
 
 compactMode = 'error';
 assert.equal(await context.__spaceDetail.runCompaction(view, true), true);
 await settle();
-assert.match(elements.sdTierPanel.innerHTML, /Compaction refused or failed/);
-assert.match(elements.sdTierPanel.innerHTML, /&lt;img/);
-assert.match(elements.sdTierPanel.innerHTML, /&lt;bad&gt;\.md/);
-assert.equal(elements.sdTierPanel.innerHTML.includes('<script>'), false);
+assert.match(tierHtml(), /Compaction refused or failed/);
+assert.match(tierHtml(), /&lt;img/);
+assert.match(tierHtml(), /&lt;bad&gt;\.md/);
+assert.equal(tierHtml().includes('<script>'), false);
 
 compactMode = 'malformed';
 assert.equal(await context.__spaceDetail.runCompaction(view, true), true);
 await settle();
-assert.match(elements.sdTierPanel.innerHTML, /Compaction recovery required/);
-assert.match(elements.sdTierPanel.innerHTML, /Failure reason:<\/strong> 42/);
-assert.match(elements.sdTierPanel.innerHTML, /&lt;apply&gt;/);
-assert.match(elements.sdTierPanel.innerHTML, /&lt;file-error&gt;/);
-assert.doesNotMatch(elements.sdTierPanel.innerHTML, /<file-error>/);
+assert.match(tierHtml(), /Compaction recovery required/);
+assert.match(tierHtml(), /Failure reason:<\/strong> 42/);
+assert.match(tierHtml(), /&lt;apply&gt;/);
+assert.match(tierHtml(), /&lt;file-error&gt;/);
+assert.doesNotMatch(tierHtml(), /<file-error>/);
 
 compactMode = 'wrong-target';
 assert.equal(await context.__spaceDetail.runCompaction(view, true), true);
 await settle();
-assert.match(elements.sdTierPanel.innerHTML, /Compaction refused or failed/);
+assert.match(tierHtml(), /Compaction refused or failed/);
 assert.equal(toasts.filter(toast => toast.message === 'Compaction applied.').length, 1);
 
 compactMode = 'pending';
@@ -341,8 +353,8 @@ const staleView = view;
 const staleRun = context.__spaceDetail.runCompaction(staleView, true);
 await settle();
 assert.equal(staleView.compacting, true);
-assert.match(elements.sdTierPanel.innerHTML, /Checking bank files…/);
-assert.doesNotMatch(elements.sdTierPanel.innerHTML, /Running compaction…/);
+assert.match(tierHtml(), /Checking bank files…/);
+assert.doesNotMatch(tierHtml(), /Running compaction…/);
 render('demo-space', 20);
 await settle();
 assert.equal(typeof pendingCompactResolve, 'function');
@@ -353,16 +365,47 @@ pendingCompactResolve({
 assert.equal(await staleRun, false, 'navigation must invalidate the old response');
 await settle();
 assert.equal(context.__spaceDetail.currentView().compactDry, null);
-assert.equal(elements.sdTierPanel.innerHTML.includes('Files eligible for compaction'), false);
+assert.equal(tierHtml().includes('Files eligible for compaction'), false);
 
 compactMode = 'ok';
 render('demo-space', 21, ['read', 'write']);
 await settle();
 view = context.__spaceDetail.currentView();
 context.__spaceDetail.renderTier(view);
-assert.equal(elements.sdTierPanel.innerHTML.includes('sd-compact-dry'), false, 'write-only sessions must not see compaction');
+assert.equal(tierHtml().includes('sd-compact-dry'), false, 'write-only sessions must not see compaction');
 const writeOnlyCount = calls.filter(call => call.tool === 'bank_compact').length;
 assert.equal(await context.__spaceDetail.runCompaction(view, true), false);
 assert.equal(calls.filter(call => call.tool === 'bank_compact').length, writeOnlyCount, 'write-only sessions must not invoke compaction');
+
+// A completed mutation and its subsequent read have independent outcomes.
+// Failed list/file refresh must not reject a confirmed Apply or hide recovery.
+for (const outcome of ['ok', 'partial']) {
+    for (const failedTool of ['bank_list', 'bank_read']) {
+        readFailureTool = null; compactMode = 'ok';
+        context.AdminRouter.epoch += 1;
+        render('demo-space', context.AdminRouter.epoch); await settle();
+        view = context.__spaceDetail.currentView();
+        assert.equal(await context.__spaceDetail.runCompaction(view, true), true);
+        context.__spaceDetail.confirmCompact(view);
+        const before = calls.filter(call => call.tool === 'bank_compact' && call.args.dry_run === false).length;
+        const priorFile = view.midFileData;
+        const priorDate = failedTool === 'bank_list' ? view.midListSuccess : view.midFileSuccess;
+        compactMode = outcome; readFailureTool = failedTool;
+        let confirmedOutcome;
+        await assert.doesNotReject(async () => { confirmedOutcome = await modal.onConfirm(); }, `${outcome} Apply must survive ${failedTool} failure`);
+        assert.equal(confirmedOutcome, true);
+        assert.equal(view.compactResult.status, outcome);
+        assert.equal(view.compactDry, null, 'the consumed confirmation is never restored by a read failure');
+        assert.equal(view.compactApplying, false);
+        assert.equal(calls.filter(call => call.tool === 'bank_compact' && call.args.dry_run === false).length, before + 1, 'no mutation is replayed');
+        assert.equal(view.midFileData, priorFile, 'previous file remains readable');
+        assert.equal(failedTool === 'bank_list' ? view.midListSuccess : view.midFileSuccess, priorDate);
+        const errorRegion = failedTool === 'bank_list' ? elements.sdMidListFreshness : elements.sdMidFileFreshness;
+        assert.match(errorRegion.innerHTML, new RegExp(`${failedTool} failed after compaction`));
+        assert.match(tierHtml(), outcome === 'ok' ? /Compaction applied/ : /Compaction recovery required/);
+        if (outcome === 'partial') assert.match(tierHtml(), /Bank content may have changed/);
+    }
+}
+readFailureTool = null;
 
 console.log('admin space detail compaction runtime: ok');

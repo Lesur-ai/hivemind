@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -204,6 +205,40 @@ def test_graph_runtime_lock_matches_every_direct_pin():
     assert _direct_lock_mismatches("pypdf==6.17.0", "pypdf==6.17.0\npypdf==0.0.0") == ["pypdf"]
 
 
+# pyproject.toml documents these dev pins as the embedded Graph runtime's own.
+_GRAPH_MIRRORED_DEV_PINS = ("neo4j", "pypdf", "qdrant-client")
+
+
+def _mirrored_dev_pin_mismatches(dev: list[str], requirements: str) -> list[str]:
+    """Return mirrored dev pins that are missing, loose, or differ from Graph."""
+    exact = re.compile(r"^([A-Za-z0-9_.-]+)==[^\s;]+$")
+    mirrored = {}
+    for spec in dev:
+        match = exact.match(spec.strip())
+        name = re.sub(r"[-_.]+", "-", match[1]).lower() if match else None
+        if name in _GRAPH_MIRRORED_DEV_PINS:
+            mirrored[name] = spec.strip()
+    missing = [name for name in _GRAPH_MIRRORED_DEV_PINS if name not in mirrored]
+    return missing + _direct_lock_mismatches("\n".join(mirrored.values()), requirements)
+
+
+def test_graph_mirrored_dev_pins_match_the_runtime_inputs():
+    """Integration tests must exercise the client versions the image installs."""
+    pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dev = pyproject["dependency-groups"]["dev"]
+    requirements = (_SVC / "requirements.txt").read_text(encoding="utf-8")
+    assert not _mirrored_dev_pin_mismatches(dev, requirements)
+
+    # A dev-only bump (the Dependabot shape) and a loosened pin must both fail.
+    for name in _GRAPH_MIRRORED_DEV_PINS:
+        pin = re.compile(rf"^{re.escape(name)}==\S+$")
+        bumped = [pin.sub(f"{name}==0.0.0", spec) for spec in dev]
+        loosened = [spec.replace(f"{name}==", f"{name}>=", 1) for spec in dev]
+        assert bumped != dev and loosened != dev
+        assert _mirrored_dev_pin_mismatches(bumped, requirements) == [name]
+        assert _mirrored_dev_pin_mismatches(loosened, requirements) == [name]
+
+
 def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
     """The container must install the complete resolution with hashes only."""
     lock = (_SVC / "requirements.lock").read_text(encoding="utf-8")
@@ -217,7 +252,7 @@ def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
     dockerfile = (_SVC / "Dockerfile").read_text(encoding="utf-8")
     assert (
         "FROM python:3.14.6-slim-bookworm@sha256:"
-        "86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30"
+        "4c92ffcde4dd6f1ff72a24518f49fd4990b27134987dfa31a733badde66df9f8"
     ) in dockerfile
     assert "aiohttp==3.14.3" in lock
     assert "boto3==1.43.88" in lock

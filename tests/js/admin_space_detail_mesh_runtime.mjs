@@ -14,7 +14,7 @@ const escapeHtml = value => String(value ?? '')
 
 function node(value = '') {
     return {
-        innerHTML: '', value,
+        innerHTML: '', dataset: {}, value,
         setAttribute() {},
     };
 }
@@ -50,6 +50,11 @@ const baseSource = {
 
 const context = {
     console,
+    currentSessionGeneration: () => 1,
+    sessionGenerationIsCurrent: value => value === 1,
+    localStorage: { getItem: () => null, setItem() {} },
+    CustomEvent: function(type) { this.type = type; },
+    setTimeout() {}, clearTimeout() {},
     esc: escapeHtml,
     icon: () => '',
     pill: (_kind, label) => String(label ?? ''),
@@ -69,6 +74,7 @@ const context = {
     SPACE_ID_RE: /^[a-z0-9][a-z0-9-]{0,63}$/,
     TIERS: new Set(['short', 'mid', 'long']),
     document: {
+        hidden: false, dispatchEvent() {},
         getElementById(id) { return elements[id] || null; },
         querySelector() { return null; },
         addEventListener(name, handler) { documentHandlers.set(name, handler); },
@@ -102,6 +108,7 @@ const context = {
 };
 
 vm.createContext(context);
+vm.runInContext(fs.readFileSync(new URL('../../src/live_mem/static/js/admin/portal-refresh.js', import.meta.url), 'utf8') + '\nPortalRefresh.beginSession();', context);
 const original = fs.readFileSync(viewPath, 'utf8');
 const instrumented = original.replace(
     "AdminViews.register('space-detail', render);",

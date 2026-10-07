@@ -50,6 +50,11 @@ _SRC = _REPO_ROOT / "src" / "live_mem"
 # structurally blind to the long/graph tier.
 _COMMIT_PATH_MODULES = (
     _SRC / "core" / "consolidator.py",
+    # Storage-only capture and its pure identity helper are also on this path.
+    # Behavioural independence from LONG configuration is covered by the real
+    # compaction tests; import names alone cannot prove that property.
+    _SRC / "core" / "mid_archive.py",
+    _SRC / "core" / "memory_id.py",
     _SRC / "core" / "write_sink.py",
     _SRC / "core" / "hivemind" / "state.py",
     _SRC / "core" / "hivemind" / "lifecycle.py",

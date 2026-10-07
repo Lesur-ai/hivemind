@@ -9,7 +9,7 @@ depuis les variables d'environnement ou un fichier .env.
 import re
 from functools import lru_cache
 from typing import Optional
-from pydantic import ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -119,7 +119,9 @@ class Settings(BaseSettings):
     # =========================================================================
     # RAG — Recherche vectorielle
     # =========================================================================
-    rag_score_threshold: float = 0.58  # Score cosinus minimum pour un chunk BGE-M3 (en dessous = ignoré)
+    # Scores depend on the embedding model: no universal relevance cutoff.
+    # An explicitly configured threshold keeps the existing opt-in behavior.
+    rag_score_threshold: Optional[float] = Field(default=None, ge=-1, le=1, allow_inf_nan=False)
     rag_chunk_limit: int = 8  # Nombre max de chunks retournés par Qdrant
     
     # =========================================================================

@@ -46,7 +46,9 @@ async def _reader(scope, receive, send):
     await send({"type": "http.response.body", "body": body})
 
 
-@pytest.mark.parametrize("length", [b"33", b"00033", b"9" * 5000])
+@pytest.mark.parametrize("length", [
+    b"33", b"00033", pytest.param(b"9" * 5000, id="5000-digit-content-length"),
+])
 async def test_oversized_content_length_rejected_without_read_or_sdk(length):
     async def forbidden(*args):
         pytest.fail("oversized body reached SDK")

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hivemind Admin</title>
+    <title>Hivemind Portal</title>
     <link rel="icon" href="/static/img/hivemind-favicon.svg">
     <link rel="stylesheet" href="/static/css/admin.css">
 </head>
@@ -14,7 +14,8 @@
     <div class="login-card" tabindex="-1">
         <img src="/static/img/hivemind-mark-dark.svg" alt="" class="login-logo" height="64">
         <div class="brand-wordmark login-wordmark">hivemind</div>
-        <h2 class="login-title">Admin console</h2>
+        <h2 class="login-title">Portal</h2>
+        <p class="login-intro">Your shared memory, in one place.</p>
         <p class="login-subtitle">Sign in with an operator token.</p>
         <div class="login-form">
             <label for="loginToken">Access token</label>
@@ -22,7 +23,7 @@
             <div class="login-error" id="loginError" role="alert"></div>
             <button id="loginBtn" class="btn btn-primary login-submit">Sign in</button>
         </div>
-        <div class="login-footer"><span id="loginVersion" class="mono"></span></div>
+        <div class="login-footer"><a href="/live">Open the read-only viewer</a><span id="loginVersion" class="mono"></span></div>
     </div>
 </div>
 
@@ -32,7 +33,7 @@
         <button type="button" id="sidebarMenuToggle" aria-controls="sidebar" class="sidebar-menu-toggle" aria-label="Menu" aria-expanded="false">
             <span class="menu-icon-slot"></span>
         </button>
-        <a class="sidebar-brand" href="#/dashboard">
+        <a class="sidebar-brand" href="#/dashboard" aria-label="hivemind">
             <img src="/static/img/hivemind-mark-dark.svg" alt="" height="28">
             <span class="brand-wordmark">hivemind</span>
         </a>
@@ -43,15 +44,28 @@
             <div class="nav-group-label">Operator tools</div>
             <ul class="nav-operator" id="sidebarNavOperator"></ul>
         </div>
-        <a class="nav-live" href="/live" target="_blank" rel="noopener">
+        <a class="nav-live" href="/live" target="_blank" rel="noopener" aria-label="Live viewer">
             <span class="nav-live-icon-slot"></span>
             <span class="nav-label">Live viewer</span>
         </a>
         <div class="sidebar-footer"><span id="headerVersion" class="mono"></span></div>
     </nav>
+    <div class="portal-workspace">
+    <header id="portalTopbar" class="portal-topbar" aria-label="Instance and refresh">
+        <div class="portal-instance"><span class="micro-label">Instance</span><span id="portalOrigin" class="mono-data"></span></div>
+        <div class="portal-controls">
+            <span id="portalHealth" class="body-small" role="status">Services not checked</span>
+            <button type="button" id="portalCheckServices" class="btn btn-secondary btn-sm" title="Checks storage and model availability" disabled>Check services</button>
+            <button type="button" id="portalRefresh" class="btn btn-secondary btn-sm">Refresh</button>
+            <label id="portalAutoControl" class="portal-auto" hidden><input type="checkbox" id="portalAutoEnabled">Auto-refresh</label>
+            <label id="portalIntervalControl" class="portal-interval" hidden><span class="sr-only">Refresh interval</span><select id="portalInterval" class="form-input"><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select></label>
+            <span id="portalFreshness" class="body-small" role="status"></span>
+        </div>
+    </header>
     <main id="content" class="content" tabindex="-1">
         <div class="state state-loading"><span class="spinner" aria-hidden="true"></span><span>Loading…</span></div>
     </main>
+    </div>
     <div class="sidebar-scrim" id="sidebarScrim"></div>
 </div>
 
@@ -62,6 +76,7 @@
 <script src="/static/vendor/purify.min.js"></script>
 <script src="/static/js/admin-api.js"></script>
 <script src="/static/js/admin-app.js"></script>
+<script src="/static/js/admin/portal-refresh.js"></script>
 <script src="/static/js/admin/views-dashboard.js"></script>
 <script src="/static/js/admin/views-spaces.js"></script>
 <script src="/static/js/admin/views-space-detail.js"></script>

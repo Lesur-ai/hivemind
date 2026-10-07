@@ -141,7 +141,11 @@ def _assert_no_auto_polling_contract(payload: dict) -> None:
 
 
 @pytest.fixture(autouse=True)
-def reset_queue():
+def reset_queue(monkeypatch):
+    # These tests isolate the consolidation FIFO; the real automatic follow-up
+    # and lock ownership are exercised in test_mid_automation.py.
+    monkeypatch.setattr('live_mem.core.mid_automation.compact_after_consolidation',
+                        AsyncMock(return_value={'status': 'not_needed'}))
     reset_consolidation_queue_for_tests()
     yield
     reset_consolidation_queue_for_tests()

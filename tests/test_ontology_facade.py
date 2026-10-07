@@ -23,6 +23,10 @@ Vérifie :
    - Rejet effectif par `_guard_url` d'une URL bloquée (anti-SSRF, 0 construction de client).
 """
 
+import os
+import subprocess
+import sys
+
 import pytest
 import yaml
 from pathlib import Path
@@ -680,6 +684,36 @@ relation_types:
 
     # 3. Invalid YAML returns None fail-closed
     assert manager.get_ontology("invalid:\n  - [unclosed") is None
+
+
+@pytest.mark.parametrize("namespace,source_root", [
+    ("src.mcp_memory", "."), ("mcp_memory", "src"),
+])
+def test_ontology_manager_yaml_in_container_and_source_layouts(namespace, source_root, tmp_path):
+    service = Path(__file__).resolve().parents[1] / "services" / "graph-memory"
+    script = """
+import importlib
+import importlib.util
+import sys
+
+namespace = sys.argv[1]
+if namespace == "src.mcp_memory":
+    assert importlib.util.find_spec("mcp_memory") is None
+module = importlib.import_module(namespace + ".core.ontology")
+manager = module.OntologyManager(sys.argv[2])
+ontology = manager.get_ontology(sys.stdin.read())
+assert ontology is not None
+assert ontology.name == "test-domain"
+assert [item.name for item in ontology.entity_types] == ["Server", "Database"]
+assert [item.name for item in ontology.relation_types] == ["HOSTS"]
+assert manager.get_ontology("invalid: [unclosed") is None
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, namespace, str(tmp_path)],
+        input=VALID_ONTOLOGY_YAML, text=True, capture_output=True, timeout=20,
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(service / source_root)},
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_ontology_label_redacts_raw_yaml():

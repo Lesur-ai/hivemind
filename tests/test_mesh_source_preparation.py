@@ -897,10 +897,10 @@ async def test_readiness_rejects_oversize_members_before_get(
 @pytest.mark.parametrize(
     ("key", "payload"),
     [
-        (f"{SPACE}/_meta.json", "x" * 262_145),
-        (f"{SPACE}/_rules.md", "x" * 262_145),
-        (f"{SPACE}/live/.keep", "not-empty"),
-        (source_preparation_key(SPACE), "x" * 65_537),
+        pytest.param(f"{SPACE}/_meta.json", "x" * 262_145, id="oversized-meta"),
+        pytest.param(f"{SPACE}/_rules.md", "x" * 262_145, id="oversized-rules"),
+        pytest.param(f"{SPACE}/live/.keep", "not-empty", id="nonempty-keep"),
+        pytest.param(source_preparation_key(SPACE), "x" * 65_537, id="oversized-preparation"),
     ],
 )
 async def test_readiness_bounds_product_and_preparation_before_get(

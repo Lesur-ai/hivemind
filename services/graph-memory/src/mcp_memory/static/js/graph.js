@@ -182,27 +182,27 @@ function showNodeDetails(node) {
         return doc ? doc.filename : docId;
     });
 
-    let html = `<h4>${node.label}</h4>
-        <span class="type-badge" data-color="${color}">${node.type}</span>
+    let html = `<h4>${escapeHtml(node.label)}</h4>
+        <span class="type-badge" data-color="${color}">${escapeHtml(node.type)}</span>
         ${node.mentions > 1 ? `<span class="type-badge-mentions">×${node.mentions}</span>` : ''}`;
 
     if (node.description) {
         const descriptions = node.description.split(' | ');
         html += `<div class="detail-section"><div class="detail-label">📝 Description</div>
-            ${descriptions.map(d => `<p>${d.trim()}</p>`).join('')}</div>`;
+            ${descriptions.map(d => `<p>${escapeHtml(d.trim())}</p>`).join('')}</div>`;
     }
     if (sourceDocs.length > 0) {
         html += `<div class="detail-section"><div class="detail-label">📄 Documents (${sourceDocs.length})</div>
-            <div>${sourceDocs.map(d => `<span class="doc-tag">📄 ${d}</span>`).join('')}</div></div>`;
+            <div>${sourceDocs.map(d => `<span class="doc-tag">📄 ${escapeHtml(d)}</span>`).join('')}</div></div>`;
     }
     if (connectedEdges.length > 0) {
         html += `<div class="detail-section"><div class="detail-label">🔗 Relations (${connectedEdges.length})</div>`;
         connectedEdges.slice(0, 15).forEach(e => {
             const other = e.from === node.id ? e.to : e.from;
             const dir = e.from === node.id ? '→' : '←';
-            html += `<div class="relation-item relation-item-link" data-action="focus-node" data-node-id="${other}">
-                <span class="relation-type">${(e.type || 'RELATED').replace(/_/g, ' ')}</span>
-                <span>${dir} ${other.length > 28 ? other.substring(0, 26) + '…' : other}</span></div>`;
+            html += `<div class="relation-item relation-item-link" data-action="focus-node" data-node-id="${escapeHtml(other)}">
+                <span class="relation-type">${escapeHtml((e.type || 'RELATED').replace(/_/g, ' '))}</span>
+                <span>${dir} ${escapeHtml(other.length > 28 ? other.substring(0, 26) + '…' : other)}</span></div>`;
         });
         if (connectedEdges.length > 15) html += `<p class="detail-overflow">… +${connectedEdges.length - 15}</p>`;
         html += `</div>`;

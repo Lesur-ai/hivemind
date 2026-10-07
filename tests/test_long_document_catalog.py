@@ -31,6 +31,7 @@ Vérifie :
 """
 
 import base64
+import json
 from io import BytesIO
 import sys
 from types import SimpleNamespace
@@ -48,8 +49,69 @@ from live_mem.core.models import GraphMemoryConfig
 from tests.fakes.neo4j_fakes import bind_fake_neo4j
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize(("query", "identifiers"), [
+    ("Quelle validation pour le dossier #7 ?", {"7"}),
+    ("Comment la demande #395 et le changement #411 ont-ils été validés ?", {"395", "411"}),
+    ("Quel logiciel utilise le matériel R9700 ?", {"r9700"}),
+    ("Quel changement correspond à a8d44a2d0a70ca1a83698b44130dce1351de991f ?", {"a8d44a2d0a70ca1a83698b44130dce1351de991f"}),
+])
+async def test_graph_entity_search_preserves_numeric_identifiers(query, identifiers, fallback):
+    from mcp_memory.core.graph import GraphService
+    service = GraphService()
+    service._fulltext_index_ready = True
+    with patch.object(service, "_search_fulltext", new_callable=AsyncMock) as fulltext, \
+         patch.object(service, "_search_contains", new_callable=AsyncMock) as contains:
+        fulltext.return_value = [] if fallback else [{"name": "Matching entity"}]
+        contains.return_value = [{"name": "Matching entity"}]
+        result = await service.search_entities("mem-search", query, limit=8)
+    assert result == [{"name": "Matching entity"}]
+    assert identifiers <= set(fulltext.await_args.args[1])
+    assert fulltext.await_args.args[0] == "mem-search" and fulltext.await_args.args[2] == 8
+    if fallback:
+        assert identifiers <= set(contains.await_args.args[1])
+        assert identifiers <= set(contains.await_args.args[2])
+        assert contains.await_args.args[0] == "mem-search" and contains.await_args.args[3] == 8
+    else:
+        contains.assert_not_awaited()
+
+
+async def test_catalog_text_query_uses_neo4j_parameter_mapping():
+    """AsyncSession.run names its first argument query: kwargs cannot reuse it."""
+    from mcp_memory.core.graph import GraphService
+    service = GraphService()
+    calls = []
+    count_result = MagicMock()
+    count_result.single = AsyncMock(return_value={"total_count": 0})
+    documents_result = MagicMock()
+    documents_result.__aiter__.return_value = []
+
+    async def run(query, parameters=None, **kwargs):
+        calls.append((query, parameters, kwargs))
+        return count_result if len(calls) == 1 else documents_result
+
+    session = SimpleNamespace(run=run)
+    with patch.object(service, "session") as context:
+        context.return_value.__aenter__.return_value = session
+        result = await service.list_documents_catalog("mem-query", query="  progress  ", status="succeeded", limit=8, offset=0)
+    assert result["total_count"] == 0
+    assert len(calls) == 2
+    for cypher, parameters, kwargs in calls:
+        assert "$query" in cypher
+        assert parameters == {"memory_id": "mem-query", "query": "progress", "status": "succeeded", "limit": 8, "offset": 0}
+        assert kwargs == {}
+
+
 @pytest.fixture(autouse=True)
-def fake_neo4j(monkeypatch):
+def isolated_bridge_storage(monkeypatch):
+    # Public reads now inspect the optional local archive marker as well.
+    from tests.fakes import GraphLongFakeStorage
+    storage = GraphLongFakeStorage()
+    monkeypatch.setattr("live_mem.core.graph_bridge.get_storage", lambda: storage)
+
+
+@pytest.fixture(autouse=True)
+def fake_neo4j(monkeypatch, mock_gm_env):
     # The neo4j driver is a service-runtime dependency absent from the root test
     # environment. Bind a per-test fake on the graph module instead of mutating
     # sys.modules at import time, which leaked into every later test module.
@@ -668,6 +730,40 @@ async def test_document_read_metadata_only_never_downloads(document_read_runtime
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("uri_state", ["missing", None, ""], ids=["absent", "null", "empty"])
+@pytest.mark.parametrize("route", ["backend", "bridge", "public"])
+@pytest.mark.parametrize("by_path", [False, True], ids=["document-id", "source-path"])
+@pytest.mark.parametrize("include_content", [True, False], ids=["content", "metadata"])
+async def test_document_read_without_storage_uri(
+    document_read_runtime, monkeypatch, uri_state, route, by_path, include_content,
+):
+    runtime = document_read_runtime
+    if uri_state == "missing":
+        runtime.document.pop("uri")
+    else:
+        runtime.document["uri"] = uri_state
+    before = dict(runtime.document)
+    storage_factory = MagicMock(side_effect=AssertionError("Missing URI must not access storage"))
+    monkeypatch.setattr(runtime.server, "get_storage", storage_factory)
+
+    result = await runtime.read(route, include_content=include_content, by_path=by_path)
+
+    if include_content:
+        assert result == {"status": "error", "message": "Document content could not be read."}
+    else:
+        assert result["status"] == "ok"
+        assert result["document"]["document_id"] == "doc1"
+        assert "content" not in result and "content_base64" not in result
+    assert runtime.document == before
+    storage_factory.assert_not_called()
+    runtime.storage._client.get_object.assert_not_called()
+    runtime.graph.get_document_details.assert_awaited_once_with(
+        memory_id="test-space", doc_id=None if by_path else "doc1",
+        source_path="docs/guide.txt" if by_path else None,
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("content", [
     "Ordinary document text.",
     "[S3 read error: Document not found: test-space/documents/guide.txt]",
@@ -728,12 +824,15 @@ async def test_document_read_binary_raw_bypasses_extraction(document_read_runtim
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("route", ["backend", "public"])
-async def test_document_read_not_found_never_downloads(document_read_runtime, route):
+@pytest.mark.parametrize("by_path", [False, True])
+async def test_document_read_not_found_never_downloads(document_read_runtime, route, by_path):
     runtime = document_read_runtime
     runtime.graph.get_document_details.side_effect = None
     runtime.graph.get_document_details.return_value = None
-    result = await runtime.read(route)
-    assert result == {"status": "error", "message": "Document 'doc1' not found"}
+    result = await runtime.read(route, by_path=by_path)
+    target = "docs/guide.txt" if by_path else "doc1"
+    # The MID archive projector also consumes this legacy absence envelope.
+    assert result == {"status": "error", "message": f"Document '{target}' not found"}
     runtime.storage._client.get_object.assert_not_called()
 
 
@@ -780,6 +879,44 @@ async def test_get_documents_meta_returns_populated_dict():
         assert meta["filename"] == "test.txt"
         assert meta["sha256"] == "sha256-hash-val"
         assert meta["source_path"] == "path/test.txt"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (json.dumps({"provenance": "mid_archive", "captured_at": "2026-09-24T20:42:48.429919Z",
+                 "preimage_id": "capture-1", "bank_path": "bank/activeContext.md", "secret": "do-not-export"}),
+     {"provenance": "mid_archive", "captured_at": "2026-09-24T20:42:48.429919Z",
+      "preimage_id": "capture-1", "bank_path": "bank/activeContext.md"}),
+    ("not-json", {}), ("[]", {}), ("null", {}),
+    (json.dumps({"provenance": "documentary", "captured_at": "2026-09-24T20:42:48Z"}), {}),
+    (json.dumps({"provenance": "mid_archive", "captured_at": {}, "preimage_id": 7}),
+     {"provenance": "mid_archive"}),
+])
+async def test_archive_provenance_reads_existing_metadata_without_exporting_arbitrary_fields(raw, expected):
+    from mcp_memory.core.graph import GraphService
+    service = GraphService()
+    doc = {"id": "archive-doc", "filename": "activeContext.md", "uri": "s3://private/archive",
+           "hash": "a" * 64, "source_path": "archives/capture/bank/activeContext.md",
+           "source_modified_at": None, "ingested_at": "2026-10-05T17:31:49Z",
+           "ingestion_status": "succeeded", "last_ingest_job_id": "job-1", "chunk_count": 3,
+           "size_bytes": 1024, "text_length": 500, "content_type": "text/markdown", "metadata_json": raw}
+    result = MagicMock()
+    result.__aiter__.return_value = [doc]
+    result.single = AsyncMock(return_value={"e": {"name": "Atlas", "type": "Project"},
+                                          "docs": [doc], "related": []})
+    session = AsyncMock()
+    session.run = AsyncMock(return_value=result)
+    with patch.object(service, "session") as context:
+        context.return_value.__aenter__.return_value = session
+        bulk = (await service.get_documents_meta("mem-1", ["archive-doc"]))["archive-doc"]
+        entity_doc = (await service.get_entity_context("mem-1", "Atlas")).documents[0]
+    cypher, = session.run.await_args_list[0].args
+    assert "d.metadata_json" in cypher
+    assert session.run.await_args_list[0].kwargs == {"memory_id": "mem-1", "doc_ids": ["archive-doc"]}
+    for projected in (bulk, entity_doc):
+        assert {k: projected[k] for k in ("provenance", "captured_at", "preimage_id", "bank_path") if k in projected} == expected
+        assert "metadata_json" not in projected and "secret" not in projected
+        assert projected["sha256"] == "a" * 64
+    assert bulk["ingested_at"] == "2026-10-05T17:31:49Z"
 
 
 @pytest.mark.asyncio
@@ -833,7 +970,8 @@ async def test_list_documents_catalog_pagination_and_tiebreaker_cypher_inspectio
         assert p1["documents"][49]["document_id"] == "doc-049"
 
         call_count, call_docs = session_p1.run.call_args_list
-        docs_query, docs_params = call_docs[0][0], call_docs[1]
+        docs_query, docs_params = call_docs.args
+        assert call_docs.kwargs == {}
         normalized_query = " ".join(docs_query.split())
         assert "ORDER BY d.ingested_at DESC, d.id ASC SKIP $offset LIMIT $limit" in normalized_query
         assert docs_params == {"memory_id": "mem-1", "limit": 50, "offset": 0}
@@ -849,7 +987,8 @@ async def test_list_documents_catalog_pagination_and_tiebreaker_cypher_inspectio
         assert p2["documents"][24]["document_id"] == "doc-074"
 
         call_count, call_docs = session_p2.run.call_args_list
-        docs_query, docs_params = call_docs[0][0], call_docs[1]
+        docs_query, docs_params = call_docs.args
+        assert call_docs.kwargs == {}
         normalized_query = " ".join(docs_query.split())
         assert "ORDER BY d.ingested_at DESC, d.id ASC SKIP $offset LIMIT $limit" in normalized_query
         assert docs_params == {"memory_id": "mem-1", "limit": 50, "offset": 50}
@@ -864,9 +1003,40 @@ async def test_list_documents_catalog_pagination_and_tiebreaker_cypher_inspectio
         assert all_res["limit"] is None
 
         call_count, call_docs = session_all.run.call_args_list
-        docs_query, docs_params = call_docs[0][0], call_docs[1]
+        docs_query, docs_params = call_docs.args
+        assert call_docs.kwargs == {}
         normalized_query = " ".join(docs_query.split())
         assert "ORDER BY d.ingested_at DESC, d.id ASC" in normalized_query
         assert "SKIP" not in docs_query
         assert "LIMIT" not in docs_query
         assert docs_params == {"memory_id": "mem-1"}
+
+
+@pytest.mark.parametrize("status", ["running", "succeeded", "deprecated", "cleanup_pending"])
+async def test_documents_portal_status_filters_use_graph_exact_equality(status):
+    """#641 F1: every Portal option reaches both real GraphService queries unchanged."""
+    from mcp_memory.core.graph import GraphService
+
+    service = GraphService()
+    row = dict(id="doc-status", filename="state.md", uri=None, hash="sha-state", source_path="/state.md",
+               source_modified_at=None, ingested_at=None, ingestion_status=status, last_ingest_job_id=None,
+               chunk_count=0, size_bytes=0, text_length=0, content_type="md")
+    count_result = MagicMock()
+    count_result.single = AsyncMock(return_value={"total_count": 1})
+    docs_result = MagicMock()
+
+    async def rows():
+        yield row
+
+    docs_result.__aiter__.side_effect = rows
+    session = AsyncMock()
+    session.run = AsyncMock(side_effect=[count_result, docs_result])
+    with patch.object(service, "session") as ctx:
+        ctx.return_value.__aenter__.return_value = session
+        result = await service.list_documents_catalog("mem-status", status=status, limit=50, offset=0)
+    assert result["total_count"] == 1
+    assert result["documents"][0]["ingestion_status"] == status
+    for call in session.run.call_args_list:
+        assert "d.ingestion_status = $status" in call.args[0]
+        assert call.args[1] == {"memory_id": "mem-status", "status": status, "limit": 50, "offset": 0}
+        assert call.kwargs == {}

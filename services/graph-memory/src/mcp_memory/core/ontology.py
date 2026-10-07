@@ -7,12 +7,18 @@ spécifiques à chaque domaine (juridique, cloud, infogérance, etc.).
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field
 
 import yaml
+
+
+def is_automatic_ontology_name(name: object) -> bool:
+    """Recognize only the reserved content-addressed automatic catalogue label."""
+    return isinstance(name, str) and re.fullmatch(r"auto_[0-9a-f]{16}", name) is not None
 
 
 @dataclass
@@ -300,7 +306,7 @@ class OntologyManager:
         """Parse et instancie une ontologie après validation stricte canonique."""
         if not yaml_str or not isinstance(yaml_str, str):
             return None
-        from mcp_memory.core.ontology_validator import _validate_and_parse_ontology
+        from .ontology_validator import _validate_and_parse_ontology
         res, data = _validate_and_parse_ontology(yaml_str)
         if not res.get("valid") or data is None:
             return None

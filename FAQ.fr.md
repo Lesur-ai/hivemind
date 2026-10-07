@@ -405,7 +405,14 @@ drift entre agents.
 
 ### Qu'est-ce que la compaction de bank (`bank_compact`) ?
 
-Quand les fichiers bank deviennent trop volumineux (> `BANK_FILE_MAX_SIZE`, 35 000 octets par défaut), une consolidation ne fait que les **signaler** : une ligne WARNING dans les logs et une liste `bank_size_advisory` dans le résultat du job (inspecteurs de job de la console, CLI). La compaction est une **décision humaine** : vous choisissez quand résumer davantage vos fichiers ; un avertissement de taille ne déclenche jamais de compaction automatique.
+Quand les fichiers bank deviennent trop volumineux (> `BANK_FILE_MAX_SIZE`,
+35 000 octets par défaut), la consolidation les **signale** d'abord par une
+ligne WARNING et une liste `bank_size_advisory`. En 1.6.0, une consolidation
+en file terminée avec succès et ayant traité des notes lance ensuite une passe
+de compaction DirectLocal automatique par défaut. L'avertissement seul n'est
+qu'un indicateur : les jobs sans note traitée et les routes partagées ou non
+sûres ne compactent pas. `MID_AUTO_COMPACT=false` désactive cette suite sans
+supprimer l'outil manuel `bank_compact`.
 
 `bank_compact` demande au LLM de résumer les fichiers surdimensionnés tout en
 préservant les décisions clés et les jalons. Ce n'est pas une garantie de
@@ -422,7 +429,14 @@ uv run python scripts/mcp_cli.py bank compact mon-espace
 uv run python scripts/mcp_cli.py bank compact mon-espace --apply
 ```
 
-`bank_compact` est un outil MCP (droit manage) : tout client MCP — un agent sur instruction humaine, le bouton Compact de la console ou la CLI ci-dessus — peut l'appeler. Il n'y a plus de compaction automatique ; l'ancien réglage `COMPACT_THRESHOLD` a disparu et une valeur résiduelle est ignorée.
+`bank_compact` est un outil MCP (droit manage) : tout client MCP — un agent sur
+instruction humaine, le bouton Compact de la console ou la CLI ci-dessus —
+peut l'appeler manuellement. `MID_AUTO_ARCHIVE=true` transfère indépendamment
+les captures conservées vers LONG en arrière-plan ; `false` les laisse en
+attente. Des passes répétées peuvent conserver plusieurs captures d'un fichier
+toujours trop gros : cette version n'ajoute ni déduplication entre captures ni
+politique de rétention. L'ancien réglage `COMPACT_THRESHOLD` a disparu et une
+valeur résiduelle est ignorée.
 
 ### Puis-je utiliser un proxy HTTP pour les connexions sortantes ?
 
@@ -646,7 +660,7 @@ correction par le modèle.
 **Étapes suivantes** :
 
 1. Examinez `failure_reason`, `failed_batch` et les diagnostics filtrés du job, puis vérifiez les identifiants fournisseur, les limites contexte/sortie et le profil du modèle réellement utilisé.
-2. Vérifiez les tailles et `bank_size_advisory`. Si une compaction est pertinente, sauvegardez d'abord puis inspectez le dry-run avec `uv run python scripts/mcp_cli.py bank compact mon-espace` ; l'application est une décision humaine séparée, DirectLocal uniquement.
+2. Vérifiez les tailles et `bank_size_advisory`. Pour une compaction **manuelle** supplémentaire, sauvegardez d'abord puis inspectez le dry-run avec `uv run python scripts/mcp_cli.py bank compact mon-espace` ; l'application manuelle reste une décision humaine séparée, DirectLocal uniquement. Une consolidation ultérieure réussie peut aussi compacter automatiquement si `MID_AUTO_COMPACT` est actif.
 3. Examinez tout résultat `partial` et les notes conservées avant de démarrer volontairement une nouvelle consolidation. Ne resoumettez pas le job en boucle et ne supposez pas qu'un timeout a annulé les écritures précédentes.
 
 ### Pourquoi la compaction manuelle ne trouve-t-elle aucun fichier candidat ?

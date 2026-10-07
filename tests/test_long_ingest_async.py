@@ -47,6 +47,45 @@ from live_mem.core.models import GraphMemoryConfig
 from live_mem.config import Settings
 
 
+@pytest.mark.parametrize("archive", [False, True])
+async def test_public_ingest_status_selects_requested_memory(mcp_server, auth_read_token, archive):
+    from live_mem.tools import call_tool_direct
+    engine = get_engine_registry().long_engine()
+    with patch.object(engine, "ingest_status", new_callable=AsyncMock, return_value={"status": "ok", "scope": "primary"}) as primary, \
+         patch.object(engine, "archive_ingest_status", new_callable=AsyncMock, return_value={"status": "ok", "scope": "archive"}) as captured:
+        result = await call_tool_direct("long_ingest_status", {"space_id": "test-space", "job_id": " job-123 ", "archive": archive})
+        assert result == {"status": "ok", "scope": "archive" if archive else "primary"}
+        chosen, other = (captured, primary) if archive else (primary, captured)
+        chosen.assert_awaited_once_with(space_id="test-space", job_id="job-123")
+        other.assert_not_awaited()
+
+
+@pytest.mark.parametrize("archive", ["false", 0, 1, None, {}, []])
+async def test_public_ingest_status_rejects_non_boolean_selector(mcp_server, auth_read_token, archive):
+    from live_mem.tools import call_tool_direct
+    engine = get_engine_registry().long_engine()
+    with patch.object(engine, "ingest_status", new_callable=AsyncMock) as primary, \
+         patch.object(engine, "archive_ingest_status", new_callable=AsyncMock) as captured:
+        result = await call_tool_direct("long_ingest_status", {"space_id": "test-space", "job_id": "job-123", "archive": archive})
+        assert result["status"] == "error"
+        primary.assert_not_awaited()
+        captured.assert_not_awaited()
+
+
+@pytest.mark.parametrize("token", [None, {"permissions": ["read"], "allowed_resources": ["other-space"], "client_name": "reader"}])
+async def test_public_archive_job_status_checks_access_before_dispatch(mcp_server, token):
+    from live_mem.tools import call_tool_direct
+    context = current_token_info.set(token)
+    engine = get_engine_registry().long_engine()
+    try:
+        with patch.object(engine, "archive_ingest_status", new_callable=AsyncMock) as captured:
+            result = await call_tool_direct("long_ingest_status", {"space_id": "test-space", "job_id": "job-123", "archive": True})
+            assert result["status"] == "error"
+            captured.assert_not_awaited()
+    finally:
+        current_token_info.reset(context)
+
+
 @pytest.fixture(autouse=True)
 def mock_gm_env(monkeypatch):
     monkeypatch.setenv("S3_ENDPOINT_URL", "http://127.0.0.1:9000")
@@ -259,9 +298,286 @@ async def test_long_ingest_list_rejects_out_of_bounds_pagination(mcp_server, aut
     assert "limit must be an integer between 1 and 100" in res["message"] or "offset must be a non-negative integer" in res["message"]
 
 
+@pytest.mark.asyncio
+async def test_long_ingest_list_archive_scope_requires_read_access(mcp_server, auth_read_token):
+    tool_fn = mcp_server._tool_manager._tools["long_ingest_list"].fn
+    engine = get_engine_registry().long_engine()
+    with patch.object(engine, "ingest_list", new_callable=AsyncMock, return_value={"status": "ok", "jobs": []}) as listed:
+        valid = await tool_fn(space_id="test-space", archive=True, status="running", limit=10)
+        assert valid["status"] == "ok"
+        listed.assert_awaited_once_with(
+            space_id="test-space", batch_id=None, status="running",
+            limit=10, offset=0, archive=True,
+        )
+        denied = await tool_fn(space_id="forbidden-space", archive=True)
+        assert denied["status"] == "error"
+        assert listed.await_count == 1
+
+
 # =============================================================================
 # 4. Intégration LongEngine & GraphBridge
 # =============================================================================
+
+@pytest.fixture
+def unbound_ingest_bridge(monkeypatch):
+    from types import SimpleNamespace
+    from live_mem.core import graph_bridge as bridge_module
+    from tests.test_write_sink import WriteSinkFakeStorage
+
+    storage = WriteSinkFakeStorage()
+    storage.objects["test-space/_meta.json"] = '{"space_id":"test-space","created_at":"original"}'
+    settings = Settings(long_embedded_url="http://graph-memory:8002")
+    monkeypatch.setattr(bridge_module, "get_storage", lambda: storage)
+    monkeypatch.setattr(bridge_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(bridge_module, "resolve_embedded_token", lambda *a, **kw: "live-test-secret")
+    token_service = MagicMock()
+    token_service.register_internal_long_token = AsyncMock(
+        return_value={"status": "ok", "current_active": True}
+    )
+    monkeypatch.setattr("live_mem.core.tokens.get_token_service", lambda: token_service)
+    monkeypatch.setattr(
+        "live_mem.core.inference_runtime.protected_certification_graph_health_timeout_seconds",
+        lambda: None,
+    )
+
+    async def call_tool(name, arguments):
+        if name == "system_health":
+            return {"status": "healthy"}
+        if name == "memory_list":
+            return {"status": "ok", "memories": []}
+        if name == "memory_create":
+            return {"status": "created"}
+        if name == "memory_ingest_batch_async":
+            return {"status": "ok", "items": [{"status": "queued"}]}
+        if name == "document_get":
+            return {"status": "ok", "document": {"id": "doc-1"}}
+        raise AssertionError(name)
+
+    client = MagicMock()
+    client.call_tool = AsyncMock(side_effect=call_tool)
+    bridge = GraphBridgeService(
+        client_factory=lambda *a, **kw: client,
+        url_validator=lambda *a, **kw: None,
+    )
+    return SimpleNamespace(storage=storage, client=client, bridge=bridge)
+
+
+async def test_unbound_archive_job_list_is_normal_waiting_state(unbound_ingest_bridge):
+    case = unbound_ingest_bridge
+    before = dict(case.storage.objects)
+    result = await case.bridge.ingest_list("test-space", archive=True, status="running", limit=10)
+    assert result["reason"] == "archive_not_configured"
+    assert "graph_connect" not in result.get("message", "")
+    assert case.storage.objects == before
+    case.client.call_tool.assert_not_awaited()
+
+
+async def test_unbound_archive_job_list_preserves_reserved_space_guard(unbound_ingest_bridge):
+    case = unbound_ingest_bridge
+    space_id = "mid_" + "a" * 40
+    case.storage.objects[f"{space_id}/_meta.json"] = '{"space_id":"%s","created_at":"original"}' % space_id
+    before = dict(case.storage.objects)
+    result = await case.bridge.ingest_list(space_id, archive=True)
+    assert result["recovery_required"] is True
+    assert result.get("reason") != "archive_not_configured"
+    assert case.storage.objects == before
+    case.client.call_tool.assert_not_awaited()
+
+
+async def test_unbound_archive_without_embedded_runtime_is_not_a_waiting_state(
+    unbound_ingest_bridge, monkeypatch,
+):
+    from live_mem.core import graph_bridge as bridge_module
+
+    monkeypatch.setattr(bridge_module.get_settings(), "long_embedded_url", "")
+    result = await unbound_ingest_bridge.bridge.ingest_list("test-space", archive=True)
+    assert result["status"] == "error"
+    assert result.get("reason") != "archive_not_configured"
+    unbound_ingest_bridge.client.call_tool.assert_not_awaited()
+
+
+async def test_first_async_ingest_persists_binding_before_projection_and_reads_same_memory(
+    unbound_ingest_bridge,
+):
+    from live_mem.core.models import EMBEDDED_TOKEN_SENTINEL
+    from live_mem.core.memory_id import derive_memory_id
+
+    case = unbound_ingest_bridge
+    original_call = case.client.call_tool.side_effect
+
+    async def inspect_binding(name, arguments):
+        if name == "memory_create":
+            await case.storage.put_json(
+                "test-space/_meta.json", {
+                    "space_id": "test-space", "created_at": "original", "description": "fresh",
+                }
+            )
+        if name == "memory_ingest_batch_async":
+            meta = await case.storage.get_json("test-space/_meta.json")
+            assert meta["graph_memory"]["token"] == EMBEDDED_TOKEN_SENTINEL
+            assert meta["graph_memory"]["memory_id"] == arguments["memory_id"]
+            assert meta["description"] == "fresh"
+        return await original_call(name, arguments)
+
+    case.client.call_tool.side_effect = inspect_binding
+    result = await case.bridge.ingest_async("test-space", documents=[{"filename": "facts.md"}])
+    document = await case.bridge.get_document("test-space", source_path="archive/facts.md")
+
+    assert result["status"] == "ok"
+    assert document["status"] == "ok"
+    reads = [call.args[1] for call in case.client.call_tool.await_args_list
+             if call.args[0] == "document_get"]
+    assert reads[0]["memory_id"] == derive_memory_id("test-space")
+    assert "live-test-secret" not in case.storage.objects["test-space/_meta.json"]
+
+
+async def test_prepare_ingest_persists_binding_without_submitting_document(unbound_ingest_bridge):
+    from live_mem.core.engines.long_engine import LongEngine
+    from live_mem.core.memory_id import derive_memory_id
+
+    case = unbound_ingest_bridge
+    result = await LongEngine(bridge=case.bridge).prepare_ingest("test-space")
+    assert result == {"status": "ok"}
+    meta = await case.storage.get_json("test-space/_meta.json")
+    assert meta["graph_memory"]["memory_id"] == derive_memory_id("test-space")
+    assert not any(call.args[0] == "memory_ingest_batch_async"
+                   for call in case.client.call_tool.await_args_list)
+
+
+@pytest.mark.parametrize("fault", ["removed", "recreated", "rebound", "write_failed", "readback_changed"])
+async def test_first_async_ingest_refuses_unverified_or_changed_binding(
+    unbound_ingest_bridge, monkeypatch, fault,
+):
+    case = unbound_ingest_bridge
+    original_call = case.client.call_tool.side_effect
+    explicit = {"url": "https://example.test/mcp", "token": "operator", "memory_id": "elsewhere"}
+
+    async def change_during_provision(name, arguments):
+        if name == "memory_create":
+            if fault == "removed":
+                await case.storage.delete("test-space/_meta.json")
+            elif fault == "recreated":
+                await case.storage.put_json(
+                    "test-space/_meta.json", {"space_id": "test-space", "created_at": "new"}
+                )
+            elif fault == "rebound":
+                await case.storage.put_json("test-space/_meta.json", {"graph_memory": explicit})
+        return await original_call(name, arguments)
+
+    case.client.call_tool.side_effect = change_during_provision
+    original_put = case.storage.put_json
+
+    async def faulty_put(key, data):
+        if fault == "write_failed":
+            raise RuntimeError("do not reflect storage credentials")
+        await original_put(key, {**data, "graph_memory": explicit})
+
+    if fault in {"write_failed", "readback_changed"}:
+        monkeypatch.setattr(case.storage, "put_json", faulty_put)
+
+    result = await case.bridge.ingest_async("test-space", documents=[{"filename": "facts.md"}])
+
+    assert result["status"] in {"error", "not_found"}
+    assert "credentials" not in str(result)
+    assert not any(call.args[0] == "memory_ingest_batch_async"
+                   for call in case.client.call_tool.await_args_list)
+    meta = await case.storage.get_json("test-space/_meta.json")
+    if fault == "removed":
+        assert meta is None
+    elif fault == "recreated":
+        assert meta == {"space_id": "test-space", "created_at": "new"}
+    elif fault in {"rebound", "readback_changed"}:
+        assert meta["graph_memory"] == explicit
+
+
+async def test_async_ingest_does_not_rewrite_existing_binding(unbound_ingest_bridge, monkeypatch):
+    case = unbound_ingest_bridge
+    await case.storage.put_json("test-space/_meta.json", {
+        "space_id": "test-space", "created_at": "original",
+        "graph_memory": {
+            "url": "https://example.test/mcp", "token": "operator", "memory_id": "chosen-memory",
+        },
+    })
+    write = AsyncMock(wraps=case.storage.put_json)
+    monkeypatch.setattr(case.storage, "put_json", write)
+    result = await case.bridge.ingest_async("test-space", documents=[{"filename": "facts.md"}])
+    assert result["status"] == "ok"
+    write.assert_not_awaited()
+    case.client.call_tool.assert_awaited_once_with("memory_ingest_batch_async", {
+        "memory_id": "chosen-memory", "documents": [{"filename": "facts.md"}], "replace_existing": False,
+    })
+
+
+@pytest.mark.parametrize("mutation", ["binding", "credential"])
+async def test_cancelled_first_ingest_finishes_started_local_mutation(
+    unbound_ingest_bridge, monkeypatch, mutation,
+):
+    import asyncio
+    from live_mem.core.tokens import get_token_service
+
+    case = unbound_ingest_bridge
+    entered, release, persisted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    owner = case.storage if mutation == "binding" else get_token_service()
+    method = "put_json" if mutation == "binding" else "register_internal_long_token"
+    original = getattr(owner, method)
+
+    async def delayed_mutation(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        result = await original(*args, **kwargs)
+        persisted.set()
+        return result
+
+    monkeypatch.setattr(owner, method, delayed_mutation)
+    task = asyncio.create_task(case.bridge.ingest_async("test-space", documents=[{"filename": "facts.md"}]))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    try:
+        task.cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not task.done(), "the caller released a still-running local mutation"
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert persisted.is_set()
+    assert not any(call.args[0] == "memory_ingest_batch_async"
+                   for call in case.client.call_tool.await_args_list)
+
+
+@pytest.mark.parametrize("operation", ["connect", "disconnect"])
+async def test_graph_binding_changes_wait_for_space_lifecycle(
+    unbound_ingest_bridge, monkeypatch, operation,
+):
+    import asyncio
+    from live_mem.core.locks import LockManager, get_lock_manager
+
+    case = unbound_ingest_bridge
+    monkeypatch.setattr("live_mem.core.locks._lock_manager", LockManager())
+    entered = AsyncMock()
+    monkeypatch.setattr("live_mem.core.graph_bridge.assert_space_not_reserved", entered)
+
+    async def change(space_id):
+        if operation == "connect":
+            return await case.bridge.connect(
+                space_id, "http://graph-memory:8002", "operator", "chosen-memory",
+            )
+        return await case.bridge.disconnect(space_id)
+
+    async with get_lock_manager().space_lifecycle("test-space"):
+        task = asyncio.create_task(change("test-space"))
+        try:
+            await asyncio.sleep(0)
+            entered.assert_not_awaited()
+            # A pinned projection in one space must not stall another space.
+            await asyncio.wait_for(change("other-space"), timeout=1)
+            entered.assert_awaited_once_with("other-space")
+        finally:
+            if task.done():
+                await task
+    await asyncio.wait_for(task, timeout=1)
+    assert entered.await_args_list[-1].args == ("test-space",)
+
 
 @pytest.mark.asyncio
 async def test_long_engine_async_ingest_delegations():

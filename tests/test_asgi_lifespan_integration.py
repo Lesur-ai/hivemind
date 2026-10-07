@@ -13,6 +13,7 @@ import subprocess
 import sys
 import textwrap
 import warnings
+from unittest.mock import AsyncMock
 
 import pytest
 import uvicorn
@@ -31,6 +32,18 @@ _GRAPH_ENVIRONMENT = {
     "LLMAAS_API_URL": "http://llm.test.invalid/v1",
     "NEO4J_PASSWORD": "test-neo4j-password",
 }
+
+
+@pytest.fixture(autouse=True)
+def _offline_mid_archive_scan(monkeypatch):
+    # Exercise the real process-owned startup/shutdown without contacting S3.
+    # Storage/Graph behavior is covered by test_mid_archive_projection.py.
+    from live_mem.core.mid_archive_projection import MidArchiveProjector
+    from live_mem.core import storage
+    from tests.test_write_sink import WriteSinkFakeStorage
+
+    monkeypatch.setattr(storage, "get_storage", lambda: WriteSinkFakeStorage())
+    monkeypatch.setattr(MidArchiveProjector, "run_once", AsyncMock())
 
 
 class _RecordingLifespanOn(LifespanOn):
@@ -152,15 +165,21 @@ class TestCoreProcessScope:
         process = _lifespan(app)
         await asyncio.wait_for(process.startup(), timeout=2.0)
         assert closes == []
+        from live_mem.core import mid_archive_projection
+        projector = mid_archive_projection._projector_task
+        assert projector is not None and not projector.done()
 
         # FastMCP enters this context for each MCP session. Neither session is
         # allowed to close the shared consolidator transport.
         for _ in range(3):
             async with server._lifespan(None):
                 assert closes == []
+                assert mid_archive_projection._projector_task is projector
 
         await asyncio.wait_for(process.shutdown(), timeout=2.0)
         assert closes == ["process-close"]
+        assert projector.done()
+        assert mid_archive_projection._projector_task is None
         assert process_phases == ["startup", "shutdown"]
         assert not process.shutdown_failed
 

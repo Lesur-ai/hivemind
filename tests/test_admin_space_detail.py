@@ -59,33 +59,41 @@ def _assert_initial_preload_contract(source: str) -> None:
     assert load_space.index("renderLoadedView(view)") < load_space.index("startPreload(view)")
 
     preload = _function("startPreload", source)
-    for loader in ("loadShort(view)", "loadMid(view)", "loadLong(view)", "loadRules(view)", "loadBackups(view)"):
+    for loader in ("startMemory(view)", "startLong(view)", "loadRules(view)"):
         assert loader in preload
-    assert "if (hasPermission(view, 'admin')) void loadAccess(view);" in preload
+    assert "if (view.tab === 'memory')" in preload
+    assert "view.tab === 'long'" in preload
+    assert "view.tab === 'rules'" in preload
+    assert "loadBackups(view)" not in preload  # The scoped Operator owns this read.
+    assert "view.tab === 'access' && hasPermission(view, 'admin')" in preload
 
 
-def test_route_entry_preloads_all_permitted_detail_surfaces_once() -> None:
+def test_route_entry_preloads_only_the_active_permitted_section_once() -> None:
     source = _source()
     _assert_initial_preload_contract(source)
 
     # Mutation proof: removing the launch of the preload pass must break the
-    # contract instead of silently restoring the former lazy-only page.
+    # contract instead of leaving the active page without its initial data.
     mutant = source.replace("if (shouldPreload) startPreload(view);", "", 1)
     assert mutant != source
     with pytest.raises(AssertionError):
         _assert_initial_preload_contract(mutant)
 
 
-def test_long_status_preloads_lightweight_then_hydrates_graph_only_when_visible() -> None:
+def test_long_panels_choose_status_or_graph_without_invisible_hydration() -> None:
     source = _source()
     assert source.count("callTool('graph_status'") == 1
     loader = _function("loadLong", source)
-    assert "include_graph: true" in loader
-    assert "includeGraph ?" in loader
-    assert "void loadLong(view);" in _function("startPreload", source)
+    assert "include_graph: includeGraph" in loader
+    assert "loadLong(view, true)" not in loader
+    assert "view.tab === 'long') startLong(view)" in _function("startPreload", source)
+    assert "loadLong(view, view.longPanel === 'graph')" in _function("refreshLongPanel", source)
     select_start = source.index("registerAction('sd-select-tier'")
-    select_end = source.index("registerAction('sd-refresh-space'", select_start)
-    assert "loadLong(view, true)" in source[select_start:select_end]
+    tier_action = source[select_start:source.index("registerAction('sd-select-tab'", select_start)]
+    assert "view.tab !== 'memory'" in tier_action
+    assert "loadLong" not in tier_action
+    assert "requestMemoryRefresh(view)" in tier_action
+    assert "loadShort" not in tier_action and "loadMid" not in tier_action
 
 
 def test_permission_gate_mirrors_server_hierarchy() -> None:
@@ -144,6 +152,10 @@ def test_payload_heavy_and_out_of_scope_tools_never_appear() -> None:
         "graph_connect",
         "backup_restore",
         "backup_download",
+        "backup_list",
+        "backup_create",
+        "backup_delete",
+        "bank_consolidation_status",
         "marked",
         "DOMPurify",
         "prompt(",
@@ -162,7 +174,9 @@ def test_long_counts_and_native_graph_use_whitelisted_display_fields() -> None:
     source = _source()
     stats = _function("graphStatsSection", source)
     graph = _function("mountLongGraph", source)
-    assert "graphStats.entity_count" in stats
+    assert "stats.entity_count" in stats
+    assert "stats.entity_types" in stats
+    assert "Number.isSafeInteger(value)" in stats
     for field in ("node.label", "node.type", "node.description", "node.mentions", "node.filename"):
         assert field in graph
     for forbidden in ("node.uri", "node.hash", "node.source_path", "node.source_docs"):
@@ -192,7 +206,7 @@ def test_hive_status_table_is_exhaustive_and_unknown_fails_closed() -> None:
 
 def test_fail_closed_copy_is_pinned_while_long_doctrine_slop_is_removed() -> None:
     source = _source()
-    long_renderer = _function("renderLongData", source)
+    long_renderer = _function("renderLongHealth", source)
     assert "data.binding === 'embedded'" in long_renderer
     assert "data.binding === 'explicit'" in long_renderer
     for exact_copy in (
@@ -247,7 +261,6 @@ def test_initial_manual_load_ctas_are_replaced_by_preloaded_states() -> None:
         "sd-retry-long",
         "sd-retry-rules",
         "sd-retry-access",
-        "sd-retry-backups",
     ):
         assert retry in source
     assert "sd-apply-short-filters" in source
@@ -256,26 +269,24 @@ def test_initial_manual_load_ctas_are_replaced_by_preloaded_states() -> None:
 def test_consolidation_and_mid_to_long_push_are_confirmed_and_scoped() -> None:
     source = _source()
     consolidate_confirm = _function("confirmConsolidate", source)
-    consolidate = _function("consolidate", source)
     graph_confirm = _function("confirmGraphPush", source)
     graph_push = _function("graphPush", source)
 
     assert "data-action=\"sd-confirm-consolidate\"" in source
-    assert "showModal(" in consolidate_confirm
-    assert "all agents' live notes" in consolidate_confirm
-    assert "only your own live notes" in consolidate_confirm
-    assert "const args = { space_id: view.spaceId };" in consolidate
-    assert "if (hasPermission(view, 'manage')) args.agent = '';" in consolidate
-    assert "callTool('bank_consolidate', args)" in consolidate
-    assert "result.status === 'running' || result.status === 'queued'" in consolidate
-    assert "await loadSpace(view)" in consolidate
+    assert "openConsolidationLauncher({" in consolidate_confirm
+    assert "spaces: [view.info]" in consolidate_confirm
+    assert "lanes: [{ ...view.info.consolidation_queue, space_id: view.spaceId }]" in consolidate_confirm
+    assert "spaceId: view.spaceId, ctx: view.ctx" in consolidate_confirm
+    assert "onSubmitted:" in consolidate_confirm
+    assert "if (guarded(view, view.ctx.epoch)) AdminRouter.go(" in consolidate_confirm
+    assert "callTool(" not in consolidate_confirm
 
     assert "data-action=\"sd-confirm-graph-push\"" in source
     assert "showModal(" in graph_confirm
     assert "Volatile bank files are not included." in graph_confirm
     assert "callTool('graph_push', { space_id: view.spaceId })" in graph_push
     assert "include_volatile" not in graph_push
-    assert "await loadLong(view, true)" in graph_push
+    assert "if (view.tab === 'long') await loadLong(view, view.longPanel === 'graph')" in graph_push
 
 
 def test_preload_and_tier_actions_runtime_are_single_flight_and_confirmed() -> None:
@@ -292,6 +303,63 @@ def test_preload_and_tier_actions_runtime_are_single_flight_and_confirmed() -> N
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "admin space detail preload runtime: ok" in completed.stdout
+
+
+@pytest.mark.parametrize("old,new", [
+    ("function startPreload(view) {", "function startPreload(view) { void loadRules(view);"),
+    ("else if (view.tab === 'access' && hasPermission(view, 'admin'))", "else if (hasPermission(view, 'admin'))"),
+    ("else if (view.tab === 'backups' && hasPermission(view, 'write')) {", "else if (view.tab === 'backups') {"),
+    ("view.memoryReadRevision !== view.memoryRevision", "true"),
+    ("if (view.consolidationMounted) return;", ""),
+    ("if (view.backupsMounted) return;", ""),
+    ("spaceId: view.spaceId, embedded: true", "spaceId: 'wrong-space', embedded: true"),
+    ("        if (view.tab === 'consolidation') {", "        if (false) {"),
+    ("AdminViews.register('space-detail', render);", "registerAction('sd-load-job', () => {}); AdminViews.register('space-detail', render);"),
+    ("AdminViews.register('space-detail', render);", "registerAction('sd-confirm-backup-delete', () => {}); AdminViews.register('space-detail', render);"),
+])
+def test_section_loading_guards_are_mutation_proven(tmp_path, old, new):
+    node = shutil.which("node") or shutil.which("nodejs")
+    assert node is not None, "Node.js is required for the section-loading proof"
+    source = _source()
+    assert source.count(old) == 1
+    mutant = tmp_path / "views-space-detail.js"
+    mutant.write_text(source.replace(old, new, 1), encoding="utf-8")
+    completed = subprocess.run(
+        [node, str(PRELOAD_RUNTIME_PATH), str(mutant)],
+        cwd=ROOT, check=False, capture_output=True, text=True,
+    )
+    assert completed.returncode != 0, "section-loading mutation survived: " + old
+    assert "AssertionError" in completed.stderr
+
+
+@pytest.mark.parametrize("old,new", [
+    ("space_id: view.spaceId, ...view.shortFilters", "space_id: view.spaceId, ...view.shortDraft"),
+    ("if (row.renderedContent !== note.content)", "if (true)"),
+    ("view.midSelectedFilename === null && result.files.length", "result.files.length"),
+    ("if (view.midSelectedFilename) await readBankFile", "if (view.midSelectedFilename && !view.midFileData) await readBankFile"),
+    ("view.midSelectedFilename !== filename || !isCurrent()", "view.midSelectedFilename !== filename"),
+    ("if (!initial) reads.push(readMemoryMetadata(view, current))", "reads.push(readMemoryMetadata(view, current))"),
+    ("data.has_more === true", "notes.length === view.shortFilters.limit"),
+    ("return current() ? { follow: true } : { skipped: true };", "return { follow: true };"),
+    ("        } catch (error) {\n            if (!current()) return { skipped: true };", "        } catch (error) {"),
+    ("memoryHtml(document.getElementById('sdMidGraphPushActions'), renderGraphPushAction(view));", ""),
+    ("if (!sessionGenerationIsCurrent(view.ctx.sessionGeneration)) return;", ""),
+    ("view.midFileData = null; view.midPreviewHtml = ''; view.midFileSuccess = null;\n            view.midRenderedContent = null; view.midRenderedFilename = null;", "view.midFileData = null; view.midPreviewHtml = ''; view.midFileSuccess = null;"),
+])
+def test_memory_reader_guards_are_mutation_proven(tmp_path, old, new):
+    node = shutil.which("node") or shutil.which("nodejs")
+    assert node is not None, "Node.js is required for the Memory-reader proof"
+    source = _source()
+    target = _function("refreshMemory", source) if "return current() ?" in old else source
+    assert target.count(old) == 1
+    mutant = tmp_path / "views-space-detail.js"
+    mutant.write_text(source.replace(target, target.replace(old, new, 1), 1), encoding="utf-8")
+    result = subprocess.run(
+        [node, str(PRELOAD_RUNTIME_PATH), str(mutant)],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode != 0, "Memory mutation survived: " + old
+    assert "AssertionError" in result.stderr, result.stdout + result.stderr
 
 
 def test_manual_compaction_is_mid_only_manage_gated_two_step_and_bound() -> None:
@@ -374,16 +442,15 @@ def test_manual_compaction_runtime_and_mutation_guards(tmp_path: Path) -> None:
     assert mutant.returncode != 0, "runtime must kill a concurrent dry run during Apply"
 
 
-def test_destructive_calls_use_typed_exact_identifiers_and_server_confirm() -> None:
+def test_space_delete_uses_typed_exact_identifier_and_server_confirm() -> None:
     source = _source()
-    backup = _function("confirmBackupDelete", source)
     space = _function("confirmSpaceDelete", source)
-    actions = _function("renderSpaceActions", source)
+    actions = _function("renderDeleteAction", source)
     assert "confirmBankDelete" not in source
     assert "callTool('bank_delete'" not in source
     assert "sd-confirm-bank-delete" not in source
-    assert "typedConfirmation: backup.backup_id" in backup
-    assert "backup_id: backup.backup_id, confirm: true" in backup
+    # Scoped backups use Operator; its real confirmation and server arguments
+    # are exercised in admin_gc_runtime, not in a parallel Space implementation.
     assert "typedConfirmation: view.spaceId" in space
     assert "space_id: view.spaceId, confirm: true" in space
     assert "label !== 'not_a_space' && label !== 'local_only'" in space
@@ -417,8 +484,9 @@ def test_rules_and_mid_are_sanitized_markdown_readers() -> None:
     assert 'data-action="sd-edit-rules"' in rules
     assert "showModal(" in _function("openRulesEditor", source)
     assert "renderMarkdown(result.content)" in mid
-    assert "if (files.length) void readBankFile(view, 0);" in _function("loadMid", source)
-    assert 'class="sd-file-row' in _function("renderMidData", source)
+    assert "await readBankFile(view, view.midSelectedFilename, options.isCurrent)" in _function("loadMid", source)
+    assert "tab.dataset.filename = file.filename" in _function("renderMidData", source)
+    assert "setAttribute('role', 'tab')" in _function("renderMidData", source)
 
 
 def test_admin_markdown_boundary_is_vendored_sanitized_and_fail_closed() -> None:
@@ -537,7 +605,7 @@ def test_space_delete_partial_runtime_keeps_modal_and_never_auto_retries(
 def test_every_tool_await_has_a_captured_epoch_guard() -> None:
     source = _source()
     call_sites = [match.start() for match in re.finditer(r"await callTool\(", source)]
-    assert len(call_sites) >= 12
+    assert call_sites  # Check every retained call, not a minimum of retired paths.
     for call_site in call_sites:
         before = source[max(0, call_site - 220) : call_site]
         after = source[call_site : call_site + 260]
@@ -564,7 +632,6 @@ const inputs = {
   sdShortCategory: { value: 'observation' },
   sdShortAgent: { value: '' },
   sdShortSince: { value: '' },
-  sdTierPanel: { innerHTML: '' },
 };
 const pending = [];
 globalThis.esc = value => String(value ?? '');
@@ -588,14 +655,14 @@ vm.runInThisContext(source, { filename: process.argv[2] });
 const view = {
   ctx: { epoch: 7, identity: { permissions: ['read'] } },
   info: {}, spaceId: 'demo', tier: 'short',
-  shortFilters: { limit: 50, category: '', agent: '', since: '' },
+  shortFilters: { limit: 50, category: 'observation', agent: '', since: '' },
   shortData: null, shortLoading: false, shortSeq: 0,
 };
 globalThis.__spaceDetailTest.setCurrentView(view);
 
 (async () => {
   const older = globalThis.__spaceDetailTest.loadShort(view);
-  inputs.sdShortCategory.value = 'decision';
+  view.shortFilters.category = 'decision';
   const newer = globalThis.__spaceDetailTest.loadShort(view);
   pending[1].resolve({ status: 'ok', notes: [], category: pending[1].args.category });
   await newer;
@@ -636,55 +703,28 @@ globalThis.__spaceDetailTest.setCurrentView(view);
     assert run(mutant, "unguarded-mutant.js")["data"] == "observation"
 
 
-def test_job_guarantee_badges_use_literal_value_and_required_tooltip() -> None:
+def test_consolidation_delegates_jobs_and_keeps_space_tools_separate() -> None:
     source = _source()
-    assert "Job state lives in server memory: it does not survive a restart and history is trimmed." in source
-    assert "guaranteeBadge(queue.guarantee)" in _function("renderLane", source)
-    assert "guaranteeBadge((view.info.consolidation_queue || {}).guarantee)" in _function("renderAuxiliary", source)
-    assert "pill('neutral', 'in-memory best effort')" not in source
-
-
-def test_activity_job_drilldown_is_field_mapped_manual_and_guarded() -> None:
-    source = _source()
-    loader = _function("loadJob", source)
-    inspector = _function("renderJobInspector", source)
-    result = _function("renderJobResult", source)
-    assert "activityJobIds(view).has(normalizedJobId)" in loader
-    assert "callTool('bank_consolidation_status', { job_id: normalizedJobId })" in loader
-    assert "if (seqAtCall !== view.jobSeq) return;" in loader
-    assert source.count("callTool('bank_consolidation_status'") == 1
-    assert 'data-action="sd-load-job"' in _function("renderActivity", source)
-    assert "The server restarted or trimmed its history (100-job cap)." in inspector
-    for field in (
-        "job.scope_label",
-        "job.requested_by",
-        "job.requested_at",
-        "job.queued_at",
-        "job.started_at",
-        "job.finished_at",
-        "job.progress",
-        "job.error",
+    auxiliary = _function("renderAuxiliary", source)
+    assert "AdminViews.get('consolidation')" in auxiliary
+    assert "spaceId: view.spaceId, embedded: true" in auxiliary
+    assert "initialLane: view.info.consolidation_queue" in auxiliary
+    assert 'id="sdConsolidationJobs"></div>${renderConsolidationTools(view)}' in auxiliary
+    assert "renderActivity(view)" not in auxiliary
+    assert "renderLane(view)" not in auxiliary
+    for retired in (
+        "renderLane", "renderActivity", "renderSpaceActions", "activityJobIds",
+        "renderJobProgress", "renderJobResult", "renderJobInspector", "loadJob",
+        "renderBackups", "loadBackups", "createBackup", "confirmBackupDelete",
+        "guaranteeBadge", "renderBankSizeAdvisory", "laneSeverity",
     ):
-        assert field in source
-    for field in (
-        "result.notes_processed",
-        "result.bank_files_updated",
-        "result.bank_files_created",
-        "result.bank_files_unchanged",
-        "result.operations_applied",
-        "result.operations_failed",
-        "result.synthesis_size",
-        "result.llm_tokens_used",
-        "result.llm_prompt_tokens",
-        "result.llm_completion_tokens",
-        "result.batches_total",
-        "result.batches_completed",
-        "result.batch_size",
-        "result.duration_seconds",
-    ):
-        assert field in result
-
-
+        assert f"function {retired}(" not in source
+    tier = _function("renderTier", source)
+    assert "report.innerHTML = renderCompactionReport(view)" in tier
+    assert "action.innerHTML = renderCompactionAction(view)" in tier
+    # The shared renderer's payload, guarantee and auto-compaction contracts are
+    # tested in test_admin_ui_p8_4 and admin_consolidation_live_refresh_runtime.
+    # Space's runtime below proves scoped mounting and non-remount on late data.
 
 
 def test_forbidden_sinks_and_mock_markers_are_absent() -> None:
@@ -709,25 +749,8 @@ def test_css_changes_stay_inside_space_detail_banner() -> None:
     assert ".sd-banner--error" in section
     assert "@media (max-width: 1100px)" in section
     assert "@media (max-width: 1023px)" in section
-    assert "@media (max-width: 767px)" not in section
-
-
-# ---------------------------------------------------------------------------
-# #457 round 2 — l'inspecteur de job doit avouer une compaction refusée sur un
-# job qui a RÉUSSI, sinon l'opérateur perd le pointeur vers l'archive conservée.
-# ---------------------------------------------------------------------------
-
-
-def test_job_inspector_reports_the_bank_size_advisory_only() -> None:
-    """The space-detail inspector shows oversized bank files as an
-    advisory (compaction is a human decision) and no compaction envelope."""
-    source = _source()
-    fn = _function("renderBankSizeAdvisory", source)
-    assert "result.bank_size_advisory" in fn
-    assert "Number.isSafeInteger(item.utf8_bytes)" in fn and "Number.isSafeInteger(item.max_size)" in fn
-    assert "safe(item.filename)" in fn and "safe(item.utf8_bytes)" in fn
-    assert "if (!valid.length) return '';" in fn
-    assert "Compaction is optional" in fn
-    assert "renderBankSizeAdvisory(job.result)" in _function("renderJobInspector", source) or "renderBankSizeAdvisory(job.result)" in source
-    for banned in ("renderCompactionAdvisory", "renderSafeCompactionFailures", "compaction_advisory", "compaction_failures"):
-        assert banned not in source, banned
+    # #629 adds phone cards only for Documents; other Space sections retain
+    # their existing responsive contract.
+    mobile_documents = section.split("@media (max-width: 767px) {", 1)[1].split("\n}", 1)[0]
+    assert all(selector.strip().startswith((".sd-document", ".sd-documents"))
+               for selector in re.findall(r"^\s*([^{}]+)\{", mobile_documents, re.M))
