@@ -9,7 +9,7 @@
 # =============================================================================
 
 # === MCP SDK (Streamable HTTP transport) ===
-mcp==1.28.1
+mcp==2.3.0
 
 # === Cryptography runtime (PyJWT/MCP transitif) ===
 # CVE-2026-69247 affecte les versions 44.x a 49.x.
