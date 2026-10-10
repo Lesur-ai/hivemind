@@ -296,6 +296,13 @@ const HIVEMIND_TOOL_CAPABILITIES = Object.freeze({
     "operation": "mutation",
     "space_scope_argument": "space_id"
   },
+  "mid_archive_retry": {
+    "canonical": "mid_archive_retry",
+    "audience": "operator",
+    "minimum_permission": "manage",
+    "operation": "mutation",
+    "space_scope_argument": "space_id"
+  },
   "bank_compact": {
     "canonical": "bank_compact",
     "audience": "operator",

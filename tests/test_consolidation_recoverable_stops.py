@@ -347,6 +347,7 @@ async def test_transient_retry_policy_reaches_actual_provider_request(monkeypatc
     service._transient_retries = 3
     requests = []
     class Provider:
+        profile = SimpleNamespace(provider_id="openai-compatible")
         async def complete(self, request):
             requests.append(request)
             if len(requests) == 1:
@@ -359,7 +360,18 @@ async def test_transient_retry_policy_reaches_actual_provider_request(monkeypatc
     assert len(requests) == 2 and all(r.retry_policy == "none" for r in requests)
     from dataclasses import replace
     assert requests[0].correlation_id != requests[1].correlation_id
-    assert replace(requests[0], correlation_id=requests[1].correlation_id) == requests[1]
+    # Wire freshness changes only the terminal nonce; logical retry semantics stay fixed.
+    def logical_messages(request):
+        return tuple(replace(message, content=message.content.removesuffix(
+            "\n\nRequest metadata (not a memory fact; do not copy): "
+            f"nonce={request.correlation_id}"
+        )) for message in request.messages)
+    assert logical_messages(requests[0]) == logical_messages(requests[1])
+    assert requests[0].messages != requests[1].messages
+    assert all(request.messages[-1].content.endswith(f"nonce={request.correlation_id}")
+               for request in requests)
+    assert replace(requests[0], messages=requests[1].messages,
+                   correlation_id=requests[1].correlation_id) == requests[1]
 
 
 async def test_transient_retry_does_not_replay_a_failed_bank_write(monkeypatch):

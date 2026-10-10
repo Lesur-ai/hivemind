@@ -38,6 +38,7 @@ class AutomaticOntologyBatch:
     ontology_yaml: str | None = field(default=None, repr=False)
     diagnostics: dict = field(default_factory=dict)
     _failure_code: str | None = None
+    _rejection_reason: str | None = None
 
     async def check_memory_identity(self, memory_id: str) -> None:
         memory = await get_graph_service().get_memory(memory_id)
@@ -59,7 +60,7 @@ class AutomaticOntologyBatch:
 
     async def prepare(self, memory_id: str, cancel_check: CancelCheck | None = None) -> str:
         if self._failure_code:
-            raise OntologyConstructionError(self._failure_code)
+            raise OntologyConstructionError(self._failure_code, rejection_reason=self._rejection_reason)
         if self.ontology_yaml is not None:
             return self.ontology_yaml
         cancelled = False
@@ -184,12 +185,16 @@ class AutomaticOntologyBatch:
                 self._failure_code = "automatic_ontology_interrupted_resubmit_batch"
                 raise IngestCancelled("automatic_ontology_cancelled") from None
             self._failure_code = str(exc)
+            self._rejection_reason = exc.rejection_reason
+            if self._rejection_reason is not None:
+                self.diagnostics = {"failure_reason": self._failure_code,
+                                    "rejection_reason": self._rejection_reason}
             raise
         except Exception:
             self._failure_code = "automatic_ontology_state_or_storage_failed"
             # Source text, catalogue definitions and provider payloads must not
             # enter the job error or an exception traceback emitted by the queue.
-            raise OntologyConstructionError(self._failure_code) from None
+            raise OntologyConstructionError(self._failure_code, rejection_reason=self._rejection_reason) from None
         finally:
             # Jobs keep their own bounded payload; history never pins the corpus.
             self.documents.clear()

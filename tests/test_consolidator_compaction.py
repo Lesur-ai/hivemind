@@ -68,7 +68,7 @@ class RecordingChat:
         self.finish_reason = finish_reason
         self.error: Exception | None = None
 
-    async def __call__(self, messages, output_budget, *, retry_policy="bounded"):
+    async def __call__(self, messages, output_budget, *, retry_policy="bounded", normal_json=False):
         self.calls.append(
             {
                 "messages": [dict(message) for message in messages],

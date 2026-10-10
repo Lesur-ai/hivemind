@@ -86,8 +86,8 @@ func TestClientInitializeReportsV160(t *testing.T) {
 				http.Error(w, "invalid client info", http.StatusBadRequest)
 				return
 			}
-			if got := clientInfo["version"]; got != "1.6.0" {
-				t.Errorf("expected clientInfo.version 1.6.0, got %v", got)
+			if got := clientInfo["version"]; got != "1.6.1" {
+				t.Errorf("expected clientInfo.version 1.6.1, got %v", got)
 			}
 
 			w.Header().Set("Content-Type", "application/json")

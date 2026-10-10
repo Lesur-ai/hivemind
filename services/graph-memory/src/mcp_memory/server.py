@@ -2,7 +2,7 @@
 """
 MCP Memory Server - Serveur principal.
 
-Expose tous les outils MCP via Streamable HTTP avec FastMCP.
+Expose tous les outils MCP via Streamable HTTP avec MCPServer.
 """
 
 import os
@@ -30,7 +30,8 @@ from hivemind_inference.process_window import ProcessWindowGate
 # Charger .env avant les imports qui en dépendent
 load_dotenv()
 
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.mcpserver import MCPServer, Context
+from .auth.context import bind_mcp_auth
 
 from .config import get_settings
 from .auth.middleware import AuthMiddleware, LoggingMiddleware, StaticFilesMiddleware
@@ -46,12 +47,11 @@ from .core.egress import redact_proxy_secrets
 settings = get_settings()
 _GRAPH_SCHEMA_STARTUP_TIMEOUT_SECONDS = settings.neo4j_query_timeout_seconds
 
-# Créer l'instance FastMCP
+# Créer l'instance MCPServer
 # host="0.0.0.0" pour accepter les connexions externes (reverse proxy, Docker)
-mcp = FastMCP(
+mcp = MCPServer(
     name=settings.mcp_server_name,
-    host=settings.mcp_server_host,
-    port=settings.mcp_server_port,
+    middleware=[bind_mcp_auth],
 )
 
 
@@ -3677,7 +3677,10 @@ _process_window = ProcessWindowGate(service="Graph Memory")
 def _create_app(*, debug: bool = False):
     """Build the final Graph Memory ASGI stack with one process owner."""
 
-    base_app = mcp.streamable_http_app()
+    base_app = mcp.streamable_http_app(
+        host=settings.mcp_server_host,
+        max_request_body_size=settings.mcp_request_max_bytes,
+    )
     app = StaticFilesMiddleware(base_app)
     app = LoggingMiddleware(app, debug=debug)
     app = AuthMiddleware(app, debug=debug)

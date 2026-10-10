@@ -237,7 +237,7 @@ def _docstring_constant(
 
 
 def _decorator_uses_default_tool_description(decorator: ast.expr) -> bool:
-    """Whether FastMCP will expose a function docstring as tool metadata."""
+    """Whether MCPServer will expose a function docstring as tool metadata."""
 
     if isinstance(decorator, ast.Call):
         return _call_name(decorator) == "tool" and not any(

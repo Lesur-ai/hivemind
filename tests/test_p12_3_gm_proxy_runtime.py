@@ -933,7 +933,7 @@ class TestOwnedTransportLifecycle:
             "_initialize_graph_document_schema",
             lambda: None,
         )
-        monkeypatch.setattr(srv.mcp, "streamable_http_app", lambda: _inner_app)
+        monkeypatch.setattr(srv.mcp, "streamable_http_app", lambda **_transport: _inner_app)
         app = srv._create_app()
         state = LifespanOn(
             uvicorn.Config(app, lifespan="auto", log_config=None)
@@ -969,7 +969,7 @@ class TestOwnedTransportLifecycle:
         async def inner(scope, receive, send):
             return None
 
-        monkeypatch.setattr(srv.mcp, "streamable_http_app", lambda: inner)
+        monkeypatch.setattr(srv.mcp, "streamable_http_app", lambda **_transport: inner)
         app = srv._create_app()
         assert isinstance(app, LifespanGuard)
         names = []

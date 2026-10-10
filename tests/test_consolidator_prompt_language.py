@@ -33,7 +33,7 @@ class RecordingCompletion:
     text: str = "merged"
     calls: list[dict] = field(default_factory=list)
 
-    async def __call__(self, messages, output_budget, *, retry_policy="bounded"):
+    async def __call__(self, messages, output_budget, *, retry_policy="bounded", normal_json=False):
         self.calls.append(
             {
                 "messages": messages,

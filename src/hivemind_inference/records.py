@@ -13,6 +13,7 @@ authority — asserted structurally by ``tests/test_p13_inference_package.py``.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import uuid
@@ -172,6 +173,9 @@ class ChatRequest:
     reasoning_effort: str | None = None
     correlation_id: str = field(default_factory=_generate_correlation_id)
     retry_policy: str = "bounded"
+    # Serialized to keep the request deeply immutable and out of repr/logs.
+    # This specifies output structure, never provider/model/profile authority.
+    response_schema_json: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         # Reject a bare str/bytes BEFORE tuple() coercion: tuple("hi") would
@@ -206,6 +210,15 @@ class ChatRequest:
             raise ValueError(
                 f"retry_policy must be one of {REQUEST_RETRY_POLICIES}"
             )
+        if self.response_schema_json is not None:
+            try:
+                if type(self.response_schema_json) is not str:
+                    raise ValueError
+                schema = json.loads(self.response_schema_json)
+                if type(schema) is not dict or schema.get("type") != "object":
+                    raise ValueError
+            except (ValueError, TypeError, RecursionError):
+                raise ValueError("response_schema_json must encode an object schema") from None
 
 
 @dataclass(frozen=True, slots=True)

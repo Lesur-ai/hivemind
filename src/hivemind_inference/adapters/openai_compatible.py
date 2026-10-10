@@ -567,6 +567,15 @@ class OpenAICompatibleChatProvider(_OpenAICompatibleBase):
         }
         if profile.temperature is not None:
             body["temperature"] = profile.temperature
+        if request.response_schema_json is not None:
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "hivemind_response",
+                    "strict": True,
+                    "schema": json.loads(request.response_schema_json),
+                },
+            }
         if request.reasoning_effort is not None and profile.provider_id not in ("openai", "openai-compatible"):
             raise self._direct_error(
                 "invalid_request",
@@ -618,6 +627,14 @@ class OpenAICompatibleChatProvider(_OpenAICompatibleBase):
                 raise self._attempt_failure(
                     exc, role="chat", correlation_id=request.correlation_id
                 ) from None
+            cache_header = headers.get("x-cache", "").strip().lower()
+            cache_status = cache_header if cache_header in {"hit", "miss"} else "unknown"
+            _logger.info(
+                "inference chat response: provider=%s adapter=%s "
+                "correlation_id=%s status=%s cache=%s",
+                profile.provider_id, profile.adapter_id,
+                request.correlation_id, status_code, cache_status,
+            )
             if status_code != 200:
                 payload = _safe_json(raw_body)
                 category, retryable, delay = _classify_openai_status(
@@ -722,6 +739,21 @@ class OpenAICompatibleChatProvider(_OpenAICompatibleBase):
         # so any shape other than a string fails closed. A genuinely empty
         # string stays a valid successful completion.
         if not isinstance(text, str):
+            # The observed gateway-poisoning shape is a completed generation
+            # with reasoning but zero visible output. Tool calls are a distinct
+            # unsupported shape, not evidence for this diagnostic. Never expose
+            # provider reasoning or reinterpret it as a successful result.
+            if (
+                text is None and finish_reason == "stop"
+                and not message.get("tool_calls")
+                and type(usage.get("completion_tokens")) is int
+                and usage["completion_tokens"] == 0
+                and any(
+                    isinstance(message.get(field), str) and message[field].strip()
+                    for field in ("reasoning", "reasoning_content")
+                )
+            ):
+                raise _invalid("reasoning_only")
             raise _invalid("invalid_content")
         return ChatResult(
             text=text,

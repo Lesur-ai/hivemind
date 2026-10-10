@@ -13,7 +13,7 @@ Flux de push :
     4. Nettoyage des fichiers obsolètes dans graph-memory
     5. Mise à jour des métadonnées du space
 
-Communication : protocole MCP via Streamable HTTP (SDK officiel mcp>=1.8.0).
+Communication : protocole MCP via Streamable HTTP (SDK officiel mcp==2.3.0).
 Graph Memory est un service externe, on utilise son API MCP telle quelle.
 
 Migration SSE → Streamable HTTP (issue #1) :
@@ -41,7 +41,8 @@ from datetime import datetime, timezone
 from typing import Callable, Optional, Any
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
+import httpx2
 
 from ..config import get_settings
 from .storage import get_storage, bank_relpath
@@ -585,8 +586,8 @@ class GraphMemoryClient:
         """
         # NOTE: ce pont Hivemind→graph-memory est du trafic INTERNE (réseau
         # Compose) et reste TOUJOURS direct, même si PROXY_URL est défini —
-        # c'est la classification P12-3 (#268), et streamablehttp_client
-        # (SDK MCP officiel) n'expose de toute façon ni proxy ni http_client.
+        # c'est la classification P12-3 (#268). Le client HTTPX2 est détenu
+        # par chaque appel avec trust_env=False pour garantir ce chemin direct.
         # L'egress Internet du service graph-memory lui-même (LLM, S3) honore
         # PROXY_URL depuis P12-3 côté service embarqué.
 
@@ -625,13 +626,18 @@ class GraphMemoryClient:
             Résultat de l'outil (dict)
         """
         try:
-            async with streamablehttp_client(
-                self._mcp_url,
-                headers=self._headers,
-                timeout=self._timeout,
-                sse_read_timeout=self._timeout,
-            ) as (read, write, _):
-                async with ClientSession(read, write) as session:
+            async with httpx2.AsyncClient(
+                headers=self._headers, timeout=self._timeout, trust_env=False,
+                # Honor operator CA settings without enabling environment proxies.
+                verify=httpx2.create_ssl_context(trust_env=True),
+            ) as http_client, streamable_http_client(
+                self._mcp_url, http_client=http_client,
+                # SDK 1 allowed large backup/export responses; only requests are size-bounded.
+                max_sse_event_size=None,
+            ) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=self._timeout,
+                ) as session:
                     await session.initialize()
 
                     result = await asyncio.wait_for(
@@ -671,13 +677,18 @@ class GraphMemoryClient:
         """
         results = []
         try:
-            async with streamablehttp_client(
-                self._mcp_url,
-                headers=self._headers,
-                timeout=self._timeout,
-                sse_read_timeout=self._timeout,
-            ) as (read, write, _):
-                async with ClientSession(read, write) as session:
+            async with httpx2.AsyncClient(
+                headers=self._headers, timeout=self._timeout, trust_env=False,
+                # Honor operator CA settings without enabling environment proxies.
+                verify=httpx2.create_ssl_context(trust_env=True),
+            ) as http_client, streamable_http_client(
+                self._mcp_url, http_client=http_client,
+                # SDK 1 allowed large backup/export responses; only requests are size-bounded.
+                max_sse_event_size=None,
+            ) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=self._timeout,
+                ) as session:
                     await session.initialize()
 
                     for tool_name, arguments in calls:

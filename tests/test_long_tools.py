@@ -12,7 +12,7 @@ documentation invariant:
 - the spec documents every canonical long alias, the non-authoritative
   boundary, and the direct `long_ingest` / `long_query` tools.
 
-Pure in-process FastMCP — no S3 / network / LLM.
+Pure in-process MCPServer — no S3 / network / LLM.
 """
 
 from __future__ import annotations

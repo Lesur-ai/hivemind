@@ -2,18 +2,10 @@
 """
 MCP Streamable HTTP client for communicating with the MCP server.
 
-This client uses the official MCP SDK (mcp>=1.8.0) with Streamable HTTP
-transport. It handles:
-- Streamable HTTP connection (single /mcp endpoint)
-- MCP handshake (initialize + notifications/initialized) via the SDK
-- Tool calls with progress notifications
-- Error handling and timeouts
-
-Migration SSE → Streamable HTTP (issue #1):
-- Import: mcp.client.sse → mcp.client.streamable_http
-- Function: sse_client → streamablehttp_client
-- URL: /sse → /mcp
-- Context manager: (read, write) → (read, write, _)
+The official MCP Python SDK 2.3.0 owns Streamable HTTP framing and the
+supported legacy initialize handshake. Each call owns its HTTPX2 client,
+transport and session in one async scope. HTTP proxy environment behavior is
+retained for this user-facing CLI; the internal LONG bridge stays direct.
 """
 
 import json
@@ -22,7 +14,8 @@ import logging
 from typing import Optional, Callable
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
+import httpx2
 
 logger = logging.getLogger("live_mem.cli")
 
@@ -87,13 +80,16 @@ class MCPClient:
             await asyncio.sleep(self.call_delay)
 
         try:
-            async with streamablehttp_client(
-                mcp_url,
-                headers=self.headers,
-                timeout=self.timeout,
-                sse_read_timeout=self.timeout,
-            ) as (read, write, _):
-                async with ClientSession(read, write) as session:
+            async with httpx2.AsyncClient(
+                headers=self.headers, timeout=self.timeout,
+            ) as http_client, streamable_http_client(
+                mcp_url, http_client=http_client,
+                # SDK 1 allowed large backup/export responses; only requests are size-bounded.
+                max_sse_event_size=None,
+            ) as (read, write):
+                async with ClientSession(
+                    read, write, read_timeout_seconds=self.timeout,
+                ) as session:
                     # The SDK handles the initialize handshake automatically
                     await session.initialize()
 

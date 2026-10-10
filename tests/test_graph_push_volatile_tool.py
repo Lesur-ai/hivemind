@@ -6,7 +6,7 @@ gate + the structured ``graph_push_volatile_optin`` audit live in
 with NO auth and NO logging — the gate/audit cannot live below the tool layer).
 
 These cases drive the REAL ``graph_push`` tool function (extracted from a real
-FastMCP built by ``tools.graph.register``) with a seeded ``current_token_info``
+MCPServer built by ``tools.graph.register``) with a seeded ``current_token_info``
 token, over:
 
 - a patched ``get_engine_registry`` whose ``long_engine()`` returns a REAL
@@ -35,7 +35,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth.context import current_token_info
 from live_mem.core.graph_bridge import GraphBridgeService
@@ -87,15 +87,15 @@ def _token(name: str, permissions: list[str]) -> dict:
 
 def _graph_push_fn():
     """Extract the real ``graph_push`` tool function from a freshly-registered
-    FastMCP (the tool body carries the manage gate + audit emit)."""
-    mcp = FastMCP(name="test-graph-push")
+    MCPServer (the tool body carries the manage gate + audit emit)."""
+    mcp = MCPServer(name="test-graph-push")
     graph_tools.register(mcp)
     return mcp._tool_manager._tools["graph_push"].fn
 
 
 def _graph_disconnect_fn():
     """Extract the real graph_disconnect/long_disconnect shared handler."""
-    mcp = FastMCP(name="test-graph-disconnect")
+    mcp = MCPServer(name="test-graph-disconnect")
     graph_tools.register(mcp)
     return mcp._tool_manager._tools["graph_disconnect"].fn
 

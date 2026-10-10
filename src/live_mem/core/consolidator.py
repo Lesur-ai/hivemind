@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from hivemind_inference.records import ChatMessage, ChatRequest
+from .consolidation_schema import NORMAL_RESPONSE_SCHEMA_JSON as _NORMAL_RESPONSE_SCHEMA_JSON
 
 from ..config import get_settings
 from .storage import get_storage, bank_relpath
@@ -5595,7 +5596,9 @@ Return JSON with this exact structure:
             # ADR-0027 : un enregistrement d'opération ne peut pas
             # surcharger le profil) et le budget de sortie ne peut
             # qu'ABAISSER le plafond du profil.
-            result = await self._complete_chat(messages, output_budget, retry_policy="none")
+            result = await self._complete_chat(
+                messages, output_budget, retry_policy="none", normal_json=True
+            )
             # Extraire les métriques d'usage. ADR-0027 : une métrique absente
             # reste explicitement absente (None) — jamais une valeur inventée.
             # L'usage est relevé AVANT toute validation : une réponse payée puis
@@ -6921,6 +6924,7 @@ INSTRUCTION: Merge these versions into ONE coherent version.
         output_budget: int,
         *,
         retry_policy: str = "bounded",
+        normal_json: bool = False,
     ):
         """Requête chat normalisée vers l'adapter enregistré (P13-1C).
 
@@ -6932,18 +6936,69 @@ INSTRUCTION: Merge these versions into ONE coherent version.
         ``InferenceRoleUnavailable`` quand le rôle chat n'est pas configuré.
         """
         from .inference_runtime import get_inference_runtime
+        from hivemind_inference.errors import InferenceError
 
         provider = get_inference_runtime().chat_provider()
+        # Gateway response caches can retain unusable HTTP-200 completions.
+        # Every MID generation (including new jobs and corrections) must be
+        # fresh. Keep the original prefix and caller messages immutable.
+        nonce = uuid.uuid4().hex
+        normalized_messages = [
+            ChatMessage(role=message["role"], content=message["content"])
+            for message in messages
+        ]
+
+        def refuse(category: str) -> InferenceError:
+            return InferenceError(
+                category=category, role="chat",
+                provider_id=provider.profile.provider_id,
+                adapter_id=provider.profile.adapter_id,
+                retryable=False, correlation_id=nonce,
+            )
+
+        for index in range(len(normalized_messages) - 1, -1, -1):
+            message = normalized_messages[index]
+            if message.role == "user":
+                normalized_messages[index] = ChatMessage(
+                    role="user",
+                    content=message.content + (
+                        "\n\nRequest metadata (not a memory fact; do not copy): "
+                        f"nonce={nonce}"
+                    ),
+                )
+                break
+        else:
+            raise refuse("invalid_request")
+
+        # The caller's budget was estimated before this metadata existed.
+        # Recheck with the normal-batch heuristic. Strict compaction/dedup
+        # admission remains computed before metadata; this check is not a
+        # provider tokenizer or an exact reservation for those paths.
+        remaining = self._context_window - sum(
+            len(message.content) for message in normalized_messages
+        ) // 4
+        effective_budget = min(output_budget, self._max_tokens, remaining)
+        if effective_budget <= 0:
+            raise refuse("invalid_request")
         request = ChatRequest(
-            messages=tuple(
-                ChatMessage(role=message["role"], content=message["content"])
-                for message in messages
-            ),
+            messages=tuple(normalized_messages),
             timeout_seconds=self._timeout,
-            max_output_tokens=max(1, min(output_budget, self._max_tokens)),
+            max_output_tokens=effective_budget,
             retry_policy=retry_policy,
+            correlation_id=nonce,
+            response_schema_json=(
+                _NORMAL_RESPONSE_SCHEMA_JSON
+                if normal_json and provider.profile.provider_id == "openai-compatible"
+                else None
+            ),
         )
-        return await provider.complete(request)
+        result = await provider.complete(request)
+        if nonce in result.text:
+            # Reject, never strip: editing a returned plan could change its
+            # meaning. The existing caller-owned correction budget still applies.
+            logger.warning("MID response refused: request metadata recopied")
+            raise refuse("invalid_response")
+        return result
 
     async def close(self) -> None:
         """

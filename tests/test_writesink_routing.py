@@ -30,7 +30,7 @@ import logging
 from unittest.mock import patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth.context import current_token_info
 from live_mem.core.engines import EngineRegistry, RegistryRefused
@@ -81,7 +81,7 @@ def _admin_token(name: str = "admin") -> dict:
 
 
 def _tool(register, name: str):
-    mcp = FastMCP(name="test")
+    mcp = MCPServer(name="test")
     register(mcp)
     tool = mcp._tool_manager._tools[name]
     for attr in ("fn", "func", "handler", "_fn", "run", "callback"):
@@ -92,10 +92,10 @@ def _tool(register, name: str):
 
 
 def test_bank_compact_apply_is_not_idempotent() -> None:
-    mcp = FastMCP(name="test")
+    mcp = MCPServer(name="test")
     register_bank_tools(mcp)
 
-    assert mcp._tool_manager._tools["bank_compact"].annotations.idempotentHint is False
+    assert mcp._tool_manager._tools["bank_compact"].annotations.idempotent_hint is False
 
 
 async def _seed_meta(storage: WriteSinkFakeStorage, space_id: str) -> None:

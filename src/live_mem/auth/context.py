@@ -130,6 +130,25 @@ def request_token_info_from_request(request: Any) -> Optional[dict[str, Any]]:
     return request_token_info_snapshot(token_info)
 
 
+_mcp_request_identity: ContextVar[tuple[bool, Optional[dict[str, Any]]]] = ContextVar(
+    "mcp_request_identity", default=(False, None)
+)
+
+
+async def bind_mcp_request_identity(context, call_next):
+    """Bind fresh HTTP identity using SDK 2's per-request middleware seam.
+
+    Applies to legacy sessions and modern stateless requests alike. Missing
+    request/state stays an MCP request with no identity, never a console call.
+    """
+    identity = request_token_info_from_request(context.request)
+    token = _mcp_request_identity.set((True, identity))
+    try:
+        return await call_next(context)
+    finally:
+        _mcp_request_identity.reset(token)
+
+
 def get_mcp_request_token_info() -> tuple[bool, Optional[dict[str, Any]]]:
     """Return ``(has_mcp_context, request_identity)`` for the current call.
 
@@ -138,17 +157,7 @@ def get_mcp_request_token_info() -> tuple[bool, Optional[dict[str, Any]]]:
     where existing contextvar/fresh-store handling remains authoritative.
     """
 
-    try:
-        from mcp.server.lowlevel.server import request_ctx
-
-        context = request_ctx.get()
-    except LookupError:
-        return False, None
-
-    request = getattr(context, "request", None)
-    if request is None:
-        return True, None
-    return True, request_token_info_from_request(request)
+    return _mcp_request_identity.get()
 
 
 def update_fresh_token(token_info: dict) -> None:
@@ -589,6 +598,7 @@ class MonoTenantSpaceAllowlistProvider:
             "backup_restore",
             # ---- bank (mid) tools — historical aliases ----
             "bank_compact",
+            "mid_archive_retry",
             "bank_consolidate",
             "bank_consolidation_queues",
             "bank_consolidation_status",

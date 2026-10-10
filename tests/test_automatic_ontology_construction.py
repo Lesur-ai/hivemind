@@ -43,7 +43,7 @@ class Provider:
         return result({"assertions": [
             {"subject": "Alice", "predicate": "knows", "object": None,
              "polarity": "affirmed", "condition": None,
-             "evidence": [{"passage_id": p["passage_id"], "quote": p["text"]}]}
+             "evidence": [{"passage_id": p["passage_id"]}]}
             for p in data["passages"] if p["text"].strip()]})
 
 
@@ -122,12 +122,9 @@ async def test_whole_json_fence_preserves_construction_and_resume(newline, inden
 
 
 @pytest.mark.parametrize("raw", [
-    'Here is the result:\n```json\n{}\n```',
-    '```json\n{}\n```\nDone.',
-    '<think>reasoning</think>\n```json\n{}\n```',
     '```JSON\n{}\n```', '```\n{}\n```',
     '```json {}\n```', '```json\n{}```',
-    '```json\n{}', '```json\n{}\n```\n```json\n{}\n```',
+    '```json\n{}\n```\n```json\n{}\n```',
     '```json\n{"a":1,"a":2}\n```',
     '```json\n{"nested":{"a":1,"a":2}}\n```',
     '```json\n{"a":NaN}\n```', '```json\n{"a":Infinity}\n```',
@@ -239,7 +236,7 @@ async def test_invalid_reference_gets_one_correction_then_explicit_failure():
         passage = packet["data"]["passages"][0]
         return result({"assertions": [{"subject": "A", "predicate": "B", "object": None,
             "polarity": "affirmed", "condition": None,
-            "evidence": [{"passage_id": passage["passage_id"] + "-unknown", "quote": passage["text"]}]}]})
+            "evidence": [{"passage_id": passage["passage_id"] + "-unknown"}]}]})
     with pytest.raises(core.OntologyConstructionError, match="invalid_output"):
         await construct([document("a.md", "A claim.")], fabricated)
     assert calls == 2
@@ -514,19 +511,13 @@ def test_source_quote_normalization_keeps_reference_and_schema_guards(failure):
     assert payload == before  # All references must pass before any quote is replaced.
 
 
-async def test_source_quotes_are_canonical_in_checkpoint_and_resume_without_inference(monkeypatch):
+async def test_reference_quotes_are_canonical_in_checkpoint_and_resume_without_inference(monkeypatch):
     docs = [document("a.md", "Alice knows Bob.")]
     provider, state, saved = Provider(), {}, Saved()
     async def no_wait(_):
         pass
     monkeypatch.setattr(core.asyncio, "sleep", no_wait)
-    async def typo(messages):
-        response = await provider(messages)
-        payload = json.loads(response.text)
-        if "assertions" in payload:
-            payload["assertions"][0]["evidence"][0]["quote"] = "Alicee knows Bob."
-        return replace(response, text=json.dumps(payload))
-    actual = await construct(docs, typo, state, saved)
+    actual = await construct(docs, provider, state, saved)
     assert len(provider.requests) == 2  # one extraction, one catalogue; no correction call
     assert [r["status"] for r in state["attempts"]] == ["admitted", "admitted"]
     extraction_snapshots = [entry for snapshot in saved.snapshots
@@ -540,3 +531,34 @@ async def test_source_quotes_are_canonical_in_checkpoint_and_resume_without_infe
     resumed_state = deepcopy(saved.latest)
     assert await construct(docs, forbidden, resumed_state) == actual
     assert resumed_state == saved.latest
+
+
+@pytest.mark.parametrize("prefix,suffix", [("Here is the result:\n", ""), ("", "\nDone."), ("<think>reasoning</think>\n", "")])
+def test_single_complete_json_fence_with_prose_is_supported(prefix, suffix):
+    assert core._parse(prefix + '```json\n{"count":1}\n```' + suffix) == {"count":1}
+
+
+@pytest.mark.parametrize("raw", [
+    'Prose ```json\n{"a":1,"a":2}\n```',
+    'Prose ```json\n{"nested":{"a":1,"a":2}}\n```',
+    'Prose ```json\n{"a":NaN}\n```',
+    'Prose ```json\n{"a":',
+    'Prose ```json\n{}\n``` and ```json\n{}\n```',
+    'Prose ```json\n{}\n```\nand ```json\n{}\n```',
+    '```text\nprose\n``` followed by ```json\n{}\n```',
+    'Prose without a fence: {}',
+])
+def test_external_prose_cannot_bypass_strict_or_single_json_frame(raw):
+    with pytest.raises((ValueError, TypeError)):
+        core._parse(raw)
+
+
+@pytest.mark.parametrize("prefix", ["", "Explanation before the result:\n"])
+def test_single_open_json_fence_requires_complete_json_through_eof(prefix):
+    assert core._parse(prefix + '```json\n{"count":1}') == {"count":1}
+
+
+@pytest.mark.parametrize("body", ['{"count":', '{"count":"unfinished', '{} trailing prose', '{"a":1,"a":2}', '{"a":NaN}', '{}\n```text\nmore'])
+def test_open_json_fence_never_repairs_or_truncates_inner_payload(body):
+    with pytest.raises((ValueError,TypeError)):
+        core._parse('Prose ```json\n'+body)

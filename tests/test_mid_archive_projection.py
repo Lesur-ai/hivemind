@@ -229,7 +229,7 @@ async def test_token_rotation_does_not_change_destination():
 
 
 @pytest.mark.asyncio
-async def test_remote_failed_jobs_backoff_resets_after_healthy_queued_pass():
+async def test_remote_failed_jobs_backoff_preserved_until_document_proof():
     storage, docs, key, long, now, worker = await setup_case()
     long.complete_immediately = False
     await worker.run_space(SPACE)
@@ -242,12 +242,12 @@ async def test_remote_failed_jobs_backoff_resets_after_healthy_queued_pass():
     assert len(long.submissions) == 1
     now[0] += 30
     await worker.run_space(SPACE)
-    assert (await storage.get_json(key))['failures'] == 0
+    assert (await storage.get_json(key))['failures'] == 1
     long.jobs['ing_2']['status'] = 'failed'
     now[0] += 30
     await worker.run_space(SPACE)
     record = await storage.get_json(key)
-    assert record['failures'] == 1 and record['next_attempt_at'] == now[0] + 30
+    assert record['failures'] == 2 and record['next_attempt_at'] == now[0] + 60
     assert len(long.submissions) == 2
 
 

@@ -4,7 +4,7 @@ import base64
 import contextlib
 import time
 
-from .mid_archive import (ERRORS, archive_bytes, pending_prefix,
+from .mid_archive import (ERRORS, REJECTION_REASONS, archive_bytes, capture_id, pending_prefix, projection_paused,
                           require, source_path, space_identity, validate_record)
 
 
@@ -65,7 +65,7 @@ class MidArchiveProjector:
                 return
             record = validate_record(raw, space_id, key)
             record.setdefault('completed', [])
-            if self.clock() < record['next_attempt_at']:
+            if projection_paused(record) or self.clock() < record['next_attempt_at']:
                 return
             meta = await self.storage.get_json(f'{space_id}/_meta.json')
             incarnation, binding = space_identity(meta, space_id, archive=record['version'] == 2)
@@ -106,7 +106,7 @@ class MidArchiveProjector:
                     if complete:
                         await self.storage.delete(key)
                     else:
-                        record.update(error=None, failures=0, next_attempt_at=self.clock() + 30)
+                        record.update(next_attempt_at=self.clock() + 30)
                         await self._save(key, record)
                     return
             complete = True
@@ -138,7 +138,7 @@ class MidArchiveProjector:
                         raise ValueError('document_unverified')
                     record['jobs'].pop(path, None)
                     if status in ('failed', 'cancelled'):
-                        raise ValueError('projection_unavailable')
+                        raise ValueError(self._job_failure(record, job))
                 require(bool(raw_bytes), 'document_unverified')
                 payload = self._payload(record, document, raw_bytes)
                 if archive:
@@ -169,7 +169,7 @@ class MidArchiveProjector:
             if complete:
                 await self.storage.delete(key)
             else:
-                record.update(error=None, failures=0, next_attempt_at=self.clock() + 30)
+                record.update(next_attempt_at=self.clock() + 30)
                 await self._save(key, record)
         except asyncio.CancelledError:
             raise
@@ -178,8 +178,54 @@ class MidArchiveProjector:
                 return  # Corrupt work is retained and reported by passive status.
             code = str(error) if isinstance(error, ValueError) and str(error) in ERRORS else 'projection_unavailable'
             record['failures'] += 1
+            if code == 'invalid_output':
+                record['invalid_output_failures'] = record.get('invalid_output_failures', 0) + 1
+            else:
+                record['rejection_reason'] = None
             record.update(error=code, next_attempt_at=self.clock() + min(3600, 30 * 2 ** min(record['failures'] - 1, 7)))
             await self._save(key, record)
+
+    @staticmethod
+    def _job_failure(record, job):
+        # Interpret only the constructor's fixed code and whitelisted diagnostic.
+        # Provider error text and rejected completion never enter the intent.
+        if job.get('error') == 'invalid_output':
+            diagnostic = job.get('automatic_ontology')
+            reason = diagnostic.get('rejection_reason') if isinstance(diagnostic, dict) else None
+            record['rejection_reason'] = reason if isinstance(reason, str) and reason in REJECTION_REASONS else None
+            return 'invalid_output'
+        if job.get('error') in ('inference_timeout', 'inference_rate_limited', 'inference_unavailable'):
+            return job['error']
+        return 'projection_unavailable'
+
+    async def retry_capture(self, space_id, preimage_id):
+        """Schedule one explicitly paused capture; no Graph calls or source edits."""
+        from .write_sink import DirectLocalWriteSink
+        key = pending_prefix(space_id) + capture_id(space_id, preimage_id) + '.json'
+        async with self.locks.space_lifecycle(space_id):
+            raw = await self.storage.get_json(key)
+            require(raw is not None)
+            record = validate_record(raw, space_id, key)
+            meta = await self.storage.get_json(f'{space_id}/_meta.json')
+            incarnation, binding = space_identity(meta, space_id, archive=record['version'] == 2)
+            require(incarnation == record['space_created_at']
+                    and record['binding_sha256'] is not None
+                    and binding == record['binding_sha256'], 'identity_changed')
+            try:
+                sink = await self.registry.resolve_sink(space_id)
+            except Exception:
+                raise ValueError('route_refused') from None
+            require(isinstance(sink, DirectLocalWriteSink), 'route_refused')
+            for document in record['documents']:
+                await archive_bytes(self.storage, record, document)
+            if not projection_paused(record):
+                return {'status': 'ok', 'resumed': False,
+                        'message': 'This capture is not paused; no retry state was changed.'}
+            record.update(error=None, failures=0, invalid_output_failures=0,
+                          rejection_reason=None, next_attempt_at=0)
+            await self._save(key, record)
+            return {'status': 'ok', 'resumed': True,
+                    'message': 'Archive retry scheduled; retained sources and admitted construction calls are preserved.'}
 
     @staticmethod
     def _payload(record, document, raw_bytes):
@@ -201,7 +247,7 @@ class MidArchiveProjector:
         # Reading every absent document first can exhaust the pass indefinitely.
         # A lost ACK replays the identical batch; Graph owns its checkpoints.
         if record['jobs'] or record['completed']:
-            complete, running, failed = True, False, False
+            complete, running, failure, finished_jobs = True, False, None, []
             for document in record['documents']:
                 path = source_path(record, document)
                 if path in record['completed']:
@@ -221,14 +267,21 @@ class MidArchiveProjector:
                                 'document_unverified')
                         running = True
                     elif state in ('failed', 'cancelled', 'not_found'):
-                        record['jobs'].pop(path, None)
-                        failed = failed or state != 'not_found'
+                        finished_jobs.append(path)
+                        if state != 'not_found':
+                            code = self._job_failure(record, job)
+                            if failure != 'invalid_output':
+                                failure = code
                     else:
                         raise ValueError('document_unverified')
-            if failed:
-                raise ValueError('projection_unavailable')
-            if complete or running:
-                return complete
+            if running:
+                return False  # Sibling jobs belong to one construction cycle.
+            for path in finished_jobs:
+                record['jobs'].pop(path, None)
+            if failure:
+                raise ValueError(failure)
+            if complete:
+                return True
         payload = []
         for document in record['documents']:
             raw_bytes = await archive_bytes(self.storage, record, document)
@@ -268,7 +321,7 @@ class MidArchiveProjector:
         # A persisted document proof needs no re-read on later bounded passes.
         record['completed'].append(path)
         record['jobs'].pop(path, None)
-        record.update(error=None, failures=0)
+        record.update(error=None, failures=0, invalid_output_failures=0, rejection_reason=None)
         await self._save(key, record)
 
     async def _long_call(self, deadline, operation, *args, **kwargs):

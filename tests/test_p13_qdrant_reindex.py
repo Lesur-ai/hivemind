@@ -2388,7 +2388,7 @@ async def test_cloud_temple_named_profile_migration_reindexes_then_ingests_and_q
     deterministic in-process doubles; no inference endpoint is contacted.
     """
 
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from live_mem.core.engines.long_engine import LongEngine
     from live_mem.core.graph_bridge import GraphBridgeService
@@ -2753,7 +2753,7 @@ async def test_cloud_temple_named_profile_migration_reindexes_then_ingests_and_q
         "live_mem.core.engines.get_engine_registry",
         lambda: _Registry(),
     )
-    tools = FastMCP(name="p13-cloud-temple-migration")
+    tools = MCPServer(name="p13-cloud-temple-migration")
     graph_tools.register(tools)
 
     status_before = await tools._tool_manager._tools["graph_status"].fn(

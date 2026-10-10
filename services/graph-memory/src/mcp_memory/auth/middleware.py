@@ -526,7 +526,7 @@ class StaticFilesMiddleware:
             await self._send_json(send, {"status": "error", "message": "Internal /api/tool error"}, 500)
 
     async def _call_tool_direct(self, tool_name: str, arguments: dict) -> dict:
-        """Appelle directement un outil enregistré dans FastMCP."""
+        """Appelle directement un outil enregistré dans MCPServer."""
         from ..server import mcp
 
         tool_manager = mcp._tool_manager

@@ -16,7 +16,7 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.6.0-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.6.1-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#requirements)
@@ -29,6 +29,8 @@ critical behavior but may trail this page's editorial structure.
 </div>
 
 ---
+
+**MCP transport (1.6.1).** Core and embedded LONG use the same pinned MCP Python SDK 2.3.0 (`MCPServer`). Existing supported MCP clients retain their tool names and aliases; the modern protocol is also served. The Python maintenance CLI and LONG bridge use the SDK 2 Streamable HTTP transport. Inference configuration, stored banks and graph data are unchanged; rebuild both images together. MCP requests are bounded to 75 MiB on the wire, with a 50 MiB decoded-document limit.
 
 > **Security fixes in 1.5.3.** Hivemind 1.5.3 addresses all seven application
 > findings from the 16 September 2026 source security review, including Graph
@@ -194,15 +196,16 @@ Hivemind serves Streamable HTTP at `/mcp` through the WAF on port `8080`.
 import os
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
+import httpx2
 
 
 async def use_hivemind():
     headers = {"Authorization": f"Bearer {os.environ['HIVEMIND_TOKEN']}"}
 
-    async with streamablehttp_client(
-        "http://localhost:8080/mcp", headers=headers
-    ) as (read, write, _):
+    async with httpx2.AsyncClient(headers=headers) as http_client, streamable_http_client(
+        "http://localhost:8080/mcp", http_client=http_client,
+    ) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
@@ -234,6 +237,14 @@ Detail**, **Consolidation**, **Audit**, **Access**, and **Operator tools**.
 Use it to inspect memory, manage space access, follow consolidation jobs, work
 with backups, and run maintenance actions. The older `/live` page remains a
 lightweight real-time viewer for notes and bank files.
+
+Manual compaction is visible in **Consolidation → In progress** and
+**Space → Active work**, and on the Dashboard for its displayed spaces. It
+shows the start time, an indeterminate running state and the latest final
+result, including recovery warnings. The original `bank_compact` request still
+waits for completion; dry runs and refused calls do not create jobs. Tracking
+uses bounded server memory and is cleared by a restart. The latest manual job
+per space is separate from the consolidation queue and its automatic compaction.
 
 The Dashboard follows consolidation activity for up to 20 spaces per page,
 with recent results and their details. Optionally show the latest 20 notes from
@@ -357,6 +368,46 @@ archive result. LONG availability never decides MID apply or recovery.
 Continuous ontology evolution and shared-space compaction remain separate work;
 this wiring does not qualify large-volume ingestion.
 
+**Recovering a paused MID archive (1.6.1).** Admission or a running job is not
+successful indexing: failure accounting is reset only after stored-document
+SHA verification or guarded operator resumption. Three `invalid_output` cycles
+pause the capture. A latest `inference_timeout` also pauses it after at least
+three unresolved failed capture cycles; those cycles need not all be timeouts.
+Rate-limit and availability failures keep their capped backoff. A paused capture
+retains its sources and admitted construction calls, including across restarts.
+
+Inspect `long_status.mid_archive_projection`: `blocked` counts paused captures;
+`error`, `failures`, `next_attempt_at` and `rejection_reason` explain pending
+work. The CLI displays `PAUSED`; the Portal currently shows pending/error
+information without an explicit pause/resume control. Aggregate status does not
+identify the exact paused capture. Use the space's backup list to locate its
+full preimage ID; that list includes ordinary backups too. A non-capture ID is
+refused, and retrying a valid unpaused capture changes nothing.
+
+```bash
+uv run python scripts/mcp_cli.py graph status my-proj
+uv run python scripts/mcp_cli.py backup list --space-id my-proj
+uv run python scripts/mcp_cli.py bank archive-retry my-proj PREIMAGE_ID
+```
+
+Replace `PREIMAGE_ID` with the complete ID, including its space prefix. Resume
+requires `manage` permission and rechecks the space, destination, DirectLocal
+route and every retained source hash. It schedules the existing worker; it
+neither compacts again nor immediately ingests, and `MID_AUTO_ARCHIVE=false`
+still prevents execution. Correct the cause before resuming. Changes to an
+unfinished construction's profile, input allowance or incompatible checkpoint
+bindings remain refused; this command does not bypass them. Preserve the bank,
+preimage, pending record and checkpoint before any separately authorized recovery.
+Older binaries can refuse new error categories and do not preserve the new
+timeout pause policy; rollback is not an automatic recovery strategy.
+
+LONG archives are historical evidence. Results carry `preimage_id`, `bank_path`,
+`captured_at`, source SHA and `ingested_at`. Capture/indexing dates do not prove
+when a fact became valid or whether it is still current. Consumers answering
+questions about the current state should read the current MID file and recent
+SHORT notes alongside dated historical sources; LONG does not resolve temporal
+conflicts automatically. See the [archive tool contract](docs/MCP_TOOLS_SPEC.md).
+
 In v1.5.0, `CONSOLIDATION_TRANSIENT_RETRIES=0..3` (default `3`) controls
 normal consolidation retries for chat timeout, rate-limit and temporary
 unavailability failures before batch writes, after 60, 120 and 300 seconds.
@@ -368,6 +419,21 @@ and retry-wait time at the default 1800-second timeout, before auxiliary work.
 The same-space lock remains held; other jobs for that space wait, and manual
 compaction or GC may refuse while it is busy. Other spaces have separate lanes.
 See the [MCP tool reference](docs/MCP_TOOLS_SPEC.md) for the complete budget.
+
+Normal SHORT→MID generation on an `openai-compatible` chat profile uses a JSON
+Schema for both the initial plan and its single correction. The endpoint must
+support schema-constrained output; a refusal never triggers a silent downgrade.
+The failed batch's notes remain available. Schema conformance describes the
+output's structure, not the accuracy of its contents: the result still passes
+all strict parsing and pre-write checks. Other profile identities, text merging
+and compaction retain their existing generation mode.
+
+Each MID generation also carries a fresh opaque request identifier, so a retry,
+correction or restarted job sends a different request body to a response cache.
+This applies to consolidation, compaction and MID maintenance. A reasoning-only
+response remains an error; cache diagnostics do not turn it into usable output.
+See [inference profiles](docs/INFERENCE_PROVIDER_PROFILES.md#mid-generation-freshness-and-response-cache-diagnostics)
+for the profile boundary, diagnostics and provider-specific limits.
 
 A successful job accounts for every processed note as integrated or explicitly
 discarded with a reason; unprocessed notes remain available. This verifies
@@ -386,6 +452,11 @@ profiles use `INFERENCE_CHAT_EFFORT` with `openai` or `openai-compatible`.
 `COMPACT_THRESHOLD` and `CONSOLIDATION_LEGACY_FRENCH_PROMPTS` are removed; stale
 values are ignored.
 
+Context and output allowances must match the actual provider/model. Recipe
+values are not universal model capabilities. Leave enough generation headroom:
+splitting an input cannot make a growing catalogue fit an undersized output
+allowance. Qualify a representative copy before changing an existing profile.
+
 **Language change for existing spaces:** newly generated bank prose and the
 residual synthesis are now requested in English, even when your notes, rules
 or existing bank are French. Required headings, exact terms, identifiers,
@@ -403,7 +474,11 @@ existing compactor once, under the same space lock, for files exceeding
 pending work for resumption. These are independent server settings loaded at
 startup. Manual `bank_compact` remains available with `manage` permission.
 Shared/unsafe routes remain ineligible. Direct MID edits and zero-note jobs do
-not trigger compaction.
+not trigger compaction. The consolidation itself still requires a caller to
+queue `mid_consolidate`; pending notes do not automatically start it.
+`CONSOLIDATION_MAX_NOTES` bounds notes selected by one job (default `200`),
+while `CONSOLIDATION_BATCH_SIZE` bounds each LLM request. Remaining notes stay
+in SHORT for a later job; automatic bounded-cycle orchestration is not delivered.
 
 `long_status.mid_automation` exposes both settings; `/admin` and
 `scripts/mcp_cli.py` show them alongside pending captures and indexing errors.

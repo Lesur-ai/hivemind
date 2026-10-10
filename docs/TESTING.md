@@ -18,7 +18,7 @@ git diff --check
 ```
 
 Public CI runs the complete Python suite and documentation checks on Python
-3.11 and native Python 3.14.6 arm64. It does not build container images, run
+3.11 and native Python 3.14.8 arm64. It does not build container images, run
 paid provider certification, or publish packages. Release image validation is
 a separate maintainer step; container publication uses the tag-gated
 [release workflow](../.github/workflows/release.yml).

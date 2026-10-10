@@ -156,7 +156,7 @@ def product(graph_env, monkeypatch):
                     payload = {"assertions": [{
                         "subject": "Instrument", "predicate": "measures", "object": "temperature",
                         "polarity": "affirmed", "condition": None,
-                        "evidence": [{"passage_id": p["passage_id"], "quote": p["text"]}],
+                        "evidence": [{"passage_id": p["passage_id"]}],
                     } for p in data["passages"]]}
             else:
                 state.calls.append("document_extract")
@@ -314,3 +314,208 @@ async def test_cancel_during_construction_keeps_admitted_work_and_releases_memor
     _, resumed = await submit_and_finish(product, docs, "auto")
     assert {job["status"] for job in resumed} == {"succeeded"}
     assert Counter(product.calls) == {"open_extract": 2, "d1": 1, "document_extract": 2}
+
+
+async def test_constructor_failure_categories_reach_every_sibling_job(product, monkeypatch):
+    from mcp_memory.core import automatic_ontology
+    provider=automatic_ontology.get_inference_runtime().chat_provider()
+    original=provider.complete
+    async def malformed(request):
+        packet=json.loads(request.messages[1].content)
+        if 'schema' in packet:
+            return ChatResult(text='{"PRIVATE SOURCE":', configured_model='synthetic-chat',
+                              model_evidence='configured_only', finish_reason='stop')
+        return await original(request)
+    monkeypatch.setattr(provider,'complete',malformed)
+    _,jobs=await submit_and_finish(product,documents(4),'auto')
+    assert all(j['status']=='failed' and j['error']=='invalid_output' for j in jobs)
+    assert all(j['automatic_ontology']=={'failure_reason':'invalid_output','rejection_reason':'malformed_json'} for j in jobs)
+    assert 'PRIVATE SOURCE' not in json.dumps(jobs)
+    state=await product.graph.load_automatic_ontology('test')
+    assert state['ontology_yaml'] is None
+    assert [a['rejection_reason'] for a in state['checkpoint']['construction']['attempts']]==['malformed_json']*2
+    assert not product.graph_docs and not product.vectors
+
+
+@pytest.mark.parametrize('mode', ['auto', 'frozen'])
+@pytest.mark.parametrize('cleanup_failed', [False, True])
+async def test_real_invalid_ingestion_job_pauses_archive_after_three_cycles(product, monkeypatch, mode, cleanup_failed):
+    from unittest.mock import AsyncMock
+    from live_mem.core.graph_bridge import GraphBridgeService
+    from live_mem.core.mid_archive import projection_status
+    from tests.test_mid_archive_auto_projection import auto_case
+    from tests.test_mid_archive_projection import SPACE, PREIMAGE, TEXT
+    from mcp_memory.core import ingest_pipeline
+
+    if mode == 'frozen':
+        await submit_and_finish(product, documents(1), 'auto')
+    original_docs = deepcopy(product.graph_docs)
+    product.invalid_labels = True
+    if cleanup_failed:
+        async def failed_cleanup(memory_id, uri):
+            raise RuntimeError("synthetic cleanup unavailable")
+        monkeypatch.setattr(ingest_pipeline._storage(), 'delete_document', failed_cleanup)
+
+    storage, _, key, long, now, worker = await auto_case()
+    bridge = object.__new__(GraphBridgeService)
+    submissions = []
+    async def call_tool(name, arguments):
+        if name == 'memory_ingest_batch_async':
+            response = await product.server.memory_ingest_batch_async(**arguments)
+            submissions.append((deepcopy(arguments), response))
+            return response
+        assert name == 'ingest_job_status'
+        return await product.queue.get_job(arguments['job_id'])
+    async def destination(_):
+        return SimpleNamespace(call_tool=call_tool), 'test', {'ontology': product.backend.node['ontology']}, None
+    bridge._resolve_archive_destination = destination
+    long.prepare_archive_ingest = AsyncMock(return_value={'status': 'ok', 'ontology_mode': mode})
+    long.ingest_archive = bridge.ingest_archive
+    long.archive_ingest_status = bridge.archive_ingest_status
+
+    for cycle in range(1, 4):
+        await worker.run_space(SPACE)
+        workers = list(product.queue._workers.values())
+        await asyncio.wait_for(asyncio.gather(*workers), timeout=15)
+        jobs = [await product.queue.get_job(item['job_id']) for _, response in submissions
+                for item in response['items']]
+        assert jobs and all(j['status'] == 'failed' and j['error'] == 'invalid_output' for j in jobs)
+        if cleanup_failed:
+            assert all(j.get('purge_status') == 'cleanup_pending' and
+                       j.get('purge_errors') == ['synthetic cleanup unavailable'] for j in jobs)
+            assert product.stored  # The real failed rollback retains an S3 orphan.
+        else:
+            assert all(not j.get('purge_errors') for j in jobs)
+        now[0] += 30
+        await worker.run_space(SPACE)
+        pending = await storage.get_json(key)
+        assert pending['error'] == 'invalid_output'
+        assert pending['invalid_output_failures'] == cycle
+        now[0] = pending['next_attempt_at']
+    submissions_before = len(submissions)
+    for _ in range(3):
+        now[0] += 7200
+        await worker.run_space(SPACE)
+    assert len(submissions) == submissions_before
+    assert (await projection_status(storage, SPACE))['blocked'] == 1
+    assert await storage.get('_backups/' + PREIMAGE + '/bank/nested/progress.md') == TEXT
+    assert product.graph_docs == original_docs
+    assert (await product.graph.load_automatic_ontology('test'))['ontology_yaml']
+    assert not product.extractions or mode == 'frozen'  # No invalid facts persisted.
+
+
+@pytest.mark.parametrize('mode', ['auto', 'frozen'])
+@pytest.mark.parametrize('category', ['timeout', 'rate_limited', 'unavailable'])
+@pytest.mark.parametrize('cleanup_failed', [False, True])
+async def test_real_inference_ingestion_failure_reaches_archive_policy(
+        product, monkeypatch, mode, category, cleanup_failed):
+    from unittest.mock import AsyncMock
+    from live_mem.core.graph_bridge import GraphBridgeService
+    from live_mem.core.mid_archive import projection_status
+    from tests.test_mid_archive_auto_projection import auto_case
+    from tests.test_mid_archive_projection import SPACE, PREIMAGE, TEXT
+    from mcp_memory.core import automatic_ontology, ingest_pipeline
+
+    if mode == 'frozen':
+        await submit_and_finish(product, documents(1), 'auto')
+    original_docs = deepcopy(product.graph_docs)
+    provider = automatic_ontology.get_inference_runtime().chat_provider()
+    original_complete = provider.complete
+    failing = True
+
+    async def complete(request):
+        try:
+            packet = json.loads(request.messages[1].content)
+        except json.JSONDecodeError:
+            packet = None
+        if failing and not (isinstance(packet, dict) and 'schema' in packet):
+            raise InferenceError(category=category, role='chat',
+                provider_id='openai-compatible', adapter_id='openai-compatible',
+                retryable=False, correlation_id='synthetic-document-failure')
+        return await original_complete(request)
+    monkeypatch.setattr(provider, 'complete', complete)
+    original_delete = ingest_pipeline._storage().delete_document
+    if cleanup_failed:
+        async def failed_cleanup(memory_id, uri):
+            raise RuntimeError('synthetic cleanup unavailable')
+        monkeypatch.setattr(ingest_pipeline._storage(), 'delete_document', failed_cleanup)
+
+    storage, docs, key, long, now, worker = await auto_case()
+    bridge = object.__new__(GraphBridgeService)
+    submissions = []
+    async def call_tool(name, arguments):
+        if name == 'memory_ingest_batch_async':
+            response = await product.server.memory_ingest_batch_async(**arguments)
+            submissions.append(response)
+            return response
+        assert name == 'ingest_job_status'
+        return await product.queue.get_job(arguments['job_id'])
+    async def destination(_):
+        return SimpleNamespace(call_tool=call_tool), 'test', {'ontology': product.backend.node['ontology']}, None
+    async def archive_document(_, *, source_path):
+        # Read the actual persisted fake backend, not an injected success ACK.
+        doc = await product.graph.get_document_by_source_path('test', source_path)
+        return ({'status': 'ok', 'document': {**doc, 'sha256': doc['hash']}}
+                if doc else {'status': 'not_found'})
+    bridge._resolve_archive_destination = destination
+    long.prepare_archive_ingest = AsyncMock(return_value={'status': 'ok', 'ontology_mode': mode})
+    long.ingest_archive = bridge.ingest_archive
+    long.archive_ingest_status = bridge.archive_ingest_status
+    long.get_archive_document = archive_document
+
+    for cycle in range(1, 4):
+        await worker.run_space(SPACE)
+        await asyncio.wait_for(asyncio.gather(*list(product.queue._workers.values())), timeout=15)
+        jobs = [await product.queue.get_job(item['job_id']) for response in submissions
+                for item in response['items']]
+        assert jobs and all(j['status'] == 'failed' and j['error'] == 'inference_' + category for j in jobs)
+        if cleanup_failed:
+            assert all(j.get('purge_status') == 'cleanup_pending' and
+                       j.get('purge_errors') == ['synthetic cleanup unavailable'] for j in jobs)
+        now[0] += 30
+        await worker.run_space(SPACE)
+        pending = await storage.get_json(key)
+        assert pending['error'] == 'inference_' + category and pending['failures'] == cycle
+        assert pending.get('invalid_output_failures', 0) == 0
+        now[0] = pending['next_attempt_at']
+    assert product.graph_docs == original_docs
+    assert await storage.get('_backups/' + PREIMAGE + '/bank/nested/progress.md') == TEXT
+    status = await projection_status(storage, SPACE)
+    assert status['blocked'] == int(category == 'timeout')
+    if category != 'timeout':
+        # Transient categories preserve the existing backoff and stay retryable.
+        before = len(submissions)
+        await worker.run_space(SPACE)
+        await asyncio.wait_for(asyncio.gather(*list(product.queue._workers.values())), timeout=15)
+        assert len(submissions) > before
+        return
+
+    before = deepcopy(pending)
+    submission_count = len(submissions)
+    worker = type(worker)(storage=storage, long_engine=long, registry=worker.registry,
+                          locks=worker.locks, clock=lambda: now[0])
+    for _ in range(3):
+        now[0] += 7200
+        await worker.run_space(SPACE)
+    assert len(submissions) == submission_count
+    assert await storage.get_json(key) == before
+    assert status['next_attempt_at'] is None
+    assert (await worker.retry_capture(SPACE, PREIMAGE))['resumed'] is True
+    assert len(submissions) == submission_count  # Resume schedules, never ingests.
+    after = await storage.get_json(key)
+    for field in ('documents', 'jobs', 'completed', 'binding_sha256', 'preimage_id'):
+        assert after[field] == before[field]
+    assert after['failures'] == 0 and after['error'] is None
+    failing = False
+    monkeypatch.setattr(ingest_pipeline._storage(), 'delete_document', original_delete)
+    # Let real ingestion succeed and acknowledge every exact persisted source.
+    for _ in range(len(docs) + 3):
+        await worker.run_space(SPACE)
+        await asyncio.wait_for(asyncio.gather(*list(product.queue._workers.values())), timeout=15)
+        now[0] += 4000
+        if await storage.get(key) is None:
+            break
+    assert await storage.get(key) is None
+    assert len(product.graph_docs) == len(original_docs) + len(docs)
+    assert await storage.get('_backups/' + PREIMAGE + '/bank/nested/progress.md') == TEXT
+    assert product.events.count('freeze') == 1  # Resume never rebuilds the ontology.

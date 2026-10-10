@@ -18,7 +18,7 @@ Voir S3_DATA_MODEL.md pour l'arborescence.
 import re
 from typing import Annotated
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -90,12 +90,12 @@ def _parse_backup_id(backup_id: str) -> tuple[str | None, str | None, dict | Non
     return sid, ts, None
 
 
-def register(mcp: FastMCP) -> int:
+def register(mcp: MCPServer) -> int:
     """
     Enregistre les 5 outils backup sur l'instance MCP.
 
     Args:
-        mcp: Instance FastMCP
+        mcp: Instance MCPServer
 
     Returns:
         Nombre d'outils enregistrés (5)

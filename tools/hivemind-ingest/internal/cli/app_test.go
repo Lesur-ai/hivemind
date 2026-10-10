@@ -28,8 +28,8 @@ func TestAppDefaultsToV160(t *testing.T) {
 		"empty build info": NewAppWithBuildInfo(ui, &config.Config{}, "", "", ""),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if app.version != "v1.6.0" {
-				t.Fatalf("expected v1.6.0 fallback, got %q", app.version)
+			if app.version != "v1.6.1" {
+				t.Fatalf("expected v1.6.1 fallback, got %q", app.version)
 			}
 		})
 	}

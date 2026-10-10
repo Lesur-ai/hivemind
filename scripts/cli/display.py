@@ -54,6 +54,11 @@ def _format_local_timestamp(value, *, date_only: bool = False) -> str:
     """
     if value is None or value == "":
         return ""
+    if type(value) in (int, float):
+        try:
+            value = datetime.fromtimestamp(value, timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            return str(value)
     raw = str(value)
     if len(raw) == 10:
         try:
@@ -1209,6 +1214,15 @@ def show_space_memory_status(
                 lines.append(f"         Age: {hours}h {minutes}m")
         if projection.get("error"):
             lines.append(f"         Indexing problem: {escape_markup(str(projection['error']))}")
+        blocked = projection.get("blocked")
+        if type(blocked) is int and blocked > 0:
+            lines.append(f"         [bold yellow]PAUSED[/bold yellow] · {blocked} capture(s) after repeated failures")
+            lines.append("         Inspect the cause, then: bank archive-retry SPACE PREIMAGE_ID")
+        elif projection.get("error") and type(projection.get("next_attempt_at")) in (int, float):
+            retry_at = projection["next_attempt_at"]
+            lines.append(f"         Next automatic retry: {escape_markup(_format_local_timestamp(retry_at))}")
+        if projection.get("rejection_reason"):
+            lines.append(f"         Rejection: {escape_markup(str(projection['rejection_reason']))}")
         if long_status.get("connected") is False:
             if long_status.get("embedded") is True or long_status.get("bound") is False:
                 lines.append("         Waiting for first ingestion; LONG binds automatically")
@@ -1614,6 +1628,15 @@ def show_graph_status(result: dict):
                 lines.append(f"Oldest capture: {escape_markup(_format_local_timestamp(backlog['oldest_at']))}")
             if backlog.get("error"):
                 lines.append(f"Indexing problem: {escape_markup(str(backlog['error']))}")
+            blocked = backlog.get("blocked")
+            if type(blocked) is int and blocked > 0:
+                lines.append(f"[bold yellow]PAUSED[/bold yellow]: {blocked} capture(s) after repeated failures")
+                lines.append("Inspect the cause, then: bank archive-retry SPACE PREIMAGE_ID")
+            elif backlog.get("error") and type(backlog.get("next_attempt_at")) in (int, float):
+                retry_at = backlog["next_attempt_at"]
+                lines.append(f"Next automatic retry: {escape_markup(_format_local_timestamp(retry_at))}")
+            if backlog.get("rejection_reason"):
+                lines.append(f"Rejection: {escape_markup(str(backlog['rejection_reason']))}")
             lines.append("A zero backlog does not mean every current MID file is indexed.")
         console.print(Panel.fit("\n".join(lines), title="MID → LONG automation", border_style="blue"))
     connected = result.get("connected", False)

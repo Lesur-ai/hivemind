@@ -2,7 +2,7 @@
 """
 Regression tests for MCP initialize/serverInfo version reporting.
 
-FastMCP defaults the low-level server version to the installed `mcp` package
+MCPServer defaults the low-level server version to the installed `mcp` package
 version when the application does not set it explicitly. Live Memory must expose
 its own VERSION value instead.
 """
@@ -19,7 +19,7 @@ def test_mcp_server_info_version_uses_live_memory_version():
     expected = version_file.read_text(encoding="utf-8").strip()
     sdk_version = package_version("mcp")
 
-    actual = server.mcp._mcp_server.version
+    actual = server.mcp._lowlevel_server.version
 
     assert actual == expected
     assert actual == live_mem.__version__

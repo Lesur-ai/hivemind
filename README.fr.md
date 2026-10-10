@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.6.0-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.6.1-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -27,6 +27,8 @@ English · [README.md](README.md)
 </div>
 
 ---
+
+**Transport MCP (1.6.1).** Le cœur et le moteur LONG embarqué utilisent le même SDK MCP Python 2.3.0 (`MCPServer`). Les clients MCP compatibles conservent leurs noms d’outils et alias ; le protocole moderne est également servi. La CLI de maintenance Python et le pont LONG utilisent le transport Streamable HTTP du SDK 2. La configuration d’inférence, les banques et les données du graphe sont conservées ; reconstruire les deux images ensemble. Les requêtes MCP sont bornées à 75 Mio sur le transport, avec une limite de 50 Mio par document décodé.
 
 > **Correctifs de sécurité de la 1.5.3.** Hivemind 1.5.3 corrige les sept constats
 > applicatifs de l'audit du code source du 16 septembre 2026 : frontières du
@@ -494,6 +496,12 @@ table ci-dessous sont ceux du logiciel **sans réglage explicite**. Le
 température `0.6` et lots de `2` notes (défaut interne : `3`). Une mise à jour
 ne remplace pas les valeurs de votre `.env`.
 
+Les réservations de contexte et de sortie doivent correspondre au modèle et au
+fournisseur réels : les valeurs de recette ne prouvent pas leurs capacités.
+Gardez assez de place pour générer le catalogue ; découper l'entrée ne résout
+pas une limite de sortie insuffisante. Qualifiez une copie représentative avant
+de changer un profil existant.
+
 **Changement de langue pour les spaces existants :** le modèle reçoit désormais
 la consigne de rédiger la nouvelle prose de la bank et la synthèse résiduelle
 en anglais, même si vos notes, vos règles et votre bank sont en français.
@@ -526,6 +534,23 @@ auxiliaire. Le verrou du space reste pris : les autres jobs du même space
 attendent, et une compaction manuelle ou le GC peuvent refuser d'intervenir.
 Les autres spaces gardent leur propre file. Voir les
 [outils et métriques MCP](docs/MCP_TOOLS_SPEC.md) pour le budget détaillé.
+
+La génération normale SHORT→MID avec un profil chat `openai-compatible` transmet
+un JSON Schema pour le plan initial et son unique correction. Le serveur doit
+prendre en charge cette sortie structurée ; un refus ne déclenche aucun repli
+silencieux sans schéma et les notes du lot en échec restent disponibles.
+La conformité au schéma porte sur la structure, pas sur l'exactitude du contenu :
+le résultat passe toujours les contrôles stricts de parsing et de validation
+avant écriture. Les autres identités de profils, la fusion de textes et la
+compaction conservent leur mode de génération existant.
+
+Chaque génération MID porte aussi un identifiant opaque nouveau : une nouvelle
+tentative, une correction ou une relance du job envoie ainsi un corps de requête
+différent au cache de réponses. Cela concerne consolidation, compaction et
+maintenance MID. Une réponse contenant seulement du raisonnement reste une
+erreur ; les diagnostics de cache ne la rendent pas exploitable. Voir les
+[profils d'inférence](docs/INFERENCE_PROVIDER_PROFILES.md#mid-generation-freshness-and-response-cache-diagnostics)
+pour le périmètre, les diagnostics et les limites propres au fournisseur.
 
 Un job réussi attribue chaque note traitée à une intégration ou à un abandon
 explicite avec motif ; les notes non traitées restent disponibles. Ce contrôle
@@ -654,12 +679,12 @@ pour les détails opérateur complets.
 
 Hivemind expose l'ensemble canonique documenté dans
 [tests/fixtures/tool_surface.json](tests/fixtures/tool_surface.json)
-(**63 noms enregistrés = 50 enregistrements directs + 13 alias de tier**,
+(**73 noms enregistrés = 60 enregistrements directs + 13 alias de tier**,
 totaux suivis par la fixture de surface) via le protocole MCP
 (Streamable HTTP) : outils historiques + alias canoniques de tier
 `short_*`/`mid_*`/`long_*` (les deux jeux restent appelables). Les tiers `short`/`mid`/`long`
 portent la grammaire publique ; `space_*`, `token_*`, `system_*`, `backup_*` et
-`admin_*` sont **transverses** et conservent leurs noms. Il existe 37 outils
+`admin_*` sont **transverses** et conservent leurs noms. Il existe 47 outils
 directs sans alias ; les 13 alias de tier restent inchangés. Voir le mapping
 stable dans
 [`docs/TOOL_MAPPING.md`](docs/TOOL_MAPPING.md)
@@ -758,6 +783,19 @@ captures et la file pour une reprise ultérieure. Ces deux paramètres serveur
 indépendants sont chargés au démarrage. L'action manuelle `bank_compact` reste
 disponible avec la permission `manage`. Les routes partagées ou non sûres restent
 exclues. Une écriture MID directe ou un job sans notes ne déclenche pas de passe.
+La consolidation elle-même doit encore être demandée via `mid_consolidate` :
+l'accumulation de notes ne la déclenche pas. `CONSOLIDATION_MAX_NOTES` borne les
+notes sélectionnées par job (défaut `200`), tandis que
+`CONSOLIDATION_BATCH_SIZE` borne chaque requête LLM. Le reliquat reste en SHORT
+pour un job ultérieur ; l'enchaînement automatique de cycles bornés n'est pas livré.
+
+La compaction manuelle apparaît dans **Consolidation → In progress**, dans
+**Space → Active work** et sur le Dashboard pour les espaces affichés. Le Portal
+montre son heure de début, son état en cours sans pourcentage, puis son dernier
+résultat avec les éventuelles consignes de récupération. L'appel `bank_compact`
+attend toujours la fin ; les simulations et appels refusés ne créent pas de job.
+Le suivi est borné, en mémoire du serveur, perdu au redémarrage et distinct de
+la file de consolidation et de sa compaction automatique.
 
 `/admin` et `scripts/mcp_cli.py` affichent ces réglages, les captures en attente
 et les erreurs via `long_status`. Le résultat horodaté `auto_compaction` reste
@@ -768,6 +806,50 @@ Un fichier peut rester au-dessus du seuil et être compacté lors d'une
 consolidation ultérieure. Chaque tentative peut conserver une sauvegarde complète
 du space et une capture LONG distincte ; cette version n'ajoute ni déduplication
 entre captures ni politique de rétention.
+
+**Reprendre une archive MID en pause (1.6.1).** L'admission ou le suivi d'un
+job ne remet plus les compteurs d'échec à zéro : il faut une preuve documentaire
+avec SHA vérifié, ou une reprise opérateur contrôlée. Trois cycles
+`invalid_output` mettent la capture en pause. Un dernier `inference_timeout`
+la met aussi en pause après au moins trois cycles échoués non résolus ; ces
+cycles ne sont pas nécessairement tous des timeouts. Les erreurs de limitation
+de débit ou d'indisponibilité gardent leur délai croissant borné. Les sources et
+appels de construction déjà admis restent conservés, même après redémarrage.
+
+Dans `long_status.mid_archive_projection`, `blocked` compte les captures en
+pause ; `error`, `failures`, `next_attempt_at` et `rejection_reason` décrivent
+l'attente. La CLI affiche `PAUSED`. Le Portal affiche les captures en attente et
+les erreurs, sans commande explicite de reprise ni libellé de pause. Ce statut
+agrégé ne donne pas l'identifiant exact de la capture. Retrouvez son ID complet
+dans la liste des sauvegardes du space, qui contient aussi des sauvegardes
+ordinaires. Un ID qui ne correspond pas à une capture est refusé ; une capture
+valide qui n'est pas en pause reste inchangée.
+
+```bash
+uv run python scripts/mcp_cli.py graph status my-proj
+uv run python scripts/mcp_cli.py backup list --space-id my-proj
+uv run python scripts/mcp_cli.py bank archive-retry my-proj PREIMAGE_ID
+```
+
+Remplacez `PREIMAGE_ID` par l'ID complet, avec son préfixe de space. La reprise
+requiert `manage` et revérifie l'identité du space, la destination, la route
+DirectLocal et les empreintes des sources. Elle remet le travail à disposition
+du worker existant, sans nouvelle compaction ni ingestion immédiate.
+`MID_AUTO_ARCHIVE=false` empêche toujours son exécution. Corrigez la cause avant
+de reprendre : un profil, un budget d'entrée ou un checkpoint incompatible
+restent refusés. Cette commande ne contourne aucune de ces gardes.
+Conservez la bank, la préimage, le travail en attente et le checkpoint avant
+une récupération opérateur distincte. Un ancien binaire peut refuser les
+nouveaux codes et rétablir l'ancienne politique de timeout : revenir en arrière
+ne suffit pas à réparer l'archive.
+
+Les résultats LONG historiques portent `preimage_id`, `bank_path`,
+`captured_at`, le SHA source et `ingested_at`. La date de capture ou d'indexation
+ne prouve ni la date de validité d'un fait, ni son actualité. Pour répondre sur
+l'état courant, un consommateur doit relire le fichier MID actuel et les notes
+SHORT récentes en complément des sources historiques datées. LONG ne résout
+pas automatiquement les contradictions temporelles. Voir le
+[contrat des outils d'archive](docs/MCP_TOOLS_SPEC.md).
 
 Le compacteur résume la mémoire de moyen terme pour qu'une nouvelle conversation
 retrouve l'état utile, les décisions et le travail ouvert. Le programme prépare
@@ -1113,12 +1195,15 @@ copiez jamais un token dans un dépôt. Voir la
 ```python
 import os
 
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
+import httpx2
 from mcp import ClientSession
 
 async def example():
     headers = {"Authorization": f"Bearer {os.environ['HIVEMIND_TOKEN']}"}
-    async with streamablehttp_client("http://localhost:8080/mcp", headers=headers) as (r, w, _):
+    async with httpx2.AsyncClient(headers=headers) as http_client, streamable_http_client(
+        "http://localhost:8080/mcp", http_client=http_client,
+    ) as (r, w):
         async with ClientSession(r, w) as session:
             await session.initialize()
 
@@ -1285,7 +1370,7 @@ global reste ouvert ; il ne s'agit pas d'une certification de sécurité.
 ```
 hivemind/
 ├── src/live_mem/              # Code source (outils MCP + interface web)
-│   ├── server.py              # Serveur FastMCP + middlewares
+│   ├── server.py              # Serveur MCPServer (SDK 2) + middlewares
 │   ├── config.py              # Configuration pydantic-settings
 │   ├── auth/                  # Authentification (check_access = isolation allowlist)
 │   ├── static/                # /live (viewer hérité) + /admin (console opérateur)

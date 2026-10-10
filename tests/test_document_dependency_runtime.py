@@ -1,6 +1,7 @@
 """Real parser and JWT compatibility checks for the locked dependencies."""
 
 import base64
+import threading
 from io import BytesIO
 
 import jwt
@@ -13,6 +14,34 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 
+# CPython 3.14 derives its C recursion guard from the real stack size, so the
+# JSON nesting depth that overflows follows the process stack rlimit (a 64 MiB
+# or unlimited runner stack parses 100k levels; 3.14.8 parses 50k on 8 MiB).
+# A small fixed thread stack keeps the recursion boundary independent of the
+# host: 2 MiB already overflows below 20k levels, a 5x margin for 100k.
+_BOUNDED_STACK_BYTES = 2 * 1024 * 1024
+
+
+def _call_on_bounded_stack(call):
+    outcome = {}
+
+    def target():
+        try:
+            call()
+        except BaseException as exc:  # re-raised on the test thread below
+            outcome["error"] = exc
+
+    previous = threading.stack_size(_BOUNDED_STACK_BYTES)
+    try:
+        worker = threading.Thread(target=target)
+        worker.start()
+    finally:
+        threading.stack_size(previous)
+    worker.join()
+    if "error" in outcome:
+        raise outcome["error"]
+
+
 @pytest.mark.parametrize("path", ["decode", "jwks"])
 def test_jwt_recursive_payload_keeps_documented_error_boundary(path, monkeypatch):
     """CVE-2026-101918: an unsigned payload must not leak RecursionError."""
@@ -21,7 +50,7 @@ def test_jwt_recursive_payload_keeps_documented_error_boundary(path, monkeypatch
 
     token = b".".join((
         b64url(b'{"alg":"HS256","typ":"JWT"}'),
-        # Python 3.14 can parse 20k levels; 100k reaches the recursion boundary.
+        # 100k levels overflow the bounded 2 MiB thread stack on every host.
         b64url(b"[" * 100_000 + b"]" * 100_000),
         b64url(b"forged-signature"),
     )).decode()
@@ -30,12 +59,15 @@ def test_jwt_recursive_payload_keeps_documented_error_boundary(path, monkeypatch
     def unexpected_network(*args, **kwargs):
         pytest.fail("recursive payload must be rejected before JWKS access")
 
-    monkeypatch.setattr(client, "fetch_data", unexpected_network)
-    with pytest.raises(jwt.DecodeError) as excinfo:
+    def decode():
         if path == "jwks":
             client.get_signing_key_from_jwt(token)
         else:
             jwt.decode(token, options={"verify_signature": False})
+
+    monkeypatch.setattr(client, "fetch_data", unexpected_network)
+    with pytest.raises(jwt.DecodeError) as excinfo:
+        _call_on_bounded_stack(decode)
     assert isinstance(excinfo.value.__cause__, RecursionError)
 
 

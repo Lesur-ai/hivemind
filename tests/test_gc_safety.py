@@ -1858,7 +1858,7 @@ async def test_unrepairable_completion_is_terminal_and_classified_by_batch_posit
     budgets: list[int] = []
     requests: list[list[dict]] = []
 
-    async def _complete_chat(messages, output_budget, *, retry_policy="bounded"):
+    async def _complete_chat(messages, output_budget, *, retry_policy="bounded", normal_json=False):
         assert retry_policy == "none"
         budgets.append(output_budget)
         requests.append(messages)
@@ -2204,7 +2204,7 @@ class _BudgetCaptureChat:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def __call__(self, messages, output_budget, *, retry_policy="bounded"):
+    async def __call__(self, messages, output_budget, *, retry_policy="bounded", normal_json=False):
         assert retry_policy == "none"
         # Snapshot the prompt at call time: the retry path mutates the live
         # `messages` list, and a reference would retroactively inflate the
@@ -2311,7 +2311,7 @@ class _SequenceChat:
         self.calls: list[dict] = []
         self._contents = list(contents)
 
-    async def __call__(self, messages, output_budget, *, retry_policy="bounded"):
+    async def __call__(self, messages, output_budget, *, retry_policy="bounded", normal_json=False):
         assert retry_policy == "none"
         # Snapshot the prompt at call time: the retry path mutates the live
         # `messages` list, and a reference would retroactively inflate the

@@ -71,6 +71,10 @@ No upstream runtime import path reaches an excluded directory.
 Modifications applied to the vendored tree are tracked here so the import can be
 refreshed against a future upstream release:
 
+- **`src/mcp_memory/config.py` — LONG call deadline sizing (1.6.1).**
+  The shared extraction/construction timeout default is 1,800 seconds rather
+  than 600. Existing environment overrides and chat-profile output ceilings
+  remain authoritative; frozen provider certification profiles are unchanged.
 - **`src/mcp_memory/core/backup.py` — bounded archive restore (#543).**
   Shared preflight limits gzip expansion, TAR member/header sizes and count,
   and control-file reads before namespace admission, JSON parsing or backend

@@ -14,7 +14,7 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from hivemind_inference import (
     ChatResult,
@@ -151,7 +151,7 @@ def _runtime(
     return runtime, chat_provider, embedding_provider
 
 
-def _system_handler(mcp: FastMCP, name: str):
+def _system_handler(mcp: MCPServer, name: str):
     return mcp._tool_manager._tools[name].fn
 
 
@@ -548,7 +548,7 @@ async def test_authenticated_health_rejects_cache_from_a_different_profile(
 
 @pytest.mark.asyncio
 async def test_manage_gate_precedes_runtime_and_hidden_contract(monkeypatch):
-    mcp = FastMCP("self-test-tool")
+    mcp = MCPServer("self-test-tool")
     assert system_tools.register(mcp) == 4
     handler = _system_handler(mcp, "inference_self_test")
     run = AsyncMock(return_value={"status": "ok"})

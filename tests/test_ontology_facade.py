@@ -13,7 +13,7 @@ Vérifie :
    - Rejet des types non-scalaires (entiers/listes/dicts au lieu de chaînes).
    - Rejet des clés inconnues au niveau racine, entités, relations et extraction_rules.
    - Protection anti-amplification sur collections explicites (> 5000 nœuds).
-2. Enregistrement FastMCP et classification P10 operator.
+2. Enregistrement MCPServer et classification P10 operator.
 3. Contrôle d'accès & authentification :
    - Rejet systématique des requêtes non-authentifiées avant tout traitement de charge utile (fail-closed, 0 appel bridge).
    - Rejet des requêtes sur espaces non-autorisés (0 appel bridge).
@@ -32,7 +32,7 @@ import yaml
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from live_mem.tools import register_all_tools
 from live_mem.auth.context import current_token_info
 from live_mem.core.engines import get_engine_registry
@@ -244,7 +244,7 @@ extraction_rules:
 
 @pytest.fixture
 def mcp_server():
-    mcp = FastMCP("test-ontology-mcp")
+    mcp = MCPServer("test-ontology-mcp")
     register_all_tools(mcp)
     return mcp
 
@@ -270,7 +270,7 @@ def auth_read_token():
 
 @pytest.mark.asyncio
 async def test_ontology_tools_registered(mcp_server):
-    """Vérifie que les 3 outils ontology_* sont bien enregistrés sur FastMCP."""
+    """Vérifie que les 3 outils ontology_* sont bien enregistrés sur MCPServer."""
     tool_names = set(mcp_server._tool_manager._tools.keys())
     assert "ontology_list" in tool_names
     assert "ontology_get" in tool_names

@@ -17,9 +17,8 @@ from typing import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.server.lowlevel.server import request_ctx
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.shared.context import RequestContext
+from mcp.server.context import ServerRequestContext
 from mcp.types import CallToolRequest, ListToolsRequest
 from starlette.requests import Request
 
@@ -36,7 +35,7 @@ from live_mem.tools.exposure import (
     DISCOVERY_NAMES_BY_PERMISSION,
     DISCOVERY_SCHEMA_BUDGET_BYTES,
     TOOL_EXPOSURES,
-    HivemindFastMCP,
+    HivemindMCPServer,
     ToolAudience,
     ToolOperation,
     ToolPermission,
@@ -74,7 +73,7 @@ def _identity(
     }
 
 
-def _request_context(token_info: dict | None) -> RequestContext:
+def _request_context(token_info: dict | None) -> ServerRequestContext:
     state = {}
     if token_info is not None:
         state[REQUEST_TOKEN_INFO_STATE_KEY] = token_info
@@ -87,7 +86,8 @@ def _request_context(token_info: dict | None) -> RequestContext:
             "state": state,
         }
     )
-    return RequestContext(
+    return ServerRequestContext(
+        protocol_version="2025-11-25", method="tools/call",
         request_id=1,
         meta=None,
         session=None,  # type: ignore[arg-type]
@@ -98,16 +98,17 @@ def _request_context(token_info: dict | None) -> RequestContext:
 
 @contextmanager
 def _mcp_request(token_info: dict | None) -> Iterator[None]:
-    token = request_ctx.set(_request_context(token_info))
+    token = auth_context._mcp_request_identity.set((True,
+        auth_context.request_token_info_from_request(_request_context(token_info).request)))
     try:
         yield
     finally:
-        request_ctx.reset(token)
+        auth_context._mcp_request_identity.reset(token)
 
 
 @pytest.fixture
-def exposed_mcp() -> HivemindFastMCP:
-    mcp = HivemindFastMCP("p10-tool-exposure")
+def exposed_mcp() -> HivemindMCPServer:
+    mcp = HivemindMCPServer("p10-tool-exposure")
     register_all_tools(mcp)
     return mcp
 
@@ -121,30 +122,30 @@ def _clear_auth_stores() -> Iterator[None]:
     auth_context._invalidated_token_hashes.clear()
 
 
-async def _list_result(mcp: HivemindFastMCP, token_info: dict | None):
-    handler = mcp._mcp_server.request_handlers[ListToolsRequest]
+async def _list_result(mcp: HivemindMCPServer, token_info: dict | None):
+    handler = mcp._lowlevel_server._request_handlers["tools/list"].handler
     with _mcp_request(token_info):
-        return await handler(ListToolsRequest())
+        return await handler(_request_context(token_info), None)
 
 
 async def _call_result(
-    mcp: HivemindFastMCP,
+    mcp: HivemindMCPServer,
     name: str,
     arguments: dict,
     token_info: dict,
 ):
-    handler = mcp._mcp_server.request_handlers[CallToolRequest]
+    handler = mcp._lowlevel_server._request_handlers["tools/call"].handler
     request = CallToolRequest(
         params={"name": name, "arguments": arguments}
     )
     with _mcp_request(token_info):
-        return await handler(request)
+        return await handler(_request_context(token_info), request.params)
 
 
 def _call_payload(result) -> dict:
     text_blocks = [
         block.text
-        for block in result.root.content
+        for block in result.content
         if getattr(block, "type", None) == "text"
     ]
     assert len(text_blocks) == 1
@@ -157,11 +158,11 @@ def _call_payload(result) -> dict:
     tuple(DISCOVERY_FIXTURE["discovery"]),
 )
 async def test_low_level_tools_list_is_exact_and_ordered_by_request_permission(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
     permission: str,
 ) -> None:
     result = await _list_result(exposed_mcp, _identity(permission))
-    names = [tool.name for tool in result.root.tools]
+    names = [tool.name for tool in result.tools]
 
     assert names == DISCOVERY_FIXTURE["discovery"][permission]
     assert names == list(
@@ -172,7 +173,7 @@ async def test_low_level_tools_list_is_exact_and_ordered_by_request_permission(
 
 @pytest.mark.asyncio
 async def test_discovery_never_advertises_alias_operator_or_mesh_names(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     alias_names = {alias for entry in TOOL_EXPOSURES for alias in entry.aliases}
     operator_names = {
@@ -183,7 +184,7 @@ async def test_discovery_never_advertises_alias_operator_or_mesh_names(
 
     for permission in ("read", "write", "manage", "admin"):
         result = await _list_result(exposed_mcp, _identity(permission))
-        names = {tool.name for tool in result.root.tools}
+        names = {tool.name for tool in result.tools}
         assert names.isdisjoint(alias_names)
         assert names.isdisjoint(operator_names)
         assert not any("mesh" in name for name in names)
@@ -191,10 +192,10 @@ async def test_discovery_never_advertises_alias_operator_or_mesh_names(
 
 @pytest.mark.asyncio
 async def test_write_discovery_restores_canonical_own_note_consolidation(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     result = await _list_result(exposed_mcp, _identity("write"))
-    names = [tool.name for tool in result.root.tools]
+    names = [tool.name for tool in result.tools]
 
     assert "mid_consolidate" in names
     assert "bank_consolidate" not in names
@@ -202,7 +203,7 @@ async def test_write_discovery_restores_canonical_own_note_consolidation(
 
 @pytest.mark.asyncio
 async def test_adr0022_provisioning_is_discovered_only_at_manage_or_admin(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = type(
@@ -215,7 +216,7 @@ async def test_adr0022_provisioning_is_discovered_only_at_manage_or_admin(
     listed = {}
     for permission in ("read", "write", "manage", "admin"):
         result = await _list_result(exposed_mcp, _identity(permission))
-        listed[permission] = {tool.name for tool in result.root.tools}
+        listed[permission] = {tool.name for tool in result.tools}
 
     provisioning = {"space_create", "token_create", "space_invite_token"}
     assert listed["read"].isdisjoint(provisioning)
@@ -255,7 +256,7 @@ async def test_adr0022_provisioning_is_discovered_only_at_manage_or_admin(
 
 @pytest.mark.asyncio
 async def test_largest_real_low_level_discovery_response_stays_below_64_kib(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     sizes = []
     for permission in ("read", "write", "manage", "admin"):
@@ -263,7 +264,7 @@ async def test_largest_real_low_level_discovery_response_stays_below_64_kib(
         wire = {
             "jsonrpc": "2.0",
             "id": 1,
-            "result": result.root.model_dump(by_alias=True, exclude_none=True),
+            "result": result.model_dump(by_alias=True, exclude_none=True),
         }
         sizes.append(
             len(
@@ -279,7 +280,7 @@ async def test_largest_real_low_level_discovery_response_stays_below_64_kib(
 
 
 def test_complete_exposure_registry_matches_canonical_surface(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     registered = set(exposed_mcp._tool_manager._tools)
     exposure_names = registered_exposure_names()
@@ -297,21 +298,21 @@ def test_complete_exposure_registry_matches_canonical_surface(
 
 @pytest.mark.asyncio
 async def test_discovery_fails_closed_without_valid_request_identity(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     assert await exposed_mcp.list_tools() == []
-    assert (await _list_result(exposed_mcp, None)).root.tools == []
+    assert (await _list_result(exposed_mcp, None)).tools == []
     malformed = _identity("read")
     malformed["permissions"] = ["read", "read"]
-    assert (await _list_result(exposed_mcp, malformed)).root.tools == []
+    assert (await _list_result(exposed_mcp, malformed)).tools == []
     wrong_container = _identity("read")
     wrong_container["permissions"] = {"read"}
-    assert (await _list_result(exposed_mcp, wrong_container)).root.tools == []
+    assert (await _list_result(exposed_mcp, wrong_container)).tools == []
 
 
 @pytest.mark.asyncio
 async def test_request_identity_overrides_stale_ambient_context_on_next_call(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     ambient_manage = current_token_info.set(_identity("manage", hash_char="b"))
     try:
@@ -319,7 +320,7 @@ async def test_request_identity_overrides_stale_ambient_context_on_next_call(
             tool.name
             for tool in (
                 await _list_result(exposed_mcp, _identity("read", hash_char="c"))
-            ).root.tools
+            ).tools
         ]
     finally:
         current_token_info.reset(ambient_manage)
@@ -333,7 +334,7 @@ async def test_request_identity_overrides_stale_ambient_context_on_next_call(
                     exposed_mcp,
                     _identity("manage", hash_char="e"),
                 )
-            ).root.tools
+            ).tools
         ]
     finally:
         current_token_info.reset(ambient_read)
@@ -344,12 +345,12 @@ async def test_request_identity_overrides_stale_ambient_context_on_next_call(
 
 @pytest.mark.asyncio
 async def test_alternating_and_concurrent_requests_never_union_discovery_cache(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     alternating = []
     for permission in ("read", "manage", "read"):
         result = await _list_result(exposed_mcp, _identity(permission))
-        alternating.append([tool.name for tool in result.root.tools])
+        alternating.append([tool.name for tool in result.tools])
     assert alternating == [
         DISCOVERY_FIXTURE["discovery"]["read"],
         DISCOVERY_FIXTURE["discovery"]["manage"],
@@ -359,23 +360,21 @@ async def test_alternating_and_concurrent_requests_never_union_discovery_cache(
     async def discover(permission: str) -> tuple[str, list[str]]:
         await asyncio.sleep(0)
         result = await _list_result(exposed_mcp, _identity(permission))
-        return permission, [tool.name for tool in result.root.tools]
+        return permission, [tool.name for tool in result.tools]
 
     profiles = ["read", "admin", "write", "manage"] * 4
     results = await asyncio.gather(*(discover(profile) for profile in profiles))
     for permission, names in results:
         assert names == DISCOVERY_FIXTURE["discovery"][permission]
 
-    cached = list(exposed_mcp._mcp_server._tool_cache)
-    assert cached in [
-        DISCOVERY_FIXTURE["discovery"][permission]
-        for permission in ("read", "write", "manage", "admin")
-    ]
+    # SDK 2 removed the low-level tool cache; assert the observable isolation
+    # contract instead of inspecting SDK 1's private cache implementation.
+    assert await exposed_mcp.list_tools() == []
 
 
 @pytest.mark.asyncio
 async def test_system_about_uses_same_compact_projection_without_secondary_leak(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     result = await _call_result(
         exposed_mcp,
@@ -392,7 +391,7 @@ async def test_system_about_uses_same_compact_projection_without_secondary_leak(
 
 @pytest.mark.asyncio
 async def test_system_about_keeps_projection_through_direct_console_proxy(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     ambient = current_token_info.set(_identity("write"))
     try:
@@ -422,7 +421,7 @@ def test_current_agent_name_prefers_fresh_request_identity_over_stale_session() 
 
 @pytest.mark.asyncio
 async def test_hidden_historical_alias_is_callable_and_refuses_identically(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeLiveService:
@@ -466,7 +465,7 @@ async def test_hidden_historical_alias_is_callable_and_refuses_identically(
 
 @pytest.mark.asyncio
 async def test_hidden_operator_call_uses_current_request_not_ambient_identity(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = type(
@@ -515,7 +514,7 @@ async def test_hidden_operator_call_uses_current_request_not_ambient_identity(
 
 @pytest.mark.asyncio
 async def test_hidden_write_manage_and_destructive_operators_keep_live_guards(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = type(
@@ -688,15 +687,14 @@ def test_streamable_http_same_session_observes_permission_and_scope_rescope(
         lambda: live_service,
     )
 
-    mcp = HivemindFastMCP(
-        "p10-streamable-http",
-        json_response=True,
-        transport_security=TransportSecuritySettings(
-            allowed_hosts=["testserver"]
-        ),
+    mcp = HivemindMCPServer(
+        "p10-streamable-http", middleware=[auth_context.bind_mcp_request_identity],
     )
     register_all_tools(mcp)
-    app = AuthMiddleware(mcp.streamable_http_app())
+    app = AuthMiddleware(mcp.streamable_http_app(
+        json_response=True,
+        transport_security=TransportSecuritySettings(allowed_hosts=["testserver"]),
+    ))
     monkeypatch.setattr(app, "_validate_token", token_service.validate_token)
 
     base_headers = {
@@ -814,7 +812,7 @@ def _registry_replacing(name: str, **changes) -> tuple:
     return tuple(entries)
 
 
-def test_registry_mutations_fail_closed(exposed_mcp: HivemindFastMCP) -> None:
+def test_registry_mutations_fail_closed(exposed_mcp: HivemindMCPServer) -> None:
     mutations = [
         TOOL_EXPOSURES[:-1],
         _registry_replacing("system_about", aliases=("system_health",)),
@@ -850,7 +848,7 @@ def test_registry_mutations_fail_closed(exposed_mcp: HivemindFastMCP) -> None:
 
 
 def test_alias_metadata_drift_fails_closed(
-    exposed_mcp: HivemindFastMCP,
+    exposed_mcp: HivemindMCPServer,
 ) -> None:
     exposed_mcp._tool_manager._tools["live_read"].description += " drift"
     with pytest.raises(RuntimeError, match="alias description differs"):

@@ -30,7 +30,7 @@ import uuid
 from functools import wraps
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from hivemind_inference import EmbeddingResult
+from hivemind_inference import EmbeddingResult, InferenceError
 
 from ..config import get_settings
 from .ontology import is_automatic_ontology_name
@@ -679,6 +679,13 @@ async def run_ingest_pipeline(
         )
         print(f"❌ [Ingest] Error: {e}", file=sys.stderr)
         out = {"status": "error", "message": str(e), "steps": _steps_log}
+        from .extractor import FrozenOntologyOutputError
+        if isinstance(e, FrozenOntologyOutputError):
+            # Keep validation distinct even when cleanup adds diagnostic text.
+            out["code"] = "invalid_output"
+        elif isinstance(e, InferenceError) and e.category in ("timeout", "rate_limited", "unavailable"):
+            # Keep normalized transport failures distinct through queue/cleanup.
+            out["code"] = "inference_" + e.category
         if cleanup.get("errors"):
             out["cleanup"] = cleanup
             out["message"] += f" | incomplete rollback: {cleanup['errors']}"

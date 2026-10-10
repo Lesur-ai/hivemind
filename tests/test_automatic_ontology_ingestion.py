@@ -369,3 +369,37 @@ async def test_server_distinguishes_refusal_infrastructure_and_admitted_jobs(mon
         assert response["code"] == ("automatic_batch_not_admitted" if failure == "refused"
                                      else "automatic_batch_infrastructure_failed")
     assert "private infrastructure response" not in str(response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('frame', ['prose_closed', 'prose_open'])
+async def test_frozen_ingestion_uses_complete_json_frame_without_correction(frame):
+    import json
+    from mcp_memory.core.extractor import ExtractorService
+    service = object.__new__(ExtractorService)
+    body = json.dumps({'entities': [{'name': 'Alice', 'type': 'Person'},
+                                   {'name': 'Bob', 'type': 'Person'}],
+                       'relations': [{'from_entity': 'Alice', 'to_entity': 'Bob', 'type': 'KNOWS'}]})
+    raw = 'Here is the result:\n```json\n' + body + ('\n```\nDone.' if frame == 'prose_closed' else '')
+    service._complete = AsyncMock(return_value=SimpleNamespace(text=raw))
+    value = await service._extract_frozen_catalogue('Alice knows Bob.', {'Person'}, {'KNOWS'})
+    assert [(v.name, v.type) for v in value.entities] == [('Alice', 'Person'), ('Bob', 'Person')]
+    assert [(v.from_entity, v.to_entity, v.type) for v in value.relations] == [('Alice', 'Bob', 'KNOWS')]
+    assert service._complete.await_count == 1
+
+
+@pytest.mark.parametrize('raw', [
+    '```\n{"entities":[],"relations":[]}\n```',
+    '```JSON\n{"entities":[],"relations":[]}\n```',
+    'Prose ```json\n{"entities":[],"relations":',
+    'Prose ```json\n{"entities":[],"relations":[]} trailing prose',
+    'Prose ```json\n{"entities":[],"relations":[]}\n```\nand ```json\n{}\n```',
+    'Prose ```json\n{"entities":[],"entities":[],"relations":[]}\n```',
+    'Prose ```json\n{"entities":[],"relations":[],"summary":NaN}\n```',
+    'Prose ```json\n{"entities":[{"name":"Alice","type":"Unknown"}],"relations":[]}\n```',
+])
+def test_frozen_ingestion_never_salvages_bad_frame_or_unknown_label(raw):
+    from mcp_memory.core.extractor import ExtractorService
+    service = object.__new__(ExtractorService)
+    with pytest.raises(ValueError, match='^Invalid extraction for frozen ontology$'):
+        service._parse_extraction(raw, known_entity_types={'Person'}, known_relation_types={'KNOWS'}, strict=True)

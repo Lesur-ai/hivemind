@@ -62,7 +62,7 @@ def _lifespan(app) -> _RecordingLifespanOn:
     )
 
 
-def _inner_app():
+def _inner_app(**_transport):
     async def inner(scope, receive, send):
         while True:
             message = await receive()
@@ -149,7 +149,7 @@ class TestCoreProcessScope:
         monkeypatch.setattr(
             server.mcp,
             "streamable_http_app",
-            lambda: process_inner,
+            lambda **_transport: process_inner,
         )
         monkeypatch.setattr(
             server.settings,
@@ -169,8 +169,8 @@ class TestCoreProcessScope:
         projector = mid_archive_projection._projector_task
         assert projector is not None and not projector.done()
 
-        # FastMCP enters this context for each MCP session. Neither session is
-        # allowed to close the shared consolidator transport.
+        # Re-entering the MCP preflight must never close process-owned resources.
+        # SDK 2 normally owns this context once for the HTTP app lifespan.
         for _ in range(3):
             async with server._lifespan(None):
                 assert closes == []
@@ -187,8 +187,8 @@ class TestCoreProcessScope:
         self,
         monkeypatch,
     ):
-        """Three TestClient MCP flows enter three in-process session lifespans,
-        while the process-owned resource closes only at ASGI shutdown."""
+        """Three real MCP sessions share the SDK 2 app lifespan; process-owned
+        resources close exactly once at ASGI shutdown."""
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -198,7 +198,7 @@ class TestCoreProcessScope:
         import live_mem.auth.middleware as auth_middleware
         import live_mem.core.consolidator as consolidator_module
         from live_mem import server
-        from live_mem.tools.exposure import HivemindFastMCP
+        from live_mem.tools.exposure import HivemindMCPServer
 
         _prepare_core_session_preflight(monkeypatch)
         session_events = []
@@ -216,19 +216,24 @@ class TestCoreProcessScope:
         async def close_process_resource():
             process_closes.append("process-close")
 
-        fresh_mcp = HivemindFastMCP(
+        fresh_mcp = HivemindMCPServer(
             name="issue-306-real-sessions",
             lifespan=counted_session_lifespan,
-            json_response=True,
-            transport_security=TransportSecuritySettings(
-                allowed_hosts=["testserver"]
-            ),
         )
         monkeypatch.setattr(
             consolidator_module,
             "close_consolidator_if_initialized",
             close_process_resource,
         )
+        sdk_factory = fresh_mcp.streamable_http_app
+
+        def sdk_app(**transport):
+            return sdk_factory(
+                **transport, json_response=True,
+                transport_security=TransportSecuritySettings(allowed_hosts=["testserver"]),
+            )
+
+        monkeypatch.setattr(fresh_mcp, "streamable_http_app", sdk_app)
         monkeypatch.setattr(server, "mcp", fresh_mcp)
         monkeypatch.setattr(
             server,
@@ -278,33 +283,12 @@ class TestCoreProcessScope:
                 terminated = client.delete("/mcp", headers=session_headers)
                 assert terminated.status_code == 200
 
-                async def wait_until_session_closed():
-                    for _ in range(200):
-                        if session_events.count("close") == request_id:
-                            return
-                        await asyncio.sleep(0.01)
-                    raise AssertionError("MCP session lifespan did not close")
-
-                client.portal.call(wait_until_session_closed)
+                assert session_events == ["open"]
                 assert process_closes == []
 
-            assert session_events == [
-                "open",
-                "close",
-                "open",
-                "close",
-                "open",
-                "close",
-            ]
+            assert session_events == ["open"]
 
-        assert session_events == [
-            "open",
-            "close",
-            "open",
-            "close",
-            "open",
-            "close",
-        ]
+        assert session_events == ["open", "close"]
         assert process_closes == ["process-close"]
 
 
@@ -609,7 +593,7 @@ class TestGraphMemoryProcessScope:
             async def main():
                 graph._close_llm_singletons = failed_close
                 graph._initialize_graph_document_schema = initialize_schema
-                graph.mcp.streamable_http_app = lambda: inner
+                graph.mcp.streamable_http_app = lambda **_transport: inner
                 app = graph._create_app()
                 server = uvicorn.Server(
                     uvicorn.Config(
