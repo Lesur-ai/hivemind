@@ -5,7 +5,7 @@ Registration-surface lock for the single MCP facade.
 This is the authoritative enumeration test for the whole tool surface after the
 tier aliases land. ``tests/fixtures/tool_surface.json`` is the sole expected
 surface/count authority; one exhaustive test below compares it with a real
-in-process FastMCP built by the real ``register_all_tools`` (no S3 / no network
+in-process MCPServer built by the real ``register_all_tools`` (no S3 / no network
 / no LLM) and pins:
 
 - every fixture-declared direct name and canonical alias is registered;
@@ -21,6 +21,9 @@ in-process FastMCP built by the real ``register_all_tools`` (no S3 / no network
 - every ``long_*`` alias inherits its identical ``graph_*`` handler, so the
   non-authoritative / protocol-derived posture is preserved by identity
   (the commit-path boundary itself is ADR-0010 territory).
+
+#680 adds one hidden manage-only direct operator tool, mid_archive_retry.
+It resumes a retained capture without recapturing MID or changing its target.
 
 Frozen fixture (``tests/fixtures/tool_surface.json``):
     The fixture is the CHECKED-IN public-surface contract. Editing it is a
@@ -132,7 +135,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth.context import current_token_info
 from live_mem.tools import call_tool_direct, register_all_tools
@@ -464,8 +467,8 @@ CROSS_CUTTING_NO_ALIAS: frozenset[str] = frozenset({
 })
 
 
-def _build() -> tuple[FastMCP, int]:
-    mcp = FastMCP(name="test")
+def _build() -> tuple[MCPServer, int]:
+    mcp = MCPServer(name="test")
     total = register_all_tools(mcp)
     return mcp, total
 
@@ -530,8 +533,8 @@ _CORE_FRENCH_COPY = re.compile(
 )
 
 
-def _registered_public_schema_texts(mcp: FastMCP) -> dict[str, str]:
-    """Render exactly what FastMCP exposes: tool copy plus input JSON Schema."""
+def _registered_public_schema_texts(mcp: MCPServer) -> dict[str, str]:
+    """Render exactly what MCPServer exposes: tool copy plus input JSON Schema."""
     return {
         name: "\n".join(
             (
@@ -559,7 +562,7 @@ def _assert_public_schema_hygiene(
                     f"{name}: agent-core copy is not canonical English: "
                     f"{match.group(0)!r}"
                 )
-    assert not findings, "FastMCP public-schema hygiene failures:\n" + "\n".join(
+    assert not findings, "MCPServer public-schema hygiene failures:\n" + "\n".join(
         findings
     )
 
@@ -594,7 +597,7 @@ def test_every_registered_fastmcp_description_and_input_schema_is_public_safe():
         for field_name, schema in tool.parameters.get("properties", {}).items():
             if not (schema.get("description") or "").strip():
                 missing_copy.append(f"{name}.{field_name}: Field description")
-    assert not missing_copy, "Missing FastMCP public copy:\n" + "\n".join(
+    assert not missing_copy, "Missing MCPServer public copy:\n" + "\n".join(
         missing_copy
     )
 
@@ -624,7 +627,7 @@ def test_every_registered_fastmcp_description_and_input_schema_is_public_safe():
 )
 def test_fastmcp_public_schema_hygiene_guard_is_mutation_proven(mutant: str):
     """Each forbidden class independently trips the dynamic schema guard."""
-    with pytest.raises(AssertionError, match="FastMCP public-schema hygiene"):
+    with pytest.raises(AssertionError, match="MCPServer public-schema hygiene"):
         _assert_public_schema_hygiene(
             {"short_note": f"Append a note. {mutant}"},
             agent_core_names={"short_note"},

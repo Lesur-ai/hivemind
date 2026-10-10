@@ -19,7 +19,7 @@ this module owns only the executable alias mapping and registration mechanism.
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 # Single-owner, string-keyed mapping ``historical_name -> canonical tier name``.
 # The handlers are nested closures inside each module's ``register(mcp)`` and are
@@ -46,7 +46,7 @@ ALIAS_MAP: dict[str, str] = {
 
 
 def register_tier_aliases(
-    mcp: FastMCP, alias_map: dict[str, str] | None = None
+    mcp: MCPServer, alias_map: dict[str, str] | None = None
 ) -> int:
     """
     Register the tier-canonical aliases over already-registered tools. Fail-closed.

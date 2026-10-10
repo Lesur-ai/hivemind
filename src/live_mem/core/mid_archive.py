@@ -12,7 +12,16 @@ _ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
 _CAPTURE = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[a-f0-9]{32}\Z')
 _SHA = re.compile(r'[a-f0-9]{64}\Z')
 ERRORS = {'projection_unavailable', 'invalid_record', 'identity_changed',
-          'route_refused', 'archive_unverified', 'document_unverified'}
+          'route_refused', 'archive_unverified', 'document_unverified', 'invalid_output',
+          'inference_timeout', 'inference_rate_limited', 'inference_unavailable'}
+REJECTION_REASONS = {'malformed_json', 'schema_failure', 'evidence_failure', 'catalogue_validation'}
+INFERENCE_RETRY_LIMIT = 3
+
+
+def projection_paused(record):
+    return (record.get('invalid_output_failures', 0) >= INFERENCE_RETRY_LIMIT
+            or (record.get('error') == 'inference_timeout'
+                and record.get('failures', 0) >= INFERENCE_RETRY_LIMIT))
 
 
 def require(condition, code='invalid_record'):
@@ -103,6 +112,10 @@ def validate_record(record, space_id, key):
         value = record.get(number)
         require(type(value) in (int, float) and math.isfinite(value) and value >= 0)
     require(type(record['failures']) is int)
+    count = record.get('invalid_output_failures', 0)
+    require(type(count) is int and count >= 0)
+    reason = record.get('rejection_reason')
+    require(reason is None or (isinstance(reason, str) and reason in REJECTION_REASONS))
     require(record.get('error') is None or record['error'] in ERRORS)
     documents = record.get('documents')
     require(isinstance(documents, list) and documents)
@@ -162,13 +175,21 @@ async def prepare_mid_archive(storage, *, space_id, preimage_id, documents):
 
 async def projection_status(storage, space_id):
     """Safe, passive status; no content, URLs, identifiers or provider messages."""
-    result = {'pending': 0, 'oldest_at': None, 'oldest_age_seconds': None, 'error': None}
+    result = {'pending': 0, 'oldest_at': None, 'oldest_age_seconds': None, 'error': None,
+              'blocked': 0, 'failures': 0, 'next_attempt_at': None, 'rejection_reason': None}
     try:
         items = await storage.list_objects(pending_prefix(space_id))
         result['pending'] = len(items)
         for item in items:
             try:
                 record = validate_record(await storage.get_json(item['Key']), space_id, item['Key'])
+                result['failures'] = max(result['failures'], record['failures'])
+                if projection_paused(record):
+                    result['blocked'] += 1
+                elif result['next_attempt_at'] is None or record['next_attempt_at'] < result['next_attempt_at']:
+                    result['next_attempt_at'] = record['next_attempt_at']
+                if record.get('rejection_reason'):
+                    result['rejection_reason'] = result['rejection_reason'] or record['rejection_reason']
                 timestamp = record['created_at']
                 if result['oldest_at'] is None or timestamp < result['oldest_at']:
                     result['oldest_at'] = timestamp

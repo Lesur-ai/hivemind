@@ -3,7 +3,7 @@
 Tests unitaires et d'intégration pour l'ingestion asynchrone et le remplacement transactionnel (Issue #450).
 
 Vérifie :
-1. Enregistrement FastMCP des 4 outils :
+1. Enregistrement MCPServer des 4 outils :
    - long_ingest_async
    - long_ingest_status
    - long_ingest_list
@@ -19,7 +19,7 @@ Vérifie :
    - Validation stricte des bornes de pagination sur limit (1..100) et offset (>= 0).
 4. Délégations LongEngine et GraphBridge :
    - Délégations fidèles de LongEngine vers GraphBridge.
-   - Alignement exact avec les outils FastMCP Graph Memory :
+   - Alignement exact avec les outils MCPServer Graph Memory :
      * memory_ingest_batch_async(memory_id, documents, replace_existing)
      * ingest_job_status(job_id, expected_memory_id)
      * ingest_job_list(memory_id, status, source_path, batch_id, limit, offset)
@@ -31,14 +31,14 @@ Vérifie :
    - Commutation atomique promote_candidate_document exécutée après validation complète du candidat (S3, LLM, Neo4j, Qdrant).
    - Purge de l'ancienne version exécutée post-commutation et traçabilité des purge_errors / cleanup_pending.
    - Rollback isolé en cas d'erreur ou d'annulation à chaque étape (S3, LLM, graphe, Qdrant) préservant l'ancien document 100% intact.
-6. Backend Graph Memory FastMCP Server & Memory Scoping Contract :
+6. Backend Graph Memory MCPServer Server & Memory Scoping Contract :
    - Cloisonnement strict par expected_memory_id.
 """
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from live_mem.tools import register_all_tools
 from live_mem.auth.context import current_token_info
 from live_mem.core.engines import get_engine_registry
@@ -96,7 +96,7 @@ def mock_gm_env(monkeypatch):
 
 @pytest.fixture
 def mcp_server():
-    mcp = FastMCP("test-async-ingest-mcp")
+    mcp = MCPServer("test-async-ingest-mcp")
     register_all_tools(mcp)
     return mcp
 
@@ -147,12 +147,12 @@ def auth_read_token():
 
 
 # =============================================================================
-# 1. Enregistrement FastMCP
+# 1. Enregistrement MCPServer
 # =============================================================================
 
 @pytest.mark.asyncio
 async def test_async_ingest_tools_registered(mcp_server):
-    """Vérifie que les 4 outils long_ingest_* sont enregistrés sur FastMCP."""
+    """Vérifie que les 4 outils long_ingest_* sont enregistrés sur MCPServer."""
     tool_names = set(mcp_server._tool_manager._tools.keys())
     assert "long_ingest_async" in tool_names
     assert "long_ingest_status" in tool_names
@@ -720,7 +720,7 @@ async def test_graph_bridge_ingest_status_unlinked_refuses_raw_id_fallback():
 
 
 # =============================================================================
-# 5. Backend Graph Memory FastMCP Server & Memory Scoping Contract
+# 5. Backend Graph Memory MCPServer Server & Memory Scoping Contract
 # =============================================================================
 
 @pytest.mark.asyncio

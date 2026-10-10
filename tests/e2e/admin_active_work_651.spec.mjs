@@ -71,9 +71,10 @@ async function setup(page, name, { hash = '#/spaces/demo/activity', permissions 
             const call = route.request().postDataJSON(); state.calls.push(call);
             const args = call.arguments || {};
             if (call.tool === 'system_whoami') return json({ status: 'ok', client_name: 'qa-651', permissions, token_hash: 'sha256:' + '1'.repeat(64) });
-            if (call.tool === 'space_info') return json({ status: 'ok', space_id: 'demo', description: 'Active work QA', owner: 'qa', created_at: '2026-09-01T00:00:00Z', hive_status_label: 'local_only', live: { notes_count: 3, total_size: 900 }, bank: { files_count: 6, total_size: 51000, files: [] }, consolidation_count: 4, consolidation_queue: state.lane });
+            if (call.tool === 'space_list') return json({ status: 'ok', total: 1, spaces: [{ space_id: 'demo', last_consolidation: FINISHED.finished_at, consolidation_count: 4, total_notes_processed: 8 }] });
+            if (call.tool === 'space_info') return json(state.spaceError || { status: 'ok', space_id: 'demo', description: 'Active work QA', owner: 'qa', created_at: '2026-09-01T00:00:00Z', hive_status_label: 'local_only', live: { notes_count: 3, total_size: 900 }, bank: { files_count: 6, total_size: 51000, files: [] }, consolidation_count: 4, consolidation_queue: state.lane });
             if (call.tool === 'bank_consolidation_queues') return json({ status: 'ok', lanes: [state.lane], denied_spaces: [] });
-            if (call.tool === 'bank_consolidation_status') return json([state.lane.running_job, ...state.lane.queued_jobs, ...state.lane.latest_jobs].find(job => job?.job_id === args.job_id) || { status: 'not_found', job_id: args.job_id });
+            if (call.tool === 'bank_consolidation_status') return json([state.lane.running_job, state.lane.manual_compaction, ...state.lane.queued_jobs, ...state.lane.latest_jobs].find(job => job?.job_id === args.job_id) || { status: 'not_found', job_id: args.job_id });
             if (call.tool === 'graph_status') return json(state.graph);
             if (call.tool === 'long_ingest_list') {
                 if (state.hold && args.archive !== true && args.limit === 50) await state.hold;
@@ -518,4 +519,187 @@ test('651 Active work is reachable from the Space tabs by keyboard', async ({ pa
     await expect(page.getByRole('tab', { name: 'Active work', exact: true })).toBeFocused();
     await settled(page);
     expectReadOnly(state);
+});
+
+// Manual compaction keeps its original synchronous request; activity comes
+// from the server snapshot, including work launched in another browser/client.
+const MANUAL = {
+    job_id: 'compact_portal_manual', kind: 'manual_compaction', space_id: 'demo',
+    status: 'running', scope: 'manual_compaction', scope_label: 'Manual compaction',
+    requested_by: 'manual-operator', guarantee: 'in_memory_best_effort',
+    requested_at: '2026-10-07T13:00:00Z', started_at: '2026-10-07T13:00:01Z',
+    queued_at: null, finished_at: null, queue_position: 1,
+    progress: { phase: 'compacting' }, message: 'Manual compaction is running. No percentage is reported.',
+};
+const manualState = state => { state.lane.manual_compaction = { ...MANUAL }; };
+const manualFinish = (state, failed = false) => {
+    state.lane.manual_compaction = { ...MANUAL, status: failed ? 'failed' : 'succeeded', queue_position: 0,
+        finished_at: '2026-10-07T13:02:00Z', progress: { phase: failed ? 'failed' : 'done' },
+        result: { status: failed ? 'partial' : 'ok',
+            files_total: 6, files_over_limit: 1, total_size_before: 51000,
+            total_size_after: failed ? null : 20000,
+            preimage_id: 'demo/retained-capture', ...(failed ? {
+                failed_phase: 'apply', rollback_outcome: 'unverified',
+                apply_may_have_mutated: true, files_applied_before_failure: 1, recovery_required: true,
+            } : {}) }, ...(failed ? { error: HOSTILE } : {}),
+    };
+};
+
+for (const [width, height] of VIEWPORTS) {
+    test(`manual compaction is visible after navigation at ${width}x${height}`, async ({ page }) => {
+        await page.setViewportSize({ width, height });
+        const state = await setup(page, 'finished', { mutate: manualState, permissions: ['read', 'write'] });
+        await settled(page);
+        await expect(status(page, 'manual-compaction')).toHaveText('In progress');
+        await expect(row(page, 'manual-compaction')).toContainText('Started');
+        await expect(row(page, 'manual-compaction')).toContainText('No percentage is reported');
+        await expect(row(page, 'manual-compaction')).not.toContainText('%');
+        await expect(status(page, 'consolidation')).toHaveText('Last job completed');
+        await expect(status(page, 'compaction')).toHaveText('Files compacted');
+        await row(page, 'manual-compaction').getByRole('button', { name: /Open manual compaction job/ }).click();
+        await expect(page.locator('#consolJobSnapshot')).toContainText('Manual compaction');
+        await expect(page.locator('#consolJobSnapshot')).toContainText('manual-operator');
+        await expect(page.locator('#consolJobSnapshot')).toContainText(MANUAL.job_id);
+        // Return to the space's activity; the launcher's view was never involved.
+        await page.getByRole('button', { name: 'Close', exact: true }).click();
+        await page.getByRole('tab', { name: 'Active work', exact: true }).click();
+        await settled(page);
+        await expect(status(page, 'manual-compaction')).toHaveText('In progress');
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await capture(page, `manual-compaction-${width}`);
+        expectReadOnly(state);
+    });
+}
+
+test('manual compaction refreshes to partial failure with recovery and escaped diagnostics', async ({ page }) => {
+    const state = await setup(page, 'finished', { mutate: manualState });
+    await settled(page);
+    manualFinish(state, true);
+    await page.getByRole('button', { name: 'Refresh active work' }).click();
+    await settled(page);
+    await expect(status(page, 'manual-compaction')).toHaveText('Last compaction failed');
+    await expect(row(page, 'manual-compaction')).toContainText('Recovery must be checked');
+    await expect(row(page, 'manual-compaction')).toContainText(HOSTILE);
+    await expect(row(page, 'manual-compaction').locator('img')).toHaveCount(0);
+    await row(page, 'manual-compaction').getByRole('button', { name: /Open manual compaction job/ }).click();
+    await expect(page.locator('#consolJobSnapshot')).toContainText('Recovery required');
+    await expect(page.locator('#consolJobSnapshot')).toContainText('51000');
+    await expect(page.locator('#consolJobSnapshot')).not.toContainText('UTF-8 bytes after');
+    await expect(page.locator('#consolJobSnapshot')).toContainText('Failed phase');
+    await expect(page.locator('#consolJobSnapshot')).toContainText('Rollback outcome');
+    await expect(page.locator('#consolJobSnapshot')).toContainText('unverified');
+    await expect(page.locator('#consolJobSnapshot')).toContainText('Apply may have mutated');
+    await expect(page.locator('#consolJobSnapshot')).toContainText('Files applied before failure');
+    await expect(page.locator('#consolJobSnapshot')).toContainText('demo/retained-capture');
+    await expect(page.locator('#consolJobSnapshot .consol-bar-indeterminate')).toHaveCount(0);
+    await capture(page, 'manual-compaction-unverified-recovery', '#consolJobSnapshot');
+    await capture(page, 'manual-compaction-unverified-result', '#consolJobSnapshot .table-scroll');
+    expect(await page.evaluate(() => window.__xss)).toBe(0);
+    expectReadOnly(state);
+});
+
+test('manual compaction inspector distinguishes a verified rollback from partial recovery', async ({ page }) => {
+    const state = await setup(page, 'finished', { mutate: state => {
+        manualFinish(state, true);
+        state.lane.manual_compaction.result = {
+            status: 'error', files_total: 6, files_over_limit: 1, total_size_before: 51000,
+            total_size_after: null, failure_reason: 'compaction_apply_reverted',
+            failed_phase: 'apply', rollback_outcome: 'verified', preimage_id: 'demo/retained-capture',
+        };
+    } });
+    await settled(page);
+    await row(page, 'manual-compaction').getByRole('button', { name: /Open manual compaction job/ }).click();
+    const snapshot = page.locator('#consolJobSnapshot');
+    await expect(snapshot.locator('tr').filter({ hasText: 'Rollback outcome' })).toContainText('verified');
+    await expect(snapshot).toContainText('Files above threshold');
+    await expect(snapshot).not.toContainText('Recovery required');
+    await expect(snapshot).not.toContainText('Files compacted');
+    const warningIcon = await snapshot.locator('.state-error > svg').boundingBox();
+    expect(warningIcon.height).toBeLessThanOrEqual(24);
+    await capture(page, 'manual-compaction-verified-rollback', '#consolJobSnapshot');
+    await capture(page, 'manual-compaction-verified-result', '#consolJobSnapshot .table-scroll');
+    expectReadOnly(state);
+});
+
+test('manual compaction idle, restart and older-server states are distinct', async ({ page }) => {
+    const state = await setup(page, 'finished', { mutate: state => { state.lane.manual_compaction = null; } });
+    await settled(page);
+    await expect(status(page, 'manual-compaction')).toHaveText('Idle');
+    manualFinish(state);
+    await page.getByRole('button', { name: 'Refresh active work' }).click();
+    await settled(page);
+    await expect(status(page, 'manual-compaction')).toHaveText('Last compaction completed');
+    delete state.lane.manual_compaction;
+    await page.getByRole('button', { name: 'Refresh active work' }).click();
+    await settled(page);
+    await expect(status(page, 'manual-compaction')).toHaveText('Tracking unavailable');
+    expectReadOnly(state);
+});
+
+test('manual compaction retains stale content when an activity read fails', async ({ page }) => {
+    const state = await setup(page, 'finished', { mutate: manualState });
+    await settled(page);
+    state.spaceError = { status: 'error', message: 'Activity read unavailable' };
+    await page.getByRole('button', { name: 'Refresh active work' }).click();
+    await expect(page.locator('#sdActivityFreshness')).toContainText('Some reads failed');
+    await expect(status(page, 'manual-compaction')).toHaveText('In progress');
+    await expect(row(page, 'manual-compaction')).toContainText('Refresh failed; showing the read from');
+    expectReadOnly(state);
+});
+
+test('manual compaction appears in global In progress and terminal history', async ({ page }) => {
+    const state = await setup(page, 'finished', { hash: '#/consolidation', mutate: manualState });
+    const entry = page.locator('#consolLanes .consol-job-row').filter({ hasText: 'Manual compaction' });
+    await expect(entry).toContainText('Running');
+    await expect(entry).toContainText('compacting');
+    await expect(entry).not.toContainText('notes');
+    await entry.getByRole('button', { name: /Inspect job/ }).click();
+    await expect(page.locator('#consolJobSnapshot')).toContainText('Manual compaction');
+    manualFinish(state);
+    await page.getByRole('button', { name: 'Refresh job', exact: true }).click();
+    await expect(page.locator('#consolJobSnapshot')).toContainText('20000');
+    await page.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.evaluate(() => PortalRefresh.refresh());
+    await expect(entry).toContainText('Completed');
+    expect(state.calls.some(call => call.tool === 'bank_compact')).toBe(false);
+});
+
+test('manual compaction appears on Dashboard with a refreshable inspector', async ({ page }) => {
+    const state = await setup(page, 'finished', { hash: '#/dashboard', mutate: manualState });
+    const entry = page.locator('#dashRunningJobs .consol-job-row').filter({ hasText: 'Manual compaction' });
+    await expect(entry).toContainText('Running');
+    await entry.getByRole('button', { name: /Details|Inspect/ }).click();
+    await expect(page.locator('#dashJobSnapshot')).toContainText('Manual compaction');
+    manualFinish(state);
+    await page.evaluate(() => PortalRefresh.refresh());
+    await expect(page.locator('#dashJobSnapshot')).toContainText('20000');
+    expect(state.calls.some(call => call.tool === 'bank_compact')).toBe(false);
+});
+
+for (const scope of ['activity', 'consolidation']) {
+    test(`manual compaction alone keeps opt-in auto-refresh following in ${scope}`, async ({ page }) => {
+        await page.addInitScript(() => localStorage.setItem('hivemind.portal.autoRefresh', JSON.stringify({ enabled: true, intervalSeconds: 15 })));
+        await page.clock.install();
+        const state = await setup(page, 'finished', { hash: scope === 'activity' ? '#/spaces/demo/activity' : '#/consolidation', mutate: manualState });
+        const entry = scope === 'activity' ? status(page, 'manual-compaction') : page.locator('#consolLanes .consol-job-row').filter({ hasText: 'Manual compaction' });
+        await expect(entry).toContainText(scope === 'activity' ? 'In progress' : 'Running');
+        await expect.poll(() => page.evaluate(() => PortalRefresh.state().busy)).toBe(false);
+        const before = state.calls.length;
+        manualFinish(state);
+        await page.clock.runFor(15001);
+        await expect(entry).toContainText(scope === 'activity' ? 'Last compaction completed' : 'Completed');
+        expect(state.calls.length).toBeGreaterThan(before);
+        await expect.poll(() => page.evaluate(() => PortalRefresh.state().busy)).toBe(false);
+        const terminal = state.calls.length;
+        await page.clock.runFor(30001);
+        expect(state.calls.length).toBe(terminal);
+        expect(state.calls.some(call => call.tool === 'bank_compact')).toBe(false);
+        expect(state.reads('graph_status').length).toBe(scope === 'activity' ? 1 : 0);
+    });
+}
+
+test('manual compaction malformed snapshot is unavailable rather than idle', async ({ page }) => {
+    await setup(page, 'finished', { mutate: state => { state.lane.manual_compaction = []; } });
+    await settled(page);
+    await expect(status(page, 'manual-compaction')).toHaveText('Activity unavailable');
 });

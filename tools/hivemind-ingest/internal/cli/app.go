@@ -33,9 +33,9 @@ type App struct {
 	buildDate string
 }
 
-// NewApp creates a new CLI App with default version v1.6.0
+// NewApp creates a new CLI App with default version v1.6.1
 func NewApp(ui *tui.UI, cfg *config.Config) *App {
-	return NewAppWithBuildInfo(ui, cfg, "v1.6.0", "dev", "unknown")
+	return NewAppWithBuildInfo(ui, cfg, "v1.6.1", "dev", "unknown")
 }
 
 // NewAppWithVersion creates a new CLI App with an explicit version string
@@ -46,7 +46,7 @@ func NewAppWithVersion(ui *tui.UI, cfg *config.Config, version string) *App {
 // NewAppWithBuildInfo creates a new CLI App with explicit version, commit, and build date
 func NewAppWithBuildInfo(ui *tui.UI, cfg *config.Config, version, commit, buildDate string) *App {
 	if version == "" {
-		version = "v1.6.0"
+		version = "v1.6.1"
 	}
 	if commit == "" {
 		commit = "dev"

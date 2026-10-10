@@ -610,7 +610,13 @@ class IngestQueueService:
             job.error = result.get("message", "Text extraction failed")
         else:
             job.status = "failed"
-            job.error = result.get("message", "Ingestion failed")
+            code = result.get("code")
+            job.error = (code if code in ("invalid_output", "inference_timeout",
+                                         "inference_rate_limited", "inference_unavailable")
+                         else result.get("message", "Ingestion failed"))
+            if result.get("cleanup", {}).get("errors"):
+                job.purge_status = "cleanup_pending"
+                job.purge_errors = list(result["cleanup"]["errors"])
 
     # ------------------------------------------------------------------ helpers
     def _find_active_source_path_locked(self, memory_id: str, source_path: str) -> Optional[str]:

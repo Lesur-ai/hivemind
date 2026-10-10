@@ -1438,7 +1438,7 @@
     function activityActive(view) {
         const state = view.activity, lane = state.lane.value, { running, queued } = activityLaneJobs(lane);
         const queuedCount = ingestCount(lane?.queued_count) ? lane.queued_count : queued.length;
-        return !!running || queuedCount > 0 || activityJobs(state.docs.value).length > 0 || activityJobs(state.archive.value).length > 0;
+        return !!running || lane?.manual_compaction?.status === 'running' || queuedCount > 0 || activityJobs(state.docs.value).length > 0 || activityJobs(state.archive.value).length > 0;
     }
 
     // Returns null once the view no longer owns the route.
@@ -1542,7 +1542,7 @@
             <p class="body-small">What is working in this space, at which step, and whether it is blocked. Each row opens its existing detail.</p>
             <div id="sdActivityFreshness" class="body-small text-muted"></div>
             <ul id="sdActivityList" class="sd-activity-list" aria-label="Active work in this space"></ul>
-            <p class="form-hint">Job histories are held in server memory and are best-effort. Manual compaction runs synchronously from the Consolidation tab and has no job.</p>
+            <p class="form-hint">Job histories are held in server memory and are best-effort. Manual compaction is tracked while its original request runs; no percentage is reported.</p>
         </section>`;
     }
 
@@ -1619,6 +1619,23 @@
         return activityRow('compaction', title, recovery ? 'error' : severity, recovery ? `${label} · recovery required` : label,
             `<p>Latest automatic result${when ? `, ${renderTimestamp(when)}` : ''}. It is separate from the consolidation result.</p>${recovery ? '<p>Recovery must be checked before retrying.</p>' : ''}${typeof reason === 'string' && reason ? serverMessage(reason) : ''}${disabled}${stale}`,
             activityOpen('consolidation', job.job_id, `Open consolidation job ${job.job_id} for its compaction result`));
+    }
+
+    function renderManualCompactionActivity(view) {
+        const source = view.activity.lane, lane = source.value, title = 'Manual compaction';
+        if (!lane) return laneUnavailableRow('manual-compaction', title, source);
+        const stale = activityStale(source);
+        if (!Object.hasOwn(lane, 'manual_compaction')) return activityRow('manual-compaction', title, 'neutral', 'Tracking unavailable', `<p>This server does not report manual compaction activity.</p>${stale}`);
+        const job = activityObject(lane.manual_compaction);
+        if (lane.manual_compaction === null) return activityRow('manual-compaction', title, 'neutral', 'Idle', `<p>No manual compaction in this server’s recent history.</p>${stale}`);
+        if (!job) return activityRow('manual-compaction', title, 'error', 'Activity unavailable', `<p>The manual compaction snapshot is invalid.</p>${stale}`);
+        const running = job.status === 'running', failed = job.status === 'failed';
+        const recovery = job.result?.recovery_required === true;
+        const label = running ? 'In progress' : failed ? 'Last compaction failed' : job.status === 'succeeded' ? 'Last compaction completed' : 'Unknown status';
+        const when = running ? job.started_at : job.finished_at;
+        return activityRow('manual-compaction', title, failed || recovery ? 'error' : running ? 'warn' : job.status === 'succeeded' ? 'ok' : 'neutral', label,
+            `<p>${running ? 'Compacting MID files. No percentage is reported.' : 'Latest manual compaction result.'}${ingestDate(when) ? ` ${running ? 'Started' : 'Finished'} ${renderTimestamp(when)}.` : ''}</p>${recovery ? '<p>Recovery must be checked before retrying.</p>' : ''}${job.error ? serverMessage(job.error) : ''}${stale}`,
+            job.job_id ? activityOpen('consolidation', job.job_id, `Open manual compaction job ${job.job_id}`) : '');
     }
 
     function activityGraphRow(view, key, title) {
@@ -1702,7 +1719,7 @@
         const state = view.activity;
         const failed = [state.lane, state.graph, state.docs, state.archive].some(source => source.error);
         memoryFreshness('sdActivityFreshness', state.success, state.unavailable || (failed ? 'Some reads failed. Each row keeps its last successful content.' : ''));
-        paintLongRegion('sdActivityList', [renderConsolidationActivity(view), renderCompactionActivity(view), renderDocumentActivity(view), renderArchiveActivity(view)].join(''));
+        paintLongRegion('sdActivityList', [renderConsolidationActivity(view), renderCompactionActivity(view), renderManualCompactionActivity(view), renderDocumentActivity(view), renderArchiveActivity(view)].join(''));
     }
 
     function renderAuxiliary(view) {
@@ -2641,7 +2658,7 @@
         const owner = { spaceId: view.spaceId, sessionGeneration: view.ctx.sessionGeneration };
         if (data.kind === 'consolidation') {
             const { running, queued, latest } = activityLaneJobs(view.activity.lane.value);
-            if (!data.jobId || ![running, ...queued, ...latest].some(job => job?.job_id === data.jobId)) return;
+            if (!data.jobId || ![running, view.activity.lane.value?.manual_compaction, ...queued, ...latest].some(job => job?.job_id === data.jobId)) return;
             pendingHandoff = { ...owner, kind: 'consolidation', jobId: data.jobId };
             AdminRouter.go(`/spaces/${encodeURIComponent(view.spaceId)}/consolidation`);
         } else if (data.kind === 'documents' || data.kind === 'archive') {

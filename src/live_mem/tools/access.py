@@ -9,12 +9,12 @@ ou promouvoir un token admin.
 
 from typing import Annotated, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
 
-def register(mcp: FastMCP) -> int:
+def register(mcp: MCPServer) -> int:
     """Enregistre les deux outils cross-cutting LM2-11 (aucun alias tier)."""
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False))

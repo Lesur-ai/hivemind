@@ -368,6 +368,14 @@
       "space_scope_argument": "space_id"
     },
     {
+      "canonical_name": "mid_archive_retry",
+      "aliases": [],
+      "audience": "operator",
+      "minimum_permission": "manage",
+      "operation": "mutation",
+      "space_scope_argument": "space_id"
+    },
+    {
       "canonical_name": "bank_compact",
       "aliases": [],
       "audience": "operator",

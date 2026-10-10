@@ -194,6 +194,34 @@ class TestNoDirectProviderSdkConstruction:
 # --------------------------------------------------------------------------- #
 
 class TestSharedProfileResolution:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "configured_timeout, expected", [(None, 1800), ("600", 600), ("2400", 2400)]
+    )
+    async def test_long_deadline_default_and_override_reach_the_provider(
+        self, monkeypatch, configured_timeout, expected
+    ):
+        from tests.fakes.inference_fakes import gm_inference_runtime
+
+        apply_graph_memory_baseline_env(monkeypatch)
+        monkeypatch.delenv("EXTRACTION_TIMEOUT_SECONDS", raising=False)
+        if configured_timeout is not None:
+            monkeypatch.setenv("EXTRACTION_TIMEOUT_SECONDS", configured_timeout)
+        from mcp_memory.config import Settings
+        from mcp_memory.core import extractor
+
+        settings = Settings(_env_file=None)
+        monkeypatch.setattr(extractor, "get_settings", lambda: settings)
+        with gm_inference_runtime(chat=make_chat_profile(max_output_tokens=32768)) as runtime:
+            complete = AsyncMock()
+            monkeypatch.setattr(runtime.chat_provider(), "complete", complete)
+            service = extractor.ExtractorService()
+            await service._complete([{"role": "user", "content": "Extract a sourced fact."}])
+            request = complete.call_args.args[0]
+            assert request.timeout_seconds == expected
+            assert service._chat_profile.max_output_tokens == 32768
+            assert request.max_output_tokens is None  # The existing profile owns its cap.
+
     def test_core_and_graph_memory_resolve_identical_profiles(self, monkeypatch):
         """The drift this closes: Graph Memory used to carry its own
         ``LLMAAS_*`` defaults (a different chat model, 60000 output tokens,
@@ -1204,7 +1232,7 @@ def _core_app(monkeypatch, inner):
 
     monkeypatch.setattr(core_server, "_reject_weak_bootstrap_key", lambda _key: None)
     monkeypatch.setattr(core_server.settings, "hivemind_mesh_enabled", "false")
-    monkeypatch.setattr(core_server.mcp, "streamable_http_app", lambda: inner)
+    monkeypatch.setattr(core_server.mcp, "streamable_http_app", lambda **_transport: inner)
     return core_server.create_app()
 
 
@@ -1342,7 +1370,7 @@ class TestInferenceLifecycleThroughTheGuard:
         monkeypatch.setattr(gm, "_close_inference_runtime", _release)
         monkeypatch.setattr(gm, "_validate_inference_startup", lambda: None)
         monkeypatch.setattr(gm, "_initialize_graph_document_schema", lambda: None)
-        monkeypatch.setattr(gm.mcp, "streamable_http_app", lambda: _RecordingInnerApp())
+        monkeypatch.setattr(gm.mcp, "streamable_http_app", lambda **_transport: _RecordingInnerApp())
 
         state = await TestInferenceLifecycleThroughTheGuard._uvicorn_startup(
             gm._create_app()
@@ -1379,7 +1407,7 @@ class TestInferenceLifecycleThroughTheGuard:
         )
         monkeypatch.setattr(gm, "_close_llm_singletons", lambda: None)
         monkeypatch.setattr(gm, "_close_inference_runtime", lambda: None)
-        monkeypatch.setattr(gm.mcp, "streamable_http_app", lambda: inner)
+        monkeypatch.setattr(gm.mcp, "streamable_http_app", lambda **_transport: inner)
 
         startup = asyncio.create_task(self._uvicorn_startup(gm._create_app()))
         await schema_entered.wait()
@@ -1413,7 +1441,7 @@ class TestInferenceLifecycleThroughTheGuard:
         monkeypatch.setattr(gm, "_initialize_graph_document_schema", fail_schema)
         monkeypatch.setattr(gm, "_close_llm_singletons", lambda: None)
         monkeypatch.setattr(gm, "_close_inference_runtime", lambda: None)
-        monkeypatch.setattr(gm.mcp, "streamable_http_app", lambda: inner)
+        monkeypatch.setattr(gm.mcp, "streamable_http_app", lambda **_transport: inner)
 
         state = await self._uvicorn_startup(gm._create_app())
 
@@ -1680,7 +1708,7 @@ class TestOneServingWindowPerProcess:
             gm, "_close_inference_runtime", lambda: closes.append("graph-inference")
         )
         monkeypatch.setattr(
-            gm.mcp, "streamable_http_app", lambda: _RecordingInnerApp()
+            gm.mcp, "streamable_http_app", lambda **_transport: _RecordingInnerApp()
         )
         return gm._create_app
 
@@ -2109,13 +2137,16 @@ class TestConsolidatorFailsClosed:
 
         service = object.__new__(ConsolidatorService)
         service._max_tokens = 4096
+        service._context_window = 131072
         service._timeout = 60
         captured = {}
 
         class _Provider:
             async def complete(self, request):
                 captured["max_output_tokens"] = request.max_output_tokens
-                return None
+                from hivemind_inference.records import ChatResult
+                return ChatResult(text="synthetic response", configured_model="synthetic",
+                                  model_evidence="configured_only", finish_reason="stop")
 
         class _Runtime:
             def chat_provider(self):

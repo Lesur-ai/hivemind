@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth import context as auth_context
 from live_mem.core import backup as backup_module
@@ -251,7 +251,7 @@ def wired(monkeypatch: pytest.MonkeyPatch):
 
 
 def _handler(register, name: str):
-    mcp = FastMCP(name=f"lm2-11-{name}")
+    mcp = MCPServer(name=f"lm2-11-{name}")
     register(mcp)
     return mcp._tool_manager._tools[name].fn
 
@@ -1108,7 +1108,7 @@ async def test_asgi_lifespan_retry_reuses_persisted_plaintext(
 def test_delegated_tool_schema_advertises_closed_profiles_and_exact_hash_contract():
     from live_mem.tools.access import register as register_access
 
-    mcp = FastMCP(name="lm2-11-schema")
+    mcp = MCPServer(name="lm2-11-schema")
     register_access(mcp)
     token_schema = mcp._tool_manager._tools["token_create"].parameters
     invite_schema = mcp._tool_manager._tools["space_invite_token"].parameters
@@ -1121,7 +1121,7 @@ def test_delegated_tool_schema_advertises_closed_profiles_and_exact_hash_contrac
     assert "sha256:" in hash_schema["description"]
     assert "64" in hash_schema["description"]
     # No schema regex: malformed hashes must reach the handler's uniform opaque
-    # response instead of leaking a distinct FastMCP validation error.
+    # response instead of leaking a distinct MCPServer validation error.
     assert "pattern" not in hash_schema
 
 
@@ -1129,7 +1129,7 @@ def test_admin_tool_schemas_publish_manage_profiles():
     """Bootstrap/admin clients discover manager creation via list_tools."""
     from live_mem.tools.admin import register as register_admin
 
-    mcp = FastMCP(name="lm2-11-admin-schema")
+    mcp = MCPServer(name="lm2-11-admin-schema")
     register_admin(mcp)
     for tool_name in (
         "admin_create_token",

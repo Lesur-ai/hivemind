@@ -1,7 +1,7 @@
 # 🖥️ Hivemind CLI, Shell & Tests
 
 > Scriptable CLI, interactive shell, and operational test scripts for Hivemind
-> `1.6.0`.
+> `1.6.1`.
 
 🇫🇷 [Version française](README.fr.md)
 
@@ -113,7 +113,7 @@ uv run python scripts/mcp_cli.py live read my-proj                          # Li
 uv run python scripts/mcp_cli.py live search my-proj "keyword"              # Full-text search in notes
 ```
 
-### Bank (11 tools)
+### Bank (12 tools)
 
 ```bash
 uv run python scripts/mcp_cli.py bank list my-proj                          # List bank files
@@ -126,6 +126,7 @@ uv run python scripts/mcp_cli.py bank consolidation-queues                  # La
 uv run python scripts/mcp_cli.py bank stale-spaces                          # 🚨 Spaces ≥5 notes / oldest ≥5 days
 uv run python scripts/mcp_cli.py bank stale-spaces --min-notes 10 --min-age-days 7 --consolidate  # Trigger caller-scoped bulk consolidation
 uv run python scripts/mcp_cli.py bank stale-spaces --consolidate --all-agents  # Explicit global bulk scope (manage/admin)
+uv run python scripts/mcp_cli.py bank archive-retry my-proj PREIMAGE_ID      # Resume an exact paused MID capture (manage)
 uv run python scripts/mcp_cli.py bank compact my-proj                       # Dry-run scan; reported sizes are UTF-8 bytes
 uv run python scripts/mcp_cli.py bank compact my-proj --apply               # DirectLocal-only apply (manage); shared routes refuse
 uv run python scripts/mcp_cli.py bank repair my-proj                        # Dry-run scan (Unicode / parasitic prefixes)
@@ -366,4 +367,4 @@ scripts/
 
 ---
 
-*Hivemind CLI — 1.6.0*
+*Hivemind CLI — 1.6.1*

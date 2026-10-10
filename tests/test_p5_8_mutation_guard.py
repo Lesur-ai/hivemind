@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.core.engines import EngineRegistry, RegistryRefused
 from live_mem.core.hivemind import (
@@ -162,7 +162,7 @@ def _admin_token() -> dict:
 
 
 def _tool(register, name: str):
-    mcp = FastMCP(name="test")
+    mcp = MCPServer(name="test")
     register(mcp)
     tool = mcp._tool_manager._tools[name]
     for attr in ("fn", "func", "handler", "_fn", "run", "callback"):

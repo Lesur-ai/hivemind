@@ -67,6 +67,10 @@ Return ONLY valid JSON:
 """
 
 
+class FrozenOntologyOutputError(ValueError):
+    """Complete output failed the frozen catalogue contract, not transport."""
+
+
 class ExtractorService:
     """
     Service d'extraction via la frontière d'inférence partagée.
@@ -209,15 +213,19 @@ class ExtractorService:
                                  Si None, seuls les 12 types de base sont reconnus.
         """
         try:
-            # Nettoyer le contenu (parfois le LLM ajoute des ```json)
             content = content.strip()
-            if content.startswith("```"):
-                # Trouver le premier { et le dernier }
-                start = content.find("{")
-                end = content.rfind("}") + 1
-                content = content[start:end]
-            
-            data = json.loads(content)
+            if strict:
+                # Construction and frozen-label extraction accept the same
+                # complete framing; never repair/truncate a strict payload.
+                from .ontology_construction import _parse
+                data = _parse(content)
+            else:
+                # Preserve the legacy non-strict extraction fallback.
+                if content.startswith("```"):
+                    start = content.find("{")
+                    end = content.rfind("}") + 1
+                    content = content[start:end]
+                data = json.loads(content)
             if strict:
                 if (type(data) is not dict or type(data.get("entities")) is not list
                         or type(data.get("relations")) is not list):
@@ -269,7 +277,7 @@ class ExtractorService:
             
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as e:
             if strict:
-                raise ValueError("Invalid extraction for frozen ontology") from None
+                raise FrozenOntologyOutputError("Invalid extraction for frozen ontology") from None
             # ADR-0027 : AUCUN fragment de complétion dans les logs. Un JSON
             # syntaxiquement valide peut encore violer le contrat structurel
             # (racine non-objet, collections/scalaires inattendus, validation

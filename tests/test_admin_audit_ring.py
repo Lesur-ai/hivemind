@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth.context import current_token_info
 from live_mem.auth.context import MonoTenantSpaceAllowlistProvider
@@ -48,7 +48,7 @@ def _isolated_ring(monkeypatch):
 
 
 def _admin_tool():
-    mcp = FastMCP(name="test-admin-audit")
+    mcp = MCPServer(name="test-admin-audit")
     assert admin_tools.register(mcp) == 9
     tool = mcp._tool_manager._tools["admin_audit_recent"]
     return tool, tool.fn
@@ -322,7 +322,7 @@ def test_policy_allowed_actions_match_canonical_surface_projection():
 @pytest.mark.asyncio
 async def test_admin_tool_permission_boundary_and_read_only_annotation():
     tool, fn = _admin_tool()
-    assert tool.annotations.readOnlyHint is True
+    assert tool.annotations.read_only_hint is True
 
     missing = await _call_as(fn, None)
     assert missing == {"status": "error", "message": "Authentication required"}

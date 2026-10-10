@@ -194,7 +194,7 @@ func (c *Client) ensureInitialized(ctx context.Context) error {
 			},
 			"clientInfo": map[string]interface{}{
 				"name":    "hivemind-ingest",
-				"version": "1.6.0",
+				"version": "1.6.1",
 			},
 		},
 	}

@@ -953,6 +953,22 @@ def bank_repair_cmd(ctx, space_id, apply, jflag):
     )
 
 
+@bank_grp.command("archive-retry")
+@click.argument("space_id")
+@click.argument("preimage_id")
+@click.option("--json", "-j", "jflag", is_flag=True)
+@click.pass_context
+def bank_archive_retry_cmd(ctx, space_id, preimage_id, jflag):
+    """Resume a MID capture paused after repeated failures (manage).
+
+    Preserves exact retained sources and successful construction calls.
+    Schedules the existing archive worker; does not compact or ingest immediately.
+    Get the exact preimage ID from backup list for this space.
+    """
+    _run_tool(ctx, "mid_archive_retry", {"space_id": space_id, "preimage_id": preimage_id},
+              lambda r: show_success(r["message"]), jflag)
+
+
 @bank_grp.command("compact")
 @click.argument("space_id")
 @click.option("--apply", is_flag=True, help="Actually compact (otherwise dry-run)")

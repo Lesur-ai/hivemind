@@ -16,20 +16,20 @@ Usage dans server.py :
 import json as _json
 import logging
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 _log = logging.getLogger("live_mem.tool_proxy")
 
-# Reference to the FastMCP instance, set during register_all_tools()
-_mcp_ref: FastMCP | None = None
+# Reference to the MCPServer instance, set during register_all_tools()
+_mcp_ref: MCPServer | None = None
 
 
-def register_all_tools(mcp: FastMCP) -> int:
+def register_all_tools(mcp: MCPServer) -> int:
     """
     Enregistre tous les outils MCP depuis les modules de catégorie.
 
     Args:
-        mcp: Instance FastMCP sur laquelle enregistrer les outils
+        mcp: Instance MCPServer sur laquelle enregistrer les outils
 
     Returns:
         Nombre total d'outils enregistrés

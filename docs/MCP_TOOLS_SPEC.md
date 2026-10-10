@@ -3,7 +3,7 @@
 > **Contract revision**: 2.8.0 (independent of the product release version in
 > [`VERSION`](../VERSION)) | **Author**: Hivemind maintainers
 >
-> The live registered MCP tool surface is **72 tools = 59 direct registrations
+> The live registered MCP tool surface is **73 tools = 60 direct registrations
 > + 13 canonical tier aliases**, arranged in 8 categories. 13 canonical
 > `short_*`/`mid_*`/`long_*` aliases are registered and callable as thin,
 > behaviorally-identical re-registrations of their historical `live_*` /
@@ -12,13 +12,13 @@
 > `admin_audit_recent` is a deliberate cross-cutting, admin-gated registration;
 > `token_create` and `space_invite_token` are direct registrations with no
 > alias, and `space_create` requires `manage` permission. The direct
-> `long_ingest`, `long_ingest_async`, `long_ingest_status`, `long_ingest_list`, `long_ingest_cancel`, `long_document_list`, `long_document_get`, `ontology_list`, `ontology_get`, `ontology_validate`, `long_query`, and hidden operator-only `long_reindex` tools
+> `long_ingest`, `long_ingest_async`, `long_ingest_status`, `long_ingest_list`, `long_ingest_cancel`, `long_document_list`, `long_document_get`, `ontology_list`, `ontology_get`, `ontology_validate`, `long_query`, and hidden operator-only `long_reindex` and `mid_archive_retry` tools
 > have no `graph_*` twin.
 >
 > The permission model is the real **4-level hierarchy
 > `admin ⊃ manage ⊃ write ⊃ read`** enforced in `auth/context.py`
 > (`check_write_permission` / `check_manage_permission` /
-> `check_admin_permission`). The permission matrix below covers all 59 direct
+> `check_admin_permission`). The permission matrix below covers all 60 direct
 > tools and flags every destructive / `confirm`-gated tool. See
 > [Rules immutability](#rules-immutability-clarification) for the
 > `space_update_rules` contract. Each tier-mapped tool is annotated with its
@@ -31,16 +31,16 @@
 
 ## Overview
 
-Hivemind exposes **59 direct MCP tools** in 8 categories, plus **13 canonical
+Hivemind exposes **60 direct MCP tools** in 8 categories, plus **13 canonical
 tier aliases**. Historical `live_*`, `bank_*`, and `graph_*` names remain
 registered as compatibility surfaces; they are tool aliases, not the current
 product identity.
-The **live registered surface is 72 = 59 + 13**
-(59 direct registrations + 13
+The **live registered surface is 73 = 60 + 13**
+(60 direct registrations + 13
 `short_*`/`mid_*`/`long_*` aliases). The direct `long_ingest`, `long_ingest_async`,
 `long_ingest_status`, `long_ingest_list`, `long_ingest_cancel`, `long_document_list`,
 `long_document_get`, `ontology_list`, `ontology_get`, `ontology_validate`,
-`long_query`, and `long_reindex` tools, `admin_audit_recent`, `inference_self_test`, and
+`long_query`, `long_reindex`, and `mid_archive_retry` tools, `admin_audit_recent`, `inference_self_test`, and
 `token_create` / `space_invite_token` are all registered directly with no
 alias. Tool
 names are derived 1:1 from the decorated
@@ -53,19 +53,19 @@ Python function name; there are **zero `@mcp.tool(name=...)` overrides** in
 | **Space** (10)  | 10    | Memory space CRUD and bounded invitation           |
 | **Token** (1)   | 1     | Manager-safe non-admin token creation              |
 | **Live** (3)    | 3     | Real-time notes (`short` tier)                     |
-| **Bank** (11)   | 11    | LLM-consolidated Memory Bank (`mid` tier)          |
+| **Bank** (12)   | 12    | LLM-consolidated Memory Bank (`mid` tier)          |
 | **Graph** (16)  | 16    | Bridge to Graph Memory / ontology engine (`long` tier) |
 | **Backup** (5)  | 5     | Backup & restore                                   |
 | **Admin** (9)   | 9     | Token management, maintenance (GC), recent console/auth audit |
 
 Per-category counts match the code: system 4, space 10, token 1, live 3, bank
-11, graph 16, backup 5, admin 9 = **59 direct**. The 13 aliases bring the
-registered total to **72**.
+12, graph 16, backup 5, admin 9 = **60 direct**. The 13 aliases bring the
+registered total to **73**.
 
 ### Registration versus discovery
 
 Registration is the complete compatibility contract; discovery is the compact
-agent-facing projection. The server keeps all **72** names registered and
+agent-facing projection. The server keeps all **73** names registered and
 callable by exact name, while authenticated `tools/list` responses advertise
 only canonical `agent_core` names for the effective request permission:
 
@@ -92,7 +92,7 @@ The `live_*` / `bank_*` / `graph_*` tools map to the public `short` / `mid` /
 canonical `short_*`/`mid_*`/`long_*` names are registered as additive aliases bound to the
 identical implementation function (ADR-0005 "thin re-registration, never a copy").
 Both names are callable today. The historical name always stays callable. 13 tools
-earn a tiered alias; the other 46 direct tools — including `space_*`, `token_*`,
+earn a tiered alias; the other 47 direct tools — including `space_*`, `token_*`,
 `system_*`, `backup_*`, `admin_*`, bank ops/supervision, and direct long tools —
 keep their names only. `long_ingest`, `long_ingest_async`, `long_ingest_status`,
 `long_ingest_list`, `long_ingest_cancel`, `long_document_list`, `long_document_get`,
@@ -1371,7 +1371,13 @@ console. That preview is server-whitelisted, uses synthetic node identifiers,
 omits document URIs/hashes/source paths, and is capped at 160 nodes and 320
 edges. `mid_archive_projection` separately reports retained MID captures awaiting
 LONG indexing: `pending`, `oldest_at`, `oldest_age_seconds`, and a safe `error`
-code or null. These fields come from the local durable backlog even when LONG
+code or null. Additive retry diagnostics are `blocked` (captures paused after
+three invalid-output cycles, or at least three unresolved failed cycles whose
+latest error is `inference_timeout`), `failures` (largest unresolved failure count),
+`next_attempt_at` (earliest unpaused retry, Unix seconds, or null), and
+`rejection_reason` (null or `malformed_json`, `schema_failure`,
+`evidence_failure`, `catalogue_validation`). Queuing/polling alone never resets
+failures; an exact persisted document acknowledgement does. These fields come from the local durable backlog even when LONG
 is unavailable; they do not attest MID commit, rollback, or recovery state.
 
 Captures made before any LONG connection remain unassigned. On the first
@@ -1410,9 +1416,24 @@ original space or LONG destination no longer matches; it never authorizes an
 automatic redirect. `document_unverified` means a job result lacks persisted
 document proof. These records remain visible and retry with capped backoff so
 repairing the original destination/document can resume them. If the first
-catalogue cannot finish, later captures also remain pending and retry; their raw
+catalogue cannot finish, later captures also remain pending. Transport failures
+retry with capped exponential backoff; the fixed `inference_timeout`,
+`inference_rate_limited` and `inference_unavailable` categories remain visible
+in backlog errors without counting as invalid-output cycles. After at least
+three unresolved failed cycles, a latest `inference_timeout` pauses the capture
+so the operator can correct sizing/deadlines before resumption. Rate-limit and
+availability failures keep their existing backoff. Three `invalid_output`
+construction or frozen-ingestion cycles also pause the capture; their raw
 sources are retained. Inspect `long_status.mid_archive_projection`, correct the
-repairable source or route problem, then let the worker retry. Actual loss or
+repairable source or route problem, then let the worker retry. For a paused capture, use the hidden manage-only
+operator tool `mid_archive_retry {space_id, preimage_id}` (CLI:
+`bank archive-retry SPACE PREIMAGE_ID`). The exact preimage ID is listed by
+`backup_list`. Resume checks the live space/destination, DirectLocal route and
+all source hashes under the lifecycle lock; it resets retry counters only,
+preserves admitted construction calls, and schedules the existing worker.
+Repeated resume of an unpaused capture is a no-op. It cannot retarget, recapture,
+purge or fix a mismatched profile/checkpoint. Disabling `MID_AUTO_ARCHIVE`
+still prevents execution. Actual loss or
 external corruption of local state is different: an orphaned namespace whose
 catalogue is not frozen requires restoration of the original binding/checkpoint
 from a verified backup, or operator investigation. Backoff alone cannot repair
@@ -1620,7 +1641,7 @@ until a successful resumed freeze or explicit deletion of that memory; there is
 no time-based expiry. The memory deletion path removes it with the Memory node.
 Cancelling the running construction job is cooperative: it stops before the next
 provider attempt or freeze, after preserving any completed call. An in-flight
-call may run until its configured extraction timeout (600 seconds by default),
+call may run until its configured extraction timeout (1,800 seconds by default in 1.6.1),
 plus at most the next 8-second backoff. The cancelled job ends as `cancelled`;
 remaining jobs needing its unfinished catalogue fail with a resubmission code. An incomplete construction
 is tied to the resolved inference profile. Changing that profile or the initial
@@ -2441,7 +2462,7 @@ two statements are not contradictory once the permission tier is named. There is
 
 ---
 
-## Complete Matrix — Tools × Permissions (all 59 direct tools)
+## Complete Matrix — Tools × Permissions (all 60 direct tools)
 
 Permission is the **minimum** scope that satisfies the call; higher scopes inherit
 it (`admin ⊃ manage ⊃ write ⊃ read`). "Dest." = `destructiveHint=True`. "Confirm" =
@@ -2511,6 +2532,7 @@ name registered (additive, live, never a rename of the historical name);
 | 57 | `long_ingest_cancel` | | | ✅ | | | | cooperative cancellation request | — (net-new) |
 | 58 | `long_document_list` | | ✅ | | | | | list indexed documents in long memory | — (net-new) |
 | 59 | `long_document_get` | | ✅ | | | | | get indexed document metadata and content | — (net-new) |
+| 60 | `mid_archive_retry` | | | | ✅ | (✅) | | explicit resume of an exact paused retained capture | — (hidden operator maintenance) |
 
 * `bank_consolidate`: `write` is sufficient to consolidate your own notes
 (`agent=caller`, omitted, or `null`). `manage`/`admin` is required to consolidate

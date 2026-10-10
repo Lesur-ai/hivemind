@@ -20,7 +20,7 @@ by regular MCP discovery.
 
 ## Complete registered surface
 
-59 registry entries cover 72 registered names.
+60 registry entries cover 73 registered names.
 
 | Canonical name | Historical aliases | Audience | Minimum profile | Operation | Space-scope argument |
 |---|---|---|---|---|---|
@@ -55,6 +55,7 @@ by regular MCP discovery.
 | `mid_write` | `bank_write` | `operator` | `manage` | `mutation` | `space_id` |
 | `mid_delete` | `bank_delete` | `operator` | `manage` | `mutation` | `space_id` |
 | `bank_repair` | — | `operator` | `manage` | `mutation` | `space_id` |
+| `mid_archive_retry` | — | `operator` | `manage` | `mutation` | `space_id` |
 | `bank_compact` | — | `operator` | `manage` | `mutation` | `space_id` |
 | `long_connect` | `graph_connect` | `operator` | `write` | `mutation` | `space_id` |
 | `long_disconnect` | `graph_disconnect` | `operator` | `write` | `mutation` | `space_id` |

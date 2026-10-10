@@ -85,6 +85,55 @@ alias, successor, or fallback. Relevant upstream references:
 - [Gemini logs policy](https://ai.google.dev/gemini-api/docs/logs-policy)
 - [Gemini API terms](https://ai.google.dev/gemini-api/terms)
 
+## MID generation freshness and response-cache diagnostics
+
+In 1.6.1, MID consolidation, compaction and maintenance chat calls append a
+fresh opaque request nonce to the last user message. This protects new jobs
+and the existing corrective generation from gateways that replay cached,
+unusable completions. It applies at the MID chat seam with the configured
+provider, without changing model, temperature, retry policy or public
+configuration. Original source messages stay unchanged, and the output-budget
+heuristic includes the suffix for normal consolidation. Compaction and dedup
+retain their stricter pre-suffix admission estimate; their boundary allowance
+does not include metadata, and a provider context refusal still fails closed.
+A returned nonce is rejected before any MID application; it is never removed from
+a plan to make that plan acceptable.
+
+The common prompt prefix stays identical, allowing engine KV-prefix reuse
+where available. This is distinct from replaying a complete cached response;
+KV reuse and hosted cache bypass still require provider-specific validation.
+LONG extraction/construction and embeddings do not receive the MID suffix.
+
+OpenAI-compatible chat response logs report only `cache=hit`, `cache=miss` or
+`cache=unknown`, based on the response's `x-cache` header. Other header values,
+cache fingerprints, prompts and reasoning are not logged. A stopped response
+with null content, nonblank reasoning and zero visible completion tokens is
+diagnosed as `reasoning_only`; it remains `invalid_response`, never a usable
+completion. Tool-call responses and provider refusals retain their existing
+classification. A cache hit's reported usage must not be interpreted as fresh
+generation or billing evidence.
+
+### Structured normal consolidation output
+
+Normal SHORT→MID consolidation requests `response_format: json_schema` with
+`strict: true` when the chat profile's identity is `openai-compatible`. The
+server-owned schema covers the existing plan's operations and note dispositions
+on the initial call and its single correction. It contains no bank text or
+dynamic target addresses. The legacy `LLMAAS_*` configuration resolves to this
+generic profile and therefore also sends the schema.
+
+This boundary uses the configured profile identity, not endpoint capability
+detection. Other identities, including an explicit `cloud-temple` profile, keep
+their existing generation mode even if they use the OpenAI-compatible adapter.
+Compaction and text merging do not request this normal-plan schema.
+
+The endpoint must support this schema request. A refusal stops the batch without
+a silent free-form fallback and preserves its source notes. Acceptance by a
+gateway alone does not prove that it enforces the grammar. Strict parsing,
+completion and complete pre-write checks still decide whether the plan may be
+applied; structural conformance does not prove summary accuracy. The nonce,
+existing correction and transient-retry limits remain in effect.
+
 ## Strict migration from `LLMAAS_*`
 
 The legacy family remains supported through the 1.x line, but it is one

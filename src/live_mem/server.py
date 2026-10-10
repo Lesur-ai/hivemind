@@ -3,7 +3,7 @@
 Serveur MCP Hivemind — Point d'entrée principal.
 
 Ce fichier :
-1. Crée l'instance FastMCP
+1. Crée l'instance MCPServer
 2. Enregistre les outils MCP via tools/ (modulaire, par catégorie)
 3. Assemble la chaîne de middlewares ASGI
 4. Démarre le serveur Uvicorn
@@ -36,7 +36,8 @@ from hivemind_inference.asgi_lifespan import (
 from hivemind_inference.process_window import ProcessWindowGate
 
 from .config import get_settings, redact_proxy_secrets
-from .tools.exposure import HivemindFastMCP
+from .tools.exposure import HivemindMCPServer
+from .auth.context import bind_mcp_request_identity
 
 # ─────────────────────────────────────────────────────────────
 # Configuration du logging (stderr uniquement, JSON structuré)
@@ -110,21 +111,22 @@ def _reject_weak_bootstrap_key(key: str) -> None:
 
 
 # =============================================================================
-# Instance FastMCP
+# Instance MCPServer
 # =============================================================================
 
 settings = get_settings()
 
 
 @asynccontextmanager
-async def _lifespan(app: HivemindFastMCP) -> AsyncIterator[None]:
+async def _lifespan(app: HivemindMCPServer) -> AsyncIterator[None]:
     """
-    Gère les préflights propres à chaque session MCP.
+    Gère les préflights MCP au démarrage du manager de transport.
 
     Les transports partagés du processus — consolidateur ET runtime d'inférence
-    partagé (PROXY_URL inclus) — ne sont ni validés ni fermés ici : FastMCP
-    entre ce contexte une fois par SESSION (`StreamableHTTPSessionManager`
-    appelle `Server.run()` par session). Y attacher un singleton de process
+    partagé (PROXY_URL inclus) — ne sont ni validés ni fermés ici : MCPServer
+    SDK 2 entre ce contexte une fois au démarrage du manager HTTP. Les
+    singletons du processus restent dans le guard ASGI extérieur : auparavant,
+    attacher leur fermeture au lifespan par session de SDK 1
     faisait qu'une déconnexion client fermait les transports pour tout le
     monde. Ce cycle de vie appartient au guard ASGI extérieur, une fois au
     démarrage et une fois au shutdown du processus.
@@ -244,16 +246,12 @@ def _report_lifespan(line: str) -> None:
 _process_window = ProcessWindowGate(service="Hivemind")
 
 
-mcp = HivemindFastMCP(
+mcp = HivemindMCPServer(
     name=settings.mcp_server_name,
-    host=settings.mcp_server_host,
-    port=settings.mcp_server_port,
+    version=_read_version(),
     lifespan=_lifespan,
+    middleware=[bind_mcp_request_identity],
 )
-# FastMCP 1.27.0 does not expose a constructor-level version argument.
-# Without this explicit low-level assignment, MCP initialize/serverInfo.version
-# falls back to the SDK package version ("mcp"), not Hivemind's VERSION file.
-mcp._mcp_server.version = _read_version()
 
 # =============================================================================
 # Enregistrement des outils — délégué aux modules tools/
@@ -448,7 +446,10 @@ def create_app():
 
     # L'app de base est le Streamable HTTP handler du SDK MCP
     # Endpoint unique : POST/GET /mcp (remplace /sse + /messages)
-    app = mcp.streamable_http_app()
+    app = mcp.streamable_http_app(
+        host=settings.mcp_server_host,
+        max_request_body_size=settings.mcp_request_max_bytes,
+    )
 
     # Empiler les middlewares (dernier ajouté = premier exécuté)
     # Ordre : RequestId → Auth → Metrics → Audit → Logging → MCPRequestLimit → ResponseLimit → Static → MCP

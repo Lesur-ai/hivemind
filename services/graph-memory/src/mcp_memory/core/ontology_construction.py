@@ -79,8 +79,15 @@ EXTRACT = (
 CORRECTION = " Return a valid JSON response matching the supplied schema and exact source evidence."
 
 
+REJECTION_REASONS = {"malformed_json", "schema_failure", "evidence_failure", "catalogue_validation"}
+
+
 class OntologyConstructionError(ValueError):
     """Value-free error code safe for an operational status response."""
+
+    def __init__(self, code, *, rejection_reason=None):
+        super().__init__(code)
+        self.rejection_reason = rejection_reason if rejection_reason in REJECTION_REASONS else None
 
 
 class _Split(Exception):
@@ -122,6 +129,35 @@ _EXTRACTION_SCHEMA = _object({"assertions": {"type": "array", "items": _object({
 })}})
 
 
+# The canonical payload above owns exact quotes and remains the legacy checkpoint
+# contract. This wire transport requests only references; reconstruction is local.
+EXTRACT_REFERENCES = EXTRACT.replace(
+    "Return evidence as {passage_id, quote}; quote must copy the ENTIRE unit exactly.",
+    "Return evidence as {passage_id} only. Do not return quote or copy source text; "
+    "the program restores the ENTIRE referenced unit exactly.",
+)
+_REFERENCE_SCHEMA = deepcopy(_EXTRACTION_SCHEMA)
+_REFERENCE_SCHEMA["properties"]["assertions"]["items"]["properties"]["evidence"]["items"] = _object({"passage_id": _STRING})
+
+
+def _restore_references(payload, units):
+    try:
+        jsonschema.validate(payload, _REFERENCE_SCHEMA)
+    except jsonschema.ValidationError:
+        raise OntologyConstructionError("invalid_extraction", rejection_reason="schema_failure") from None
+    # Validate every reference before attaching even one source quote.
+    known = {p["passage_id"]: p for p in units}
+    for row in payload["assertions"]:
+        ids = [e["passage_id"] for e in row["evidence"]]
+        if (len(set(ids)) != len(ids) or not set(ids) <= known.keys()
+                or ids != sorted(ids, key=lambda k: known[k]["text_start"])):
+            raise OntologyConstructionError("invalid_extraction", rejection_reason="evidence_failure")
+    for row in payload["assertions"]:
+        for evidence in row["evidence"]:
+            evidence["quote"] = known[evidence["passage_id"]]["text"]
+    return _validate_facts(payload, units)
+
+
 def _validate_catalogue(payload, replacing=False):
     schema = deepcopy(_CATALOGUE_SCHEMA)
     if replacing:
@@ -144,7 +180,7 @@ def _validate_catalogue(payload, replacing=False):
         if not verdict["valid"]:
             raise ValueError
     except (ValueError, TypeError, KeyError, jsonschema.ValidationError):
-        raise OntologyConstructionError("invalid_catalogue") from None
+        raise OntologyConstructionError("invalid_catalogue", rejection_reason="catalogue_validation") from None
     return deepcopy(catalogue)
 
 
@@ -247,7 +283,10 @@ def _passage_units(source):
 
 def _validate_facts(payload, units):
     try:
-        jsonschema.validate(payload, _EXTRACTION_SCHEMA)
+        try:
+            jsonschema.validate(payload, _EXTRACTION_SCHEMA)
+        except jsonschema.ValidationError:
+            raise OntologyConstructionError("invalid_extraction", rejection_reason="schema_failure") from None
         known = {p["passage_id"]: p for p in units}
         known_texts = {p["text"] for p in units}
         for row in payload["assertions"]:
@@ -257,8 +296,10 @@ def _validate_facts(payload, units):
                     or any(e["quote"] != known[e["passage_id"]]["text"] and e["quote"] in known_texts
                            for e in row["evidence"])):
                 raise ValueError
-    except (ValueError, KeyError, TypeError, jsonschema.ValidationError):
-        raise OntologyConstructionError("invalid_extraction") from None
+    except OntologyConstructionError:
+        raise
+    except (ValueError, KeyError, TypeError):
+        raise OntologyConstructionError("invalid_extraction", rejection_reason="evidence_failure") from None
     # All references are valid. Canonicalize the owned payload before invoke
     # hashes/persists it; source text, not the model's recopy, defines the quote.
     for row in payload["assertions"]:
@@ -276,10 +317,20 @@ def _message_bytes(messages):
     return len(_json([{"role": m.role, "content": m.content} for m in messages]).encode())
 
 
+# Bump this binding whenever _parse changes its accepted response framing.
+OUTPUT_FRAMING = "strict-json-or-single-json-fence-complete-through-eof-v2"
+
+
 def _parse(raw):
-    # Accept only a complete JSON fence; the enclosed payload stays strict.
+    # Normalize one JSON-labelled block, never salvage partial JSON or choose
+    # between blocks. An unclosed fence requires strict JSON through EOF; trailing
+    # prose or missing JSON delimiters still fail in json.loads below.
     if isinstance(raw, str):
-        fenced = re.fullmatch(r"\s*```json\r?\n(.*?)\r?\n```\s*", raw, re.DOTALL)
+        fenced = None
+        if raw.count("```") == 2:
+            fenced = re.fullmatch(r".*?```json\r?\n(.*?)\r?\n```(?:[ \t]*\r?\n|[ \t]*\Z).*?", raw, re.DOTALL)
+        elif raw.count("```") == 1:
+            fenced = re.fullmatch(r".*?```json\r?\n(.*)", raw, re.DOTALL)
         if fenced:
             raw = fenced[1]
     def pairs(items):
@@ -338,7 +389,29 @@ async def construct_ontology(
     except (KeyError, TypeError, ValueError, OverflowError):
         raise OntologyConstructionError("checkpoint_attempts_invalid") from None
 
-    async def invoke(instruction, data, schema, validate):
+    # A transport upgrade cannot give a corrupt admission ledger a new binding.
+    try:
+        for key, saved in checkpoint["calls"].items():
+            if (not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{64}", key)
+                    or not isinstance(saved, dict)
+                    or saved["payload_sha256"] != _digest(saved["payload"])):
+                raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise OntologyConstructionError("checkpoint_admitted_output_invalid") from None
+
+    # Explicit compatible transport upgrade: the legacy semantic/source binding
+    # has passed unchanged. Canonical admissions are not rewritten or re-keyed.
+    # Every later transport change is independently bound before any inference.
+    bindings = {"extraction_transport_sha256": _digest([EXTRACT_REFERENCES, _REFERENCE_SCHEMA]),
+                "output_framing_sha256": _digest(OUTPUT_FRAMING)}
+    for name, expected in bindings.items():
+        if name in checkpoint and checkpoint[name] != expected:
+            raise OntologyConstructionError("checkpoint_binding_mismatch")
+    upgrades = {name: expected for name, expected in bindings.items() if name not in checkpoint}
+    if upgrades:
+        await persist(deepcopy(checkpoint) | upgrades)
+
+    async def invoke(instruction, data, schema, validate, *, wire=None):
         messages = _messages(instruction, data, schema)
         key = _digest([{"role": m.role, "content": m.content} for m in messages])
         if key in checkpoint["calls"]:
@@ -346,7 +419,11 @@ async def construct_ontology(
             try:
                 if saved["payload_sha256"] != _digest(saved["payload"]):
                     raise ValueError
-                return validate(deepcopy(saved["payload"]))
+                payload = deepcopy(saved["payload"])
+                value = validate(payload)
+                if _digest(payload) != saved["payload_sha256"]:
+                    raise ValueError
+                return value
             except (KeyError, TypeError, ValueError):
                 raise OntologyConstructionError("checkpoint_admitted_output_invalid") from None
         if key in checkpoint["splits"]:
@@ -356,7 +433,8 @@ async def construct_ontology(
         for attempt in range(4):
             if attempt:
                 await asyncio.sleep((2, 4, 8)[attempt - 1])
-            request = _messages(instruction + (CORRECTION if corrected else ""), data, schema)
+            wire_instruction, wire_schema, wire_validate = wire or (instruction, schema, validate)
+            request = _messages(wire_instruction + (CORRECTION if corrected else ""), data, wire_schema)
             if _message_bytes(request) > input_budget_bytes:
                 raise _Split("physical_input_limit")
             started = time.monotonic()
@@ -382,13 +460,19 @@ async def construct_ontology(
                     failure = OntologyConstructionError("inference_incomplete")
                 else:
                     try:
-                        payload = _parse(response.text)
-                        # Validation may canonicalize this owned payload only after all checks pass.
-                        value = validate(payload)
-                    except (ValueError, TypeError):
+                        try:
+                            payload = _parse(response.text)
+                        except (ValueError, TypeError):
+                            raise OntologyConstructionError("invalid_output", rejection_reason="malformed_json") from None
+                        # Only validated references can restore the owned quotes.
+                        value = wire_validate(payload)
+                    except (ValueError, TypeError) as exc:
+                        reason = getattr(exc, "rejection_reason", None)
+                        receipt["rejection_reason"] = reason if reason in REJECTION_REASONS else "schema_failure"
                         retry = not corrected
                         corrected = True
-                        failure = None if retry else OntologyConstructionError("invalid_output")
+                        failure = None if retry else OntologyConstructionError(
+                            "invalid_output", rejection_reason=receipt["rejection_reason"])
                 receipt["status"] = "admitted" if value is not None else "split" if split else "rejected"
             except InferenceError as exc:
                 receipt["status"] = "inference_" + exc.category
@@ -415,7 +499,8 @@ async def construct_ontology(
     async def extract(source, units):
         data = {"source_id": source["id"], "passages": units}
         try:
-            return await invoke(EXTRACT, data, _EXTRACTION_SCHEMA, lambda p: _validate_facts(p, units))
+            return await invoke(EXTRACT, data, _EXTRACTION_SCHEMA, lambda p: _validate_facts(p, units),
+                                wire=(EXTRACT_REFERENCES, _REFERENCE_SCHEMA, lambda p: _restore_references(p, units)))
         except _Split as exc:
             if len(units) < 2:
                 raise OntologyConstructionError(str(exc)) from None

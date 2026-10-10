@@ -3,7 +3,7 @@
 Tests unitaires et d'intégration pour le catalogue documentaire et l'index SHA-256 (Issue #464).
 
 Vérifie :
-1. Enregistrement FastMCP des 2 nouveaux outils :
+1. Enregistrement MCPServer des 2 nouveaux outils :
    - long_document_list
    - long_document_get
 2. Gouvernance Auth & Contrôle d'accès :
@@ -16,7 +16,7 @@ Vérifie :
    - Rejet direct-dispatch des types invalides pour include_content (ex: "false", 123).
 4. Délégations LongEngine et GraphBridge :
    - Délégations fidèles de LongEngine vers GraphBridge.
-   - Alignement avec les outils FastMCP Graph Memory :
+   - Alignement avec les outils MCPServer Graph Memory :
      * document_list(memory_id, limit, offset, status, query)
      * document_get(memory_id, document_id, source_path, include_content)
    - Résolution unlinked space en fallback sur runtime embarqué pour la lecture.
@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from live_mem.tools import register_all_tools, call_tool_direct
 from live_mem.auth.context import current_token_info
 from live_mem.core.engines import get_engine_registry
@@ -134,7 +134,7 @@ def mock_gm_env(monkeypatch):
 
 @pytest.fixture
 def mcp_server():
-    mcp = FastMCP("test-doc-catalog-mcp")
+    mcp = MCPServer("test-doc-catalog-mcp")
     register_all_tools(mcp)
     return mcp
 
@@ -149,7 +149,7 @@ def _token(name="test", perms=None, spaces=None):
 
 
 # ─────────────────────────────────────────────────────────────
-# 1. Enregistrement FastMCP
+# 1. Enregistrement MCPServer
 # ─────────────────────────────────────────────────────────────
 
 def test_document_catalog_tools_registered(mcp_server):
@@ -531,7 +531,7 @@ async def test_graph_bridge_get_document_atomic_resolution():
 
 
 # ─────────────────────────────────────────────────────────────
-# 5. FastMCP Execution End-to-End avec Token Autorisé
+# 5. MCPServer Execution End-to-End avec Token Autorisé
 # ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

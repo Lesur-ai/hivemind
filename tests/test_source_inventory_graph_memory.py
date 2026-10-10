@@ -21,6 +21,7 @@ offline and deterministic while locking the Dockerfile's narrow COPY surface.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -166,7 +167,7 @@ def test_graph_runtime_direct_dependencies_are_exact_pins():
     requirements = (_SVC / "requirements.txt").read_text(encoding="utf-8")
     assert not _mutable_requirement_lines(requirements)
 
-    mutated = requirements.replace("mcp==1.28.1", "mcp>=1.8.0", 1)
+    mutated = re.sub(r"(?m)^mcp==[^\n]+$", "mcp>=1.8.0", requirements, count=1)
     assert _mutable_requirement_lines(mutated) == ["mcp>=1.8.0"]
 
 
@@ -196,13 +197,68 @@ def test_graph_runtime_lock_matches_every_direct_pin():
     assert not _direct_lock_mismatches(requirements, lock)
 
     # Both input-only and lock-only updates must fail, including extras/casing.
-    for name, version in (("boto3", "1.43.88"), ("uvicorn[standard]", "0.51.0"), ("PyYAML", "6.0.3")):
+    for name, version in (("boto3", "1.43.108"), ("uvicorn[standard]", "0.54.0"), ("PyYAML", "6.0.3")):
         mutated = requirements.replace(f"{name}=={version}", f"{name}==0.0.0", 1)
         assert mutated != requirements
         assert _direct_lock_mismatches(mutated, lock)
     assert _direct_lock_mismatches("Py_Yaml[extra]==6.0.3", "py-yaml==0.0.0") == ["py-yaml"]
     assert _direct_lock_mismatches("pypdf==6.17.0", "") == ["pypdf"]
     assert _direct_lock_mismatches("pypdf==6.17.0", "pypdf==6.17.0\npypdf==0.0.0") == ["pypdf"]
+
+
+# SDK 2 preserves the 4 MiB default unless its HTTP factory receives the
+# explicit envelope. Factory wiring and real HTTP boundary tests supersede
+# the SDK 1-only FastMCP-constructor static heuristic from #689.
+_GRAPH_REQUEST_ENVELOPE_BYTES = 75 * 1024 * 1024
+
+
+def _static_int(node: ast.AST) -> int | None:
+    """Evaluate integer literals combined with + and *, nothing else."""
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mult)):
+        left, right = _static_int(node.left), _static_int(node.right)
+        if left is not None and right is not None:
+            return left + right if isinstance(node.op, ast.Add) else left * right
+    return None
+
+
+def test_graph_request_envelope_covers_the_largest_ingested_document():
+    example = (_REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^MCP_REQUEST_MAX_BYTES=(\d+)$", example)[1] == str(
+        _GRAPH_REQUEST_ENVELOPE_BYTES
+    )
+    validators = (_SVC / "src" / "mcp_memory" / "core" / "validators.py").read_text(
+        encoding="utf-8"
+    )
+    largest = next(
+        _static_int(node.value)
+        for node in ast.parse(validators).body
+        if isinstance(node, ast.Assign)
+        and any(getattr(t, "id", None) == "MAX_INGEST_SIZE_BYTES" for t in node.targets)
+    )
+    assert largest is not None
+    assert 4 * -(-largest // 3) < _GRAPH_REQUEST_ENVELOPE_BYTES
+
+
+def test_graph_mcp_pin_cannot_silently_cap_ingestion_request_bodies(monkeypatch):
+    """SDK 2 moves sizing to the HTTP factory; real wire limits are also
+    exercised in test_mcp2_transport.py, including 4 MiB regression mutants."""
+    from tests.fakes.inference_fakes import apply_graph_memory_baseline_env
+    apply_graph_memory_baseline_env(monkeypatch)
+    from mcp_memory import server
+
+    captured = {}
+    original = server.mcp.streamable_http_app
+
+    def capture(**transport):
+        captured.update(transport)
+        return original(**transport)
+
+    monkeypatch.setattr(server.mcp, "streamable_http_app", capture)
+    server._create_app()
+    assert captured["max_request_body_size"] == _GRAPH_REQUEST_ENVELOPE_BYTES
+    assert server.settings.mcp_request_max_bytes == _GRAPH_REQUEST_ENVELOPE_BYTES
 
 
 # pyproject.toml documents these dev pins as the embedded Graph runtime's own.
@@ -251,12 +307,12 @@ def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
 
     dockerfile = (_SVC / "Dockerfile").read_text(encoding="utf-8")
     assert (
-        "FROM python:3.14.6-slim-bookworm@sha256:"
-        "4c92ffcde4dd6f1ff72a24518f49fd4990b27134987dfa31a733badde66df9f8"
+        "FROM python:3.14.8-slim-bookworm@sha256:"
+        "48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83"
     ) in dockerfile
     assert "aiohttp==3.14.3" in lock
-    assert "boto3==1.43.88" in lock
-    assert "botocore==1.43.88" in lock
+    assert "boto3==1.43.108" in lock
+    assert "botocore==1.43.109" in lock
     assert "--require-hashes -r requirements.lock" in dockerfile
     assert "pip install --no-cache-dir --upgrade pip" not in dockerfile
     assert "apt-get" not in dockerfile

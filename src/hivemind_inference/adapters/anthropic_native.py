@@ -225,6 +225,9 @@ class AnthropicChatProvider(_AnthropicBase):
 
     async def complete(self, request: ChatRequest) -> ChatResult:
         profile = self._profile
+        if request.response_schema_json is not None:
+            # Never silently discard a generation constraint not wired here.
+            raise self._direct_error("unsupported", correlation_id=request.correlation_id)
         effective_max = profile.max_output_tokens
         if request.max_output_tokens is not None:
             if request.max_output_tokens > profile.max_output_tokens:

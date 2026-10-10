@@ -19,18 +19,18 @@ import time
 from ..config import redact_proxy_secrets as _redact_proxy_secrets
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 _logger = logging.getLogger("live_mem.system")
 
 
-def register(mcp: FastMCP) -> int:
+def register(mcp: MCPServer) -> int:
     """
     Enregistre les outils system sur l'instance MCP.
 
     Args:
-        mcp: Instance FastMCP
+        mcp: Instance MCPServer
 
     Returns:
         Nombre d'outils enregistrés (4)
@@ -140,16 +140,16 @@ def register(mcp: FastMCP) -> int:
         # Use the same permission projection as ``tools/list`` without losing
         # the authenticated ``/api/tool`` proxy path, which intentionally calls
         # handlers outside the MCP SDK request context. A lightweight plain
-        # FastMCP test instance still lists its local registrations.
+        # MCPServer test instance still lists its local registrations.
         from .exposure import (
-            HivemindFastMCP,
+            HivemindMCPServer,
             discovery_names_for_token,
         )
 
         registered = {
             tool.name: tool for tool in mcp._tool_manager.list_tools()
         }
-        if isinstance(mcp, HivemindFastMCP):
+        if isinstance(mcp, HivemindMCPServer):
             from ..auth.context import get_effective_token_info
 
             exposed_names = discovery_names_for_token(

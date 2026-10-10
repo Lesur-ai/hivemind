@@ -192,9 +192,9 @@ async def test_home_hivemind_sidecar_reads_are_counted_but_never_displayed() -> 
 ])
 @pytest.mark.parametrize('options,counts', [({}, True), ({'include_counts': False}, False)])
 async def test_dashboard_space_list_tool_keeps_auth_filter_and_default(credential, allowed, options, counts):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from live_mem.tools.space import register
-    mcp = FastMCP('dashboard-metadata-test')
+    mcp = MCPServer('dashboard-metadata-test')
     register(mcp)
     handler = mcp._tool_manager.get_tool('space_list')
     assert handler.parameters['properties']['include_counts']['default'] is True

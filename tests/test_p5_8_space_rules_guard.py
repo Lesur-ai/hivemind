@@ -184,7 +184,7 @@ async def test_update_rules_hivemind_fails_closed_no_write() -> None:
 async def test_update_rules_hivemind_via_tool_surfaces_safe_error() -> None:
     """Through the MCP tool wrapper, the fail-closed StagedWriteNotImplemented is
     caught and returned as a safe_error (status=error) — not a crash."""
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from live_mem.auth.context import current_token_info
     from live_mem.tools.space import register as register_space_tools
@@ -194,7 +194,7 @@ async def test_update_rules_hivemind_via_tool_surfaces_safe_error() -> None:
     storage.objects["hive-a/_rules.md"] = "# old rules\n"
 
     def _tool(name):
-        mcp = FastMCP(name="test")
+        mcp = MCPServer(name="test")
         register_space_tools(mcp)
         t = mcp._tool_manager._tools[name]
         for attr in ("fn", "func", "handler", "_fn", "run", "callback"):
@@ -312,7 +312,7 @@ async def test_update_meta_hivemind_via_tool_surfaces_safe_error() -> None:
     """Through the MCP ``space_update`` tool wrapper, the fail-closed
     StagedWriteNotImplemented is caught and returned as a safe_error
     (status=error) — not a crash — and nothing is written."""
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from live_mem.auth.context import current_token_info
     from live_mem.tools.space import register as register_space_tools
@@ -324,7 +324,7 @@ async def test_update_meta_hivemind_via_tool_surfaces_safe_error() -> None:
     )
 
     def _tool(name):
-        mcp = FastMCP(name="test")
+        mcp = MCPServer(name="test")
         register_space_tools(mcp)
         t = mcp._tool_manager._tools[name]
         for attr in ("fn", "func", "handler", "_fn", "run", "callback"):

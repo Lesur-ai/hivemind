@@ -36,7 +36,7 @@ import json
 import logging
 from typing import Annotated, Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -129,7 +129,7 @@ def _emit_long_ingest_volatile_optin_audit(
         pass
 
 
-def register(mcp: FastMCP) -> int:
+def register(mcp: MCPServer) -> int:
     """
     Enregistre les 7 outils graph sur l'instance MCP.
 
@@ -139,7 +139,7 @@ def register(mcp: FastMCP) -> int:
     jumeau graph_*).
 
     Args:
-        mcp: Instance FastMCP
+        mcp: Instance MCPServer
 
     Returns:
         Nombre d'outils enregistrés (7)

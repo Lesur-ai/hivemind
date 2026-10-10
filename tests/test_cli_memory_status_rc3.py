@@ -530,3 +530,37 @@ def test_embedded_unbound_message_and_shell_error_follow_server_state(monkeypatc
     output = capsys.readouterr().out
     assert "Access denied" in output
     assert "Consolidation Job" not in output
+
+
+@pytest.mark.parametrize("command", [["space", "status", "alpha"], ["graph", "status", "alpha"]])
+@pytest.mark.parametrize("category", ["invalid_output", "inference_timeout"])
+def test_archive_pause_is_visible_and_retry_schedules_once(monkeypatch, command, category):
+    replies = _space_replies(pending=1)
+    replies['graph_status']['mid_archive_projection'].update(
+        blocked=1, error=category, rejection_reason='malformed_json' if category == 'invalid_output' else None, next_attempt_at=None)
+    shown = _run(monkeypatch, command, replies)
+    assert shown.exit_code == 0 and 'PAUSED' in shown.output  # Derived indexing is not MID recovery.
+    assert category in shown.output and 'bank archive-retry' in shown.output
+    if category == 'invalid_output':
+        assert 'malformed_json' in shown.output
+    else:
+        assert 'after repeated failures' in shown.output
+        assert 'invalid ontology output' not in shown.output
+    retry = _run(monkeypatch, ['bank', 'archive-retry', 'alpha', 'alpha/capture', '--json'], {
+        'mid_archive_retry': {'status':'ok', 'resumed':True, 'message':'Archive retry scheduled.'}})
+    assert retry.exit_code == 0 and json.loads(retry.output)['resumed'] is True
+    assert FakeClient.calls == [('mid_archive_retry', {'space_id':'alpha', 'preimage_id':'alpha/capture'})]
+
+
+@pytest.mark.parametrize("command", [["space", "status", "alpha"], ["graph", "status", "alpha"]])
+@pytest.mark.parametrize("deadline", [1791385200, 1e100])
+def test_archive_retry_deadline_display_is_local_and_does_not_crash(monkeypatch, command, deadline):
+    replies = _space_replies(pending=1)
+    replies["graph_status"]["mid_archive_projection"].update(
+        error="projection_unavailable", next_attempt_at=deadline)
+    shown = _run(monkeypatch, command, replies)
+    assert shown.exit_code == 0 and "Next automatic retry" in shown.output
+    if deadline == 1791385200:
+        assert "UTC" in shown.output
+    else:
+        assert "1e+100" in shown.output

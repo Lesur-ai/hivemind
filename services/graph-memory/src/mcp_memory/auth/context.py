@@ -29,6 +29,18 @@ current_auth: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.Con
 DENY_ALL = object()
 
 
+async def bind_mcp_auth(context, call_next):
+    """Use the current validated HTTP identity, never a legacy session copy."""
+    request = context.request
+    scope = getattr(request, "scope", {})
+    auth = scope.get("auth") if isinstance(scope, dict) else None
+    token = current_auth.set(auth if isinstance(auth, dict) else None)
+    try:
+        return await call_next(context)
+    finally:
+        current_auth.reset(token)
+
+
 def check_memory_access(memory_id: str) -> Optional[dict]:
     """
     Vérifie si le contexte d'auth actuel autorise l'accès à une mémoire.

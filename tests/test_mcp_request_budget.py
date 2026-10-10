@@ -205,7 +205,7 @@ async def test_tiny_chunks_retain_only_bounded_buffer_not_chunk_metadata():
 
 
 def test_real_sdk_accepts_exact_limit_initialize_and_streams_sse():
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
     from starlette.testclient import TestClient
 
     limit = 64 * 1024
@@ -216,8 +216,8 @@ def test_real_sdk_accepts_exact_limit_initialize_and_streams_sse():
     body = json.dumps(payload).encode()
     # JSON trailing whitespace is legal and exercises the complete wire cap.
     body += b" " * (limit - len(body))
-    mcp = FastMCP("budget-fixture", stateless_http=True)
-    app = MCPRequestLimitMiddleware(mcp.streamable_http_app(), max_bytes=limit)
+    mcp = MCPServer("budget-fixture")
+    app = MCPRequestLimitMiddleware(mcp.streamable_http_app(stateless_http=True), max_bytes=limit)
     headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
     with TestClient(app, base_url="http://localhost:8002") as client:
         response = client.post("/mcp", content=body, headers=headers)

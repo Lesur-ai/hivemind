@@ -16,7 +16,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import Tool as MCPTool
 
 
@@ -294,6 +294,13 @@ TOOL_EXPOSURES: tuple[ToolExposure, ...] = (
         space_scope_argument="space_id",
     ),
     _entry(
+        "mid_archive_retry",
+        audience=_OPERATOR,
+        permission=_MANAGE,
+        operation=_M,
+        space_scope_argument="space_id",
+    ),
+    _entry(
         "bank_compact",
         audience=_OPERATOR,
         permission=_MANAGE,
@@ -526,6 +533,7 @@ _FROZEN_OPERATOR_MINIMUMS: Mapping[str, ToolPermission] = MappingProxyType(
         "mid_delete": _MANAGE,
         "bank_repair": _MANAGE,
         "bank_compact": _MANAGE,
+        "mid_archive_retry": _MANAGE,
         "long_connect": _WRITE,
         "long_disconnect": _WRITE,
         "long_reindex": _MANAGE,
@@ -601,6 +609,7 @@ _FROZEN_SPACE_SCOPE_ARGUMENTS: Mapping[str, str] = MappingProxyType(
         "mid_delete": "space_id",
         "bank_repair": "space_id",
         "bank_compact": "space_id",
+        "mid_archive_retry": "space_id",
         "long_connect": "space_id",
         "long_disconnect": "space_id",
         "long_reindex": "space_id",
@@ -764,7 +773,7 @@ def exposure_manifest(
 
 
 def validate_tool_exposure_registry(
-    mcp: FastMCP,
+    mcp: MCPServer,
     *,
     registry: Sequence[ToolExposure] = TOOL_EXPOSURES,
     declared_registration_count: int | None = None,
@@ -777,7 +786,7 @@ def validate_tool_exposure_registry(
 
     # Do not restate global registration counts here. The checks below preserve
     # relative consistency across frozen classification, alias mapping, unique
-    # ownership, and live FastMCP names. The canonical test fixture owns the
+    # ownership, and live MCPServer names. The canonical test fixture owns the
     # deliberately test-tier-only absolute cardinality pin.
     entries = tuple(registry)
     owners: dict[str, str] = {}
@@ -915,7 +924,7 @@ def validate_tool_exposure_registry(
     )
     for entry in entries:
         canonical = tools[entry.canonical_name]
-        readonly = getattr(canonical.annotations, "readOnlyHint", None)
+        readonly = getattr(canonical.annotations, "read_only_hint", None)
         if entry.operation is ToolOperation.READ and readonly is not True:
             raise RuntimeError(
                 f"{entry.canonical_name}: registry says read but handler is not readOnly"
@@ -945,10 +954,10 @@ def validate_tool_exposure_registry(
                     )
 
 
-class HivemindFastMCP(FastMCP):
-    """FastMCP whose low-level list handler is permission-aware by construction.
+class HivemindMCPServer(MCPServer):
+    """MCPServer whose low-level list handler is permission-aware by construction.
 
-    ``FastMCP.__init__`` binds ``self.list_tools`` while setting up protocol
+    ``MCPServer.__init__`` binds ``self.list_tools`` while setting up protocol
     handlers.  Overriding the method on the class (instead of monkey-patching an
     instance later) guarantees the low-level ``tools/list`` handler receives the
     Hivemind projection.
@@ -960,7 +969,7 @@ class HivemindFastMCP(FastMCP):
         complete = await super().list_tools()
         by_name = {tool.name: tool for tool in complete}
         if len(by_name) != len(complete):
-            raise RuntimeError("duplicate tool names in FastMCP list_tools result")
+            raise RuntimeError("duplicate tool names in MCPServer list_tools result")
         has_mcp_context, token_info = get_mcp_request_token_info()
         if not has_mcp_context or token_info is None:
             return []

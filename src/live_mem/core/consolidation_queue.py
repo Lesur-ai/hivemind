@@ -18,7 +18,7 @@ import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ..config import get_settings
 from .consolidator import (
@@ -69,7 +69,7 @@ class ConsolidationJob:
     agent: str
     requested_by: str
     requested_at: str = field(default_factory=_now)
-    queued_at: str = field(default_factory=_now)
+    queued_at: str | None = field(default_factory=_now)
     started_at: str | None = None
     finished_at: str | None = None
     status: str = "queued"
@@ -77,6 +77,7 @@ class ConsolidationJob:
     error: str | None = None
     guarantee: str = QUEUE_GUARANTEE
     progress: dict[str, Any] = field(default_factory=dict)
+    kind: str = "consolidation"
 
 
 class ConsolidationQueueService:
@@ -93,6 +94,55 @@ class ConsolidationQueueService:
         self._workers: dict[str, asyncio.Task] = {}
         self._jobs: dict[str, ConsolidationJob] = {}
         self._max_history = max_history
+
+    async def observe_manual_compaction(
+        self, space_id: str, requested_by: str, operation: Callable[[], Awaitable[dict]]
+    ) -> dict:
+        """Observe the locked caller's work; never enqueue or spawn it.
+
+        The tool owns authorization, routing and the existing space lock. This
+        record is only bounded process-local visibility, not mutation authority.
+        """
+        job = ConsolidationJob(
+            job_id=f"compact_{uuid.uuid4().hex}", space_id=space_id, agent="",
+            requested_by=requested_by, queued_at=None, started_at=_now(),
+            status="running", kind="manual_compaction", progress={"phase": "compacting"},
+        )
+        async with self._state_lock:
+            self._jobs[job.job_id] = job
+            self._trim_history_locked()
+        try:
+            result = await operation()
+            if type(result) is not dict:
+                raise TypeError("Invalid compaction report")
+        except BaseException:
+            # A cancelled/disconnected caller can interrupt recovery. Never
+            # retain exception text (which may contain a prompt or credential).
+            # No await: these terminal writes are atomic on the event loop.
+            # Waiting for the lock here would let cancellation orphan a record.
+            job.status = "failed"
+            job.finished_at = _now()
+            job.progress = {"phase": "failed"}
+            job.error = "Manual compaction was interrupted. Check recovery before retrying."
+            job.result = {"status": "partial", "failed_phase": "unknown",
+                          "failure_reason": "compaction_interrupted", "recovery_required": True}
+            self._trim_history_locked()
+            raise
+        # Likewise, successful/report-based finalization must never suspend.
+        # Aggregate diagnostics only: no Markdown, model output or per-file
+        # completion content is copied into the job-history read surface.
+        job.result = {key: value for key, value in result.items() if key in {
+            "status", "failed_phase", "failure_reason", "preimage_id", "recovery_required",
+            "rollback_outcome", "apply_may_have_mutated", "files_applied_before_failure",
+            "files_total", "files_over_limit", "total_size_before", "total_size_after",
+        } and type(value) in (str, int, bool)}
+        job.status = "succeeded" if result.get("status") == "ok" else "failed"
+        job.finished_at = _now()
+        job.progress = {"phase": "done" if job.status == "succeeded" else "failed"}
+        if job.status == "failed":
+            job.error = "Manual compaction failed. Inspect its result before retrying."
+        self._trim_history_locked()
+        return result
 
     async def enqueue(self, space_id: str, agent: str, requested_by: str) -> dict:
         """
@@ -173,8 +223,12 @@ class ConsolidationQueueService:
             latest = [
                 self._job_payload(job)
                 for job in reversed(self._jobs.values())
-                if job.space_id == space_id
+                if job.space_id == space_id and job.kind == "consolidation"
             ][:10]
+            manual_compaction = next((
+                self._job_payload(job) for job in reversed(self._jobs.values())
+                if job.space_id == space_id and job.kind == "manual_compaction"
+            ), None)
             if active:
                 lane_state = "running"
             elif queued_ids:
@@ -194,6 +248,7 @@ class ConsolidationQueueService:
                 "queued_job_ids": queued_ids,
                 "queued_jobs": queued_jobs,
                 "latest_jobs": latest,
+                "manual_compaction": manual_compaction,
                 "service_config": {
                     "batch_size": get_settings().consolidation_batch_size,
                 },
@@ -413,6 +468,8 @@ class ConsolidationQueueService:
         self._trim_history_locked()
 
     def _queue_position_locked(self, job: ConsolidationJob) -> int:
+        if job.kind == "manual_compaction":
+            return 1 if job.status == "running" else 0
         if self._active_jobs.get(job.space_id) == job.job_id:
             return 1
         queue = self._queues.get(job.space_id, ())
@@ -442,7 +499,12 @@ class ConsolidationQueueService:
             "next_action": NO_AUTO_POLLING_NEXT_ACTION,
             "polling": dict(NO_AUTO_POLLING_CONTRACT),
         }
-        if job.status == "running":
+        if job.kind == "manual_compaction":
+            payload.update({"kind": job.kind, "scope": "manual_compaction",
+                            "scope_label": "Manual compaction"})
+            if job.status == "running":
+                payload["message"] = "Manual compaction is running in the original request. No percentage is reported."
+        elif job.status == "running":
             payload["message"] = (
                 "Async consolidation job accepted and running for "
                 f"space '{job.space_id}'. Do not wait for completion by "

@@ -14,7 +14,7 @@ requires-python = ">=3.11"
 # LM2-27 fix : httpx-sse retiré (introuvable dans le code source, surface
 # d'attaque inutile depuis la migration Streamable HTTP).
 dependencies = [
-    "mcp[cli]>=1.28.1",       # CVE-2026-32871/52869/52870/59950 — fixé en 1.28.1
+    "mcp[cli]==2.3.0",       # Shared SDK version with the embedded Graph runtime.
     "PyJWT>=2.15.1",          # CVE-2026-102274/101918; restore PyJWT library padding compatibility.
     "urllib3>=2.8.0",         # CVE-2026-97687/97688/97689; also protects unlocked installs.
     "uvicorn>=0.32.0",
@@ -24,6 +24,7 @@ dependencies = [
     "rich>=13.0",
     "prompt-toolkit>=3.0",
     "httpx>=0.28",
+    "httpx2==2.13.1",         # Owned MCP 2 transport clients; inference remains on httpx.
     "boto3>=1.40",
     "openai>=1.50",
     "python-dotenv>=1.0",

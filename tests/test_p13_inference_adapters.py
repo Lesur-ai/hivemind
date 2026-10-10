@@ -2834,15 +2834,49 @@ class TestGeminiUnindexedEmbeddings:
                 )
         assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
 
-    async def test_batch_retry_wait_must_fit_original_deadline(self):
-        async with InferenceEmulator([{"body": gemini_embedding_payload()}, self._transient_429("1")]) as emulator:
+    async def test_batch_retry_wait_must_fit_original_deadline(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import hivemind_inference.retry as retry
+
+        provider = build_embedding_provider(
+            embedding_profile("http://localhost:1234/v1", provider="gemini")
+        )
+        now = [0.0]
+        requests = []
+
+        async def wire(method, path, **kwargs):
+            requests.append(kwargs)
+            assert method == "POST" and path == "/embeddings"
+            if len(requests) == 1:
+                # Spend most of the shared budget without racing CI scheduling
+                # or HTTP client initialization against a 200 ms wall clock.
+                now[0] = 4.5
+                return 200, {}, json.dumps(gemini_embedding_payload()).encode()
+            assert len(requests) == 2, "must not retry or start the third input"
+            failure = self._transient_429("1")
+            return 429, {"retry-after": "1"}, json.dumps(failure["body"]).encode()
+
+        async def forbidden_sleep(delay):
+            pytest.fail("retry delay must not start outside the original budget")
+
+        clock = SimpleNamespace(monotonic=lambda: now[0])
+        monkeypatch.setattr(openai_compatible, "time", clock)
+        monkeypatch.setattr(retry, "time", clock)
+        monkeypatch.setattr(retry, "asyncio", SimpleNamespace(
+            **{**vars(asyncio), "sleep": forbidden_sleep}
+        ))
+        monkeypatch.setattr(provider, "_request", wire)
+        try:
             with pytest.raises(InferenceError) as exc:
-                await embed_with(
-                    embedding_profile(emulator.v1_url, provider="gemini"),
-                    EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=0.2),
+                await provider.embed(
+                    EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=5),
                 )
+        finally:
+            await provider.aclose()
         assert exc.value.category == "rate_limited"
-        assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
+        assert [r["json_body"]["input"] for r in requests] == [["a"], ["b"]]
+        assert [r["timeout"] for r in requests] == [5, 0.5]
 
     @pytest.mark.parametrize("counts,expected", [
         ((10**18, 10**18), None),

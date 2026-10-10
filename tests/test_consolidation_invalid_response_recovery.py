@@ -76,7 +76,13 @@ async def test_invalid_http200_recovers_before_any_write_and_continues(
     assert all(note not in storage.objects for note in notes)
     bank = storage.objects[f"{SPACE}/bank/facts.md"]
     assert bank.count("- first batch") == bank.count("- next batch") == 1
-    assert requests[1]["messages"][:-1] == requests[0]["messages"]
+    # The corrective context retains the original logical messages; each
+    # generation adds its own fresh wire-only request metadata suffix.
+    initial_context = [dict(message) for message in requests[0]["messages"]]
+    initial_context[-1]["content"] = initial_context[-1]["content"].rsplit(
+        "\n\nRequest metadata", 1,
+    )[0]
+    assert requests[1]["messages"][:-1] == initial_context
     assert requests[1]["model"] == requests[0]["model"]
     assert "invalid_normal_provider_response" in requests[1]["messages"][-1]["content"]
     assert "PRIVATE_REASONING_NOT_A_PLAN" not in json.dumps(requests)

@@ -42,6 +42,7 @@ _SAFE_PROVIDER_FAILURE_DIAGNOSTICS = frozenset(
         "invalid_choices",
         "invalid_message",
         "invalid_content",
+        "reasoning_only",
     }
 )
 

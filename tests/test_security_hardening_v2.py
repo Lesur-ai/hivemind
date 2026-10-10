@@ -934,8 +934,8 @@ class TestLM2_26_DependencyBounds:
         return PYPROJECT.read_text(encoding="utf-8")
 
     def test_mcp_requires_127_or_later(self, pyproject_content):
-        """CVE-2026-32871 (path traversal FastMCP) corrigé en 1.27.0."""
-        m = re.search(r'"mcp\[cli\]>=(\d+\.\d+\.\d+)"', pyproject_content)
+        """CVE-2026-32871 (path traversal MCPServer) corrigé en 1.27.0."""
+        m = re.search(r'"mcp\[cli\](?:>=|==)(\d+\.\d+\.\d+)"', pyproject_content)
         assert m, "Borne mcp[cli] introuvable"
         version_str = m.group(1)
         major, minor, _patch = (int(x) for x in version_str.split("."))

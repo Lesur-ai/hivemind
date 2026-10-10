@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth.context import current_token_info
 from live_mem.core.engines import RegistryRefused
@@ -22,7 +22,7 @@ from live_mem.tools.admin import register as register_admin_tools
 
 
 def _registered_gc_tool():
-    mcp = FastMCP(name="test-admin-gc-contract")
+    mcp = MCPServer(name="test-admin-gc-contract")
     register_admin_tools(mcp)
     tool = mcp._tool_manager._tools["admin_gc_notes"]
     for attr in ("fn", "func", "handler", "_fn", "run", "callback"):

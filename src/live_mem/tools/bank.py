@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Outils MCP — Catégorie Bank (11 outils).
+Outils MCP — Catégorie Bank (12 outils).
 
 Memory Bank consolidée : lire, lister, consolider via LLM, compacter,
 réparer, écrire et supprimer manuellement.
@@ -17,6 +17,7 @@ Permissions :
     - bank_repair      🔧 (manage)  — Répare les noms de fichiers corrompus par le LLM
     - bank_write       🔧 (manage)  — Écrit/remplace un fichier bank directement
     - bank_delete      🔧 (manage)  — Supprime un fichier bank
+    - mid_archive_retry 🔧 (manage) — Reprend une capture MID exacte en pause
 
 La consolidation est l'opération qui transforme les notes live en
 fichiers bank structurés. `bank_consolidate` place un job dans une file
@@ -31,7 +32,7 @@ import re
 from datetime import datetime, timezone
 from typing import Annotated
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -143,15 +144,15 @@ def _validate_bank_filename(filename: str) -> dict | None:
     return None
 
 
-def register(mcp: FastMCP) -> int:
+def register(mcp: MCPServer) -> int:
     """
-    Enregistre les 11 outils bank sur l'instance MCP.
+    Enregistre les 12 outils bank sur l'instance MCP.
 
     Args:
-        mcp: Instance FastMCP
+        mcp: Instance MCPServer
 
     Returns:
-        Nombre d'outils enregistrés (11)
+        Nombre d'outils enregistrés (12)
     """
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
@@ -518,10 +519,10 @@ def register(mcp: FastMCP) -> int:
         ],
     ) -> dict:
         """
-        Read the current status of a process-local consolidation job.
+        Read a process-local consolidation or observed manual compaction job.
 
         Args:
-            job_id: Identifier returned by ``mid_consolidate``.
+            job_id: Identifier from ``mid_consolidate`` or a queue summary.
 
         Returns:
             Job status and, when complete, its result or error.
@@ -1395,7 +1396,13 @@ def register(mcp: FastMCP) -> int:
                         # intact, so its fallback is a partial with phase
                         # ``unknown``.
                         mutation_path_entered = True
-                        return await engine.compact_bank(space_id, dry_run=False)
+                        from ..auth.context import get_effective_token_info
+                        from ..core.consolidation_queue import get_consolidation_queue
+                        token_info = get_effective_token_info() or {}
+                        return await get_consolidation_queue().observe_manual_compaction(
+                            space_id, token_info.get("client_name", ""),
+                            lambda: engine.compact_bank(space_id, dry_run=False),
+                        )
             else:
                 # Dry-run : pas besoin de lock (lecture seule). READ-ONLY scan —
                 # not routed through resolve_sink (reads-stay).
@@ -1451,4 +1458,29 @@ def register(mcp: FastMCP) -> int:
                 mutation_path_entered=mutation_path_entered,
             )
 
-    return 11  # Nombre d'outils enregistrés
+    @mcp.tool(
+        description="Resume a retained MID capture paused after repeated invalid output or inference timeouts.",
+        annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True),
+    )
+    async def mid_archive_retry(
+        space_id: Annotated[str, Field(description="Space owning the retained capture")],
+        preimage_id: Annotated[str, Field(description="Exact retained preimage ID, including the space prefix")],
+    ) -> dict:
+        """Manage-only DirectLocal retry; preserves sources, target and admitted calls."""
+        from ..auth.context import check_access, check_manage_permission
+        from ..core.mid_archive import ERRORS
+        from ..core.mid_archive_projection import MidArchiveProjector
+        try:
+            access_err = check_access(space_id)
+            if access_err:
+                return access_err
+            manage_err = check_manage_permission()
+            if manage_err:
+                return manage_err
+            return await MidArchiveProjector().retry_capture(space_id, preimage_id)
+        except Exception as exc:
+            code = str(exc) if isinstance(exc, ValueError) and str(exc) in ERRORS else 'projection_unavailable'
+            return {'status': 'error', 'failure_reason': code,
+                    'message': 'Archive retry refused; retained capture was not discarded or redirected.'}
+
+    return 12  # Nombre d'outils enregistrés

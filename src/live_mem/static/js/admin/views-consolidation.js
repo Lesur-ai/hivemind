@@ -35,6 +35,7 @@
 
     function laneActive(lane) {
         return !!(lane && (lane.running_job || (typeof lane.queued_count === 'number' && lane.queued_count > 0)
+            || lane.manual_compaction?.status === 'running'
             || (Array.isArray(lane.queued_jobs) && lane.queued_jobs.length)));
     }
 
@@ -75,7 +76,7 @@
         const inspector = state.inspector;
         if (inspectorCurrent(inspector)) {
             const jobs = scopedItems(state.data && state.data.lanes).flatMap(lane =>
-                [lane.running_job, ...(Array.isArray(lane.queued_jobs) ? lane.queued_jobs : []),
+                [lane.running_job, lane.manual_compaction, ...(Array.isArray(lane.queued_jobs) ? lane.queued_jobs : []),
                     ...(Array.isArray(lane.latest_jobs) ? lane.latest_jobs : [])]);
             const embedded = lanesRead && jobs.find(job => job && job.job_id === inspector.id);
             if (inspector.manual || (lanesRead && detailActive() && !embedded)) {
@@ -325,6 +326,7 @@
         // Active registry entries win over duplicate/inconsistent history.
         lanes.forEach(lane => {
             add(lane.running_job, lane.space_id, true);
+            add(lane.manual_compaction, lane.space_id, false);
             (Array.isArray(lane.queued_jobs) ? lane.queued_jobs : []).forEach(job => add(job, lane.space_id, true));
         });
         lanes.forEach(lane => (Array.isArray(lane.latest_jobs) ? lane.latest_jobs : []).forEach(job => add(job, lane.space_id, false)));
@@ -431,6 +433,16 @@
             return `<div class="consol-nothing"><span class="micro-label">Nothing to do</span>${serverMessage(result.message)}</div>`;
         }
         const rows = [
+            ['Files total', result.files_total],
+            ['Files above threshold', result.files_over_limit],
+            ['UTF-8 bytes before', result.total_size_before],
+            ['UTF-8 bytes after', result.total_size_after],
+            ['Preimage', result.preimage_id],
+            ['Recovery required', result.recovery_required],
+            ['Failed phase', result.failed_phase],
+            ['Rollback outcome', result.rollback_outcome],
+            ['Apply may have mutated', result.apply_may_have_mutated],
+            ['Files applied before failure', result.files_applied_before_failure],
             ['Notes total', result.notes_total],
             ['Notes processed', result.notes_processed],
             ['Notes declared useless', result.notes_discarded_count],
@@ -480,10 +492,10 @@
         else if (qp >= 2) posLine = statusDot('warn', `Position ${qp} in queue`);
         let statusBlock = '';
         if (job.status === 'succeeded') statusBlock = renderResultMetrics(job.result) + renderBankSizeAdvisory(job.result) + renderAutoCompaction(job.result);
-        else if (job.status === 'failed') statusBlock = `<div class="state-error" role="alert">${icon('alert')}<div><div class="micro-label">Failed</div>${serverMessage(job.error)}</div></div>${renderResultMetrics(job.result)}${renderBankSizeAdvisory(job.result)}${renderAutoCompaction(job.result)}`;
+        else if (job.status === 'failed') statusBlock = `<div class="state state-error" role="alert">${icon('alert')}<div><div class="micro-label">Failed</div>${serverMessage(job.error)}</div></div>${renderResultMetrics(job.result)}${renderBankSizeAdvisory(job.result)}${renderAutoCompaction(job.result)}`;
         else if (job.message) statusBlock = serverMessage(job.message);
         return `<div class="consol-jobinspect">
-            ${progressBar(job.progress)}
+            ${job.kind === 'manual_compaction' && !['running', 'queued'].includes(job.status) ? '' : progressBar(job.progress)}
             <div class="consol-jobmeta">${meta.join('')}${posLine ? `<div class="consol-jobmeta-row">${posLine}</div>` : ''}</div>
             ${statusBlock}
         </div>`;

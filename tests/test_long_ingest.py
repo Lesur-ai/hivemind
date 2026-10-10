@@ -25,7 +25,7 @@ emits a structured ``long_ingest_volatile_optin`` audit event (reusing the P4-8
 ``tools/graph.py`` audit pattern on ``logging.getLogger("live_mem.audit")``).
 This path NEVER imports or calls the commit path (negative-import AST test).
 
-This suite drives the REAL tool functions (extracted from a real FastMCP built by
+This suite drives the REAL tool functions (extracted from a real MCPServer built by
 ``tools.graph.register``) over the same deterministic seam the P4-4 / P4-8 suites
 use: a real :class:`LongEngine` wrapping a real :class:`GraphBridgeService` wired
 to a :class:`FakeGraphTransport`, over an in-memory :class:`FakeStorage`. NO
@@ -47,7 +47,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth.context import current_token_info
 from live_mem.core.graph_bridge import GraphBridgeService
@@ -149,9 +149,9 @@ def _wire(storage: "FakeStorage", **factory_kwargs):
 
 
 def _tool_fn(name: str):
-    """Extract a real tool function from a freshly-registered graph FastMCP
+    """Extract a real tool function from a freshly-registered graph MCPServer
     (the tool body carries the mode dispatch, permission gates, and audit emit)."""
-    mcp = FastMCP(name="test-long-ingest")
+    mcp = MCPServer(name="test-long-ingest")
     graph_tools.register(mcp)
     return mcp._tool_manager._tools[name].fn
 
@@ -177,7 +177,7 @@ _DOC_B = {"source_path": "docs/incident-2031.md", "content": "postmortem body"}
 
 
 def _build_full():
-    mcp = FastMCP(name="test")
+    mcp = MCPServer(name="test")
     register_all_tools(mcp)
     return mcp
 
@@ -200,7 +200,7 @@ def test_new_long_tools_are_not_aliases() -> None:
 
 def test_graph_register_returns_sixteen() -> None:
     """The graph category registers the legacy four plus twelve direct long/ontology/catalog tools."""
-    mcp = FastMCP(name="test-graph-count")
+    mcp = MCPServer(name="test-graph-count")
     n = graph_tools.register(mcp)
     assert n == 16
     names = set(mcp._tool_manager._tools)
@@ -479,11 +479,11 @@ async def test_long_query_returns_memory_query_results() -> None:
 
 def test_long_query_is_read_only_annotation() -> None:
     """long_query carries readOnlyHint=True (the contract: a thin read tool)."""
-    mcp = FastMCP(name="test-ro")
+    mcp = MCPServer(name="test-ro")
     graph_tools.register(mcp)
     tool = mcp._tool_manager._tools["long_query"]
     assert tool.annotations is not None
-    assert tool.annotations.readOnlyHint is True
+    assert tool.annotations.read_only_hint is True
 
 
 # =============================================================================

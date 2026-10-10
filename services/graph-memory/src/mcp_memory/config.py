@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     mcp_server_host: str = "0.0.0.0"
     mcp_server_debug: bool = False
     mcp_server_name: str = "mcp-memory"
+    mcp_request_max_bytes: int = Field(default=75 * 1024 * 1024, ge=1)
     
     # =========================================================================
     # Admin / Auth
@@ -208,7 +209,7 @@ class Settings(BaseSettings):
     # Limites et timeouts
     # =========================================================================
     max_document_size_mb: int = 50
-    extraction_timeout_seconds: int = 600  # 10 min par appel LLM (gros docs avec chain-of-thought)
+    extraction_timeout_seconds: int = 1800  # 30 min par appel LLM; surcharge .env conservée
     s3_upload_timeout_seconds: int = 60
     neo4j_query_timeout_seconds: int = 30
 

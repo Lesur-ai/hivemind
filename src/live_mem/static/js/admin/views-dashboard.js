@@ -365,7 +365,11 @@
 
     function _activityOutcome(job, partial, label) {
         const result = job.result && typeof job.result === 'object' ? job.result : null;
-        const state = job.status === 'failed' ? 'Consolidation failed'
+        const state = job.kind === 'manual_compaction'
+            ? (job.status === 'running' ? 'Manual compaction in progress'
+                : job.status === 'failed' ? 'Manual compaction failed'
+                    : job.status === 'succeeded' ? 'Manual compaction completed' : 'Manual compaction status unavailable')
+            : job.status === 'failed' ? 'Consolidation failed'
             : job.status === 'queued' ? 'Waiting for consolidation to start'
                 : job.status === 'running' ? 'Consolidation in progress'
                     : job.status === 'succeeded' ? (partial ? 'Consolidation result incomplete' : 'Consolidation completed')
@@ -380,6 +384,7 @@
                 summary.push(`<p class="dash-job-result body-small">${result.batches_completed} of ${result.batches_total} batches reported completed</p>`);
             }
         }
+        if (job.kind === 'manual_compaction' && result?.recovery_required === true) summary.push(`<p class="body-small">${statusDot('error', 'Recovery required')}</p>`);
         if (job.status === 'succeeded' && !partial && result && Number.isFinite(result.notes_processed) && Number.isFinite(result.notes_total)) {
             const notes = result.notes_total === 0 ? 'No notes to process'
                 : `${result.notes_processed} of ${result.notes_total} notes processed`;
@@ -462,7 +467,7 @@
         if (!_inspectorCurrent(view)) return;
         const inspector = view.inspector;
         if (!['running', 'queued'].includes(inspector.job.status)) return;
-        const match = !error && view.data && view.data.lanes.flatMap(lane => [lane.running_job, ...(lane.queued_jobs || []), ...(lane.latest_jobs || [])].filter(Boolean).map(job => ({ ...job, space_id: lane.space_id })))
+        const match = !error && view.data && view.data.lanes.flatMap(lane => [lane.running_job, lane.manual_compaction, ...(lane.queued_jobs || []), ...(lane.latest_jobs || [])].filter(Boolean).map(job => ({ ...job, space_id: lane.space_id })))
             .find(job => job.job_id === inspector.job.job_id && job.space_id === inspector.job.space_id);
         if (match) {
             inspector.job = match; inspector.lastSuccess = view.lastSuccess;

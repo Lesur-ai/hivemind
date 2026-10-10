@@ -12,7 +12,7 @@ from typing import Optional
 
 import pytest
 from click.testing import CliRunner
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem import server as live_mem_server
 from live_mem.tools import graph as graph_tools
@@ -38,7 +38,7 @@ def _read(relative: str) -> str:
 
 
 def _system_handler(name: str):
-    mcp = FastMCP(name="p9-system-contract")
+    mcp = MCPServer(name="p9-system-contract")
     assert system_tools.register(mcp) == 4
     return mcp._tool_manager._tools[name].fn
 
@@ -119,7 +119,7 @@ def test_long_query_discloses_its_embedding_provider_dependency() -> None:
 
 
 def test_long_query_registered_schema_discloses_embedding_without_chat() -> None:
-    mcp = FastMCP(name="p9-long-query-contract")
+    mcp = MCPServer(name="p9-long-query-contract")
     assert graph_tools.register(mcp) == 16
     tool = mcp._tool_manager._tools["long_query"]
     schema_text = str(tool.description) + str(tool.parameters)

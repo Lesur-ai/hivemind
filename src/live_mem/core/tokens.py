@@ -371,7 +371,7 @@ class TokenService:
         if clean_name == INTERNAL_LONG_TOKEN_NAME:
             return {"status": "error", "message": "Reserved token name"}
 
-        # Frontière fermée jusque dans le service : FastMCP impose déjà
+        # Frontière fermée jusque dans le service : MCPServer impose déjà
         # le Literal, mais aucun appel interne ne doit pouvoir contourner la
         # grammaire canonique via espaces, réordonnancement ou doublons.
         perm_list = DELEGATED_PERMISSION_PROFILES.get(permissions)

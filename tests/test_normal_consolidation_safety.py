@@ -83,7 +83,7 @@ class Completion:
         self.retry_policies: list[str] = []
         self.messages: list[list[dict]] = []
 
-    async def __call__(self, messages, output_budget, *, retry_policy="bounded"):
+    async def __call__(self, messages, output_budget, *, retry_policy="bounded", normal_json=False):
         self.calls += 1
         self.output_budgets.append(output_budget)
         self.retry_policies.append(retry_policy)
@@ -784,7 +784,7 @@ async def test_auto_created_edit_aggregates_operation_counts_consistently(
                     {
                         "type": "add_section",
                         "heading": "## Architecture",
-                        "content": "Microservices with FastMCP.",
+                        "content": "Microservices with MCPServer.",
                         "reason": "Add architecture.",
                         "notes": [1],
                     },
@@ -5730,7 +5730,7 @@ async def test_multibatch_corrective_completion_resolves_unclassified_notes(
 
     call_count = 0
 
-    async def mock_complete(messages, output_budget, *, retry_policy="bounded"):
+    async def mock_complete(messages, output_budget, *, retry_policy="bounded", normal_json=False):
         nonlocal call_count
         call_count += 1
         resp = b1_out if call_count == 1 else b2_out

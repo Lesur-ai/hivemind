@@ -19,6 +19,132 @@ No changes recorded yet.
 
 ---
 
+## [1.6.1] — 2026-10-10
+
+Hivemind 1.6.1 is a maintenance release. MID archive retries preserve failure
+state and pause after repeated invalid output or unresolved inference timeouts;
+a paused capture requires an operator to resume it. The new manage-only
+`mid_archive_retry` tool and `bank archive-retry` CLI command preserve its sources
+and successful construction calls. Extraction now requests passage references,
+with compatible transport/framing bindings persisted in construction checkpoints.
+The Portal shows manual compaction while it runs, and the Python runtime,
+embedded Graph Memory dependencies and release tooling pins are updated.
+Retry metadata and consolidation `manual_compaction` status are additive;
+retained source captures and the authority of MID storage are preserved.
+
+**Release identity.** Hivemind now reports runtime version `1.6.1`.
+
+### Dependencies
+
+- The Hivemind and Graph Memory images move from CPython 3.14.6 to 3.14.8
+  (`python:3.14.8-slim-bookworm`, pinned by multi-arch digest). CI runs the same
+  interpreter.
+- Embedded Graph Memory runtime: starlette 1.7.0, uvicorn 0.54.0, boto3 1.43.108,
+  cryptography 50.0.2, click 8.5.0, mcp 2.3.0 and openai 2.54.0. The
+  hash-locked resolution is regenerated with them.
+- Core and embedded Graph migrate together to MCP Python SDK 2.3.0
+  (`MCPServer`). Streamable HTTP keeps supported legacy clients and also
+  serves the modern protocol. The CLI and LONG bridge use owned HTTPX2
+  transport clients; inference/datastore clients remain on HTTPX. Fresh
+  request-scoped permissions, tool names/aliases and retained source data
+  are preserved. Both SDK transports explicitly accept the existing 75 MiB
+  wire-envelope limit; decoded documents remain bounded to 50 MiB (#683).
+  The OpenAI Python SDK stays on 2.x in this release.
+  Auth-store migration and internal LONG credential registration now run once
+  at HTTP app startup rather than per MCP session. A failed preflight refuses
+  process startup, including transient storage failures; Graph continues to
+  validate the LONG credential on every request. Python clients retain SDK 1's
+  unbounded SSE response sizing for large backup/export replies, with existing
+  timeouts. HTTPX2 uses OS certificate trust by default; explicit
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` remain honored by both clients, while the
+  internal LONG bridge still ignores environment proxies.
+- Release and CI workflow actions: astral-sh/setup-uv 10.2.0,
+  docker/setup-buildx-action 4.4.1, docker/build-push-action 7.4.0 and
+  docker/setup-qemu-action 4.4.0.
+- Admin console browser tests: Playwright 1.63.0.
+
+### Added
+
+- Manage-only `mid_archive_retry(space_id, preimage_id)` and CLI
+  `bank archive-retry SPACE PREIMAGE_ID` for an exact paused MID capture.
+  Resume verifies the current identity, pinned destination, DirectLocal route
+  and retained source hashes, then resets retry state for the existing worker.
+  It does not ingest immediately, change the inference profile or replace a
+  checkpoint; `MID_AUTO_ARCHIVE=false` still prevents automatic execution.
+
+### Changed
+
+- English/French README, inference-profile guidance and consolidation design
+  now explain the JSON Schema profile boundary, fresh MID request identifiers,
+  and preservation of failed-batch notes. They distinguish structural validation
+  from summary accuracy and document the absence of batch-wide storage rollback.
+
+- For invalid extraction output and inference transport failures, LONG document
+  ingestion job `error` uses fixed `invalid_output`, `inference_timeout`,
+  `inference_rate_limited` or `inference_unavailable` codes. This also affects
+  direct document clients of `long_ingest_status` / `long_ingest_list`, not only
+  MID archives. Incomplete-cleanup details remain in `purge_status` /
+  `purge_errors`; provider text is not the status contract.
+
+### Fixed
+
+- Normal SHORT→MID consolidation on the `openai-compatible` chat profile sends
+  the existing plan's JSON Schema on initial and corrective calls, for any
+  configured model. Its endpoint must support schema-constrained output; a
+  refusal stops the batch and preserves its unprocessed notes, without silent
+  fallback. Strict parsing, pre-write validation and retry limits are unchanged.
+  Other profile identities, text merging and compaction retain their generation
+  contract.
+
+- **MID response-cache poisoning:** consolidation, compaction and MID maintenance
+  generations use an opaque request nonce at the end of the last user message,
+  including corrective calls and restarted jobs. Original source messages stay
+  unchanged; nonce recopy is refused before application. Normal consolidation
+  output budgets include the suffix. The existing correction/retry limits
+  remain unchanged.
+  OpenAI-compatible chat logs expose only a closed cache status and distinguish
+  reasoning-only invalid responses without logging provider content.
+
+- **LONG inference deadline:** automatic ontology construction and frozen-ontology
+  document extraction now default to 1,800 seconds per provider call instead of
+  600. Existing `EXTRACTION_TIMEOUT_SECONDS` overrides remain effective. The
+  output ceiling remains controlled by the existing chat-profile setting;
+  frozen certification profiles, embedding identity and capture retry guards
+  are unchanged.
+
+- MID archive retries preserve successful construction calls and failure counters
+  until each document's stored SHA is verified. Three `invalid_output`
+  construction or frozen-ingestion cycles pause automatic resubmission without
+  dropping retained sources. A latest `inference_timeout` also pauses the capture
+  after at least three unresolved failed cycles, instead of resubmitting it
+  hourly indefinitely. The manage-only `mid_archive_retry` tool and
+  `bank archive-retry SPACE PREIMAGE_ID` CLI command resume an exact paused
+  capture after checking its identity, destination and source hashes. Backlog
+  status exposes retry and rejection information without rejected source text.
+  Construction requests passage references and restores exact source quotes
+  programmatically. Construction and frozen-catalogue ingestion share the same
+  strict JSON reader: one JSON-labelled Markdown block may contain a complete
+  JSON response, even without its closing fence at EOF. Partial JSON, duplicate
+  keys, multiple blocks and incompatible checkpoints remain rejected. Strict
+  ingestion refuses unlabelled or uppercase `JSON` fences; legacy non-strict
+  parsing is unchanged. Failed jobs retain incomplete-cleanup diagnostics.
+  **Rollback:** an older projector can refuse the new error categories as
+  `invalid_record`; retained captures remain intact and require a verified
+  pre-change intent restore or forward resumption. Older versions also resume
+  their previous timeout backoff rather than preserve the new timeout pause.
+- The Portal shows manual compaction in Consolidation activity, Space → Active
+  work and the Dashboard's displayed spaces, with start/finish times and the
+  latest final result. Failures and recovery warnings remain visible. Tracking
+  uses bounded server memory; the command remains synchronous and dry runs or
+  refused calls create no jobs.
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary. Portal extension seams are described in
+[extension points](docs/EXTENSION_POINTS.md). See the
+[migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+---
+
 ## [1.6.0] — 2026-10-07
 
 Hivemind 1.6.0 preserves original MID captures and indexes them automatically in

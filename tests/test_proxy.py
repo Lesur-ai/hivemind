@@ -433,11 +433,11 @@ class _ProbeStorage:
 
 
 def _system_health_callable():
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.mcpserver import MCPServer
 
     from live_mem.tools.system import register as register_system_tools
 
-    mcp = FastMCP(name="probe-test")
+    mcp = MCPServer(name="probe-test")
     register_system_tools(mcp)
     tool = mcp._tool_manager._tools["system_health"]
     for attr in ("fn", "func", "handler", "_fn", "run", "callback"):

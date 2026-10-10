@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from live_mem.auth.context import MonoTenantSpaceAllowlistProvider
 from live_mem.core.engines.long_engine import LongEngine
@@ -34,7 +34,7 @@ _META_KEY = f"{_SPACE_ID}/_meta.json"
 
 
 def _tool_and_registration_count():
-    mcp = FastMCP(name="test-reindex-tool")
+    mcp = MCPServer(name="test-reindex-tool")
     count = graph_tools.register(mcp)
     return mcp._tool_manager._tools["long_reindex"], count
 
@@ -85,8 +85,8 @@ def test_long_reindex_is_direct_hidden_non_idempotent_operator_tool() -> None:
     tool, count = _tool_and_registration_count()
 
     assert count == 16
-    assert tool.annotations.readOnlyHint is False
-    assert tool.annotations.idempotentHint is False
+    assert tool.annotations.read_only_hint is False
+    assert tool.annotations.idempotent_hint is False
     assert "long_reindex" not in ALIAS_MAP
     assert "long_reindex" not in ALIAS_MAP.values()
 

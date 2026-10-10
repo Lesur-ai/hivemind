@@ -20,6 +20,39 @@ should apply. The relevant decision boundaries are summarized in the
   (plus Neo4j and Qdrant) ships in the default compose stack as a
   mandatory, derived-only, non-authoritative component (ADR-0019 / ADR-0010).
 
+
+## MCP SDK 2 upgrade in 1.6.1
+
+Rebuild and roll out the core and embedded Graph images from the same source:
+both lock MCP Python SDK 2.3.0. An SDK major is not a date-based MCP protocol
+version. Supported legacy MCP clients continue to use `/mcp` and the same tool
+names/aliases; the server also supports the modern 2026-07-28 protocol. The
+Python maintenance CLI must use this release's locked environment
+(`uv sync --locked --dev`), because SDK 1 imports and transport APIs differ.
+
+No bank, S3 object, graph schema or embedding migration is required for this
+transport change. Retain the existing backup/rollback procedure and inference
+configuration. Verify health, authenticated discovery, a read call from the
+CLI, and a LONG read before admitting writes after rollout.
+
+Both runtimes set the SDK request-body bound explicitly to 75 MiB; document
+handlers retain the 50 MiB decoded-document limit. A batch's complete JSON
+envelope (including base64) must fit the wire bound, even when each document
+fits individually. A 413 is an admission refusal, not an inference failure.
+
+The token-store migration and internal LONG credential preflight now run once
+when the HTTP app starts, rather than when each MCP session opens. Failure
+refuses process startup: a transient S3/token-store outage at boot can therefore
+cause container restarts until storage recovers. Check startup logs and restore
+storage/credential access before retrying. The embedded Graph still validates
+the internal credential on every request; revocation or expiry remains denied.
+
+The 75 MiB admission limit bounds requests, not backup/export replies. Owned
+Python clients retain SDK 1's unbounded SSE event sizing with their existing
+timeouts. HTTPX2 uses the OS certificate trust store by default instead of
+certifi. Both clients honor `SSL_CERT_FILE`/`SSL_CERT_DIR` for a private CA;
+the internal LONG bridge remains direct and ignores environment proxy routing.
+
 ## Quickstart (Dev)
 
 The dev profile brings up a self-contained storage stack with local MinIO and
@@ -464,6 +497,64 @@ no opt-in `long` profile and no disabled-state release path.
   edge into it, and no long state is ever a source of truth (ADR-0010).
   A slow, stale, or restarting embedded runtime never affects bank
   correctness.
+
+### LONG extraction call sizing
+
+`EXTRACTION_CHUNK_SIZE` is the existing target for the source text sent to each
+frozen-ontology extraction call. Its default is 25,000 characters. It is separate
+from embedding `CHUNK_SIZE` / `CHUNK_OVERLAP`, the model context window and the
+output-token limit. The ontology and the accumulated entity/relation context
+also occupy input space; generated JSON and any model reasoning occupy output
+space. Fitting the context window alone does not prove the call will finish on
+time.
+
+`EXTRACTION_TIMEOUT_SECONDS` defaults to 1,800 seconds per provider call in
+1.6.1 (previously 600), not per document or capture. Existing `.env` overrides
+remain effective; an upgrade does not replace an explicitly configured 600.
+On a slower local model, qualify a smaller source-text target, for example:
+
+```dotenv
+EXTRACTION_CHUNK_SIZE=8000
+EXTRACTION_TIMEOUT_SECONDS=1800
+```
+
+The existing chat profile also owns the output ceiling:
+`INFERENCE_CHAT_MAX_OUTPUT_TOKENS` for split profiles, or `LLMAAS_MAX_TOKENS`
+for the legacy family. Do not mix the two families. A local Qwen qualification
+can use 32,768 output tokens when the selected model and available context
+support it. This is a ceiling, not a required response length or a capacity
+certification. The root `.env.example` recipe already requests 200,000 output
+tokens; 8,192 was a local test limit, not a product-wide ceiling. Frozen provider
+certification profiles are unchanged.
+
+Increasing the deadline leaves admitted construction calls reusable. Changing
+the output ceiling changes the chat-profile identity: an unfinished automatic
+ontology checkpoint rejects that change. Preserve the checkpoint; do not edit
+its binding or discard admitted outputs to force resumption under another
+profile. Use a separate isolated qualification for a changed output budget.
+
+Set these existing variables in the shared root `.env`; Compose already passes
+that file to the embedded Graph Memory service. Recreate that service to load
+changed settings. Measure complete accepted responses, elapsed time and token
+usage on representative chunks, including later chunks with accumulated
+context. The splitter prefers section and line boundaries and may exceed its
+target for long paragraphs or lines; inspect actual chunk sizes during the run.
+An 8,000-character target is a starting point for qualification, not a universal
+capacity or latency guarantee. Smaller targets increase the number of calls.
+A retained MID capture pauses when its latest failure is `inference_timeout`
+after at least three unresolved failed cycles. Its source remains available;
+correct the target/deadline, then schedule the existing `mid_archive_retry`
+operator action (CLI: `bank archive-retry SPACE PREIMAGE_ID`). Other transport
+failures retain capped backoff.
+
+This setting applies to document extraction after the catalogue is frozen;
+initial automatic-ontology construction has its own context-budgeted batches.
+Changing the target neither recrafts the frozen catalogue nor changes the
+embedding identity. Failed extraction still fails the whole document, with its
+retained source available for retry; successful chunks of a failed document do
+not currently have a durable per-chunk resume checkpoint. Keep original sources
+and native backups, qualify all documents through sourced LONG retrieval, and
+check the persisted embedding model before declaring an archive complete.
 
 ### Embedded credential lifecycle and repair
 
