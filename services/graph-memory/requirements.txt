@@ -61,7 +61,7 @@ beautifulsoup4==4.15.0
 # === CLI ===
 click==8.5.0               # Framework CLI
 rich==15.0.0               # Affichage CLI (tableaux, spinners, couleurs)
-aiohttp==3.14.3            # CVE-2026-69244 (parser C de reponses malformees)
+aiohttp==3.14.4            # CVE-2026-69244 (parser C de reponses malformees)
 
 # === Tests (optionnel, pour dev) ===
 # pytest>=7.0.0
