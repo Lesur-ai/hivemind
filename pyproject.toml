@@ -52,7 +52,7 @@ dev = [
     "pyyaml>=6.0,<7",
     "qdrant-client==1.19.1",
     "neo4j==6.3.1",  # Exercise the Graph persistence boundary used by ontology activation.
-    "pypdf==6.19.0",  # Exercise the same PDF parser as the embedded runtime.
+    "pypdf==6.20.0",  # Exercise the same PDF parser as the embedded runtime.
 ]
 
 [tool.setuptools.packages.find]
