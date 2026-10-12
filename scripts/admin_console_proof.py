@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.14,<3.15"
 # dependencies = ["playwright>=1.49,<2"]
 # ///
 """P8-7 (#145) — admin console visual / responsive / accessibility proof harness.

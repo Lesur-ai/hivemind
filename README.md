@@ -16,10 +16,10 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.6.1-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.6.2-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
-[![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#requirements)
+[![python](https://img.shields.io/badge/python-3.14-F59E0B?style=flat-square)](#requirements)
 
 Français · [README.fr.md](README.fr.md)
 
@@ -31,6 +31,19 @@ critical behavior but may trail this page's editorial structure.
 ---
 
 **MCP transport (1.6.1).** Core and embedded LONG use the same pinned MCP Python SDK 2.3.0 (`MCPServer`). Existing supported MCP clients retain their tool names and aliases; the modern protocol is also served. The Python maintenance CLI and LONG bridge use the SDK 2 Streamable HTTP transport. Inference configuration, stored banks and graph data are unchanged; rebuild both images together. MCP requests are bounded to 75 MiB on the wire, with a 50 MiB decoded-document limit.
+
+**MID bootstrap (1.6.2).** This maintenance release lets you create a standard
+space without supplying rules. `DEFAULT_RULES_FILE` in `.env.example` points to
+`RULES/live-mem.standard.memory.bank.md`; an absent or empty setting also uses
+that shipped file. Creation prepares and verifies six empty MID documents
+before committing the space. Consolidation fills them using your configured
+chat model and can update H1-only tables or compacted summaries while preserving
+their titles and child sections. An untouched standard bank remains eligible
+as an empty Mesh target. The standard template is selected by rules content;
+custom rules keep their dynamic structure, including at the default path.
+Existing spaces are preserved. Rebuild the Hivemind image when upgrading.
+Native Anthropic consolidation requires a model supporting structured output.
+See the [release notes](CHANGELOG.md#162--2026-10-12).
 
 > **Security fixes in 1.5.3.** Hivemind 1.5.3 addresses all seven application
 > findings from the 16 September 2026 source security review, including Graph
@@ -98,7 +111,7 @@ For a deliberate single-node setup, set `HIVEMIND_MESH_ENABLED=false`. See the
 
 - Docker 24+
 - Docker Compose 2.17.0+
-- Python 3.11+ and [`uv`](https://docs.astral.sh/uv/) for the CLI and tests
+- Python 3.14 and [`uv`](https://docs.astral.sh/uv/) for the CLI and tests
 - A compatible S3 service
 - Chat and embedding provider credentials for `mid` and `long`
 
@@ -568,10 +581,15 @@ Hivemind deployment and one `space_id` model. Follow the
 
 ```bash
 uv sync --locked --dev
-uv run pytest tests/test_hivemind_state.py tests/test_hivemind_peer.py
-uv run pytest tests
-python scripts/check_doc_links.py
+git diff --check
+# Example: select only cases affected by the change.
+uv run pytest tests/test_hivemind_state.py -k '<affected_behavior>'
 ```
+
+Keep local testing to the strict necessary minimum. CI runs the complete
+suite, integration checks, and coverage validation. For documentation changes,
+run directly relevant checks such as `python scripts/check_doc_links.py`;
+broader local test runs need an explicit request or a concrete diagnostic reason.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request.
 The public architecture summary is in

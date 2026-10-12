@@ -55,8 +55,29 @@ the internal LONG bridge remains direct and ignores environment proxy routing.
 
 ## Quickstart (Dev)
 
+Creating a space without `rules` uses the shipped standard rules even when
+`DEFAULT_RULES_FILE` is absent or empty. In the Docker image they are available
+at `/app/RULES/live-mem.standard.memory.bank.md`; a source clone uses the same
+relative path from its repository root. A nonempty `DEFAULT_RULES_FILE` remains
+an operator override: a missing, unreadable or empty file fails creation before
+storage changes rather than silently selecting another ruleset.
+
+With the shipped standard, space creation initializes the six standard MID
+files as empty H1/H2 documents and verifies them before committing the space.
+The first consolidation edits this bank instead of having to invent its
+structure. Explicit custom rules or a custom default rules file keep their
+dynamic bank structure. Existing spaces are never reseeded or overwritten.
+
+Normal consolidation may update the direct body below an existing H1, including
+a table or compacted summary. Its title and existing child sections remain
+protected. Manual/automatic compaction retains its existing DirectLocal-only
+route and verified preimage; a compacted bank can be edited by subsequent
+consolidations even if its summary has no H2. Configure a working chat inference
+role before either operation; the deterministic bank template does not replace
+the model or relax response validation.
+
 The dev profile brings up a self-contained storage stack with local MinIO and
-the WAF in front of the Hivemind MCP service. Python 3.11+ is needed once to
+the WAF in front of the Hivemind MCP service. Python 3.14 is needed once to
 generate local secrets; `uv` supplies the locked CLI environment.
 
 ```bash

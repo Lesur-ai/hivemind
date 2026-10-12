@@ -11,7 +11,8 @@ import pytest
 from hivemind_inference.records import ChatMessage, ChatRequest, ChatResult
 from live_mem.core import consolidator as core
 from tests.test_p13_inference_adapters import complete_with, openai_chat_profile, anthropic_chat_profile
-from tests.fakes.inference_emulator import InferenceEmulator
+from tests.fakes.inference_emulator import InferenceEmulator, anthropic_message_payload
+from hivemind_inference.registry import build_chat_provider
 from hivemind_inference.errors import InferenceError
 
 
@@ -69,23 +70,48 @@ async def test_endpoint_refusal_never_downgrades_to_free_form():
     assert "response_format" in emulator.requests[0]["json"]
 
 
-async def test_native_adapter_refuses_unimplemented_constraint_before_http():
+async def test_anthropic_schema_reaches_native_wire_without_changing_request():
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}},
+              "required": ["ok"], "additionalProperties": False}
+    async with InferenceEmulator([{"body": anthropic_message_payload('{"ok":true}')}]) as emulator:
+        result = await complete_with(anthropic_chat_profile(emulator.url),
+                                     request(response_schema_json=json.dumps(schema), retry_policy="none"))
+    assert len(emulator.requests) == 1
+    body = emulator.requests[0]["json"]
+    assert body["output_config"] == {"format": {"type": "json_schema", "schema": schema}}
+    assert body["max_tokens"] == 128
+    assert "response_format" not in body and "thinking" not in body
+    assert result.text == '{"ok":true}' and result.finish_reason == "stop"
+
+
+async def test_anthropic_plain_request_has_no_output_config():
     async with InferenceEmulator() as emulator:
+        await complete_with(anthropic_chat_profile(emulator.url), request())
+    assert "output_config" not in emulator.requests[0]["json"]
+
+
+async def test_anthropic_schema_refusal_never_retries_without_constraint():
+    async with InferenceEmulator([{"status": 400, "body": {"error": {"type": "invalid_request_error"}}}]) as emulator:
         with pytest.raises(InferenceError) as error:
             await complete_with(anthropic_chat_profile(emulator.url),
-                                request(response_schema_json='{"type":"object"}'))
-    assert error.value.category == "unsupported"
-    assert emulator.requests == []
+                                request(response_schema_json='{"type":"object","additionalProperties":false}', retry_policy="none"))
+    assert error.value.category == "invalid_request"
+    assert len(emulator.requests) == 1
+    assert "output_config" in emulator.requests[0]["json"]
 
 
-@pytest.mark.parametrize("identity", ["openai-compatible", "anthropic", "cloud-temple"])
+@pytest.mark.parametrize("identity", ["openai-compatible", "anthropic", "cloud-temple", "openai"])
 async def test_normal_initial_and_correction_are_constrained_but_merge_is_plain(monkeypatch, identity):
     calls = []
     async def complete(item):
         calls.append(item)
         return ChatResult(text='{"file_edits":[],"discarded_notes":[],"synthesis":"ok"}',
                           configured_model="qwen3.8:27b", model_evidence="configured_only", finish_reason="stop")
-    provider = SimpleNamespace(profile=SimpleNamespace(provider_id=identity, adapter_id="anthropic" if identity == "anthropic" else "openai-compatible"), complete=complete)
+    profile = (anthropic_chat_profile("http://127.0.0.1:1") if identity == "anthropic"
+               else openai_chat_profile("http://127.0.0.1:1/v1", provider=identity))
+    provider = build_chat_provider(profile)
+    await provider.aclose()
+    monkeypatch.setattr(provider, "complete", complete)
     from live_mem.core import inference_runtime
     monkeypatch.setattr(inference_runtime, "get_inference_runtime", lambda: SimpleNamespace(chat_provider=lambda: provider))
     service = object.__new__(core.ConsolidatorService)
@@ -94,15 +120,16 @@ async def test_normal_initial_and_correction_are_constrained_but_merge_is_plain(
     await service._call_llm(messages)
     await service._call_llm(core._corrective_messages(messages, None, None, "invalid_normal_consolidation_json"))
     await service._complete_chat(messages, 500)
-    assert (calls[0].response_schema_json is not None) == (identity == "openai-compatible")
+    assert (calls[0].response_schema_json is not None) == (identity in {"openai-compatible", "anthropic"})
     assert calls[1].response_schema_json == calls[0].response_schema_json
     assert calls[2].response_schema_json is None
     assert calls[0].retry_policy == calls[1].retry_policy == "none"
     assert messages == [{"role": "user", "content": "Return the normal plan."}]
 
 
-def test_schema_preserves_supported_operation_variants_and_rejects_extras():
-    schema = json.loads(core._NORMAL_RESPONSE_SCHEMA_JSON)
+@pytest.mark.parametrize("name", ["_NORMAL_RESPONSE_SCHEMA_JSON", "_ANTHROPIC_NORMAL_RESPONSE_SCHEMA_JSON"])
+def test_schema_preserves_supported_operation_variants_and_rejects_extras(name):
+    schema = json.loads(getattr(core, name))
     validator = jsonschema.Draft202012Validator(schema)
     assert set(schema["properties"]["discarded_notes"]["items"]["properties"]["reason"]["enum"]) == core._NORMAL_DISCARD_REASONS
     operations = [
@@ -123,5 +150,29 @@ def test_schema_preserves_supported_operation_variants_and_rejects_extras():
     validator.validate({"file_edits": [], "discarded_notes": [{"note": 1, "reason": "already_in_bank"}], "synthesis": "Already represented"})
     for invalid_notes in ([], [0]):
         plan = {"file_edits": [{"filename": "facts.md", "action": "create", "content": "# Facts", "reason": "New", "notes": invalid_notes}], "discarded_notes": [], "synthesis": "ok"}
-        with pytest.raises(jsonschema.ValidationError):
-            validator.validate(plan)
+        assert core._normal_output_schema_failures(plan)
+        if name == "_NORMAL_RESPONSE_SCHEMA_JSON" or invalid_notes == []:
+            with pytest.raises(jsonschema.ValidationError):
+                validator.validate(plan)
+
+
+def test_anthropic_normal_schema_uses_supported_constraints_and_local_checks_remain():
+    schema = json.loads(core._ANTHROPIC_NORMAL_RESPONSE_SCHEMA_JSON)
+    def check(node):
+        if isinstance(node, dict):
+            assert not ({"minLength", "minimum", "maximum", "maxLength"} & node.keys())
+            if node.get("type") == "object":
+                assert node["additionalProperties"] is False
+            if "minItems" in node:
+                assert node["minItems"] in (0, 1)
+            for value in node.values():
+                check(value)
+        elif isinstance(node, list):
+            for value in node:
+                check(value)
+    check(schema)
+    validator = jsonschema.Draft202012Validator(schema)
+    for reason, notes in [("", [1]), ("New", [0])]:
+        plan = {"file_edits": [{"filename": "facts.md", "action": "create", "content": "# Facts", "reason": reason, "notes": notes}], "discarded_notes": [], "synthesis": "ok"}
+        validator.validate(plan)
+        assert core._normal_output_schema_failures(plan)

@@ -3,7 +3,7 @@
 # =============================================================================
 # Direct dependency input. The image installs the generated, hash-locked
 # `requirements.lock`, not this file directly. Regenerate intentionally with:
-# uv pip compile requirements.txt --universal --python-version 3.11 --generate-hashes --no-annotate \
+# uv pip compile requirements.txt --universal --python-version 3.14 --generate-hashes --no-annotate \
 #   --no-header --output-file requirements.lock
 # Review the complete resolution and build-test amd64 + arm64 on every bump.
 # =============================================================================

@@ -402,7 +402,8 @@ def test_authorize_allows_legitimate_call_with_supplied_identity() -> None:
         ({"tenant_id"}, "set"),
         (object(), "object"),
     ],
-    ids=lambda v: v if isinstance(v, str) else repr(v),
+    ids=["list-empty", "str-empty", "int-zero", "bool-false", "list-with-str",
+         "str-non-empty", "int-non-zero", "bool-true", "set", "object"],
 )
 def test_authorize_denies_on_non_dict_context(ctx, kind) -> None:
     """Any non-None, non-dict context value fails closed."""

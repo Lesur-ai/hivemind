@@ -28,6 +28,7 @@ Wire contract implemented here:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 from ..egress import build_owned_async_http_client, close_owned_client_from_sync
@@ -190,6 +191,8 @@ class _AnthropicBase:
 class AnthropicChatProvider(_AnthropicBase):
     """``ChatProvider`` implementation over the native Messages API."""
 
+    supports_response_schema = True
+
     @property
     def profile(self) -> ResolvedChatProfile:
         return self._profile
@@ -221,13 +224,14 @@ class AnthropicChatProvider(_AnthropicBase):
             body["system"] = "\n\n".join(system_parts)
         if self._profile.temperature is not None:
             body["temperature"] = self._profile.temperature
+        if request.response_schema_json is not None:
+            body["output_config"] = {
+                "format": {"type": "json_schema", "schema": json.loads(request.response_schema_json)}
+            }
         return body
 
     async def complete(self, request: ChatRequest) -> ChatResult:
         profile = self._profile
-        if request.response_schema_json is not None:
-            # Never silently discard a generation constraint not wired here.
-            raise self._direct_error("unsupported", correlation_id=request.correlation_id)
         effective_max = profile.max_output_tokens
         if request.max_output_tokens is not None:
             if request.max_output_tokens > profile.max_output_tokens:

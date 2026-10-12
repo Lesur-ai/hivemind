@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "hivemind"
 authors = [{name = "Christophe Lesur"}]
 dynamic = ["version"]
-requires-python = ">=3.11"
+requires-python = ">=3.14,<3.15"
 # LM2-26 fix : bornes basses remontées pour exclure les versions vulnérables
 # connues. uv.lock épingle les versions exactes ; ces bornes protègent les
 # builds `pip install live-memory` sans uv.lock (CVE-2026-32871 sur mcp<1.27,

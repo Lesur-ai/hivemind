@@ -7,7 +7,7 @@ credentials or live provider account.
 
 ## Install and run the public checks
 
-Python 3.11 or newer, `uv`, and Node.js 24 are required for the complete
+Python 3.14, `uv`, and Node.js 24 are required for the complete
 nominal suite, including its dependency-free browser-script harnesses.
 
 ```bash
@@ -17,8 +17,9 @@ uv run python scripts/check_doc_links.py
 git diff --check
 ```
 
-Public CI runs the complete Python suite and documentation checks on Python
-3.11 and native Python 3.14.8 arm64. It does not build container images, run
+Public CI maintains one complete Python 3.14.8 suite, with a hardware matrix
+running eight disjoint shards on each of x64 and native arm64, followed by complete-evidence and documentation checks. Each
+PR/main job is limited to ten minutes. It does not build container images, run
 paid provider certification, or publish packages. Release image validation is
 a separate maintainer step; container publication uses the tag-gated
 [release workflow](../.github/workflows/release.yml).

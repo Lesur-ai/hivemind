@@ -139,6 +139,8 @@ DEDICATED_SUITES: dict[str, DedicatedSuite] = {
 # repository-quality tool. A new unclassified script makes the policy test RED.
 TEST_TOOLING_SCRIPTS: frozenset[str] = frozenset(
     {
+        "scripts/ci_pytest_shards.py",
+        "scripts/ci_playwright_shards.py",
         "scripts/test_quality_ci.py",
         "scripts/test_suite_baseline.py",
     }

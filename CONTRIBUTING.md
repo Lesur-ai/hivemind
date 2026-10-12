@@ -18,7 +18,7 @@ intake for a future release, not a live view of unreleased development.
 
 ## Local setup
 
-Install Python 3.11 or newer and
+Install Python 3.14 and
 [`uv`](https://docs.astral.sh/uv/getting-started/installation/). Docker is
 optional unless you are changing an image or deployment behavior. Then create
 an isolated development environment and run the public checks:

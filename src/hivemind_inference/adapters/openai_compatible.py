@@ -545,6 +545,11 @@ class OpenAICompatibleChatProvider(_OpenAICompatibleBase):
     def profile(self) -> ResolvedChatProfile:
         return self._profile  # type: ignore[return-value]
 
+    @property
+    def supports_response_schema(self) -> bool:
+        # Only the generic opt-in profile is qualified for the MID grammar.
+        return self._profile.provider_id == "openai-compatible"
+
     async def complete(self, request: ChatRequest) -> ChatResult:
         profile: ResolvedChatProfile = self._profile  # type: ignore[assignment]
         effective_max = profile.max_output_tokens

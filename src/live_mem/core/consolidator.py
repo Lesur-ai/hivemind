@@ -11,7 +11,7 @@ C'est le cœur intelligent de Live Memory. Le pipeline :
 5. Écriture : bank files + synthesis + suppression notes + update meta
 
 Principes :
-    - Les agents n'écrivent JAMAIS dans la bank — seul le LLM le fait
+    - Le serveur initialise la bank standard ; le LLM maintient son contenu
     - Les notes sont supprimées UNIQUEMENT après succès complet (atomicité)
     - Un seul consolidate à la fois par espace (asyncio.Lock)
     - Le LLM produit des OPÉRATIONS D'ÉDITION (pas des réécritures complètes)
@@ -38,10 +38,14 @@ from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from hivemind_inference.records import ChatMessage, ChatRequest
-from .consolidation_schema import NORMAL_RESPONSE_SCHEMA_JSON as _NORMAL_RESPONSE_SCHEMA_JSON
+from .consolidation_schema import (
+    NORMAL_RESPONSE_SCHEMA_JSON as _NORMAL_RESPONSE_SCHEMA_JSON,
+    ANTHROPIC_NORMAL_RESPONSE_SCHEMA_JSON as _ANTHROPIC_NORMAL_RESPONSE_SCHEMA_JSON,
+)
 
 from ..config import get_settings
 from .storage import get_storage, bank_relpath
+from .bank_template import CANONICAL_BANK_TITLES as _CANONICAL_BANK_TITLES
 from .reservation_guard import assert_space_not_reserved
 from .live_note_format import split_live_note_front_matter
 from .write_sink import DirectLocalWriteSink, StagedWriteNotImplemented
@@ -409,7 +413,9 @@ _NORMAL_FORM_FAULT_HINTS: tuple[tuple[frozenset[str], str], ...] = (
         ),
         "Target one existing heading per operation, written exactly as it "
         "appears in the file, at most once per batch; create only files that "
-        "do not exist and edit only files that exist.",
+        "do not exist and edit only files that exist. Do not combine an H1 "
+        "body operation with child-section operations in the same file; "
+        "address the child sections instead.",
     ),
     (
         frozenset(
@@ -423,8 +429,9 @@ _NORMAL_FORM_FAULT_HINTS: tuple[tuple[frozenset[str], str], ...] = (
                 "normal_h1_not_preserved",
             }
         ),
-        "Never change the hierarchy of existing sections, never target or "
-        "alter the H1 title, and never insert after an anchor that another "
+        "Never change the hierarchy of existing sections or add, delete or "
+        "alter an H1 title. Existing H1 direct bodies may be replaced, appended "
+        "or prepended without changing their title or descendants. Never insert after an anchor that another "
         "operation of the same plan removes.",
     ),
     (
@@ -1789,16 +1796,6 @@ def _normal_generated_body_preserves_descendant_hierarchy(
     )
 
 
-_CANONICAL_BANK_TITLES: dict[str, str] = {
-    "activeContext.md": "Active Context",
-    "systemPatterns.md": "System Patterns",
-    "techContext.md": "Tech Context",
-    "productContext.md": "Product Context",
-    "projectbrief.md": "Project Brief",
-    "progress.md": "Progress",
-}
-
-
 def _synthetic_bank_file_skeleton(filename: str) -> str:
     """Return a minimal valid H1 document for an auto-created bank file."""
     if filename in _CANONICAL_BANK_TITLES:
@@ -2147,7 +2144,7 @@ def _normal_edit_candidate(
                 )
             )
             continue
-        if target.level == 1:
+        if target.level == 1 and operation_type == "delete_section":
             failures.append(failure("protected_normal_h1_target", operation_index))
             continue
         if target.start in seen_source_target_operations:
@@ -5470,7 +5467,7 @@ Return JSON with this exact structure:
 12. Do not translate or rewrite existing bank content solely to change its language
 13. Return exactly ONE direct valid JSON object: no prose, Markdown fence, comment, or <think> block
 14. Add no fields outside this schema: every operation, create, and rewrite needs a non-blank reason; required content must never be blank
-15. create targets must be absent, edit/rewrite targets must exist, and an existing H1 must never change
+15. create targets must be absent, edit/rewrite targets must exist, and an existing H1 title must never change. replace_section, append_to_section and prepend_to_section may target an existing H1 but edit ONLY its direct body through the next heading; never delete or add an H1 or include the target heading in content. Do not combine an H1 body operation with child-section operations in the same file; address the child sections instead
 16. MANDATORY 'notes': non-empty list of 1-based integers within batch note bounds (e.g. [1, 2]) on every create, rewrite, and operation indicating source note numbers represented
 17. Every date you write comes from the note's `date` field or from an explicit date inside the note — never from the consolidation day, which you do not know
 18. Never delete content no note of this batch completes or supersedes; when a note supersedes an item, write its durable outcome first (one line, dated with the note's `date` when it has one — undated otherwise, never an invented date — in the file the rules assign, citing the note, listed BEFORE the removal in file_edits — writes apply in order) and delete the superseded state: an intermediate status, value or transient state leaves no line; an over-target file grows only by the condensed minimum its new facts require — age-based condensation is compaction's job, not yours
@@ -6987,8 +6984,9 @@ INSTRUCTION: Merge these versions into ONE coherent version.
             retry_policy=retry_policy,
             correlation_id=nonce,
             response_schema_json=(
-                _NORMAL_RESPONSE_SCHEMA_JSON
-                if normal_json and provider.profile.provider_id == "openai-compatible"
+                (_ANTHROPIC_NORMAL_RESPONSE_SCHEMA_JSON
+                 if provider.profile.adapter_id == "anthropic" else _NORMAL_RESPONSE_SCHEMA_JSON)
+                if normal_json and getattr(provider, "supports_response_schema", False)
                 else None
             ),
         )

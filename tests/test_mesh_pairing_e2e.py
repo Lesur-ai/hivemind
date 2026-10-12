@@ -290,8 +290,9 @@ async def _admin_tcp_post(base_url: str, action: str, data: dict) -> tuple[int, 
     return response.status_code, json.loads(response.body)
 
 
+@pytest.mark.parametrize("standard_target", [False, True])
 async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(
-    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch, standard_target: bool
 ) -> None:
     """P10-5: prove the three actions cross two real ASGI/TCP boundaries.
 
@@ -334,7 +335,18 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(
         for key, value in a_storage.snapshot().items()
         if key.startswith(f"{SPACE}/") and "/_hivemind/" not in key
     }
-    await _seed_blank_target(b_storage)
+    if standard_target:
+        from pathlib import Path
+        with monkeypatch.context() as target_patch:
+            target_patch.setattr(space_module, "get_storage", lambda: b_storage)
+            target_patch.setattr(tokens_module, "get_storage", lambda: b_storage)
+            target_patch.setattr(tokens_module, "_token_service", TokenService())
+            target_patch.setattr("live_mem.config.get_settings", lambda: SimpleNamespace(
+                default_rules_file=str(Path(__file__).resolve().parents[1] / "RULES/live-mem.standard.memory.bank.md")))
+            created_target = await SpaceService().create(SPACE, "Standard Mesh target", bootstrap_admin=True)
+            assert created_target["status"] == "created"
+    else:
+        await _seed_blank_target(b_storage)
 
     endpoints: dict[str, str] = {}
     a_transcript: list[tuple[str, str]] = []
@@ -487,6 +499,15 @@ async def test_two_tcp_asgi_admins_pair_without_in_process_peer_transport(
     audit_blob = json.dumps(audit_entries, sort_keys=True)
     for canary in (invitation_canary, a_private, b_private, snapshot_canary):
         assert canary not in audit_blob
+
+
+    assert {
+        key: value for key, value in b_storage.snapshot().items()
+        if key.startswith(f"{SPACE}/bank/")
+    } == {
+        key: value for key, value in a_storage.snapshot().items()
+        if key.startswith(f"{SPACE}/bank/")
+    }
 
 
 async def test_two_asgi_instances_pair_and_converge(monkeypatch):

@@ -215,9 +215,8 @@ def _seed(storage: RecordingStorage, *, facts: str = FACTS) -> list[dict]:
                 _edit(
                     operations=[
                         {
-                            "type": "replace_section",
+                            "type": "delete_section",
                             "heading": "# Facts",
-                            "content": "rewritten root body",
                             "reason": "must be refused",
                             "notes": [1],
                         }
@@ -288,7 +287,7 @@ async def test_one_invalid_sibling_prevents_every_other_sibling_write(
 ) -> None:
     """A valid create cannot sneak through ahead of an invalid edit sibling.
 
-    The invalid sibling is a protected H1 target.  It used to be a missing
+    The invalid sibling deletes a protected H1 title.  It used to be a missing
     heading, but an absent target is now recovered rather than refused, so that
     example no longer exercises the atomicity contract this test exists for.
     """
@@ -305,9 +304,8 @@ async def test_one_invalid_sibling_prevents_every_other_sibling_write(
             _edit(
                 operations=[
                     {
-                        "type": "replace_section",
+                        "type": "delete_section",
                         "heading": "# Facts",
-                        "content": "must not matter",
                         "reason": "invalid target",
                         "notes": [1],
                     }

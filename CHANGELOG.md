@@ -15,7 +15,56 @@ linked guides when installing or upgrading.
 
 ## [Unreleased] — Hivemind public release
 
-No changes recorded yet.
+
+---
+
+## [1.6.2] — 2026-10-12
+
+Hivemind 1.6.2 is a maintenance release for standard-space MID bootstrap,
+consolidation after compaction, and native Anthropic structured output.
+
+**Release identity.** Hivemind now reports runtime version `1.6.2`.
+
+**Upgrade.** Rebuild the Hivemind image. Existing spaces and their rules are
+preserved; the initial six-document bank applies to newly created standard
+spaces. Explicit custom rules and default-file overrides retain their behavior.
+Existing H1-only documents can receive direct-body updates without altering
+their root heading or children. Native Anthropic consolidation now requires
+a model supporting structured output; unsupported models fail before bank
+writes and retain the source notes.
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary; the Portal extension seam is described in
+[`docs/EXTENSION_POINTS.md`](docs/EXTENSION_POINTS.md).
+See the [migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### Fixed
+
+- Native Anthropic normal consolidation now sends its plan schema through
+  `output_config.format` on both the initial call and the correction. This
+  addresses Haiku JSON responses wrapped in Markdown fences. Local validation
+  retains the full contract; an unsupported schema is rejected without a
+  silent free-form fallback. Compaction and effort settings are unchanged.
+- Space creation without rules now uses the shipped standard when
+  `DEFAULT_RULES_FILE` is absent or empty. Standard spaces start with six
+  empty, editable MID documents, verified before the creation commit marker.
+  The template is selected by canonical rules content, independently of its
+  path; custom rules at the default path retain their own structure.
+- A newly created, untouched standard bank remains an empty Mesh target.
+  Bootstrap verifies that all six seed documents are pristine and there is no
+  consolidation history, then replaces them with the verified source snapshot
+  under the existing import fence. Populated or modified targets still refuse.
+- Normal consolidation can replace, append or prepend the direct body under
+  an existing H1 without changing its title or child sections. H1-only tables
+  and summaries produced by compaction no longer fail solely because their
+  editable body is addressed through the root heading. Adding, deleting or
+  changing H1 titles remains refused.
+
+### Changed
+
+- Support only CPython 3.14 (CI/production pinned to 3.14.8). Run complete
+  PR/main test suites in verified disjoint shards, cap each CI job at ten
+  minutes, and isolate public aggregate evidence from persistent runner files.
 
 ---
 

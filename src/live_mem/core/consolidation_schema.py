@@ -7,9 +7,14 @@ Inline alternatives avoid nested refs unsupported by some llama.cpp versions.
 import json
 
 
-def _schema() -> dict:
-    text = {"type": "string", "minLength": 1}
-    notes = {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}
+def _schema(*, anthropic: bool = False) -> dict:
+    # Native Anthropic rejects minLength/minimum. These two constraints
+    # remain mandatory in the local normal-plan validator before any write.
+    text = ({"type": "string", "description": "Non-empty text."} if anthropic
+            else {"type": "string", "minLength": 1})
+    note_index = ({"type": "integer", "description": "1-based source note index."} if anthropic
+                  else {"type": "integer", "minimum": 1})
+    notes = {"type": "array", "minItems": 1, "items": note_index}
 
     def closed(properties):
         return {"type": "object", "properties": properties,
@@ -30,7 +35,7 @@ def _schema() -> dict:
     return closed({
         "file_edits": {"type": "array", "items": {"anyOf": edits}},
         "discarded_notes": {"type": "array", "items": closed({
-            "note": {"type": "integer", "minimum": 1},
+            "note": note_index,
             "reason": {"enum": ["already_in_bank", "superseded", "obsolete", "no_bank_value"]},
         })},
         "synthesis": text,
@@ -38,3 +43,5 @@ def _schema() -> dict:
 
 
 NORMAL_RESPONSE_SCHEMA_JSON = json.dumps(_schema(), separators=(",", ":"))
+
+ANTHROPIC_NORMAL_RESPONSE_SCHEMA_JSON = json.dumps(_schema(anthropic=True), separators=(",", ":"))

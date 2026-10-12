@@ -2316,7 +2316,7 @@ class BootstrapService:
             )
 
         # 1. Cible vierge ?
-        await self._assert_blank_target(target_space_id)
+        seed_paths = await self._assert_blank_target(target_space_id)
 
         # 2. Vérification d'intégrité AVANT tout write.
         self._verify_manifest(snapshot)
@@ -2342,6 +2342,8 @@ class BootstrapService:
                 status=HiveNodeStatus.UNSAFE, reason="bootstrap_in_progress"
             )
         )
+
+        await self._remove_pristine_bank_seeds(target_space_id, seed_paths, snapshot)
 
         # 4. Écrire les fichiers du space + l'état Hivemind partagé via put()
         #    (pas copy_object) — les checksums ont été vérifiés en-process.
@@ -2543,7 +2545,7 @@ class BootstrapService:
             )
 
         # 1-2. Cible vierge + intégrité AVANT tout write (helpers partagés).
-        await self._assert_blank_target(target_space_id)
+        seed_paths = await self._assert_blank_target(target_space_id)
         self._verify_manifest(snapshot)
         for entry in manifest.entries:
             if not self._is_shared_export_path(entry.path):
@@ -2558,6 +2560,8 @@ class BootstrapService:
         await store.set_node_status(
             NodeHealth(status=HiveNodeStatus.UNSAFE, reason="mesh_pending_activation")
         )
+
+        await self._remove_pristine_bank_seeds(target_space_id, seed_paths, snapshot)
 
         # 4. Écrire les fichiers du space + état partagé (_meta.json mergé).
         prefix = f"{target_space_id}/"
@@ -2699,32 +2703,82 @@ class BootstrapService:
             node_status=HiveNodeStatus.UNSAFE,
         )
 
-    async def _assert_blank_target(self, target_space_id: str) -> None:
-        """
-        Refuse si la cible contient autre chose que des placeholders.
+    async def _assert_blank_target(self, target_space_id: str) -> tuple[str, ...]:
+        """Accept placeholders or the complete, untouched standard seed only.
 
-        Autorisé : ``_meta.json``, ``_rules.md``, ``live/.keep``,
-        ``bank/.keep``. Refusé : tout ``bank/*`` ou ``live/*`` non-.keep,
-        ``_synthesis.md``, et TOUT objet ``_hivemind/*`` (un space déjà dans
-        un cluster ne doit pas être réimporté — anti cross-cluster merge).
+        Real bank/live content, synthesis and any protocol state still refuse.
+        The returned seed paths carry no project facts and may be replaced by
+        the source manifest only after import has marked the target UNSAFE.
         """
+        from ..bank_template import STANDARD_BANK, STANDARD_RULES_SHA256
+
         prefix = f"{target_space_id}/"
-        # Five placeholder keys (including an optional S3 directory marker) are
-        # allowed; the sixth necessarily proves non-blank. Never slurp an
-        # attacker-sized prefix.
-        objects = await self._storage.list_objects(prefix, max_keys=6)
-        offending: list[str] = []
-        for obj in objects:
-            rel = obj["Key"][len(prefix):]
-            if rel in ("", "_meta.json", "_rules.md", "live/.keep", "bank/.keep"):
-                continue
-            # node_status.json écrit par un import précédent crashé compte aussi.
-            offending.append(rel)
-        if offending:
+        allowed = {"", "_meta.json", "_rules.md", "live/.keep", "bank/.keep"}
+        seeds = {f"bank/{name}": content for name, content in STANDARD_BANK.items()}
+        # At most eleven placeholders; a twelfth unique object proves populated.
+        objects = await self._storage.list_objects(
+            prefix, max_keys=len(allowed) + len(seeds) + 1,
+        )
+        extras = {obj["Key"][len(prefix):] for obj in objects} - allowed
+        if not extras:
+            return ()
+        pristine = extras == set(seeds)
+        if pristine:
+            # Reject oversized/changed seed bodies before fetching their bytes.
+            pristine = all(
+                obj.get("Size") == len(seeds[rel].encode("utf-8"))
+                for obj in objects if (rel := obj["Key"][len(prefix):]) in seeds
+            )
+        if pristine:
+            meta = await self._storage.get_json(prefix + "_meta.json")
+            rules = await self._storage.get(prefix + "_rules.md")
+            pristine = (
+                isinstance(meta, dict)
+                and meta.get("space_id") == target_space_id
+                and "last_consolidation" in meta
+                and meta["last_consolidation"] is None
+                and all(
+                    type(meta.get(key)) is int and meta[key] == expected
+                    for key, expected in (
+                        ("consolidation_count", 0), ("total_notes_processed", 0), ("version", 1),
+                    )
+                )
+                and isinstance(rules, str)
+                and _sha256_bytes(rules.encode("utf-8")) == STANDARD_RULES_SHA256
+            )
+        if pristine:
+            for rel, content in seeds.items():
+                if await self._storage.get(prefix + rel) != content:
+                    pristine = False
+                    break
+        if not pristine:
             raise BootstrapError(
                 f"import refused: target {target_space_id!r} is not empty "
-                f"(non-placeholder objects: {sorted(offending)[:10]})"
+                f"(non-placeholder objects: {sorted(extras)[:10]})"
             )
+        return tuple(sorted(seeds))
+
+    async def _remove_pristine_bank_seeds(
+        self, target_space_id: str, seed_paths: tuple[str, ...],
+        snapshot: BootstrapSnapshot,
+    ) -> None:
+        """Drop only surplus empty templates under the existing import fence.
+
+        The source manifest is already verified and the target is UNSAFE.
+        Recheck every seed before removing any; all failures stay UNSAFE.
+        Source-owned paths are overwritten by the ordinary manifest import.
+        """
+        from ..bank_template import STANDARD_BANK
+
+        prefix = f"{target_space_id}/"
+        for rel in seed_paths:
+            if await self._storage.get(prefix + rel) != STANDARD_BANK[rel.removeprefix("bank/")]:
+                raise BootstrapError("import refused: standard seed changed before replacement")
+        for rel in seed_paths:
+            if rel not in snapshot.files:
+                await self._storage.delete(prefix + rel)
+                if await self._storage.get(prefix + rel) is not None:
+                    raise BootstrapError("import refused: standard seed removal was not verified")
 
     @staticmethod
     def _verify_manifest(snapshot: BootstrapSnapshot) -> None:

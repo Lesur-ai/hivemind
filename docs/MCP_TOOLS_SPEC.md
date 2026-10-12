@@ -287,20 +287,25 @@ Creates a new memory space with its rules.
 async def space_create(
     space_id: str,          # Identifier: letters, numbers, underscore, hyphen (max 64)
     description: str,       # Short description
-    rules: str = "",        # Optional Markdown rules; empty loads DEFAULT_RULES_FILE
+    rules: str = "",        # Optional rules; empty uses configured or shipped defaults
     owner: str = ""         # Owner (optional, informational)
 ) -> dict:
 ```
 
 **Behavior**:
 - Validates `space_id`: regex `^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`
-- If `rules` is empty, loads the configured `DEFAULT_RULES_FILE`; fails closed
-  if no readable default is configured.
+- Default selection: empty loads DEFAULT_RULES_FILE when nonempty, otherwise
+  the shipped `RULES/live-mem.standard.memory.bank.md` (repository-root CWD
+  or Docker `/app`). An unreadable or empty rules file fails before mutation.
+  The shipped standard prepares six empty H1/H2 MID files and verifies their
+  bytes before committing creation. Custom rules/default files retain their
+  dynamic structure; existing spaces are never reseeded.
 - Requires `manage` (or inherited `admin`). A `write` token cannot allocate a
   new space or expand its own allowlist.
 - For a persisted non-admin manager, revalidates the caller under the token
   lock and automatically grants the new space to that caller.
-- Creates `{space_id}/_rules.md` and the two `.keep` preparation objects first
+- Creates `{space_id}/_rules.md`, the two `.keep` preparation objects and any
+  standard initial MID files first
   (immutable on the normal path — see
   [Rules immutability](#rules-immutability-clarification); the `manage`-only
   `space_update_rules` is the deliberate operator escape hatch)

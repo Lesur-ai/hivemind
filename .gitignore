@@ -60,3 +60,6 @@ neo4j_data/
 neo4j_logs/
 qdrant_data/
 qdrant_snapshots/
+
+# Run-local CI evidence; never part of an exported source snapshot.
+.artifacts/

@@ -57,7 +57,7 @@ def register(mcp: MCPServer) -> int:
                 default="",
                 description=(
                     "Markdown consolidation rules that define the memory bank "
-                    "structure; empty uses DEFAULT_RULES_FILE"
+                    "structure; empty uses DEFAULT_RULES_FILE or the shipped standard rules"
                 ),
             ),
         ] = "",
@@ -76,7 +76,9 @@ def register(mcp: MCPServer) -> int:
         A manage-level operator can update them later with
         ``space_update_rules``.
 
-        If ``rules`` is empty, the server loads the configured default rules.
+        If ``rules`` is empty, the server loads the configured default rules,
+        falling back to the shipped standard rules. The shipped standard
+        initializes six empty, editable MID documents before creation commits.
 
         Args:
             space_id: Unique identifier using letters, numbers, hyphens, and
@@ -88,12 +90,10 @@ def register(mcp: MCPServer) -> int:
         Returns:
             Details of the created space.
         """
-        from pathlib import Path
         from ..auth.context import (
             check_manage_permission,
             get_effective_token_info,
         )
-        from ..config import get_settings
         from ..core.space import get_space_service
 
         try:
@@ -107,32 +107,10 @@ def register(mcp: MCPServer) -> int:
             if actor is None:
                 return {"status": "error", "message": "Authentication required"}
 
-            # Si rules vide, charger les rules par défaut
-            effective_rules = rules
-            if not effective_rules.strip():
-                settings = get_settings()
-                if settings.default_rules_file:
-                    rules_path = Path(settings.default_rules_file)
-                    if rules_path.is_file():
-                        effective_rules = rules_path.read_text(encoding="utf-8")
-                    else:
-                        return {
-                            "status": "error",
-                            "message": f"Default rules file not found: {settings.default_rules_file}",
-                        }
-                else:
-                    return {
-                        "status": "error",
-                        "message": (
-                            "The 'rules' parameter is required. "
-                            "No default rules file is configured (DEFAULT_RULES_FILE)."
-                        ),
-                    }
-
             return await get_space_service().create(
                 space_id=space_id,
                 description=description,
-                rules=effective_rules,
+                rules=rules,
                 owner=owner,
                 actor_token_hash=actor.get("token_hash", ""),
                 bootstrap_admin=(

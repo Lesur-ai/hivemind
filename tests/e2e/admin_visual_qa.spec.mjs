@@ -813,6 +813,7 @@ test('accessibility: attention text has at least 4.5 rendered contrast', async (
     await routeConsole(page);
     await page.goto(`${ORIGIN}/admin.html#/access`);
     await expect(page.locator('#accessTable')).toBeVisible();
+    await expect(page.locator('#accessTable td').first()).toBeVisible();
     const contrast = await page.evaluate(() => {
         const cell = document.querySelector('#accessTable td');
         cell.insertAdjacentHTML('beforeend', pill('warn', 'Expired'));

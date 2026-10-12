@@ -192,8 +192,8 @@ class Settings(BaseSettings):
         return stripped
 
     # ─── Rules par défaut ─────────────────────────────────────
-    # Chemin vers le fichier Markdown utilisé comme rules par défaut
-    # quand space_create est appelé sans paramètre rules.
+    # Optional override for the default rules file. Empty uses the shipped
+    # RULES/live-mem.standard.memory.bank.md in a clone or Docker /app.
     # Ex: RULES/live-mem.standard.memory.bank.md (relatif au CWD)
     # ou /app/RULES/live-mem.standard.memory.bank.md (absolu dans Docker)
     default_rules_file: str = ""

@@ -6,35 +6,189 @@ on:
     branches:
       - main
 
-# This workflow is safe for fork pull requests: it neither requests package
-# permissions nor references repository, organization, or environment secrets.
+# Fork-safe, read-only PR/main checks. Every worker has a seven-minute test
+# budget; complete collection and raw evidence are verified before a stable
+# check name can succeed. No image/package publication or secrets are used.
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test public tree
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+  prepare_python314:
+    name: Collect public python314 suite (${{ matrix.architecture }})
+    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
-
-      - name: Set up Node.js for browser-harness tests
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: "3.11"
+          python-version: "3.14.8"
+      - name: Install locked development dependencies
+        run: uv sync --locked --dev --python 3.14.8
+      - name: Verify interpreter and native architecture
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - <<'PY_RUNTIME'
+          import platform
+          import sys
+          expected = (3, 14, 8)
+          if sys.implementation.name != "cpython" or tuple(sys.version_info[:len(expected)]) != expected:
+              raise SystemExit(f"expected CPython {expected!r}, got {sys.version_info[:3]!r}")
+          machines = {'arm64': {'aarch64', 'arm64'}, 'x64': {'x86_64', 'amd64'}}
+          if platform.machine().lower() not in machines['${{ matrix.architecture }}']:
+              raise SystemExit(f"expected native ${{ matrix.architecture }} runner, got {platform.machine()!r}")
+          PY_RUNTIME
+      - name: Collect all public cases into eight disjoint shards
+        run: >-
+          uv run --no-sync python scripts/ci_pytest_shards.py plan
+          --source-sha "$GITHUB_SHA" --mode plain --shards 8
+          --output .artifacts/plan.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plan-python314-${{ matrix.architecture }}
+          path: .artifacts/plan.json
+          if-no-files-found: error
+          retention-days: 7
 
+  python314_shards:
+    name: Public python314 ${{ matrix.architecture }} shard ${{ matrix.shard }}
+    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    needs: [prepare_python314]
+    strategy:
+      fail-fast: false
+      matrix:
+        architecture: [x64, arm64]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.14.8"
+      - name: Install locked development dependencies
+        run: uv sync --locked --dev --python 3.14.8
+      - name: Verify interpreter and native architecture
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - <<'PY_RUNTIME'
+          import platform
+          import sys
+          expected = (3, 14, 8)
+          if sys.implementation.name != "cpython" or tuple(sys.version_info[:len(expected)]) != expected:
+              raise SystemExit(f"expected CPython {expected!r}, got {sys.version_info[:3]!r}")
+          machines = {'arm64': {'aarch64', 'arm64'}, 'x64': {'x86_64', 'amd64'}}
+          if platform.machine().lower() not in machines['${{ matrix.architecture }}']:
+              raise SystemExit(f"expected native ${{ matrix.architecture }} runner, got {platform.machine()!r}")
+          PY_RUNTIME
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: plan-python314-${{ matrix.architecture }}
+          path: .artifacts/plan
+      - name: Run the assigned complete public shard
+        run: >-
+          uv run --no-sync python scripts/ci_pytest_shards.py run
+          --plan .artifacts/plan/plan.json --index ${{ matrix.shard }}
+          --output .artifacts/result
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: result-python314-${{ matrix.architecture }}-${{ matrix.shard }}
+          path: .artifacts/result
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    name: Test public tree
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    needs: [prepare_python314, python314_shards, public_cli]
+    if: ${{ always() }}
+    steps:
+      - name: Require preparation and every worker to succeed
+        env:
+          PREPARE_RESULT: ${{ needs.prepare_python314.result }}
+          WORKERS_RESULT: ${{ needs.python314_shards.result }}
+          CLI_RESULT: ${{ needs.public_cli.result }}
+        run: test "$PREPARE_RESULT" = success && test "$WORKERS_RESULT" = success && test "$CLI_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.14.8"
+      - name: Install locked development dependencies
+        run: uv sync --locked --dev --python 3.14.8
+      - name: Verify interpreter and native architecture
+        run: |
+          set -euo pipefail
+          uv run --no-sync python - <<'PY_RUNTIME'
+          import platform
+          import sys
+          expected = (3, 14, 8)
+          if sys.implementation.name != "cpython" or tuple(sys.version_info[:len(expected)]) != expected:
+              raise SystemExit(f"expected CPython {expected!r}, got {sys.version_info[:3]!r}")
+          if platform.machine().lower() not in {'aarch64', 'arm64'}:
+              raise SystemExit(f"expected native arm64 runner, got {platform.machine()!r}")
+          PY_RUNTIME
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: plan-python314-arm64
+          path: .artifacts/plans/arm64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: result-python314-arm64-*
+          path: .artifacts/results/arm64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: plan-python314-x64
+          path: .artifacts/plans/x64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: result-python314-x64-*
+          path: .artifacts/results/x64
+      - name: Verify complete source-bound public evidence on both architectures
+        run: |
+          set -euo pipefail
+          for architecture in arm64 x64; do
+            uv run --no-sync python -c 'import sys; from pathlib import Path; from scripts.ci_pytest_shards import read_json, require; require(read_json(Path(sys.argv[1]))["runtime"]["machine"] == sys.argv[2], "wrong hardware cohort")' ".artifacts/plans/$architecture/plan.json" "$architecture"
+            uv run --no-sync python scripts/ci_pytest_shards.py verify \
+              --plan ".artifacts/plans/$architecture/plan.json" \
+              --results ".artifacts/results/$architecture" \
+              --source-sha "$GITHUB_SHA" --output ".artifacts/verified/$architecture"
+          done
+      - name: Check public documentation links
+        run: uv run --no-sync python scripts/check_doc_links.py
+
+  # Compatibility check: both hardware cohorts were verified above; executes no tests.
+  test_python314_arm64:
+    name: Test public tree (Python 3.14.8, arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    needs: [test]
+    if: ${{ always() }}
+    steps:
+      - name: Require the single supported Python suite
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$TEST_RESULT" = success
+
+  public_cli:
+    name: Public ingestion CLI
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Go for the public ingestion CLI
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -47,65 +201,3 @@ jobs:
           bash scripts/build-hivemind-ingest.sh --test
           test "$(./bin/hivemind-ingest version | awk '{print $2}')" = \
             "v$(tr -d '\r\n' < VERSION)"
-
-      - name: Install dependencies
-        run: uv sync --locked --dev
-
-      - name: Run public test suite
-        run: uv run --no-sync pytest tests/ -q --strict-markers --durations=50
-
-      - name: Check public documentation links
-        run: uv run python scripts/check_doc_links.py
-
-  test_python314_arm64:
-    name: Test public tree (Python 3.14.8, arm64)
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Python 3.14.8
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.14.8"
-
-      - name: Set up Node.js for browser-harness tests
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          python-version: "3.14.8"
-
-      - name: Install locked dependencies
-        run: uv sync --locked --dev --python 3.14.8
-
-      - name: Verify native CPython 3.14.8 runtime
-        run: |
-          set -euo pipefail
-          uv run --no-sync python - <<'PY'
-          import platform
-          import sys
-
-          expected = (3, 14, 8)
-          if sys.implementation.name != "cpython" or sys.version_info[:3] != expected:
-              raise SystemExit(
-                  f"expected CPython {expected!r}, got "
-                  f"{sys.implementation.name} {sys.version_info[:3]!r}"
-              )
-          if platform.machine().lower() not in {"aarch64", "arm64"}:
-              raise SystemExit(f"expected native arm64 runner, got {platform.machine()!r}")
-          PY
-
-      - name: Run complete public Python test suite
-        run: uv run --no-sync pytest tests/ -q --strict-markers --durations=50
-
-      - name: Check public documentation links
-        run: uv run --no-sync python scripts/check_doc_links.py
-
-# This workflow tests the public source tree. It does not build container
-# images or publish packages. Image publication runs in release.yml after
-# tag verification; maintainers validate release images separately before a cut.

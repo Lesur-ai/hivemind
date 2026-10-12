@@ -17,10 +17,10 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.6.1-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.6.2-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
-[![python](https://img.shields.io/badge/python-3.11+-F59E0B?style=flat-square)](#-pr%C3%A9requis)
+[![python](https://img.shields.io/badge/python-3.14-F59E0B?style=flat-square)](#-pr%C3%A9requis)
 
 English · [README.md](README.md)
 
@@ -29,6 +29,20 @@ English · [README.md](README.md)
 ---
 
 **Transport MCP (1.6.1).** Le cœur et le moteur LONG embarqué utilisent le même SDK MCP Python 2.3.0 (`MCPServer`). Les clients MCP compatibles conservent leurs noms d’outils et alias ; le protocole moderne est également servi. La CLI de maintenance Python et le pont LONG utilisent le transport Streamable HTTP du SDK 2. La configuration d’inférence, les banques et les données du graphe sont conservées ; reconstruire les deux images ensemble. Les requêtes MCP sont bornées à 75 Mio sur le transport, avec une limite de 50 Mio par document décodé.
+
+**Initialisation MID (1.6.2).** Cette version de maintenance permet de créer un
+space standard sans fournir de règles. Dans `.env.example`, `DEFAULT_RULES_FILE`
+pointe vers `RULES/live-mem.standard.memory.bank.md` ; une variable absente ou
+vide utilise aussi ce fichier livré. La création prépare et vérifie six
+documents MID vides avant de valider le space. La consolidation les remplit avec
+le modèle de dialogue configuré et peut mettre à jour une table sous un H1 ou un
+résumé compacté en conservant son titre et ses sous-sections. Une banque standard
+intacte reste une cible Mesh vide admissible. Le modèle de banque est sélectionné
+par le contenu des règles ; des règles personnalisées gardent leur structure,
+même au chemin par défaut. Les spaces existants sont conservés. Reconstruire
+l'image Hivemind lors de la mise à jour. La consolidation Anthropic native exige
+un modèle prenant en charge les sorties structurées. Voir les
+[notes de version](CHANGELOG.md#162--2026-10-12).
 
 > **Correctifs de sécurité de la 1.5.3.** Hivemind 1.5.3 corrige les sept constats
 > applicatifs de l'audit du code source du 16 septembre 2026 : frontières du
@@ -297,7 +311,7 @@ graphe de connaissances `long`, lié au space en interne. C'est une
 ## 📦 Prérequis
 
 - **Docker** >= 24.0 + **Docker Compose** >= 2.17.0 (`up --wait` est utilisé)
-- **Python 3.11+** et [`uv`](https://docs.astral.sh/uv/) (CLI/tests locaux)
+- **Python 3.14** et [`uv`](https://docs.astral.sh/uv/) (CLI/tests locaux)
 - Un **stockage S3-compatible** (Dell ECS, AWS, MinIO)
 - Une paire de rôles **chat + embeddings** configurée pour la consolidation
   `mid`, l'extraction et les requêtes `long`. La matrice v1.4 couvre des rôles
@@ -1317,11 +1331,15 @@ uv run python scripts/test_recette.py --list
 | `qualite`   | Régression des outils MCP : system, admin, space, short, mid, backup, GC                 |
 | `graph`     | Chemin override explicite `graph_connect` du tier `long` : connect, push, status, disconnect (sautée sans `--graph-url`/`--graph-token`) |
 
-La suite protocole Hivemind importée tourne aussi sous `pytest` :
+La suite protocole Hivemind importée tourne aussi sous `pytest`. En local,
+exécuter uniquement le strict nécessaire pour le comportement modifié ; la CI
+valide la suite complète, l'intégration et la couverture. Une exécution locale
+plus large demande une instruction explicite ou un besoin concret de diagnostic.
 
 ```bash
-uv run pytest tests/test_hivemind_state.py tests/test_hivemind_peer.py
-uv run pytest tests
+git diff --check
+# Exemple : sélectionner uniquement les cas concernés par la modification.
+uv run pytest tests/test_hivemind_state.py -k '<comportement_concerne>'
 ```
 
 ---

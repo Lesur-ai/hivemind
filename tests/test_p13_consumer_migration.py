@@ -2082,7 +2082,7 @@ class TestDeploymentPurity:
         assert len(present) == 1, [str(path) for path in present]
         raw = present[0].read_text(encoding="utf-8")
         workflow = yaml.safe_load(raw)
-        assert set(workflow["jobs"]) == {"test", "test_python314_arm64"}
+        assert set(workflow["jobs"]) == {"test", "test_python314_arm64", "prepare_python314", "python314_shards", "public_cli"}
         assert "docker/build-push-action" not in raw
 
     # The matching guard for the OFFLINE export audit — which must resolve the

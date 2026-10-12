@@ -14,10 +14,12 @@ Voir MCP_TOOLS_SPEC.md pour les signatures et retours attendus.
 """
 
 import base64
+import hashlib
 import io
 import json
 import re
 import tarfile
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -93,7 +95,7 @@ class SpaceService:
         self,
         space_id: str,
         description: str,
-        rules: str,
+        rules: str = "",
         owner: str = "",
         *,
         actor_token_hash: str = "",
@@ -129,6 +131,27 @@ class SpaceService:
         namespace_error = reserved_space_error(space_id)
         if namespace_error is not None:
             return namespace_error
+
+        # Resolve defaults in the shared service before any durable mutation.
+        # The clone and Docker /app both ship this path; custom paths remain
+        # authoritative and are never silently replaced after a read failure.
+        initial_bank = None
+        if not rules.strip():
+            from ..config import get_settings
+            from .bank_template import STANDARD_BANK, STANDARD_RULES_SHA256
+
+            standard_path = Path("RULES/live-mem.standard.memory.bank.md")
+            rules_path = Path(get_settings().default_rules_file or standard_path)
+            if not rules_path.is_file():
+                return {
+                    "status": "error",
+                    "message": f"Default rules file not found: {rules_path}",
+                }
+            rules = rules_path.read_text(encoding="utf-8")
+            if not rules.strip():
+                return {"status": "error", "message": "Default rules file is empty"}
+            if hashlib.sha256(rules.encode("utf-8")).hexdigest() == STANDARD_RULES_SHA256:
+                initial_bank = STANDARD_BANK
 
         # VULN-07 fix : valider les tailles des champs
         if len(rules) > MAX_RULES_SIZE:
@@ -176,6 +199,7 @@ class SpaceService:
                     token_service=token_service,
                     token_store=store,
                     actor=actor,
+                    initial_bank=initial_bank,
                 )
 
     @staticmethod
@@ -304,11 +328,12 @@ class SpaceService:
         token_service,
         token_store,
         actor=None,
+        initial_bank: dict[str, str] | None = None,
     ) -> dict:
         """Prépare puis commit un espace sous ses verrous de cycle de vie.
 
         Un préfixe sans ``_meta.json`` n'est repris que s'il contient un
-        sous-ensemble exact de ``_rules.md``, ``live/.keep`` et ``bank/.keep``
+        sous-ensemble exact de rules/keeps et des éventuels fichiers MID initiaux
         avec les octets attendus. Aucun rollback destructif n'est tenté : une
         ambiguïté devient ``partial/recovery_required``. Un préfixe absent
         avec un grant historique n'est jamais recréé. Une préparation exacte
@@ -324,6 +349,10 @@ class SpaceService:
             f"{space_id}/live/.keep": "",
             f"{space_id}/bank/.keep": "",
         }
+        expected_objects.update({
+            f"{space_id}/bank/{filename}": content
+            for filename, content in (initial_bank or {}).items()
+        })
 
         committed_state, committed_reason = await self.classify_committed_state(
             storage, space_id
@@ -439,6 +468,19 @@ class SpaceService:
                         "S3 preparation is incomplete; recovery is required.",
                         retry_safe=True,
                     )
+
+        # Verify the seed before granting access or writing the commit marker.
+        for filename, content in (initial_bank or {}).items():
+            try:
+                confirmed = await storage.get(f"{space_id}/bank/{filename}")
+            except Exception:
+                confirmed = None
+            if confirmed != content:
+                return self._partial_create(
+                    space_id,
+                    "The initial MID bank is not verified; the space is uncommitted.",
+                    retry_safe=True,
+                )
 
         grant_added = False
         if actor is not None and "admin" not in set(actor.permissions or []):

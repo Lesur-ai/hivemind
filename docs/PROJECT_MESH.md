@@ -58,6 +58,12 @@ to make the source appear writable.
    The services complete the full-mesh membership ACK, signed bounded bootstrap,
    final ACK, and activation in the background.
 
+A newly created standard space is blank for pairing while all six initial
+documents are unchanged, its rules are the shipped standard and it has no
+consolidation history, notes, synthesis or Mesh state. Bootstrap replaces those
+empty templates with the verified source snapshot; a changed, missing or extra
+document refuses pairing. Existing populated spaces are never merged.
+
 This V1 workflow requires the source space to have exactly one active member
 and provisions a two-node mesh. It fails closed when the source already has
 more than one active member. Adding a third node, or otherwise enrolling into

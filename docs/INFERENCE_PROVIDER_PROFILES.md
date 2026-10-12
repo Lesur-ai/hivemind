@@ -115,24 +115,31 @@ generation or billing evidence.
 
 ### Structured normal consolidation output
 
-Normal SHORT→MID consolidation requests `response_format: json_schema` with
-`strict: true` when the chat profile's identity is `openai-compatible`. The
-server-owned schema covers the existing plan's operations and note dispositions
-on the initial call and its single correction. It contains no bank text or
-dynamic target addresses. The legacy `LLMAAS_*` configuration resolves to this
-generic profile and therefore also sends the schema.
+Normal SHORT→MID consolidation requests a server-owned JSON Schema on the
+initial call and its single correction when the chat adapter exposes the
+`supports_response_schema` capability:
 
-This boundary uses the configured profile identity, not endpoint capability
-detection. Other identities, including an explicit `cloud-temple` profile, keep
-their existing generation mode even if they use the OpenAI-compatible adapter.
-Compaction and text merging do not request this normal-plan schema.
+- The generic `openai-compatible` profile sends `response_format: json_schema`
+  with `strict: true`. Legacy `LLMAAS_*` configuration resolves to this profile.
+- Native `anthropic` sends `output_config.format` with `type: json_schema`.
+  Its schema uses Anthropic's supported subset: non-empty text and positive
+  note indices remain mandatory local validation rules, since Anthropic does
+  not accept `minLength` or numeric `minimum` constraints.
 
-The endpoint must support this schema request. A refusal stops the batch without
-a silent free-form fallback and preserves its source notes. Acceptance by a
-gateway alone does not prove that it enforces the grammar. Strict parsing,
+Both variants describe the existing operations and note dispositions, without
+bank text or dynamic target addresses. Other named profiles, including
+`cloud-temple` and `openai`, keep their existing generation mode. Compaction
+and text merging do not request the normal-plan schema. This capability is
+configured by the adapter; Hivemind does not probe endpoints or infer support
+from a successful HTTP response.
+
+The endpoint must support the requested schema. A refusal stops the batch
+without a silent free-form fallback and preserves its source notes. Acceptance
+by a gateway alone does not prove that it enforces the grammar. Strict parsing,
 completion and complete pre-write checks still decide whether the plan may be
 applied; structural conformance does not prove summary accuracy. The nonce,
-existing correction and transient-retry limits remain in effect.
+existing correction and transient-retry limits remain in effect. Native
+Anthropic effort settings are unchanged.
 
 ## Strict migration from `LLMAAS_*`
 
@@ -299,7 +306,7 @@ the adapter never silently mutates or invents one.
 | OpenAI chat | `model`, `messages`, `max_completion_tokens`, optional `reasoning_effort` | `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
 | Cloud Temple chat | `model`, `messages`, `max_tokens` | `max_completion_tokens`, `reasoning_effort`, `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
 | Gemini chat | `model`, `messages`, `max_tokens` | `max_completion_tokens`, `reasoning_effort`, `thinking`, `top_k`, `top_p`, `stop`, `seed`, `tools`, `stream`, `n`, penalties |
-| Native Anthropic chat | `model`, `messages`, `max_tokens`, conditional top-level `system` | `max_completion_tokens`, `reasoning_effort`, `thinking`, `top_k`, `top_p`, tools, streaming, penalties |
+| Native Anthropic chat | `model`, `messages`, `max_tokens`, conditional top-level `system`, conditional `output_config.format` | `max_completion_tokens`, `reasoning_effort`, `thinking`, `top_k`, `top_p`, tools, streaming, penalties |
 | All named embeddings | `model`, `input` | `dimensions`, `encoding_format`, `output_dimension`, `output_dtype`, `user` |
 
 The Gemini embedding profile additionally rejects `task_type`; it does not
