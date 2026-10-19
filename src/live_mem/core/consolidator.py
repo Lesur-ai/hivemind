@@ -340,6 +340,7 @@ _NORMAL_MODEL_FORM_FAULT_REASONS = frozenset(
         "normal_after_anchor_modified",
         "normal_append_reparents_source",
         "normal_create_target_exists",
+        "normal_create_without_body",
         "normal_edit_reduction_refused",
         "normal_edit_target_missing",
         "normal_h1_not_preserved",
@@ -445,6 +446,12 @@ _NORMAL_FORM_FAULT_HINTS: tuple[tuple[frozenset[str], str], ...] = (
         "An edit or rewrite must keep the file's existing content: it may not "
         "remove most of it or leave it empty.",
     ),
+    (
+        frozenset({"normal_create_without_body"}),
+        "A create or rewrite that claims notes must carry their content under "
+        "its H1, not only headings; never split a new file into an H1-only "
+        "create plus an edit of the same file.",
+    ),
 )
 _NORMAL_OPERATION_FAILURE_REASONS = frozenset(
     {
@@ -488,6 +495,7 @@ _NORMAL_OPERATION_FAILURE_REASONS = frozenset(
         "normal_append_reparents_source",
         "normal_bank_readback_failed",
         "normal_create_target_exists",
+        "normal_create_without_body",
         "normal_edit_reduction_refused",
         "normal_edit_target_missing",
         "normal_h1_not_preserved",
@@ -1701,6 +1709,44 @@ def _normal_model_body_is_safe(value: str, *, owner_level: int) -> bool:
     """Keep model-owned body text from changing the surrounding hierarchy."""
 
     return _normal_model_body_fault(value, owner_level=owner_level) is None
+
+
+def _normal_content_has_body_beyond_h1(content: str) -> bool:
+    """Return whether a whole-file candidate holds text beyond its headings.
+
+    Only a file that holds text may consume the notes it claims (#1052,
+    hivemind#124): an H1 alone, or a skeleton of headings, would delete them
+    while preserving none of their content.  Run after the strict grammar has
+    accepted the candidate, with the same fence lexer: a non-blank line inside
+    a fence is content, fence delimiters and ATX headings are structure, and a
+    line of whitespace or invisible characters only is blank.
+    """
+
+    fence_character: str | None = None
+    fence_length = 0
+    for line in _physical_markdown_lines(content):
+        raw_line = line.rstrip("\r\n")
+        fence_open = _strict_compaction_fence_open(raw_line)
+        fence_close = _strict_compaction_fence_close(raw_line)
+        if fence_character is not None:
+            if (
+                fence_close is not None
+                and fence_close[0] == fence_character
+                and fence_close[1] >= fence_length
+            ):
+                fence_character = None
+                fence_length = 0
+            elif not _normal_is_blank(raw_line):
+                return True
+            continue
+        if fence_open is not None:
+            fence_character, fence_length = fence_open
+            continue
+        if _STRICT_COMPACTION_HEADING_RE.fullmatch(raw_line) is not None:
+            continue
+        if not _normal_is_blank(raw_line):
+            return True
+    return False
 
 
 def _normal_model_text(value: str, line_ending: str) -> str:
@@ -6074,6 +6120,23 @@ Return JSON with this exact structure:
                         continue
                 operation_count = len(file_edit["operations"])
 
+            # A whole-file write that claims notes must hold their text: the
+            # notes are deleted after this write (#1052, hivemind#124).
+            if (
+                action in {"create", "rewrite"}
+                and file_notes_tuple
+                and not _normal_content_has_body_beyond_h1(candidate)
+            ):
+                failures.append(
+                    {
+                        "reason": "normal_create_without_body",
+                        "file_index": file_index,
+                        "filename": filename,
+                    }
+                )
+                failed_file_indices.add(file_index)
+                continue
+
             deduplicated, _dedup_count, dedup_failure = await self._deduplicate_content(
                 candidate, filename
             )
@@ -6112,6 +6175,26 @@ Return JSON with this exact structure:
                     failed_file_indices.add(file_index)
                     continue
             candidate = deduplicated
+            # A duplicate merge may replace the text the guard above accepted
+            # with headings only; the final bytes must still hold it.
+            if (
+                action in {"create", "rewrite"}
+                and file_notes_tuple
+                and not _normal_content_has_body_beyond_h1(candidate)
+            ):
+                logger.error(
+                    "DEDUP %s: merge left no text under the headings — batch refused",
+                    filename,
+                )
+                failures.append(
+                    {
+                        "reason": "deduplication_contract_violation",
+                        "file_index": file_index,
+                        "filename": filename,
+                    }
+                )
+                failed_file_indices.add(file_index)
+                continue
             if not _normal_is_utf8_encodable(candidate):
                 failures.append(
                     {

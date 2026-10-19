@@ -25,6 +25,23 @@ def _read(relative: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+# Excluded from the public export, so either one identifies the private tree
+# (the overlay source is the marker test_p13_consumer_migration already uses).
+_PRIVATE_TREE_MARKERS = (
+    ".github/workflows/build.yml",
+    "release/public-overlay/.github/workflows/ci.yml",
+)
+
+
+def _read_private_ci() -> str:
+    # #1074: the public tree also has a .github/workflows/ci.yml, the public
+    # overlay, so the file's existence cannot select the private oracle. Skip
+    # only outside the private tree; inside it a missing ci.yml fails.
+    if not any((ROOT / marker).is_file() for marker in _PRIVATE_TREE_MARKERS):
+        pytest.skip("the private CI workflow is absent from the public release tree")
+    return (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+
 def _build_job_body(workflow: str) -> str:
     match = re.search(
         r"(?ms)^  build:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_]*:|\Z)", workflow
@@ -124,7 +141,8 @@ def _assert_proof_matrix(shell: str, helper: str) -> None:
 
 
 def test_issue_183_docker_proof_is_blocking_and_complete() -> None:
-    _assert_ci_gate(_read(".github/workflows/build.yml"))
+    # #991: the Private CI jobs live in ci.yml, which build.yml calls.
+    _assert_ci_gate(_read_private_ci())
     _assert_proof_matrix(
         _read("scripts/verify_embedded_secret_docker.sh"),
         _read("scripts/verify_embedded_secret_container.py"),
@@ -132,13 +150,13 @@ def test_issue_183_docker_proof_is_blocking_and_complete() -> None:
 
 
 def test_mutation_red_runtime_job_removed_from_build_dependencies() -> None:
-    original = _read(".github/workflows/build.yml")
-    workflow = original.replace(
-        "needs: [change_classifier, test, test_python314_arm64, audit, embedded_secret_runtime, "
-        "public_tree, coverage_floors]",
-        "needs: [change_classifier, test, test_python314_arm64, audit, public_tree, coverage_floors]",
-    )
-    assert workflow != original, "mutation target string no longer matches build.yml"
+    original = _read_private_ci()
+    _assert_ci_gate(original)
+    build = _build_job_body(original)
+    mutated_build = re.sub(r"(?m)^(    needs: \[.*)embedded_secret_runtime, ", r"\1", build)
+    assert mutated_build != build, "build dependency mutation must apply"
+    workflow = original.replace(build, mutated_build, 1)
+    assert workflow != original, "mutation target string no longer matches ci.yml"
     with pytest.raises(AssertionError):
         _assert_ci_gate(workflow)
 

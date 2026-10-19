@@ -1,7 +1,7 @@
 # 🖥️ Hivemind CLI, Shell & Tests
 
 > Scriptable CLI, interactive shell, and operational test scripts for Hivemind
-> `1.6.2`.
+> `1.6.3`.
 
 🇫🇷 [Version française](README.fr.md)
 
@@ -367,4 +367,4 @@ scripts/
 
 ---
 
-*Hivemind CLI — 1.6.2*
+*Hivemind CLI — 1.6.3*

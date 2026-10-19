@@ -360,23 +360,31 @@ async def test_pipeline_uses_frozen_default_before_first_io(graph_env, monkeypat
     storage.upload_document.assert_not_awaited()
 
 
-@pytest.mark.parametrize("invalid", [False, True])
+@pytest.mark.parametrize("invalid", [False, True, "legacy_temporal"])
 async def test_pipeline_actual_extractor_applies_frozen_vocabulary_before_graph(graph_env, monkeypatch, invalid):
     from mcp_memory.core import ingest_pipeline as pipeline
     from mcp_memory.core.extractor import ExtractorService
     from unittest.mock import MagicMock
+    from tests.fakes.inference_fakes import enable_occurrence_extraction
+    enable_occurrence_extraction(monkeypatch)  # the T03 occurrence path (#999)
     graph, backend, _ = graph_env
     await graph.save_automatic_ontology("test", expected_created_at=CREATED.isoformat(), batch_fingerprint=BATCH, checkpoint={}, ontology_yaml=YAML)
     graph.get_memory = AsyncMock(return_value=SimpleNamespace(ontology=backend.node["ontology"]))
     graph.add_document = AsyncMock()
     graph.add_entities_and_relations = AsyncMock(return_value={"entities_created": 2, "relations_created": 2})
     graph.update_document_ingestion = AsyncMock()
-    storage = SimpleNamespace(upload_document=AsyncMock(return_value={"uri": "s3://bucket/test/document.md", "size_bytes": 30}))
+    storage = SimpleNamespace(upload_document=AsyncMock(return_value={"uri": "s3://bucket/test/document.md", "size_bytes": 30}),
+                              put_extracted_text=AsyncMock(return_value=""))  # T04b retention
     extractor = object.__new__(ExtractorService)
-    extractor._complete = AsyncMock(return_value=SimpleNamespace(text=json.dumps({
-        "entities": [{"name": "Switch", "type": "INVENTED" if invalid else "Device"}, {"name": "Unclassified", "type": "Other"}],
+    provider_body = {
+        "entities": [{"name": "Switch", "type": "INVENTED" if invalid is True else "Device"}, {"name": "Unclassified", "type": "Other"}],
         "relations": [{"from_entity": "Switch", "to_entity": "Unclassified", "type": "RELATED_TO"}, {"from_entity": "Unclassified", "to_entity": "Switch", "type": "Other"}],
-    })))
+    }
+    from tests.fakes.inference_fakes import temporal_unknown_payload
+    async def completion(messages):
+        output = provider_body if invalid == "legacy_temporal" else temporal_unknown_payload(provider_body, messages[1]["content"])
+        return SimpleNamespace(text=json.dumps(output))
+    extractor._complete = AsyncMock(side_effect=completion)
     monkeypatch.setattr(pipeline, "_graph", lambda: graph)
     monkeypatch.setattr(pipeline, "_storage", lambda: storage)
     monkeypatch.setattr(pipeline, "_extractor", lambda: extractor)
@@ -392,6 +400,10 @@ async def test_pipeline_actual_extractor_applies_frozen_vocabulary_before_graph(
     else:
         assert result["status"] == "ok"
         graph.add_document.assert_awaited_once()
+        handoff = graph.add_entities_and_relations.call_args.kwargs["extraction"]
+        assert handoff.temporal_schema_version == 1
+        assert len(handoff.occurrences) == 2
+        assert all(o.source_ref.doc_id == result["document_id"] for o in handoff.occurrences)
         assert result["entity_types"] == {"Device": 1, "Other": 1}
         assert result["ontology_diagnostics"] == {
             "entity_other": {"count": 1, "denominator": 2, "rate": .5},

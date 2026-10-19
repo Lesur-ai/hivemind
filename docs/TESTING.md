@@ -17,9 +17,9 @@ uv run python scripts/check_doc_links.py
 git diff --check
 ```
 
-Public CI maintains one complete Python 3.14.8 suite, with a hardware matrix
-running eight disjoint shards on each of x64 and native arm64, followed by complete-evidence and documentation checks. Each
-PR/main job is limited to ten minutes. It does not build container images, run
+Public CI maintains one complete Python 3.14.8 suite, running eight disjoint
+shards on X64, followed by complete-evidence and documentation checks. Each
+PR/main job is limited to twenty minutes. It does not build container images, run
 paid provider certification, or publish packages. Release image validation is
 a separate maintainer step; container publication uses the tag-gated
 [release workflow](../.github/workflows/release.yml).
@@ -56,6 +56,31 @@ The orthogonal `slow` and `optional` markers do not replace a primary marker:
 The default `uv run pytest tests/` remains the complete nominal Python suite.
 An environment-dependent skip is a recorded limitation, not evidence that the
 skipped behavior passed.
+
+## CI execution environments
+
+PR and main CI run the complete X64 suite. Native ARM64 validation is reserved
+for final release assembly, including the exact public tree before publication.
+Architecture checks must run natively, and an unavailable runner must not
+weaken the test scope or the required result. The historical required context
+`Test public tree (Python 3.14.8, arm64)` is an X64 compatibility verdict; its
+name remains stable for branch protection and is not an ARM64 release proof.
+
+Private engineering CI uses one complete branch-coverage run as its Python
+correctness reference, plus explicit uninstrumented timing and cancellation
+sentinels on two workers. The sentinel policy names test definitions with a
+reason; collection resolves every parameter variant on the tested source.
+Missing definitions, skipped sentinels and incomplete worker evidence fail the
+gate. `Tests` requires both the plain verdict and the complete coverage floors.
+The staged public tree retains its separate complete uninstrumented suite.
+
+Maintainers can dispatch private CI with `plain_scope=complete` to retain a
+complete plain comparison on four workers. That run also executes the sentinels
+against the same source SHA and records separate qualification evidence.
+Collection/source/policy digests keep the scopes distinct; sentinel coverage
+cannot satisfy the complete branch-coverage gate. Neither the critical floors
+nor the current twenty-eight-minute (1680 s) test-process budget changes as part of this
+simplification; the budget comes from the separate maintainer update.
 
 ## Dedicated and manual runners
 

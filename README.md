@@ -16,7 +16,7 @@ Agents notice what others are doing, inherit what others have learned, and
 understand complex projects together.
 
 [![protocol](https://img.shields.io/badge/protocol-MCP-00A7C7?style=flat-square)](#how-memory-works)
-[![version](https://img.shields.io/badge/version-1.6.2-9CA3AF?style=flat-square)](#license)
+[![version](https://img.shields.io/badge/version-1.6.3-9CA3AF?style=flat-square)](#license)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-111827?style=flat-square)](#license)
 [![python](https://img.shields.io/badge/python-3.14-F59E0B?style=flat-square)](#requirements)
@@ -31,6 +31,19 @@ critical behavior but may trail this page's editorial structure.
 ---
 
 **MCP transport (1.6.1).** Core and embedded LONG use the same pinned MCP Python SDK 2.3.0 (`MCPServer`). Existing supported MCP clients retain their tool names and aliases; the modern protocol is also served. The Python maintenance CLI and LONG bridge use the SDK 2 Streamable HTTP transport. Inference configuration, stored banks and graph data are unchanged; rebuild both images together. MCP requests are bounded to 75 MiB on the wire, with a 50 MiB decoded-document limit.
+
+**LONG source context and MID note safety (1.6.3).** Each passage that
+`long_query` returns now carries the headings and introductions of its source
+section, rendered in `rag_chunks[].text`; graph relations report their real
+`source`, `target` and `direction` instead of `"?"`. Passages indexed before
+1.6.3 receive bounded context from their retained originals at read time, with
+no reingestion. Asking the extraction model for temporal occurrences stays off
+by default (`TEMPORAL_OCCURRENCE_EXTRACTION`, experimental). MID consolidation
+no longer deletes notes into files that hold only their title (#124). Rebuild
+both images together; LONG backups of 1.6.3 data use format `1.1`, which 1.6.2
+cannot restore, so back up before upgrading. See the
+[upgrade checklist](docs/DEPLOYMENT.md#upgrade-to-163) and the
+[release notes](CHANGELOG.md#163--2026-10-19).
 
 **MID bootstrap (1.6.2).** This maintenance release lets you create a standard
 space without supplying rules. `DEFAULT_RULES_FILE` in `.env.example` points to
@@ -586,10 +599,12 @@ git diff --check
 uv run pytest tests/test_hivemind_state.py -k '<affected_behavior>'
 ```
 
-Keep local testing to the strict necessary minimum. CI runs the complete
-suite, integration checks, and coverage validation. For documentation changes,
-run directly relevant checks such as `python scripts/check_doc_links.py`;
-broader local test runs need an explicit request or a concrete diagnostic reason.
+While iterating, run only the focused tests needed for the changed behavior
+and its risks. Reuse relevant passing evidence and diagnose failures with
+focused reproductions. CI queue delays do not require a complete local suite.
+Do not push merely to obtain test feedback. For documentation changes, run
+`git diff --check` and directly relevant document checks such as
+`python scripts/check_doc_links.py`.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request.
 The public architecture summary is in

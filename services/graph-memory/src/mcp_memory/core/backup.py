@@ -29,10 +29,89 @@ from typing import Optional, List, Dict, Any
 from ..config import get_settings
 from .egress import redact_proxy_errors_async
 from .validators import validate_graph_document_references
+from .chunk_annotation import ANNOTATION_KEYS, verify_against_texts, verify_origins
+from .temporal import TemporalOutputError, annotation_origin_for, import_temporal_state, load_text_record
+
+
+def _text_records(graph_data: dict, memory_id: str) -> dict:
+    """doc_id -> validated retained-text record (T04b); refuses bad records."""
+    records = {}
+    for doc in graph_data.get("documents", []):
+        record = load_text_record(doc.get("extracted_text_json"), memory_id, doc.get("id"))
+        if record is not None:
+            records[doc["id"]] = record
+    return records
+
+
+def _document_filenames(graph_data: dict) -> dict:
+    """doc_id -> file name of its document record: the parse mode reindex uses."""
+    return {doc.get("id"): doc.get("filename") for doc in graph_data.get("documents", [])
+            if type(doc) is dict}
+
+
+def _annotated_payloads(points) -> list:
+    """Payloads of restored vector points that carry a temporal annotation."""
+    return [p["payload"] for p in points if type(p) is dict and type(p.get("payload")) is dict
+            and any(key in p["payload"] for key in ANNOTATION_KEYS)]
+
+
+def _annotated_by_document(points) -> dict:
+    """Annotated payloads grouped by document, built once for the whole restore."""
+    grouped = {}
+    for payload in _annotated_payloads(points):
+        grouped.setdefault(payload.get("doc_id"), []).append(payload)
+    return grouped
+
+
+def _verify_origins(points, records: dict) -> None:
+    """A restored passage's origin is the one its document's record implies (#999)."""
+    try:
+        verify_origins(_annotated_payloads(points),
+                       {doc_id: annotation_origin_for(record) for doc_id, record in records.items()})
+    except TemporalOutputError:
+        raise ValueError("Backup passage annotation origin does not match its document") from None
+
+
+def _verify_annotations(memory_id: str, payloads, texts: dict, filenames: dict) -> None:
+    try:
+        verify_against_texts(memory_id, payloads, texts, filenames=filenames)
+    except TemporalOutputError:
+        raise ValueError("Backup passage annotation does not match its retained text") from None
 
 
 # Version du format de backup (pour compatibilité future)
 BACKUP_FORMAT_VERSION = "1.0"
+# Occurrence-bearing graph exports (LONG temporal contract v1, T04). Written
+# only when the memory holds occurrence records, so other backups stay 1.0;
+# 1.6.2 importers refuse it through their exact version check.
+TEMPORAL_BACKUP_FORMAT_VERSION = "1.1"
+
+
+def _check_backup_format(manifest, graph_data=None) -> None:
+    """Refuse an unknown format or an undeclared/smuggled temporal extension."""
+    version = manifest.get("version") if type(manifest) is dict else None
+    if version not in (BACKUP_FORMAT_VERSION, TEMPORAL_BACKUP_FORMAT_VERSION):
+        raise ValueError(
+            f"Incompatible backup version: {version} "
+            f"(expected: {BACKUP_FORMAT_VERSION} or {TEMPORAL_BACKUP_FORMAT_VERSION})"
+        )
+    temporal = version == TEMPORAL_BACKUP_FORMAT_VERSION
+    declared = manifest.get("temporal_schema_version")
+    if temporal != (type(declared) is int and declared == 1) or (
+        not temporal and "temporal_schema_version" in manifest
+    ):
+        raise ValueError("Backup temporal schema declaration is invalid")
+    if graph_data is None:
+        return
+    graph_version = graph_data.get("temporal_schema_version") if type(graph_data) is dict else None
+    if temporal:
+        if (type(graph_version) is not int or graph_version != 1
+                or type(graph_data.get("occurrences")) is not list):
+            raise ValueError("Backup temporal schema declaration is invalid")
+    elif "temporal_schema_version" in graph_data or "occurrences" in graph_data or any(
+        type(d) is dict and "extracted_text_json" in d for d in graph_data.get("documents") or []
+    ):
+        raise ValueError("Backup temporal schema declaration is invalid")
 
 # Taille max d'une archive tar.gz en bytes (100 MB)
 MAX_ARCHIVE_SIZE_BYTES = 100 * 1024 * 1024
@@ -333,8 +412,9 @@ class BackupService:
         
         # === 4. Construire le manifest ===
         elapsed = round(_time.monotonic() - _t0, 1)
+        temporal = "occurrences" in graph_data
         manifest = {
-            "version": BACKUP_FORMAT_VERSION,
+            "version": TEMPORAL_BACKUP_FORMAT_VERSION if temporal else BACKUP_FORMAT_VERSION,
             "backup_id": backup_id,
             "memory_id": memory_id,
             "memory_name": memory.name,
@@ -361,6 +441,9 @@ class BackupService:
                 "document_keys.json",
             ]
         }
+        if temporal:
+            manifest["temporal_schema_version"] = 1
+            manifest["stats"]["occurrences"] = len(graph_data["occurrences"])
         manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
         
         # === 5. Upload sur S3 ===
@@ -518,11 +601,7 @@ class BackupService:
         await _log("📋 Reading manifest...")
         manifest = await self._download_json(f"{backup_prefix}/manifest.json")
         
-        if manifest.get("version") != BACKUP_FORMAT_VERSION:
-            raise ValueError(
-                f"Incompatible backup version: {manifest.get('version')} "
-                f"(expected: {BACKUP_FORMAT_VERSION})"
-            )
+        _check_backup_format(manifest)
         if manifest.get("memory_id") != memory_id:
             raise ValueError("Backup manifest memory namespace mismatch")
         
@@ -546,6 +625,8 @@ class BackupService:
         
         await _log("✅ Graph data verified (checksum OK)")
 
+        _check_backup_format(manifest, graph_data)
+        import_temporal_state(graph_data, memory_id)
         validate_graph_document_references(graph_data, memory_id, self._storage._bucket)
         doc_keys = await self._download_json(f"{backup_prefix}/document_keys.json")
         self._validate_document_keys(memory_id, doc_keys)
@@ -571,6 +652,29 @@ class BackupService:
         await _log(f"✅ Loaded {len(qdrant_points)} vectors (checksum OK)")
 
         qdrant_identity = manifest.get("qdrant_identity")
+
+        # Retained texts (T04b) stay in place. Each is read once, hash-verified,
+        # before any effect: restored passages must quote their own document's
+        # exact text. A text that cannot be read is reported below, not guessed.
+        text_states = {}
+        annotated = _annotated_by_document(qdrant_points)
+        filenames = _document_filenames(graph_data)
+        records = _text_records(graph_data, memory_id)
+        _verify_origins(qdrant_points, records)
+        for text_doc_id, record in records.items():
+            text = None
+            try:
+                text = await self._storage.read_extracted_text(memory_id, text_doc_id, record)
+                state = "ok"
+            except FileNotFoundError:
+                state = "missing"
+            except (ValueError, UnicodeDecodeError):
+                state = "corrupt"
+            except Exception:
+                state = "unavailable"
+            text_states[text_doc_id] = state
+            if text is not None and text_doc_id in annotated:
+                _verify_annotations(memory_id, annotated[text_doc_id], {text_doc_id: text}, filenames)
 
         # Garde de compatibilité lecture seule #277. Elle précède toute mutation
         # Neo4j/Qdrant ; la restauration multi-backend qui suit n'est pas
@@ -610,6 +714,12 @@ class BackupService:
                     print(f"⚠️ [Restore] Missing S3 document: {uri}", file=sys.stderr)
         
         await _log(f"📄 S3 documents: {docs_ok} OK, {docs_missing} missing")
+        # Retained texts (T04b) stay in place: count only hash-verified ones.
+        text_counts = {"ok": 0, "missing": 0, "corrupt": 0, "unavailable": 0}
+        for text_doc_id, state in text_states.items():
+            text_counts[state] += 1
+            if state != "ok":
+                print(f"⚠️ [Restore] Retained text {state} for {text_doc_id}", file=sys.stderr)
         
         total_elapsed = round(_time.monotonic() - _t0, 1)
         await _log(f"🏁 Restore completed in {total_elapsed}s")
@@ -622,6 +732,8 @@ class BackupService:
             "qdrant_vectors_restored": vectors_imported,
             "s3_documents_ok": docs_ok,
             "s3_documents_missing": docs_missing,
+            **({f"s3_extracted_texts_{state}": count for state, count in text_counts.items()}
+               if manifest.get("version") == TEMPORAL_BACKUP_FORMAT_VERSION else {}),
             "elapsed_seconds": total_elapsed,
         }
     
@@ -728,6 +840,21 @@ class BackupService:
                         await _log(f"  📄 {filename_orig} ({self._human_size(len(content))})")
                     except Exception as e:
                         await _log(f"  ⚠️ {filename_orig}: {e}")
+
+                # Retained exact extracted texts (T04b), hash-verified on read.
+                # A full archive never silently omits one: re-converting the
+                # original cannot guarantee the same coordinate text.
+                for text_doc_id, record in _text_records(graph_data, memory_id).items():
+                    try:
+                        content = (await self._storage.read_extracted_text(
+                            memory_id, text_doc_id, record)).encode("utf-8")
+                    except Exception:
+                        raise ValueError(
+                            "Full archive cannot include a retained extracted text"
+                        ) from None
+                    info = tarfile.TarInfo(name=f"{archive_dir}/extracted_text/{text_doc_id}.txt")
+                    info.size = len(content)
+                    tar.addfile(info, io.BytesIO(content))
         
         archive_bytes = buf.getvalue()
         await _log(f"✅ Archive: {self._human_size(len(archive_bytes))}")
@@ -862,12 +989,11 @@ class BackupService:
         
         manifest = json.loads(_read_member(manifest_path).decode("utf-8"))
         
-        if manifest.get("version") != BACKUP_FORMAT_VERSION:
+        try:
+            _check_backup_format(manifest)
+        except ValueError:
             tar.close()
-            raise ValueError(
-                f"Incompatible backup version: {manifest.get('version')} "
-                f"(expected: {BACKUP_FORMAT_VERSION})"
-            )
+            raise
         
         memory_id = manifest.get("memory_id")
         if not memory_id:
@@ -903,6 +1029,13 @@ class BackupService:
         if expected_hash and actual_hash != expected_hash:
             tar.close()
             raise ValueError("Invalid graph checksum; the archive may be corrupted")
+        try:
+            # Complete temporal validation before the first document upload.
+            _check_backup_format(manifest, graph_data)
+            import_temporal_state(graph_data, memory_id)
+        except ValueError:
+            tar.close()
+            raise
         
         await _log("✅ Graph data verified (checksum OK)")
         
@@ -967,6 +1100,33 @@ class BackupService:
         
         docs_uploaded = 0
         docs_skipped = 0
+
+        # Retained texts (T04b): every member must match a graph record by
+        # hash, checked before the first upload; absent members stay missing.
+        try:
+            text_records = _text_records(graph_data, memory_id)
+            text_contents = {}
+            for member in members:
+                if member.endswith("/") or _is_archive_document(member):
+                    continue
+                if member.startswith("extracted_text/") or "/extracted_text/" in member:
+                    name = member.rsplit("/extracted_text/", 1)[-1].removeprefix("extracted_text/")
+                    text_doc_id = name[:-len(".txt")] if name.endswith(".txt") else None
+                    record = text_records.get(text_doc_id)
+                    content = _read_member(member)
+                    if (record is None or text_doc_id in text_contents
+                            or hashlib.sha256(content).hexdigest() != record["sha256"]):
+                        raise ValueError("Invalid retained extracted text in the archive")
+                    try:
+                        text_contents[text_doc_id] = content.decode("utf-8")
+                    except UnicodeDecodeError:
+                        raise ValueError("Invalid retained extracted text in the archive") from None
+            _verify_origins(qdrant_points, text_records)
+            _verify_annotations(memory_id, _annotated_payloads(qdrant_points), text_contents,
+                                _document_filenames(graph_data))
+        except ValueError:
+            tar.close()
+            raise
 
         qdrant_identity = manifest.get("qdrant_identity")
 
@@ -1046,6 +1206,10 @@ class BackupService:
             await _log("⚠️ No documents in the archive (lightweight backup)")
         else:
             await _log(f"✅ Uploaded {docs_uploaded} documents to S3")
+        texts_uploaded = 0
+        for text_doc_id, content in sorted(text_contents.items()):
+            await self._storage.put_extracted_text(memory_id, text_doc_id, content)
+            texts_uploaded += 1
         
         tar.close()
         
@@ -1074,6 +1238,9 @@ class BackupService:
             "qdrant_vectors_restored": vectors_imported,
             "s3_documents_uploaded": docs_uploaded,
             "s3_documents_skipped": docs_skipped,
+            **({"s3_extracted_texts_uploaded": texts_uploaded,
+                "s3_extracted_texts_missing": len(text_records) - texts_uploaded}
+               if text_records else {}),
             "elapsed_seconds": total_elapsed,
         }
     
@@ -1103,7 +1270,7 @@ class BackupService:
         files = ("graph_data.json", "qdrant_vectors.jsonl", "document_keys.json", "manifest.json")
         if (
             type(manifest) is not dict
-            or manifest.get("version") != BACKUP_FORMAT_VERSION
+            or manifest.get("version") not in (BACKUP_FORMAT_VERSION, TEMPORAL_BACKUP_FORMAT_VERSION)
             or manifest.get("memory_id") != memory_id
             or manifest.get("backup_id") != backup_id
             or type(manifest.get("files")) is not list

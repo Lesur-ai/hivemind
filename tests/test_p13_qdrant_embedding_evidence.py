@@ -264,12 +264,8 @@ async def test_invalid_batch_reaches_no_vector_store_operation(
 
     class Extractor:
         async def extract_with_ontology_chunked(self, *args, **kwargs):
-            return SimpleNamespace(
-                entities=[],
-                relations=[],
-                summary="",
-                key_topics=[],
-            )
+            from mcp_memory.core.models import ExtractionResult
+            return ExtractionResult()
 
     class Chunker:
         def chunk_document(self, text, filename):
@@ -328,7 +324,8 @@ async def test_invalid_batch_reaches_no_vector_store_operation(
     monkeypatch.setattr(ingest_pipeline, "_chunker", lambda: Chunker())
     monkeypatch.setattr(ingest_pipeline, "_embedder", lambda: embedder)
     monkeypatch.setattr(ingest_pipeline, "_vector_store", lambda: vector_store)
-    monkeypatch.setattr(ingest_pipeline, "get_settings", lambda: SimpleNamespace())
+    # The occurrence path keeps this storage double free of retained text (#999).
+    monkeypatch.setattr(ingest_pipeline, "get_settings", lambda: SimpleNamespace(temporal_occurrence_extraction=True))
     monkeypatch.setattr(server, "_extract_text", lambda content, filename: "text")
 
     result = await ingest_pipeline.run_ingest_pipeline(

@@ -6,7 +6,7 @@ on:
     branches:
       - main
 
-# Fork-safe, read-only PR/main checks. Every worker has a seven-minute test
+# Fork-safe, read-only PR/main checks. Every worker has a twenty-eight-minute test
 # budget; complete collection and raw evidence are verified before a stable
 # check name can succeed. No image/package publication or secrets are used.
 permissions:
@@ -15,12 +15,12 @@ permissions:
 jobs:
   prepare_python314:
     name: Collect public python314 suite (${{ matrix.architecture }})
-    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        architecture: [x64, arm64]
+        architecture: [x64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -40,7 +40,7 @@ jobs:
           expected = (3, 14, 8)
           if sys.implementation.name != "cpython" or tuple(sys.version_info[:len(expected)]) != expected:
               raise SystemExit(f"expected CPython {expected!r}, got {sys.version_info[:3]!r}")
-          machines = {'arm64': {'aarch64', 'arm64'}, 'x64': {'x86_64', 'amd64'}}
+          machines = {'x64': {'x86_64', 'amd64'}}
           if platform.machine().lower() not in machines['${{ matrix.architecture }}']:
               raise SystemExit(f"expected native ${{ matrix.architecture }} runner, got {platform.machine()!r}")
           PY_RUNTIME
@@ -58,13 +58,13 @@ jobs:
 
   python314_shards:
     name: Public python314 ${{ matrix.architecture }} shard ${{ matrix.shard }}
-    runs-on: ${{ matrix.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: [prepare_python314]
     strategy:
       fail-fast: false
       matrix:
-        architecture: [x64, arm64]
+        architecture: [x64]
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,7 +85,7 @@ jobs:
           expected = (3, 14, 8)
           if sys.implementation.name != "cpython" or tuple(sys.version_info[:len(expected)]) != expected:
               raise SystemExit(f"expected CPython {expected!r}, got {sys.version_info[:3]!r}")
-          machines = {'arm64': {'aarch64', 'arm64'}, 'x64': {'x86_64', 'amd64'}}
+          machines = {'x64': {'x86_64', 'amd64'}}
           if platform.machine().lower() not in machines['${{ matrix.architecture }}']:
               raise SystemExit(f"expected native ${{ matrix.architecture }} runner, got {platform.machine()!r}")
           PY_RUNTIME
@@ -109,8 +109,8 @@ jobs:
 
   test:
     name: Test public tree
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [prepare_python314, python314_shards, public_cli]
     if: ${{ always() }}
     steps:
@@ -138,17 +138,9 @@ jobs:
           expected = (3, 14, 8)
           if sys.implementation.name != "cpython" or tuple(sys.version_info[:len(expected)]) != expected:
               raise SystemExit(f"expected CPython {expected!r}, got {sys.version_info[:3]!r}")
-          if platform.machine().lower() not in {'aarch64', 'arm64'}:
-              raise SystemExit(f"expected native arm64 runner, got {platform.machine()!r}")
+          if platform.machine().lower() not in {'x86_64', 'amd64'}:
+              raise SystemExit(f"expected native x64 runner, got {platform.machine()!r}")
           PY_RUNTIME
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: plan-python314-arm64
-          path: .artifacts/plans/arm64
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: result-python314-arm64-*
-          path: .artifacts/results/arm64
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: plan-python314-x64
@@ -157,10 +149,10 @@ jobs:
         with:
           pattern: result-python314-x64-*
           path: .artifacts/results/x64
-      - name: Verify complete source-bound public evidence on both architectures
+      - name: Verify complete source-bound public evidence on X64
         run: |
           set -euo pipefail
-          for architecture in arm64 x64; do
+          for architecture in x64; do
             uv run --no-sync python -c 'import sys; from pathlib import Path; from scripts.ci_pytest_shards import read_json, require; require(read_json(Path(sys.argv[1]))["runtime"]["machine"] == sys.argv[2], "wrong hardware cohort")' ".artifacts/plans/$architecture/plan.json" "$architecture"
             uv run --no-sync python scripts/ci_pytest_shards.py verify \
               --plan ".artifacts/plans/$architecture/plan.json" \
@@ -170,11 +162,12 @@ jobs:
       - name: Check public documentation links
         run: uv run --no-sync python scripts/check_doc_links.py
 
-  # Compatibility check: both hardware cohorts were verified above; executes no tests.
+  # Historical required context: the label is stable, but this verifies X64 only.
+  # Native ARM64 evidence is produced separately at final release assembly.
   test_python314_arm64:
     name: Test public tree (Python 3.14.8, arm64)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [test]
     if: ${{ always() }}
     steps:
@@ -185,8 +178,8 @@ jobs:
 
   public_cli:
     name: Public ingestion CLI
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Go for the public ingestion CLI

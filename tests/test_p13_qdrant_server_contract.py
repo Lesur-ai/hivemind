@@ -42,7 +42,8 @@ async def test_low_score_passage_is_kept_unless_cutoff_is_explicit(monkeypatch, 
     if tool_name == "memory_query":
         assert len(response["rag_chunks"]) == (2 if threshold is None else 0)
         if threshold is None:
-            assert response["rag_chunks"][0]["text"] == "Expected passage: notice is 90 days."
+            assert response["rag_chunks"][0]["indexed_text"] == "Expected passage: notice is 90 days."
+            assert "Expected passage: notice is 90 days." in response["rag_chunks"][0]["text"]
             assert response["rag_chunks"][0]["score"] == 0.39
     else:
         assert response["rag_chunks_used"] == (2 if threshold is None else 0)
@@ -327,7 +328,8 @@ class _RetrievalGraph(_Graph):
     async def get_entity_context(self, memory_id, entity_name, depth):
         return SimpleNamespace(
             documents=[{"id": "graph-doc", "filename": "general.md", "source_path": self.source}],
-            relations=[{"type": "RELATED_TO", "description": "Useful graph relationship"}],
+            relations=[{"type": "RELATED_TO", "description": "Useful graph relationship",
+                        "source": "Known entity", "target": "Recovery", "direction": "outgoing"}],
             related_entities=[],
         )
 
@@ -395,7 +397,8 @@ async def test_archive_passages_carry_capture_identity_and_distinguish_ingestion
         for chunk in response["rag_chunks"]:
             for key in ("sha256", "captured_at", "preimage_id", "bank_path", "provenance", "ingested_at"):
                 assert chunk[key] == capture[key]
-        assert response["rag_chunks"][0]["text"] == "Expected passage: notice is 90 days."
+        assert response["rag_chunks"][0]["indexed_text"] == "Expected passage: notice is 90 days."
+        assert "Expected passage: notice is 90 days." in response["rag_chunks"][0]["text"]
     else:
         prompt, = extractor.prompts
         assert "answer-doc" in prompt and capture["source_path"] in prompt and capture["sha256"] in prompt
@@ -481,13 +484,16 @@ async def test_labeled_passages_remain_reachable_with_graph_context(
         assert response["retrieval_mode"] == ("graph+rag" if entity else "rag-only")
         if answer_doc:
             assert chunks[0]["doc_id"] == answer_doc
-            assert chunks[0]["text"] == "Expected passage: notice is 90 days."
+            assert chunks[0]["indexed_text"] == "Expected passage: notice is 90 days."
+            assert "Expected passage: notice is 90 days." in chunks[0]["text"]
             assert chunks[0]["source_path"] == source
         else:
             assert chunks == []
         assert bool(response["entities"]) == entity
         if entity:
-            assert response["entities"][0]["relations"][0]["description"] == "Useful graph relationship"
+            relation = response["entities"][0]["relations"][0]
+            assert relation["description"] == "Useful graph relationship"
+            assert (relation["source"], relation["target"], relation["direction"]) == ("Known entity", "Recovery", "outgoing")
     elif answer_doc:
         assert "Expected passage: notice is 90 days." in extractor.prompts[0]
         if entity:
@@ -529,3 +535,358 @@ async def test_denied_retrieval_does_not_embed_or_search(monkeypatch, tool_name,
     monkeypatch.setattr(server, "check_memory_access", lambda _memory_id: denied)
     assert await getattr(server, tool_name)(memory_id="memory-one", **{query_field: "notice"}) == denied
     assert embedder.queries == vector.search_calls == extractor.prompts == []
+
+
+# T06: extend the native retrieval harness; source I/O uses the real storage
+# boundary over the deletion suite's in-memory object store, never a provider.
+@pytest.fixture
+def legacy_case(monkeypatch):
+    from hashlib import sha256
+    from unittest.mock import AsyncMock, Mock
+    apply_graph_memory_baseline_env(monkeypatch)
+    from mcp_memory.core.storage import StorageService
+    from io import BytesIO
+
+    server = _server(monkeypatch)
+    _, _, _, extractor = _wire_search(monkeypatch, server)
+    text = '# Session\n12 April 2022\n\n' + ('Background.\n\n' * 400) + 'Mira adopted Pip last week.\n'
+    content = text.encode()
+    digest = sha256(content).hexdigest()
+    uri = 'memory-one/documents/source.md'
+    doc = dict(id='answer-doc', memory_id='memory-one', uri=uri, sha256=digest,
+               filename='source.md', ingestion_status='succeeded')
+    # The public document-read harness also uses stdlib Mock/BytesIO. A
+    # private test-module import cannot be shipped in this copied suite.
+    store = SimpleNamespace(objects={uri: content}, deleted=[], put_object=Mock(), delete_object=Mock())
+    store.get_object = Mock(side_effect=lambda **kw: {'Body': BytesIO(store.objects[kw['Key']])})
+    storage = StorageService.__new__(StorageService)
+    storage._bucket, storage._client, storage._legacy_client = 'test-bucket', store, store
+    graph = _RetrievalGraph(entity=False, source='docs/source.md')
+    graph.get_document_details = AsyncMock(side_effect=lambda **kwargs: dict(doc))
+    graph.get_documents_meta = AsyncMock(return_value={'answer-doc': doc})
+    vector = _LabeledPassages(answer_doc='answer-doc')
+    async def search(**kwargs):
+        return [SimpleNamespace(score=.8, chunk=SimpleNamespace(
+            memory_id='memory-one', doc_id='answer-doc', filename='source.md',
+            text='[Session] Mira adopted Pip last week.', section_title='Session',
+            article_number=None, index=i)) for i in range(2)]
+    vector.search = search
+    monkeypatch.setattr(server, 'get_graph', lambda: graph)
+    monkeypatch.setattr(server, 'get_vector_store', lambda: vector)
+    monkeypatch.setattr(server, 'get_storage', lambda: storage)
+    monkeypatch.setattr(server, 'settings', SimpleNamespace(rag_score_threshold=None, rag_chunk_limit=8))
+    yield SimpleNamespace(server=server, graph=graph, vector=vector, storage=storage,
+                          store=store, doc=doc, text=text, extractor=extractor)
+    store.put_object.assert_not_called()
+    store.delete_object.assert_not_called()
+
+
+@pytest.mark.parametrize('tool,field', [('memory_query', 'query'), ('question_answer', 'question')])
+async def test_legacy_context_is_reconstructed_once_without_temporal_extraction(legacy_case, tool, field):
+    c = legacy_case
+    result = await getattr(c.server, tool)('memory-one', **{field: 'When was Pip adopted?'})
+    assert result['status'] == 'ok'
+    assert result['partial'] is False
+    assert c.store.get_object.call_count == 1
+    assert result['legacy_context_cost']['source_reads'] == 1
+    assert result['legacy_context_cost']['source_bytes'] == len(c.text.encode())
+    assert result['legacy_context_cost']['text_codepoints'] == len(c.text)
+    assert result['legacy_context_cost']['elapsed_ms'] >= 0
+    if tool == 'memory_query':
+        assert len(result['rag_chunks']) == 2
+        for row in result['rag_chunks']:
+            assert row['indexed_text'] == '[Session] Mira adopted Pip last week.'
+            assert row['chunk_text'] == 'Mira adopted Pip last week.'
+            assert row['annotation_origin'] == 'legacy_unannotated'
+            assert row['temporal_annotations'] == []
+            assert row['context_status'] == 'complete'
+            assert row['source_ref']['sha256'] == c.doc['sha256']
+            assert '12 April 2022' in row['text']
+            assert 'last week' in row['text']
+    else:
+        assert '12 April 2022' in c.extractor.prompts[0]
+        assert 'legacy_unannotated' in c.extractor.prompts[0]
+    assert c.store.deleted == []
+
+
+@pytest.mark.parametrize('fault,reason,reads', [
+    ('foreign_uri', 'source_unavailable', 0),
+    ('foreign_bucket', 'source_unavailable', 0),
+    ('foreign_memory', 'source_version_mismatch', 0),
+    ('foreign_doc', 'source_version_mismatch', 0),
+    ('inactive', 'source_version_mismatch', 0),
+    ('hash_changed', 'source_version_mismatch', 0),
+    ('bad_bytes', 'source_version_mismatch', 1),
+    ('missing', 'source_unavailable', 1),
+    ('replacement', 'source_version_mismatch', 1),
+    ('binary', 'source_unavailable', 0),
+    ('invalid_utf8', 'source_unavailable', 1),
+    ('ambiguous', 'source_scope_ambiguous', 1),
+    ('byte_budget', 'context_budget_exceeded', 1),
+    ('text_budget', 'context_budget_exceeded', 1),
+    ('deadline', 'context_budget_exceeded', 0),
+])
+async def test_legacy_context_failures_keep_index_and_never_repair(legacy_case, monkeypatch, fault, reason, reads):
+    from hashlib import sha256
+    from unittest.mock import AsyncMock
+    from mcp_memory.core import temporal
+    c = legacy_case
+    if fault == 'foreign_uri': c.doc['uri'] = 'other/documents/source.md'
+    elif fault == 'foreign_bucket': c.doc['uri'] = 's3://foreign/memory-one/documents/source.md'
+    elif fault == 'foreign_memory': c.doc['memory_id'] = 'other'
+    elif fault == 'foreign_doc': c.doc['id'] = 'other-doc'
+    elif fault == 'inactive': c.doc['ingestion_status'] = 'pending'
+    elif fault == 'hash_changed':
+        original = dict(c.doc)
+        c.graph.get_documents_meta.return_value = {'answer-doc': original}
+        c.doc['sha256'] = '0' * 64
+    elif fault == 'bad_bytes': c.store.objects[c.doc['uri']] = b'wrong source'
+    elif fault == 'missing': c.store.objects.clear()
+    elif fault == 'replacement':
+        original = dict(c.doc)
+        c.graph.get_document_details = AsyncMock(side_effect=[original, dict(original, ingestion_status='superseded')])
+    elif fault == 'binary': c.doc['filename'] = 'source.pdf'
+    elif fault in ('invalid_utf8', 'ambiguous'):
+        content = b'\xff' if fault == 'invalid_utf8' else c.text.encode() + b'Mira adopted Pip last week.\n'
+        c.store.objects[c.doc['uri']] = content
+        c.doc['sha256'] = sha256(content).hexdigest()
+    elif fault == 'byte_budget': monkeypatch.setattr(temporal, 'LEGACY_SOURCE_BYTES', 32)
+    elif fault == 'text_budget': monkeypatch.setattr(temporal, 'LEGACY_TEXT_CODEPOINTS', 32)
+    elif fault == 'deadline': monkeypatch.setattr(temporal, 'LEGACY_SECONDS', 0)
+    before = dict(c.store.objects)
+    result = await c.server.memory_query('memory-one', query='When?')
+    assert result['status'] == 'ok' and result['partial'] is True
+    assert reason in {w['reason'] for w in result['warnings']}
+    assert all(w['memory_id'] == 'memory-one' for w in result['warnings'])
+    assert c.store.get_object.call_count == reads
+    assert c.store.objects == before and c.store.deleted == []
+    for row in result['rag_chunks']:
+        assert row['indexed_text'] == '[Session] Mira adopted Pip last week.'
+        assert row['chunk_text'] is None and row['source_spans'] == [] and row['source_ref'] is None
+        assert row['temporal_annotations'] == []
+        assert row['context_status'] == ('ambiguous' if fault == 'ambiguous' else 'unavailable')
+        assert row['indexed_text'] in row['text']
+
+
+@pytest.mark.parametrize('source,indexed,title,article,status,quote', [
+    ('Été\r\n  Mira\tadopted Pip.\r\n', '[Log] Été Mira adopted Pip.', 'Log', None, 'complete', 'Été\r\n  Mira\tadopted Pip.'),
+    ('Evidence.', '[Article 2 - Scope] Evidence.', 'Scope', '2', 'complete', 'Evidence.'),
+    ('Evidence.', '[Article 2] Evidence.', 'Scope', '2', 'complete', 'Evidence.'),
+    ('Evidence.', '[' + 'T' * 60 + '] Evidence.', 'T' * 90, None, 'complete', 'Evidence.'),
+    ('Evidence.', '[' + 'T' * 77 + '...] Evidence.', 'T' * 90, None, 'complete', 'Evidence.'),
+    ('[Log] Evidence.', '[Log] Evidence.', 'Log', None, 'ambiguous', None),
+    ('[other] Evidence.', '[other] Evidence.', 'Log', None, 'complete', '[other] Evidence.'),
+    ('Evidence.\nEvidence.', 'Evidence.', None, None, 'ambiguous', None),
+    ('Evidence.', 'evidence.', None, None, 'unavailable', None),
+    ('Evidence!', 'Evidence.', None, None, 'unavailable', None),
+])
+def test_legacy_alignment_only_replays_native_transforms(source, indexed, title, article, status, quote):
+    from mcp_memory.core.temporal import ExtractionSource, _legacy_normalize, legacy_alignment
+    chunk = SimpleNamespace(text=indexed, section_title=title, article_number=article, index=999)
+    span, actual = legacy_alignment(ExtractionSource(source), *_legacy_normalize(source), chunk)
+    assert actual == status
+    assert (span.quote if span else None) == quote
+    if span:
+        assert 0 <= span.start < span.end <= len(source)
+        assert span.end - span.start == len(span.quote)
+        assert source[span.start:span.end] == span.quote
+
+
+async def test_legacy_context_closure_reports_truncation(legacy_case):
+    from hashlib import sha256
+    c = legacy_case
+    text = '# Session\n' + 'Long introduction ' * 200 + '\n\nMira adopted Pip last week.\n'
+    c.store.objects[c.doc['uri']] = text.encode()
+    c.doc['sha256'] = sha256(text.encode()).hexdigest()
+    result = await c.server.memory_query('memory-one', query='When?')
+    assert result['partial'] is True
+    assert {w['reason'] for w in result['warnings']} == {'legacy_unannotated', 'context_budget_exceeded'}
+    for row in result['rag_chunks']:
+        assert row['context_status'] == 'partial'
+        assert row['chunk_text'] == 'Mira adopted Pip last week.'
+        assert sum(len(e['quote']) for ctx in row['source_context'] for e in ctx['evidence']) <= 8192
+
+
+async def test_legacy_source_read_checks_metadata_and_closes_bounded_body(legacy_case):
+    from io import BytesIO
+    from hashlib import sha256
+    from time import monotonic
+    from unittest.mock import Mock
+    from mcp_memory.core.temporal import LegacySourceError
+    c = legacy_case
+    for metadata in ({'memory-id': 'foreign'}, {'doc_hash': '0' * 64}, {}):
+        body = BytesIO(b'body')
+        c.store.get_object = Mock(return_value={'Body': body, 'Metadata': metadata})
+        with pytest.raises(LegacySourceError, match='source_version_mismatch'):
+            await c.storage.read_legacy_document('memory-one', c.doc['uri'], sha256(b'correct').hexdigest(), 20, monotonic() + 1)
+        assert body.closed
+    body = BytesIO(b'x' * 200)
+    c.store.get_object = Mock(return_value={'Body': body, 'ContentLength': 200})
+    with pytest.raises(LegacySourceError, match='context_budget_exceeded') as error:
+        await c.storage.read_legacy_document('memory-one', c.doc['uri'], c.doc['sha256'], 10, monotonic() + 1)
+    assert error.value.bytes_read == 0 and body.closed
+
+
+async def test_legacy_source_deadline_and_cancellation_discard_late_result(legacy_case, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from mcp_memory.core import temporal
+    c = legacy_case
+    began = asyncio.Event()
+    async def blocked(*args):
+        began.set()
+        await asyncio.Event().wait()
+    c.storage.read_legacy_document = AsyncMock(side_effect=blocked)
+    monkeypatch.setattr(temporal, 'LEGACY_SECONDS', .02)
+    result = await c.server.memory_query('memory-one', query='When?')
+    assert result['partial'] and {w['reason'] for w in result['warnings']} == {'legacy_unannotated', 'context_budget_exceeded'}
+    assert c.storage.read_legacy_document.await_count == 1
+    monkeypatch.setattr(temporal, 'LEGACY_SECONDS', 30)
+    began.clear()
+    task = asyncio.create_task(c.server.memory_query('memory-one', query='When?'))
+    await began.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert c.store.get_object.call_count == 0
+
+
+async def test_legacy_budgets_are_shared_and_cached_source_cannot_cross_memory(legacy_case, monkeypatch):
+    from unittest.mock import AsyncMock
+    from mcp_memory.core import temporal
+    c = legacy_case
+    # First source succeeds; a second distinct source cannot reuse its allowance.
+    monkeypatch.setattr(temporal, 'LEGACY_SOURCE_BYTES', len(c.text.encode()))
+    reader = temporal.LegacyContextReader('memory-one', c.graph, c.storage)
+    chunk = SimpleNamespace(doc_id='answer-doc', memory_id='memory-one', text='Mira adopted Pip last week.',
+                            section_title='Session', article_number=None)
+    assert (await reader.enrich(chunk, c.doc))['context_status'] == 'complete'
+    import asyncio
+    before = reader.summary()['legacy_context_cost']['elapsed_ms']
+    await asyncio.sleep(.02)
+    assert reader.summary()['legacy_context_cost']['elapsed_ms'] == before
+    chunk.memory_id = 'foreign'
+    assert (await reader.enrich(chunk, c.doc))['context_status'] == 'unavailable'
+    chunk.memory_id, chunk.doc_id = 'memory-one', 'other-doc'
+    c.graph.get_document_details = AsyncMock(return_value=dict(c.doc, id='other-doc'))
+    assert (await reader.enrich(chunk, c.doc))['context_status'] == 'unavailable'
+    assert c.store.get_object.call_count == 1
+    assert reader.source_bytes == len(c.text.encode())
+    assert 'context_budget_exceeded' in {w['reason'] for w in reader.warnings}
+
+
+@pytest.mark.parametrize('tool,field', [('memory_query', 'query'), ('question_answer', 'question')])
+async def test_legacy_enrichment_never_reads_when_memory_access_is_denied(legacy_case, monkeypatch, tool, field):
+    c = legacy_case
+    denied = {'status': 'error', 'message': 'denied'}
+    monkeypatch.setattr(c.server, 'check_memory_access', lambda _: denied)
+    assert await getattr(c.server, tool)('memory-one', **{field: 'When?'}) == denied
+    assert c.store.get_object.call_count == 0
+    c.graph.get_document_details.assert_not_awaited()
+
+
+async def test_legacy_cpu_preparation_keeps_event_loop_responsive(legacy_case, monkeypatch):
+    import asyncio
+    import threading
+    from mcp_memory.core import temporal
+    c = legacy_case
+    released = threading.Event()
+    responsive = []
+    original = temporal._legacy_normalize
+    def controlled(text):
+        responsive.append(released.wait(.2))
+        return original(text)
+    monkeypatch.setattr(temporal, '_legacy_normalize', controlled)
+    async def tick():
+        await asyncio.sleep(.01)
+        released.set()
+    heartbeat = asyncio.create_task(tick())
+    try:
+        result = await c.server.memory_query('memory-one', query='When?')
+    finally:
+        released.set()
+        await heartbeat
+    assert responsive and all(responsive)
+    assert result['partial'] is False
+
+
+async def test_legacy_qa_keeps_source_header_for_unavailable_binary(legacy_case):
+    c = legacy_case
+    original_search = c.vector.search
+    async def binary(**kwargs):
+        rows = await original_search(**kwargs)
+        for row in rows:
+            row.chunk.filename, row.chunk.section_title, row.chunk.article_number = 'manual.pdf', 'Scope', '2'
+        return rows
+    c.vector.search = binary
+    c.doc['filename'] = 'manual.pdf'
+    result = await c.server.question_answer('memory-one', question='Which section?')
+    assert result['partial'] is True
+    assert '[Source: manual.pdf > Scope > Art. 2]' in c.extractor.prompts[0]
+    assert '[Session] Mira adopted Pip last week.' in c.extractor.prompts[0]
+    assert c.store.get_object.call_count == 0
+    c.graph.get_document_details.assert_not_awaited()
+
+
+async def test_legacy_graph_timeout_does_not_claim_an_unobserved_get(legacy_case, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+    from mcp_memory.core import temporal
+    c = legacy_case
+    async def blocked(**kwargs):
+        await asyncio.Event().wait()
+    c.graph.get_document_details = AsyncMock(side_effect=blocked)
+    monkeypatch.setattr(temporal, 'LEGACY_SECONDS', .01)
+    result = await c.server.memory_query('memory-one', query='When?')
+    assert result['partial'] is True
+    cost = result['legacy_context_cost']
+    assert cost['source_reads'] == cost['source_bytes'] == 0
+    assert cost['source_bytes_complete'] is True
+    assert c.store.get_object.call_count == 0
+
+
+async def test_legacy_failed_body_read_reports_incomplete_byte_observation(legacy_case):
+    from unittest.mock import Mock
+    c = legacy_case
+    body = SimpleNamespace(read=Mock(side_effect=OSError('read failed')), close=Mock())
+    c.store.get_object.side_effect = lambda **kw: {'Body': body}
+    result = await c.server.memory_query('memory-one', query='When?')
+    assert result['partial'] is True
+    assert result['legacy_context_cost']['source_bytes_complete'] is False
+    assert result['legacy_context_cost']['source_reads'] == 1
+    body.close.assert_called_once()
+
+
+@pytest.mark.parametrize('phase', ['prepare', 'locate'])
+async def test_legacy_cpu_deadline_discards_late_proof(legacy_case, monkeypatch, phase):
+    import asyncio
+    import threading
+    from mcp_memory.core import temporal
+    c = legacy_case
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    name = '_prepare_legacy_source' if phase == 'prepare' else '_locate_legacy_context'
+    original = getattr(temporal, name)
+    def blocked(*args):
+        entered.set()
+        release.wait(.5)
+        try:
+            return original(*args)
+        finally:
+            finished.set()
+    monkeypatch.setattr(temporal, name, blocked)
+    monkeypatch.setattr(temporal, 'LEGACY_SECONDS', .05)
+    task = asyncio.create_task(c.server.memory_query('memory-one', query='When?'))
+    try:
+        assert await asyncio.to_thread(entered.wait, .5)
+        result = await asyncio.wait_for(task, .2)
+        assert result['partial'] is True
+        assert all(row['source_ref'] is None and row['source_spans'] == [] for row in result['rag_chunks'])
+        assert result['legacy_context_cost']['source_bytes_complete'] is True
+        assert result['legacy_context_cost']['text_codepoints_complete'] is (phase == 'locate')
+    finally:
+        release.set()
+        await asyncio.to_thread(finished.wait, .5)
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task

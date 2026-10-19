@@ -47,6 +47,7 @@ import httpx2
 from ..config import get_settings
 from .storage import get_storage, bank_relpath
 from .models import GraphMemoryConfig, EMBEDDED_TOKEN_SENTINEL
+from .chunk_render import rebound
 from .memory_id import derive_memory_id, reserved_space_error
 from .embedded_secret import resolve_embedded_token
 from .url_guard import validate_gm_url
@@ -2338,7 +2339,7 @@ class GraphBridgeService:
         reason = (error or {}).get("reason")
         if reason not in ("archive_destination_changed", "archive_not_configured"):
             reason = "archive_unavailable"
-        return {**result, "partial": True, "warnings": [{"scope": "mid_archive", "reason": reason,
+        return {**result, "partial": True, "warnings": [*result.get("warnings", []), {"scope": "mid_archive", "reason": reason,
             "message": "Archive evidence is unavailable; documentary results only."}]}
 
     async def _query_with_archives(self, space_id: str, query: str, limit: int, tool: str) -> dict:
@@ -2366,6 +2367,19 @@ class GraphBridgeService:
                 return self._archive_partial(result)
             ids = [config.memory_id, archive_id]
             out = {**result, "memory_ids": ids}
+            if any('partial' in r or 'warnings' in r for r in (result, other)):
+                out['partial'] = bool(result.get('partial') or other.get('partial'))
+                out['warnings'] = []
+                for response, mid in zip((result, other), ids):
+                    for warning in response.get('warnings', []):
+                        qualified = {**warning, 'memory_id': mid}
+                        if qualified not in out['warnings']:
+                            out['warnings'].append(qualified)
+            if 'legacy_context_cost' in result or 'legacy_context_cost' in other:
+                out.pop('legacy_context_cost', None)
+                out['legacy_context_costs'] = [
+                    {'memory_id': mid, **response['legacy_context_cost']}
+                    for response, mid in zip((result, other), ids) if 'legacy_context_cost' in response]
             if tool == "memory_search":
                 out["results"] = self._interleave_evidence(result["results"], other["results"], ids, limit)
                 out["result_count"] = len(out["results"])
@@ -2373,6 +2387,12 @@ class GraphBridgeService:
                 out["entities"] = self._interleave_evidence(result["entities"], other["entities"], ids, limit)
                 chunk_limit = max(result["stats"]["rag_chunk_limit"], other["stats"]["rag_chunk_limit"])
                 out["rag_chunks"] = self._interleave_evidence(result["rag_chunks"], other["rag_chunks"], ids, chunk_limit)
+                # Each namespace was bounded alone: the response-wide occurrence
+                # bounds apply again to the interleaved result.
+                out["rag_chunks"], trimmed = rebound(out["rag_chunks"])
+                if trimmed:
+                    out["partial"] = True
+                    out["warnings"] = [*out.get("warnings", []), *[w for w in trimmed if w not in out.get("warnings", [])]]
                 # Keep source evidence resolvable, including graph-only sources.
                 out["source_documents"] = [
                     {**doc, "memory_id": mid}

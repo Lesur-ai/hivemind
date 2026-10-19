@@ -461,6 +461,10 @@ class _FakeGraph:
         assert memory_id == self.memory_id
         return self.ontology_uri
 
+    async def list_reindex_text_records(self, memory_id: str):
+        assert memory_id == self.memory_id
+        return {}
+
 
 class _FailingGraph:
     def __init__(self, message: str):
@@ -468,6 +472,9 @@ class _FailingGraph:
 
     async def list_reindex_documents(self, memory_id: str):
         raise RuntimeError(self.message)
+
+    async def list_reindex_text_records(self, memory_id: str):
+        return {}
 
 
 class _FakeStorage:
@@ -1624,6 +1631,9 @@ async def test_inventory_failure_cancels_and_drains_sibling_reads(
         async def get_reindex_ontology_uri(self, _memory_id: str):
             return None
 
+        async def list_reindex_text_records(self, _memory_id: str):
+            return {}
+
     class Storage:
         async def list_reindex_objects(self, _memory_id: str):
             storage_started.set()
@@ -2613,12 +2623,8 @@ async def test_cloud_temple_named_profile_migration_reindexes_then_ingests_and_q
 
     class _JourneyExtractor:
         async def extract_with_ontology_chunked(self, *_args, **_kwargs):
-            return SimpleNamespace(
-                entities=[],
-                relations=[],
-                summary="",
-                key_topics=[],
-            )
+            from mcp_memory.core.models import ExtractionResult
+            return ExtractionResult()
 
     class _JourneyEmbedder(_FakeEmbedder):
         async def embed_query_result(self, query: str):
@@ -2668,10 +2674,11 @@ async def test_cloud_temple_named_profile_migration_reindexes_then_ingests_and_q
     monkeypatch.setattr(ingest_pipeline, "_chunker", lambda: journey_chunker)
     monkeypatch.setattr(ingest_pipeline, "_embedder", lambda: journey_embedder)
     monkeypatch.setattr(ingest_pipeline, "_vector_store", lambda: named_store)
+    # The occurrence path keeps this storage double free of retained text (#999).
     monkeypatch.setattr(
         ingest_pipeline,
         "get_settings",
-        lambda: SimpleNamespace(),
+        lambda: SimpleNamespace(temporal_occurrence_extraction=True),
     )
 
     dispatches: list[tuple[str, dict]] = []
@@ -2841,7 +2848,8 @@ async def test_cloud_temple_named_profile_migration_reindexes_then_ingests_and_q
     assert query_result["stats"]["rag_chunks_retained"] == 1
     assert len(query_result["rag_chunks"]) == 1
     queried_chunk = query_result["rag_chunks"][0]
-    assert queried_chunk["text"] == post_migration_text
+    assert queried_chunk["indexed_text"] == post_migration_text
+    assert post_migration_text in queried_chunk["text"]
     assert queried_chunk["doc_id"] == ingest_result["document_id"]
     assert queried_chunk["filename"] == "post-migration.txt"
     assert queried_chunk["source_path"] == "evidence/post-migration.txt"

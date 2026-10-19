@@ -31,7 +31,15 @@ from .maintenance import (
     MAX_REINDEX_SOURCE_DOCUMENTS,
     ReindexSourceLimitExceeded,
 )
+from .temporal import (
+    OCCURRENCES_PER_RELATION, OccurrenceBudget, TemporalOccurrenceConflict,
+    TemporalOutputError, check_text_record, import_temporal_state, load_record,
+    load_text_record, persisted_rows,
+)
 
+
+REINDEX_OCCURRENCE_PAGE = 256
+MAX_REINDEX_OCCURRENCES_PER_DOCUMENT = 100_000
 
 _DOCUMENT_SOURCE_NORMALIZATION_BATCH_SIZE = 1_000
 _DOCUMENT_SCHEMA_MIGRATION_ID = "document-source-path-empty-to-null-v1"
@@ -643,6 +651,29 @@ class GraphService:
                 "⚠️ [Graph] Index (memory_id, id) was not created",
                 file=sys.stderr,
             )
+        # Temporal occurrence lookups (T04): performance only, same budget and
+        # fail-open policy. Identity is enforced by validated MERGE writes.
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async with self.session() as session:
+                    for statement in (
+                        """
+                        CREATE INDEX temporal_occurrence_memory_id_id IF NOT EXISTS
+                        FOR (o:TemporalOccurrence) ON (o.memory_id, o.id)
+                        """,
+                        """
+                        CREATE INDEX temporal_occurrence_triple IF NOT EXISTS
+                        FOR (o:TemporalOccurrence)
+                        ON (o.memory_id, o.from_entity, o.type, o.to_entity)
+                        """,
+                    ):
+                        result = await session.run(Query(statement, timeout=timeout_seconds))
+                        await result.consume()
+        except Exception:
+            print(
+                "⚠️ [Graph] Temporal occurrence indexes were not created",
+                file=sys.stderr,
+            )
 
     async def _ensure_document_migration_marker_constraint_locked(self) -> None:
         """Require uniqueness for the durable global migration marker."""
@@ -959,6 +990,7 @@ class GraphService:
         ingestion_status: str = "running",
         last_ingest_job_id: Optional[str] = None,
         chunk_count: int = 0,
+        extracted_text: Optional[Dict[str, Any]] = None,
     ) -> Document:
         """
         Ajoute un document au graphe avec métadonnées enrichies.
@@ -978,8 +1010,15 @@ class GraphService:
             ingestion_status: État d'ingestion durable ("running" → "succeeded" après Qdrant)
             last_ingest_job_id: ID du job d'ingestion asynchrone (None pour l'ingestion synchrone)
             chunk_count: Nombre de chunks vectorisés (finalisé après Qdrant)
+            extracted_text: Enregistrement du texte extrait retenu (T04b), déjà
+                stocké sous sa clé dérivée ; validé avant toute écriture.
         """
         import json
+
+        text_record_json = None
+        if extracted_text is not None:
+            check_text_record(extracted_text, memory_id, doc_id)
+            text_record_json = json.dumps(extracted_text, sort_keys=True, separators=(",", ":"))
 
         # Retry only admission-safe DDL. The global legacy-data migration is a
         # startup hook and can never be triggered by this per-memory operation.
@@ -1010,7 +1049,8 @@ class GraphService:
                     last_ingest_job_id: $last_ingest_job_id,
                     chunk_count: $chunk_count
                 })
-                SET d.source_path = $source_path
+                SET d.source_path = $source_path,
+                    d.extracted_text_json = $extracted_text_json
                 RETURN d
                 """,
                 doc_id=doc_id,
@@ -1027,6 +1067,7 @@ class GraphService:
                 ingestion_status=ingestion_status,
                 last_ingest_job_id=last_ingest_job_id,
                 chunk_count=chunk_count,
+                extracted_text_json=text_record_json,
             )
 
             record = await result.single()
@@ -1252,6 +1293,23 @@ class GraphService:
                     "chunk_count": record.get("chunk_count") or 0,
                 }
             return None
+
+    async def get_extracted_text_record(self, memory_id: str, doc_id: str) -> Optional[Dict[str, Any]]:
+        """Validated retained-text record of one generation; None for legacy.
+
+        A present but invalid record fails closed instead of reading as legacy.
+        """
+        async with self.session() as session:
+            result = await session.run(
+                """
+                MATCH (d:Document {id: $doc_id, memory_id: $memory_id})
+                RETURN d.extracted_text_json AS record
+                """,
+                doc_id=doc_id,
+                memory_id=memory_id,
+            )
+            row = await result.single()
+        return load_text_record(row["record"], memory_id, doc_id) if row else None
 
     async def get_documents_meta(self, memory_id: str, doc_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         """
@@ -1511,6 +1569,66 @@ class GraphService:
                 )
             return documents
 
+    async def list_reindex_text_records(self, memory_id: str) -> Dict[str, str]:
+        """Raw retained-text records (contract section 2) by document ID.
+
+        Documents ingested before retention carry none and are absent here:
+        the reindex boundary treats them as legacy, never as annotated.
+        """
+        async with self.session() as session:
+            result = await session.run(
+                """
+                MATCH (d:Document {memory_id: $memory_id})
+                WHERE d.extracted_text_json IS NOT NULL
+                RETURN d.id as document_id, d.extracted_text_json as record
+                LIMIT $limit
+                """,
+                memory_id=memory_id,
+                limit=MAX_REINDEX_SOURCE_DOCUMENTS + 1,
+            )
+            records: Dict[str, str] = {}
+            async for row in result:
+                if len(records) >= MAX_REINDEX_SOURCE_DOCUMENTS:
+                    raise ReindexSourceLimitExceeded("source inventory limit exceeded")
+                records[row["document_id"]] = row["record"]
+            return records
+
+    async def list_reindex_occurrences(self, memory_id: str, doc_id: str) -> List[Any]:
+        """Every occurrence of one published document, strictly validated.
+
+        Ascending IDs in bounded pages. Candidates, deprecated and
+        cleanup-pending generations are never read; a document above the
+        per-document cap fails closed instead of being silently truncated.
+        """
+        occurrences: List[Any] = []
+        after = ""
+        async with self.session() as session:
+            while True:
+                result = await session.run(
+                    """
+                    MATCH (d:Document {memory_id: $memory_id, id: $doc_id, ingestion_status: 'succeeded'})
+                          -[:HAS_TEMPORAL_OCCURRENCE]->
+                          (o:TemporalOccurrence {memory_id: $memory_id})
+                    WHERE o.doc_id = d.id AND o.id > $after
+                    RETURN o.id AS id, o.record_json AS record_json
+                    ORDER BY o.id
+                    LIMIT $limit
+                    """,
+                    memory_id=memory_id,
+                    doc_id=doc_id,
+                    after=after,
+                    limit=REINDEX_OCCURRENCE_PAGE,
+                )
+                page = [(r["id"], r["record_json"]) async for r in result]
+                for occurrence_id, record_json in page:
+                    # Bound to the requested namespace and generation, not to a node property.
+                    occurrences.append(load_record(record_json, memory_id, doc_id, occurrence_id))
+                if len(occurrences) > MAX_REINDEX_OCCURRENCES_PER_DOCUMENT:
+                    raise ReindexSourceLimitExceeded("occurrence inventory limit exceeded")
+                if len(page) < REINDEX_OCCURRENCE_PAGE:
+                    return occurrences
+                after = page[-1][0]
+
     async def get_reindex_ontology_uri(self, memory_id: str) -> Optional[str]:
         """Return the exact configured ontology object URI without coercion."""
         async with self.session() as session:
@@ -1583,12 +1701,18 @@ class GraphService:
                 orphan_deleted = await delete_orphans.single()
                 entities_deleted = orphan_deleted["deleted"] if orphan_deleted else 0
             
-            # Puis supprimer le document lui-même
+            # Puis supprimer le document lui-même, avec dans la MÊME instruction
+            # les seules occurrences temporelles de cette génération (T04) :
+            # jamais celles d'une autre source partageant le triplet.
             result = await session.run(
                 """
                 MATCH (d:Document {id: $doc_id, memory_id: $memory_id})
+                OPTIONAL MATCH (d)-[:HAS_TEMPORAL_OCCURRENCE]->(o:TemporalOccurrence {memory_id: $memory_id})
+                WHERE o.doc_id = d.id
+                WITH d, collect(o) AS occurrences
+                FOREACH (o IN occurrences | DETACH DELETE o)
                 DETACH DELETE d
-                RETURN count(d) as deleted
+                RETURN count(d) as deleted, size(occurrences) as occurrences_deleted
                 """,
                 doc_id=doc_id,
                 memory_id=memory_id
@@ -1596,16 +1720,18 @@ class GraphService:
 
             record = await result.single()
             deleted = record["deleted"] > 0 if record else False
-            
+            occurrences_deleted = record["occurrences_deleted"] if deleted else 0
+
             if deleted:
                 print(f"🗑️ [Graph] Document deleted: {doc_id}", file=sys.stderr)
                 print(f"   Orphaned entities deleted: {entities_deleted}", file=sys.stderr)
                 print(f"   MENTIONS relations deleted: {mentions_count}", file=sys.stderr)
-            
+
             return {
                 "deleted": deleted,
                 "relations_deleted": mentions_count if deleted else 0,
-                "entities_deleted": entities_deleted if deleted else 0
+                "entities_deleted": entities_deleted if deleted else 0,
+                "occurrences_deleted": occurrences_deleted,
             }
     
     # =========================================================================
@@ -1628,13 +1754,35 @@ class GraphService:
         - Source documents trackés sur chaque entité (propriété source_docs)
         - Relations ENRICHIES au MATCH (description + poids cumulatif)
         - Lien MENTIONS entre document et entité avec compteur
+        - Occurrences temporelles v1 (T04) : un nœud par occurrence de cette
+          génération, jamais fusionné dans la relation agrégée ; validées
+          avant la première écriture, sans écrasement d'un enregistrement
+          existant.
         """
         entities_created = 0
         entities_merged = 0
         relations_created = 0
         relations_merged = 0
-        
+        occurrence_rows = persisted_rows(extraction, memory_id, doc_id)
+
         async with self.session() as session:
+            if occurrence_rows:
+                # Same generation-scoped ID with another annotation (or owner)
+                # is a conflict: refuse the candidate before any graph write.
+                existing = await session.run(
+                    """
+                    MATCH (o:TemporalOccurrence {memory_id: $memory_id})
+                    WHERE o.id IN $ids
+                    RETURN o.id AS id, o.doc_id AS doc_id, o.record_json AS record_json
+                    """,
+                    memory_id=memory_id,
+                    ids=[row["id"] for row in occurrence_rows],
+                )
+                expected = {row["id"]: row["record_json"] for row in occurrence_rows}
+                async for record in existing:
+                    if record["doc_id"] != doc_id or record["record_json"] != expected.get(record["id"]):
+                        raise TemporalOccurrenceConflict("temporal_occurrence_conflict")
+
             # =================================================================
             # Phase 1 : Ajouter/Merger les entités
             # =================================================================
@@ -1724,17 +1872,109 @@ class GraphService:
                     relations_created += 1
                 else:
                     relations_merged += 1
-        
+
+            # =================================================================
+            # Phase 3 : Occurrences temporelles de cette génération (T04)
+            # =================================================================
+            if occurrence_rows:
+                # ON CREATE only: an existing record is never overwritten, and
+                # only an identical record of this document is linked to it.
+                result = await session.run(
+                    """
+                    UNWIND $rows AS row
+                    MATCH (d:Document {id: $doc_id, memory_id: $memory_id})
+                    MERGE (o:TemporalOccurrence {memory_id: $memory_id, id: row.id})
+                    ON CREATE SET o.doc_id = $doc_id,
+                                  o.from_entity = row.from_entity,
+                                  o.type = row.type,
+                                  o.to_entity = row.to_entity,
+                                  o.temporal_schema_version = 1,
+                                  o.record_json = row.record_json
+                    WITH d, o, (o.doc_id = $doc_id AND o.record_json = row.record_json) AS same
+                    FOREACH (_ IN CASE WHEN same THEN [1] ELSE [] END |
+                        MERGE (d)-[:HAS_TEMPORAL_OCCURRENCE]->(o))
+                    RETURN count(o) AS written,
+                           sum(CASE WHEN same THEN 1 ELSE 0 END) AS linked
+                    """,
+                    rows=occurrence_rows,
+                    doc_id=doc_id,
+                    memory_id=memory_id,
+                )
+                record = await result.single()
+                if record is None or record["written"] != len(occurrence_rows):
+                    raise TemporalOutputError("temporal_document_unavailable")
+                if record["linked"] != len(occurrence_rows):
+                    raise TemporalOccurrenceConflict("temporal_occurrence_conflict")
+
         total_entities = entities_created + entities_merged
         total_relations = relations_created + relations_merged
         print(f"🔗 [Graph] Entities: {entities_created} new + {entities_merged} merged = {total_entities}", file=sys.stderr)
         print(f"🔗 [Graph] Relations: {relations_created} new + {relations_merged} merged = {total_relations}", file=sys.stderr)
-        
+
         return {
             "entities_created": entities_created,
             "entities_merged": entities_merged,
             "relations_created": relations_created,
-            "relations_merged": relations_merged
+            "relations_merged": relations_merged,
+            "occurrences_stored": len(occurrence_rows),
+        }
+
+    async def get_relation_occurrences(
+        self,
+        memory_id: str,
+        relations: List[tuple],
+    ) -> Dict[str, Any]:
+        """Bounded occurrence records for aggregate relations (contract §5).
+
+        ``relations`` are ``(from_entity, type, to_entity)`` triples in the
+        caller's existing ranked order. Only occurrences of published
+        generations are visible; candidates, deprecated and cleanup-pending
+        documents never leak. IDs are selected in ascending order, at most
+        one row beyond the per-relation bound is fetched, and records that do
+        not fit the shared response budget are omitted whole with an explicit
+        partial flag and warning. No total is fabricated.
+        """
+        if type(relations) is not list or any(
+            type(r) not in (tuple, list) or len(r) != 3
+            or any(type(v) is not str or not v for v in r) for r in relations
+        ):
+            raise ValueError("relations must be (from_entity, type, to_entity) triples")
+        budget = OccurrenceBudget()
+        selected = []
+        async with self.session() as session:
+            for from_entity, rel_type, to_entity in relations:
+                result = await session.run(
+                    """
+                    MATCH (d:Document {memory_id: $memory_id, ingestion_status: 'succeeded'})
+                          -[:HAS_TEMPORAL_OCCURRENCE]->
+                          (o:TemporalOccurrence {memory_id: $memory_id, from_entity: $from_entity,
+                                                 type: $type, to_entity: $to_entity})
+                    WHERE o.doc_id = d.id
+                    RETURN o.id AS id, o.doc_id AS doc_id, o.record_json AS record_json
+                    ORDER BY o.id
+                    LIMIT $limit
+                    """,
+                    memory_id=memory_id,
+                    from_entity=from_entity,
+                    type=rel_type,
+                    to_entity=to_entity,
+                    limit=OCCURRENCES_PER_RELATION + 1,
+                )
+                rows = [(r["id"], r["doc_id"], r["record_json"]) async for r in result]
+                records, partial = budget.select(rows, memory_id)
+                selected.append({
+                    "from_entity": from_entity,
+                    "type": rel_type,
+                    "to_entity": to_entity,
+                    "occurrence_ids": [row.occurrence_id for row in records],
+                    "temporal_annotations": [row.model_dump(mode="json") for row in records],
+                    "occurrences_partial": partial,
+                })
+        return {
+            "temporal_schema_version": 1,
+            "relations": selected,
+            "partial": any(r["occurrences_partial"] for r in selected),
+            "warnings": sorted(budget.warnings),
         }
     
     # =========================================================================
@@ -1993,9 +2233,10 @@ class GraphService:
                 """
                 MATCH (e:Entity {name: $name, memory_id: $memory_id})
                 OPTIONAL MATCH (d:Document)-[:MENTIONS]->(e)
-                OPTIONAL MATCH (e)-[r:RELATED_TO]-(other:Entity)
-                RETURN e, collect(DISTINCT d) as docs, 
-                       collect(DISTINCT {entity: other, relation: r}) as related
+                OPTIONAL MATCH (e)-[r:RELATED_TO]-(other:Entity {memory_id: $memory_id})
+                RETURN e, collect(DISTINCT d) as docs,
+                       collect(DISTINCT {entity: other, relation: r, source: startNode(r).name, target: endNode(r).name,
+                                         direction: CASE WHEN r IS NULL THEN NULL WHEN startNode(r) = endNode(r) THEN 'self' WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END}) as related
                 """,
                 name=entity_name,
                 memory_id=memory_id
@@ -2010,9 +2251,10 @@ class GraphService:
                     MATCH (e:Entity {memory_id: $memory_id})
                     WHERE toLower(e.name) CONTAINS toLower($name)
                     OPTIONAL MATCH (d:Document)-[:MENTIONS]->(e)
-                    OPTIONAL MATCH (e)-[r:RELATED_TO]-(other:Entity)
-                    RETURN e, collect(DISTINCT d) as docs, 
-                           collect(DISTINCT {entity: other, relation: r}) as related
+                    OPTIONAL MATCH (e)-[r:RELATED_TO]-(other:Entity {memory_id: $memory_id})
+                    RETURN e, collect(DISTINCT d) as docs,
+                           collect(DISTINCT {entity: other, relation: r, source: startNode(r).name, target: endNode(r).name,
+                                             direction: CASE WHEN r IS NULL THEN NULL WHEN startNode(r) = endNode(r) THEN 'self' WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming' END}) as related
                     LIMIT 1
                     """,
                     name=entity_name,
@@ -2059,9 +2301,13 @@ class GraphService:
                         "type": item["entity"]["type"]
                     })
                 if item["relation"]:
+                    # Extrémités réelles de l'arête stockée (source -> target) et sens relatif à l'entité lue.
                     relations.append({
                         "type": item["relation"]["type"],
-                        "description": item["relation"].get("description")
+                        "description": item["relation"].get("description"),
+                        "source": item["source"],
+                        "target": item["target"],
+                        "direction": item["direction"],
                     })
             
             return GraphContext(
@@ -2288,6 +2534,11 @@ class GraphService:
                 for k, v in props.items():
                     if hasattr(v, 'to_native'):
                         props[k] = v.to_native().isoformat()
+                if "extracted_text_json" in props:
+                    try:
+                        load_text_record(props["extracted_text_json"], memory_id, props.get("id"))
+                    except TemporalOutputError:
+                        raise ValueError("retained extracted text record is invalid") from None
                 documents.append(props)
             
             # 3. Exporter les Entities
@@ -2349,18 +2600,44 @@ class GraphService:
                     "entity_name": record["entity_name"],
                     "count": record["count"]
                 })
-            
+
+            # 6. Occurrences temporelles v1 (T04), liées à leur document.
+            # Un enregistrement invalide refuse l'export : jamais de backup
+            # présenté comme complet après une perte silencieuse.
+            occ_result = await session.run(
+                """
+                MATCH (d:Document {memory_id: $memory_id})-[:HAS_TEMPORAL_OCCURRENCE]->(o:TemporalOccurrence {memory_id: $memory_id})
+                WHERE o.doc_id = d.id
+                RETURN o.id as id, o.doc_id as doc_id, o.record_json as record_json
+                ORDER BY o.doc_id, o.id
+                """,
+                memory_id=memory_id
+            )
+            occurrences = []
+            async for record in occ_result:
+                try:
+                    row = load_record(record["record_json"], memory_id, record["doc_id"], record["id"])
+                except TemporalOutputError:
+                    raise ValueError("temporal occurrence record is invalid") from None
+                occurrences.append(row.model_dump(mode="json"))
+
             print(f"📦 [Graph Export] {memory_id}: {len(documents)} docs, "
                   f"{len(entities)} entities, {len(relations)} relations, "
-                  f"{len(mentions)} mentions", file=sys.stderr)
-            
-            return {
+                  f"{len(mentions)} mentions, {len(occurrences)} occurrences", file=sys.stderr)
+
+            exported = {
                 "memory": memory_props,
                 "documents": documents,
                 "entities": entities,
                 "relations": relations,
                 "mentions": mentions
             }
+            if occurrences or any("extracted_text_json" in d for d in documents):
+                # Declared feature boundary (backup 1.1); absent otherwise so a
+                # legacy export stays byte-identical.
+                exported["temporal_schema_version"] = 1
+                exported["occurrences"] = occurrences
+            return exported
     
     @_guard_graph_import
     async def import_memory_data(self, data: Dict[str, Any]) -> Dict[str, int]:
@@ -2381,7 +2658,8 @@ class GraphService:
         # Export preserves all Memory properties. Validate and explicitly
         # restore the automatic default too, before any import mutation.
         _automatic_ontology_state(memory_props)
-        
+        temporal = import_temporal_state(data, memory_id)
+
         # Vérifier que la mémoire n'existe pas
         existing = await self.get_memory(memory_id)
         if existing:
@@ -2528,7 +2806,49 @@ class GraphService:
                     count=mention.get("count", 1)
                 )
                 counters["mentions"] += 1
-        
+
+            # 6. Format temporel (backup 1.1) : état de publication des
+            # documents, qui borne la visibilité, puis occurrences liées.
+            if temporal is not None:
+                occurrence_rows, document_states = temporal
+                await self._run_consumed(
+                    session,
+                    """
+                    UNWIND $states AS state
+                    MATCH (d:Document {id: state.id, memory_id: $memory_id})
+                    SET d.ingestion_status = state.ingestion_status,
+                        d.chunk_count = state.chunk_count,
+                        d.last_ingest_job_id = state.last_ingest_job_id,
+                        d.extracted_text_json = state.extracted_text_json
+                    """,
+                    states=document_states,
+                    memory_id=memory_id,
+                )
+                result = await session.run(
+                    """
+                    UNWIND $rows AS row
+                    MATCH (d:Document {id: row.doc_id, memory_id: $memory_id})
+                    CREATE (o:TemporalOccurrence {
+                        memory_id: $memory_id,
+                        id: row.id,
+                        doc_id: row.doc_id,
+                        from_entity: row.from_entity,
+                        type: row.type,
+                        to_entity: row.to_entity,
+                        temporal_schema_version: 1,
+                        record_json: row.record_json
+                    })
+                    CREATE (d)-[:HAS_TEMPORAL_OCCURRENCE]->(o)
+                    RETURN count(o) AS created
+                    """,
+                    rows=occurrence_rows,
+                    memory_id=memory_id,
+                )
+                record = await result.single()
+                if record is None or record["created"] != len(occurrence_rows):
+                    raise RuntimeError("temporal occurrence import is incomplete")
+                counters["occurrences"] = len(occurrence_rows)
+
         print(f"📥 [Graph Import] {memory_id}: {counters}", file=sys.stderr)
         return counters
     

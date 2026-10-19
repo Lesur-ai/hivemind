@@ -27,7 +27,7 @@ import gc
 import sys
 import time as _time
 import uuid
-from functools import wraps
+from functools import partial, wraps
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from hivemind_inference import EmbeddingResult, InferenceError
@@ -127,6 +127,16 @@ def _merge_embedding_results(
 # Services (réutilise les singletons lazy-loaded des modules core)
 # =============================================================================
 
+
+def _text_converter_provenance(extension: str) -> dict[str, str]:
+    from importlib.metadata import version
+    from platform import python_version
+    packages = {"pdf": "pypdf", "docx": "python-docx", "html": "beautifulsoup4", "htm": "beautifulsoup4"}
+    package = packages.get(extension)
+    return {"converter_id": "mcp_memory.server._extract_text:" + extension,
+            "converter_version": (version(package) if package else "python-" + python_version()) + ":v1"}
+
+
 def _graph():
     from .graph import get_graph_service
     return get_graph_service()
@@ -219,14 +229,26 @@ async def delete_document_everywhere(
             print(f"⚠️ [delete_everywhere] Qdrant: {e}", file=sys.stderr)
 
     # 2. Neo4j (document + entités orphelines)
+    graph_failed = False
     try:
         graph_res = await _graph().delete_document(memory_id, doc_id)
         result["neo4j_deleted"] = bool(graph_res.get("deleted"))
         result["entities_deleted"] = graph_res.get("entities_deleted", 0)
         result["relations_deleted"] = graph_res.get("relations_deleted", 0)
     except Exception as e:
+        graph_failed = True
         result["errors"].append(f"neo4j: {e}")
         print(f"⚠️ [delete_everywhere] Neo4j: {e}", file=sys.stderr)
+
+    # 2b. Texte extrait retenu de CETTE génération (T04b) : clé dérivée du
+    #     doc_id, après Neo4j et seulement si le graphe ne le référence plus.
+    if not graph_failed:
+        try:
+            if not await _storage().delete_extracted_text(memory_id, doc_id):
+                result["errors"].append("s3: retained text deletion not confirmed")
+        except Exception as e:
+            result["errors"].append(f"s3: {e}")
+            print(f"⚠️ [delete_everywhere] S3 retained text: {e}", file=sys.stderr)
 
     # 3. S3 (objet original) — en dernier : tant que Neo4j pointe encore dessus,
     #    storage_check ne le considère pas comme orphelin.
@@ -442,9 +464,22 @@ async def run_ingest_pipeline(
         from .ontology import get_ontology_manager
         ontology_label = get_ontology_manager().get_ontology_label(ontology_to_use)
         await _report("llm_extract", 15, f"🔍 Starting LLM extraction (ontology: {ontology_label})...")
-        extraction = await _extractor().extract_with_ontology_chunked(
-            text, ontology_to_use, progress_callback=_extraction_progress
-        )
+        from .temporal import ExtractionSource, bind_context_only, bind_source
+        source_context = ExtractionSource(text, markdown=file_ext == "md")
+        # Occurrence extraction is experimental and off unless explicitly True
+        # (#999): off, the provider receives exactly the 1.6.2 extraction
+        # request and spontaneous temporal output is discarded unvalidated.
+        occurrences_requested = getattr(settings, "temporal_occurrence_extraction", False) is True
+        if occurrences_requested:
+            extraction = await _extractor().extract_with_ontology_chunked(
+                text, ontology_to_use, progress_callback=_extraction_progress,
+                source_context=source_context,
+            )
+        else:
+            extraction = await _extractor().extract_with_ontology_chunked(
+                text, ontology_to_use, progress_callback=_extraction_progress,
+                discard_temporal_output=True,
+            )
         await _report(
             "llm_extract", 60,
             f"✅ Extraction: {len(extraction.entities)} entities, {len(extraction.relations)} relations",
@@ -452,6 +487,20 @@ async def run_ingest_pipeline(
 
         # --- RAG : chunking + embeddings en mémoire (avant toute mutation graphe/vecteur) ---
         doc_id = str(uuid.uuid4())
+        if occurrences_requested:
+            extraction = bind_source(
+                extraction, source_context, memory_id, doc_id, doc_hash,
+                _text_converter_provenance(file_ext),
+            )
+        else:
+            extraction = bind_context_only(extraction, source_context, _text_converter_provenance(file_ext))
+        # Retain the exact coordinate text with the candidate (T04b). A text
+        # that cannot be retained fails the candidate; rollback deletes it.
+        text_record = None
+        if extraction.source_text is not None:
+            from .temporal import extracted_text_record
+            await _storage().put_extracted_text(memory_id, doc_id, extraction.source_text)
+            text_record = extracted_text_record(extraction.text_provenance, memory_id, doc_id)
         chunks_stored = 0
         EMBED_BATCH_SIZE = 5
         chunks = []
@@ -468,6 +517,21 @@ async def run_ingest_pipeline(
                 for chunk in chunks:
                     chunk.doc_id = doc_id
                     chunk.memory_id = memory_id
+
+                if text_record is not None:
+                    # Offsets of each passage plus its context and the occurrence
+                    # records whose fact evidence overlaps it (T05). The embedded
+                    # string (chunk.text) is not touched. The origin comes from
+                    # this generation's record, as reindex derives it (#999).
+                    from .chunk_annotation import annotate_chunks
+                    from .temporal import SourceRef, annotation_origin_for
+                    await loop.run_in_executor(
+                        None, partial(
+                            annotate_chunks, chunks, source_context, extraction.occurrences,
+                            SourceRef(memory_id=memory_id, doc_id=doc_id, sha256=doc_hash,
+                                      text_sha256=source_context.text_sha256),
+                            origin=annotation_origin_for(text_record)),
+                    )
 
                 chunk_texts = [c.text for c in chunks]
                 total_chunks = len(chunk_texts)
@@ -517,6 +581,7 @@ async def run_ingest_pipeline(
             content_type=file_ext,
             ingestion_status="running",
             last_ingest_job_id=last_ingest_job_id,
+            **({"extracted_text": text_record} if text_record is not None else {}),
         )
         graph_result = await _graph().add_entities_and_relations(
             memory_id=memory_id, doc_id=doc_id, extraction=extraction

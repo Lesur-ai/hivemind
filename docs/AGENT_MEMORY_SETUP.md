@@ -130,6 +130,12 @@ Allowed categories are `observation`, `decision`, `progress`, `issue`, `todo`,
 `insight`, and `question`. Agent identity is derived from the dedicated token;
 never pass or invent an agent identity.
 
+Write every human decision and every blocking question raised to the human as
+a `short_note` (category `decision` or `question`) in the same turn it is
+received or raised, before relaying it to another agent, publishing it, or
+acting on it. A record in an issue tracker or pull request does not replace
+that note.
+
 Use `long_query` for historical context, prior incidents, runbooks, decisions,
 and cross-document relationships, then re-read the referenced canonical file
 before acting. Long memory is non-authoritative. Do not run `long_push`, alter
