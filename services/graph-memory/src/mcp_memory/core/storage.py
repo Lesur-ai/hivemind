@@ -122,8 +122,33 @@ class StorageService:
         # Client par défaut pour les opérations de données
         self._client = self._client_v2
 
+        # Query compatibility gets one physical attempt with bounded sockets;
+        # retain the normal source/maintenance clients' established retry policy.
+        legacy_config = (config_v2 if self.signature_mode == 'dual' else config_v4).merge(
+            Config(retries={'total_max_attempts': 1, 'mode': 'standard'},
+                   connect_timeout=1, read_timeout=1))
+        self._legacy_client = boto3.client(
+            's3', endpoint_url=settings.s3_endpoint_url,
+            aws_access_key_id=settings.s3_access_key_id,
+            aws_secret_access_key=settings.s3_secret_access_key,
+            region_name=region, config=legacy_config)
+        self._guard_legacy_attempts(self._legacy_client)
+
         self._bucket = settings.s3_bucket_name
         self._endpoint_url = settings.s3_endpoint_url
+
+    @staticmethod
+    def _guard_legacy_attempts(client):
+        # S3 region redirects can bypass total_max_attempts and issue another
+        # GET (or HEAD). Stop error responses before any generic S3 redirect or
+        # retry handler. This client serves legacy reads only, concurrently.
+        def stop_error(response=None, caught_exception=None, operation=None, **kwargs):
+            if caught_exception is not None:
+                raise caught_exception
+            if response is not None and response[0].status_code >= 300:
+                raise ClientError(response[1], operation.name)
+        client.meta.events.register_first('needs-retry.s3.GetObject', stop_error,
+                                           unique_id='hivemind-legacy-one-attempt')
 
     @staticmethod
     def _resolve_signature_mode() -> str:
@@ -256,6 +281,41 @@ class StorageService:
                 raise FileNotFoundError(f"Document not found: {key}")
             raise
     
+    async def read_legacy_document(self, memory_id, reference, expected_hash, max_bytes, deadline):
+        """One bounded original GET for query compatibility; no writes/retries.
+
+        Boto I/O runs outside the event loop. A cancelled/timed-out caller never
+        consumes a late result; the worker checks its deadline before reading
+        the body and always closes it. Ordinary document downloads are unchanged.
+        """
+        from .temporal import LegacySourceError
+        import time
+        key = self.document_key(memory_id, reference)
+
+        def read():
+            if time.monotonic() >= deadline:
+                raise LegacySourceError('context_budget_exceeded')
+            response = self._legacy_client.get_object(Bucket=self._bucket, Key=key)
+            body = response['Body']
+            try:
+                if time.monotonic() >= deadline or response.get('ContentLength', 0) > max_bytes:
+                    raise LegacySourceError('context_budget_exceeded')
+                metadata = response.get('Metadata', {})
+                for name, expected in (('memory-id', memory_id), ('doc-hash', expected_hash)):
+                    values = [metadata[k] for k in (name, name.replace('-', '_')) if k in metadata]
+                    if any(v != expected for v in values):
+                        raise LegacySourceError('source_version_mismatch')
+                content = body.read(max_bytes + 1)
+                if len(content) > max_bytes or time.monotonic() >= deadline:
+                    raise LegacySourceError('context_budget_exceeded', len(content))
+                if hashlib.sha256(content).hexdigest() != expected_hash:
+                    raise LegacySourceError('source_version_mismatch', len(content))
+                return content
+            finally:
+                body.close()
+
+        return await asyncio.to_thread(read)
+
     @_redact_proxy_errors
     async def delete_document(self, memory_id: str, key_or_uri: str) -> bool:
         """
@@ -279,6 +339,95 @@ class StorageService:
             print(f"❌ [S3] Deletion error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
             return False
     
+    # --- Retained exact extracted text (LONG temporal contract §2, T04b) ---
+    # One object per document generation, outside documents/ so reindex and
+    # the orphan audit never treat it as a source. Keys are derived, never
+    # caller-supplied.
+
+    @_redact_proxy_errors
+    async def put_extracted_text(self, memory_id: str, doc_id: str, text: str) -> str:
+        """Store a generation's exact extracted text; returns its derived key."""
+        from .temporal import extracted_text_key
+
+        key = extracted_text_key(memory_id, doc_id)
+        if type(text) is not str:
+            raise ValueError("extracted text must be a string")
+        content = text.encode("utf-8")
+        self._client.put_object(
+            Bucket=self._bucket,
+            Key=key,
+            Body=content,
+            ContentType="text/plain; charset=utf-8",
+            Metadata={
+                "memory-id": memory_id,
+                "doc-id": doc_id,
+                "text-sha256": hashlib.sha256(content).hexdigest(),
+            },
+        )
+        return key
+
+    @_redact_proxy_errors
+    async def read_extracted_text(self, memory_id: str, doc_id: str, record: dict) -> str:
+        """Return the retained text only if it matches its validated record."""
+        from .temporal import check_text_record
+
+        check_text_record(record, memory_id, doc_id)
+        try:
+            response = self._client.get_object(Bucket=self._bucket, Key=record["storage_ref"])
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+                raise FileNotFoundError("retained extracted text not found") from None
+            raise
+        content = response["Body"].read()
+        if hashlib.sha256(content).hexdigest() != record["sha256"]:
+            raise ValueError("retained extracted text does not match its record")
+        return content.decode("utf-8")
+
+    @_redact_proxy_errors
+    async def delete_extracted_text(self, memory_id: str, doc_id: str) -> bool:
+        """Delete one generation's derived text key (absent is not an error)."""
+        from .temporal import extracted_text_key
+
+        key = extracted_text_key(memory_id, doc_id)
+        try:
+            self._client.delete_object(Bucket=self._bucket, Key=key)
+            return True
+        except ClientError as e:
+            print(f"❌ [S3] Deletion error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+            return False
+
+    async def delete_extracted_text_prefix(self, memory_id: str) -> dict:
+        """Memory deletion: remove only keys of the exact retained-text shape.
+
+        The bucket is shared with Hivemind spaces that may reuse this ID. Any
+        listed key of another shape refuses the whole batch before deleting.
+        """
+        from .temporal import extracted_text_key
+
+        if type(memory_id) is not str or not VALID_MEMORY_ID.fullmatch(memory_id):
+            raise ValueError("Invalid Graph document prefix")
+        prefix = f"{memory_id}/extracted_text/"
+        objects = await self.list_all_objects(prefix=prefix)
+        keys = []
+        for obj in objects:
+            key = obj["key"]
+            doc_id = key[len(prefix):-len(".txt")] if key.startswith(prefix) and key.endswith(".txt") else ""
+            try:
+                if extracted_text_key(memory_id, doc_id) != key:
+                    raise ValueError
+            except ValueError:
+                raise ValueError("Unexpected object in the retained text namespace") from None
+            keys.append(key)
+        deleted_count = error_count = 0
+        for key in keys:
+            try:
+                self._client.delete_object(Bucket=self._bucket, Key=key)
+                deleted_count += 1
+            except ClientError as e:
+                error_count += 1
+                print(f"❌ [S3] Error deleting {key}: {redact_proxy_secrets(str(e))}", file=sys.stderr)
+        return {"deleted_count": deleted_count, "error_count": error_count, "total_found": len(objects)}
+
     @_redact_proxy_errors
     async def document_exists(self, key_or_uri: str, *, memory_id: str) -> bool:
         """Vérifie si un document existe dans S3."""

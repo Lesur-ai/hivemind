@@ -20,6 +20,7 @@ async def retrieval_case(archive_case):
         c.archive_id: [{'id': f'archive-{i}', 'source_path': f'archive/{i}', 'content': f'archived {i}'} for i in range(3)],
     }
     c.error = None
+    c.signals = {}
     async def read(name, args):
         if name == 'memory_list':
             return await previous(name, args)
@@ -33,7 +34,7 @@ async def retrieval_case(archive_case):
             return {'status': 'ok', 'memory_id': mid, 'result_count': 3,
                     'results': [{'entity': {'name': 'Same name', 'type': mid}, 'documents': [d]} for d in c.rows[mid]]}
         if name == 'memory_query':
-            return {'status': 'ok', 'memory_id': mid, 'retrieval_mode': 'hybrid',
+            return {'status': 'ok', 'memory_id': mid, 'retrieval_mode': 'hybrid', **c.signals.get(mid, {}),
                     'entities': [{'name': 'Same name', 'type': mid} for _ in range(3)],
                     'rag_chunks': [{'doc_id': d['id'], 'text': d['content']} for d in c.rows[mid]],
                     'source_documents': c.rows[mid],
@@ -136,3 +137,27 @@ async def test_local_archive_collision_never_delivers_archive_evidence(retrieval
         assert len(result[field]) == 3
     assert all(args['memory_id'] == 'documentary' for _, args in c.read_calls)
     assert c.storage.snapshot() == before
+
+
+async def test_query_preserves_context_diagnostics_from_both_namespaces(retrieval_case):
+    c = retrieval_case
+    c.signals = {
+        'documentary': {'partial': False, 'warnings': [{'reason': 'legacy_unannotated', 'doc_id': 'same'}],
+                         'legacy_context_cost': {'source_reads': 1}},
+        c.archive_id: {'partial': True, 'warnings': [{'reason': 'source_unavailable', 'doc_id': 'same'}],
+                       'legacy_context_cost': {'source_reads': 0}},
+    }
+    result = await c.engine.query('space-a', 'When?', limit=2)
+    assert result['partial'] is True
+    assert 'legacy_context_cost' not in result
+    assert result['legacy_context_costs'] == [
+        {'memory_id': 'documentary', 'source_reads': 1}, {'memory_id': c.archive_id, 'source_reads': 0}]
+    assert result['warnings'] == [
+        {'reason': 'legacy_unannotated', 'doc_id': 'same', 'memory_id': 'documentary'},
+        {'reason': 'source_unavailable', 'doc_id': 'same', 'memory_id': c.archive_id},
+    ]
+    c.error = ConnectionError('unavailable')
+    result = await c.engine.query('space-a', 'When?', limit=2)
+    assert result['partial'] is True
+    assert result['warnings'][0]['reason'] == 'legacy_unannotated'
+    assert result['warnings'][1]['reason'] == 'archive_unavailable'

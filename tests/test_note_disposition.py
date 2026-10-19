@@ -1497,3 +1497,115 @@ async def test_mixed_model_and_environment_faults_refuse_at_once(
     assert {"invalid_normal_replacement_structure", "invalid_normal_source_structure"} <= reasons
     assert storage.objects == before
     assert all(key in storage.objects for key in note_keys)
+
+
+# ── #1052 / hivemind#124 — an H1 alone never consumes notes ─────────────────
+# A custom-rules space has no seeded bank.  The issue's model emitted, per
+# file, an H1-only create plus a duplicate edit carrying the text; the
+# correction dropped the edits and kept the creates, which were accepted, so
+# the notes were deleted while every file held only its title.
+
+_ISSUE_FILES = (
+    ("activeContext.md", "# Active Context"),
+    ("progress.md", "# Progress"),
+    ("findings.md", "# Findings"),
+    ("toolTrace.md", "# Tool Trace"),
+    ("decisions.md", "# Decisions"),
+)
+
+
+def _issue_create(filename: str, content: str) -> dict:
+    return {
+        "filename": filename,
+        "action": "create",
+        "content": content,
+        "reason": "New bank file for the notes",
+        "notes": [1, 2],
+    }
+
+
+def _empty_custom_rules_bank(
+    monkeypatch: pytest.MonkeyPatch, storage: RecordingStorage
+) -> list[str]:
+    _seed_bank(storage)  # custom rules, no six-document seed
+    del storage.objects[f"{SPACE}/bank/facts.md"]
+    note_keys = _seed_notes(storage, 2)
+    _bind_direct_local(monkeypatch, storage)
+    return note_keys
+
+
+def _issue_split_plan() -> dict:
+    creates = [_issue_create(name, f"{title}\n") for name, title in _ISSUE_FILES]
+    edits = [
+        _edit([1, 2], content="- Note 1 detail\n- Note 2 detail", heading=title, filename=name)
+        for name, title in _ISSUE_FILES
+    ]
+    return _plan(creates + edits)
+
+
+def _issue_service() -> object:
+    service = _service()
+    service._batch_size = 2
+    service._validation_enabled = False
+    service._bank_file_max_size = 35000
+    return service
+
+
+def _bank_keys(storage: RecordingStorage) -> list[str]:
+    return sorted(key for key in storage.objects if key.startswith(f"{SPACE}/bank/"))
+
+
+async def test_h1_only_creates_kept_by_the_correction_refuse_the_batch_and_keep_the_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RecordingStorage()
+    note_keys = _empty_custom_rules_bank(monkeypatch, storage)
+    before = dict(storage.objects)
+    service = _issue_service()
+    h1_only = _plan([_issue_create(name, f"{title}\n") for name, title in _ISSUE_FILES])
+    service._call_llm = AsyncMock(side_effect=[_ok(_issue_split_plan()), _ok(h1_only)])
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    assert service._call_llm.await_count == 2
+    assert result["notes_deleted"] == 0
+    assert _bank_keys(storage) == []
+    assert storage.objects == before
+    assert all(key in storage.objects for key in note_keys)
+    assert result["status"] == "error"
+    assert result["failure_reason"] == "batch_write_failed"
+    assert [f["reason"] for f in result["operation_failures"]] == [
+        "normal_create_without_body"
+    ] * len(_ISSUE_FILES)
+    corrective = service._call_llm.await_args_list[1].args[0][-1]["content"]
+    assert '"reason": "normal_create_without_body"' in corrective
+    assert '"reason": "duplicate_normal_target"' in corrective
+    assert "must carry their content under its H1" in corrective
+    assert "H1-only create plus an edit" in corrective
+
+
+async def test_h1_only_creates_corrected_with_bodies_write_the_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RecordingStorage()
+    note_keys = _empty_custom_rules_bank(monkeypatch, storage)
+    service = _issue_service()
+    complete = _plan(
+        [
+            _issue_create(name, f"{title}\n\n- Note 1 detail\n- Note 2 detail\n")
+            for name, title in _ISSUE_FILES
+        ]
+    )
+    service._call_llm = AsyncMock(side_effect=[_ok(_issue_split_plan()), _ok(complete)])
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    assert service._call_llm.await_count == 2
+    assert result["status"] == "ok"
+    assert result["notes_deleted"] == 2
+    assert _bank_keys(storage) == sorted(f"{SPACE}/bank/{name}" for name, _ in _ISSUE_FILES)
+    for name, title in _ISSUE_FILES:
+        assert storage.objects[f"{SPACE}/bank/{name}"] == (
+            f"{title}\n\n- Note 1 detail\n- Note 2 detail\n"
+        )
+    assert all(key not in storage.objects for key in note_keys)

@@ -17,7 +17,7 @@ autres, héritent de ce qu'ils ont appris, et comprennent ensemble des projets
 complexes.
 
 [![protocole](https://img.shields.io/badge/protocole-MCP-00A7C7?style=flat-square)](#-concept)
-[![version](https://img.shields.io/badge/version-1.6.2-9CA3AF?style=flat-square)](#-licence)
+[![version](https://img.shields.io/badge/version-1.6.3-9CA3AF?style=flat-square)](#-licence)
 [![CI](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml/badge.svg)](https://github.com/Lesur-ai/hivemind/actions/workflows/ci.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-111827?style=flat-square)](#-licence)
 [![python](https://img.shields.io/badge/python-3.14-F59E0B?style=flat-square)](#-pr%C3%A9requis)
@@ -29,6 +29,20 @@ English · [README.md](README.md)
 ---
 
 **Transport MCP (1.6.1).** Le cœur et le moteur LONG embarqué utilisent le même SDK MCP Python 2.3.0 (`MCPServer`). Les clients MCP compatibles conservent leurs noms d’outils et alias ; le protocole moderne est également servi. La CLI de maintenance Python et le pont LONG utilisent le transport Streamable HTTP du SDK 2. La configuration d’inférence, les banques et les données du graphe sont conservées ; reconstruire les deux images ensemble. Les requêtes MCP sont bornées à 75 Mio sur le transport, avec une limite de 50 Mio par document décodé.
+
+**Contexte source LONG et sûreté des notes MID (1.6.3).** Chaque passage
+renvoyé par `long_query` porte désormais les titres et introductions de sa
+section source, rendus dans `rag_chunks[].text` ; les relations du graphe
+indiquent leurs vraies extrémités `source`, `target` et leur `direction` au lieu
+de `"?"`. Les passages indexés avant la 1.6.3 reçoivent à la lecture un contexte
+borné issu de leurs originaux conservés, sans réingestion. La demande
+d'occurrences temporelles au modèle d'extraction reste désactivée par défaut
+(`TEMPORAL_OCCURRENCE_EXTRACTION`, expérimental). La consolidation MID ne
+supprime plus de notes au profit de fichiers réduits à leur titre (#124).
+Reconstruire les deux images ensemble ; les sauvegardes LONG des données 1.6.3
+utilisent le format `1.1`, que la 1.6.2 ne restaure pas : sauvegarder avant la
+mise à jour. Voir la [liste de mise à jour](docs/DEPLOYMENT.md#upgrade-to-163)
+et les [notes de version](CHANGELOG.md#163--2026-10-19).
 
 **Initialisation MID (1.6.2).** Cette version de maintenance permet de créer un
 space standard sans fournir de règles. Dans `.env.example`, `DEFAULT_RULES_FILE`
@@ -1331,10 +1345,12 @@ uv run python scripts/test_recette.py --list
 | `qualite`   | Régression des outils MCP : system, admin, space, short, mid, backup, GC                 |
 | `graph`     | Chemin override explicite `graph_connect` du tier `long` : connect, push, status, disconnect (sautée sans `--graph-url`/`--graph-token`) |
 
-La suite protocole Hivemind importée tourne aussi sous `pytest`. En local,
-exécuter uniquement le strict nécessaire pour le comportement modifié ; la CI
-valide la suite complète, l'intégration et la couverture. Une exécution locale
-plus large demande une instruction explicite ou un besoin concret de diagnostic.
+La suite protocole Hivemind importée tourne aussi sous `pytest`. Pendant
+l'itération, exécuter uniquement les tests ciblés nécessaires au comportement
+modifié et à ses risques. Réutiliser les preuves valides et diagnostiquer les
+échecs avec des reproductions ciblées. L'attente d'un runner CI n'impose pas
+une suite locale complète. Ne pas pousser uniquement pour obtenir un retour
+de tests. Pour la documentation, vérifier le diff et les contrats concernés.
 
 ```bash
 git diff --check

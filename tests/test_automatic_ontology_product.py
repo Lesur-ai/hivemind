@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from hivemind_inference import ChatResult, EmbeddingResult, InferenceError
-from tests.fakes.inference_fakes import make_chat_profile, make_embedding_profile
+from tests.fakes.inference_fakes import make_chat_profile, make_embedding_profile, temporal_unknown_payload
 from tests.test_automatic_ontology_state import graph_env, YAML  # noqa: F401
 
 
@@ -41,6 +41,8 @@ def product(graph_env, monkeypatch):
     from mcp_memory.core.embedder import EmbeddingService
     from mcp_memory.core.chunker import SemanticChunker
 
+    from tests.fakes.inference_fakes import enable_occurrence_extraction
+    enable_occurrence_extraction(monkeypatch)  # this harness answers the T03 temporal packet
     graph, backend, _ = graph_env
     state = SimpleNamespace(
         calls=[], events=[], stored={}, vectors={}, graph_docs={}, extractions=[],
@@ -113,7 +115,18 @@ def product(graph_env, monkeypatch):
         state.events.append("s3_rollback")
         return True
 
+    texts = {}  # T04b retained texts, keyed by generation
+
+    async def put_text(memory_id, doc_id, text):
+        texts[doc_id] = text
+        return f"{memory_id}/extracted_text/{doc_id}.txt"
+
+    async def delete_text(memory_id, doc_id):
+        texts.pop(doc_id, None)
+        return True
+
     storage = SimpleNamespace(upload_document=upload, delete_document=delete,
+                              put_extracted_text=put_text, delete_extracted_text=delete_text,
                               compute_hash=lambda content: hashlib.sha256(content).hexdigest())
     monkeypatch.setattr(server, "get_storage", lambda: storage)
     monkeypatch.setattr(ingest_pipeline, "_storage", lambda: storage)
@@ -170,6 +183,7 @@ def product(graph_env, monkeypatch):
                     "relations": [{"from_entity": "Instrument", "to_entity": "Temperature", "type": "RELATED_TO"}],
                     "summary": "Instrument measures temperature.", "key_topics": ["Measurement"],
                 }
+                payload = temporal_unknown_payload(payload, request.messages[1].content)
             return ChatResult(text=json.dumps(payload), configured_model="synthetic-chat",
                 model_evidence="configured_only", finish_reason="stop",
                 input_tokens=10, output_tokens=5, total_tokens=15)
@@ -217,6 +231,11 @@ async def test_chosen_yaml_reaches_pipeline_without_any_calibration(product):
     assert product.backend.node["ontology"] == "general"
     assert len(product.graph_docs) == len(product.vectors) == 2
     assert [row.entities[0].type for row in product.extractions] == ["Device", "Device"]
+    for row in product.extractions:
+        assert row.temporal_schema_version == 1
+        assert len(row.occurrences) == 1
+        assert row.occurrences[0].occurrence_id.startswith("occ1:")
+        assert row.occurrences[0].event_time.status == "unknown"
 
 
 async def test_automatic_batch_freezes_once_before_document_ingestion(product):
@@ -228,6 +247,8 @@ async def test_automatic_batch_freezes_once_before_document_ingestion(product):
     jobs = [await product.queue.get_job(item["job_id"]) for item in response["items"]]
     assert {job["status"] for job in jobs} == {"succeeded"}
     assert Counter(product.calls) == {"open_extract": 12, "d1": 1, "d2": 1, "document_extract": 12}
+    assert all(row.temporal_schema_version == 1 and len(row.occurrences) == 1 for row in product.extractions)
+    assert len({row.occurrences[0].source_ref.doc_id for row in product.extractions}) == 12
     assert product.events.index("freeze") < product.events.index("s3_upload") < product.events.index("graph_document")
     assert product.events.count("freeze") == 1
     frozen = await product.graph.load_automatic_ontology("test")

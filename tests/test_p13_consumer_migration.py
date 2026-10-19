@@ -2074,13 +2074,14 @@ class TestDeploymentPurity:
         this is the only path that ever inspects the MATERIALIZED public
         workflow rather than just the pre-export staging source.
         """
-        candidates = [
-            _REPO_ROOT / "release/public-overlay/.github/workflows/ci.yml",
-            _REPO_ROOT / ".github/workflows/ci.yml",
-        ]
-        present = [path for path in candidates if path.is_file()]
-        assert len(present) == 1, [str(path) for path in present]
-        raw = present[0].read_text(encoding="utf-8")
+        overlay = _REPO_ROOT / "release/public-overlay/.github/workflows/ci.yml"
+        materialized = _REPO_ROOT / ".github/workflows/ci.yml"
+        # The source tree can also carry a workflow of its own at the
+        # materialized path; the overlay source exists only there, so it
+        # identifies the source tree and takes precedence.
+        path = overlay if overlay.is_file() else materialized
+        assert path.is_file(), str(path)
+        raw = path.read_text(encoding="utf-8")
         workflow = yaml.safe_load(raw)
         assert set(workflow["jobs"]) == {"test", "test_python314_arm64", "prepare_python314", "python314_shards", "public_cli"}
         assert "docker/build-push-action" not in raw

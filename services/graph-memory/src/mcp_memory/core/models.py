@@ -8,7 +8,9 @@ Définit les structures de données utilisées dans tout le service.
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from .temporal import Occurrence
 
 
 # =============================================================================
@@ -86,6 +88,29 @@ class ExtractionResult(BaseModel):
     relations: List[ExtractedRelation] = Field(default_factory=list)
     summary: Optional[str] = Field(None, description="Document summary")
     key_topics: List[str] = Field(default_factory=list, description="Main topics")
+    temporal_schema_version: Optional[int] = None
+    occurrences: List[Occurrence] = Field(default_factory=list)
+    context_status: str = "complete"
+    context_warnings: List[str] = Field(default_factory=list)
+    # Occurrence extraction off (#999): spontaneous temporal fields removed
+    # from the model output before validation. Diagnostic only, never stored.
+    temporal_output_discarded: int = 0
+    # Candidate-only handoff. T04 owns durable retained-text storage.
+    source_text: Optional[str] = None
+    text_provenance: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("temporal_schema_version", mode="before")
+    @classmethod
+    def temporal_version(cls, value):
+        if value is not None and (type(value) is not int or value != 1):
+            raise ValueError("unsupported_temporal_schema")
+        return value
+
+    @model_validator(mode="after")
+    def occurrence_version(self):
+        if self.occurrences and self.temporal_schema_version != 1:
+            raise ValueError("missing_temporal_schema")
+        return self
 
 
 # =============================================================================
@@ -197,6 +222,26 @@ class Chunk(BaseModel):
     char_count: int = Field(default=0, description="Character count")
     token_estimate: int = Field(default=0, description="Estimated token count")
 
+    # Source coordinates (LONG temporal contract v1, section 2). The chunker maps
+    # the passage back to zero-based code-point offsets of the exact extracted
+    # text before it strips, joins or prefixes anything; ``text`` stays the
+    # embedded string. ``annotation`` carries the temporal payload fragment
+    # attached at ingestion or read back from the vector payload.
+    source_spans: List[Dict[str, int]] = Field(default_factory=list, description="Source ranges of the passage")
+    annotation: Optional[Dict[str, Any]] = Field(default=None, description="Temporal annotation payload fragment")
+
+
+def chunk_source_header(chunk) -> str:
+    """Shared citation header for the indexed and enriched QA renderings."""
+    if not chunk.filename:
+        return ''
+    header = f'[Source: {chunk.filename}'
+    if chunk.section_title:
+        header += f' > {chunk.section_title}'
+    if chunk.article_number:
+        header += f' > Art. {chunk.article_number}'
+    return header + ']'
+
 
 class ChunkResult(BaseModel):
     """
@@ -211,15 +256,7 @@ class ChunkResult(BaseModel):
     @property
     def context_text(self) -> str:
         """Texte formaté pour inclusion dans un prompt LLM."""
-        parts = []
-        if self.chunk.filename:
-            parts.append(f"[Source: {self.chunk.filename}")
-            if self.chunk.section_title:
-                parts.append(f" > {self.chunk.section_title}")
-            if self.chunk.article_number:
-                parts.append(f" > Art. {self.chunk.article_number}")
-            parts.append("]")
-        header = "".join(parts)
+        header = chunk_source_header(self.chunk)
         return f"{header}\n{self.chunk.text}" if header else self.chunk.text
 
 

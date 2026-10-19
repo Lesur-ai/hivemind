@@ -732,6 +732,10 @@ async def test_server_memory_tools_hold_the_outer_multi_backend_gate(
             effects.append(("s3.delete_prefix", memory_id))
             return {"deleted_count": 1, "error_count": 0}
 
+        async def delete_extracted_text_prefix(self, memory_id: str):
+            effects.append(("s3.delete_extracted_text", memory_id))
+            return {"deleted_count": 0, "error_count": 0}
+
     class Graph:
         async def get_memory(self, memory_id: str):
             return SimpleNamespace(id=memory_id)

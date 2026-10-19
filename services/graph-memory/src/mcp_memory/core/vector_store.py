@@ -28,7 +28,9 @@ from hivemind_inference import (
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
+from .chunk_annotation import ANNOTATION_KEYS, check_fragment
 from .models import Chunk, ChunkResult
+from .temporal import TemporalOutputError
 
 DEFAULT_LEGACY_COLLECTION_PREFIX = "memory_"
 MAX_QDRANT_COLLECTION_NAME_LENGTH = 255
@@ -623,19 +625,7 @@ class VectorStoreService:
                 qmodels.PointStruct(
                     id=str(uuid4()),
                     vector=list(embedding),
-                    payload={
-                        "memory_id": memory_id,
-                        "doc_id": doc_id,
-                        "filename": filename,
-                        "text": chunk.text,
-                        "chunk_index": chunk.index,
-                        "total_chunks": chunk.total_chunks,
-                        "section_title": chunk.section_title,
-                        "article_number": chunk.article_number,
-                        "heading_hierarchy": chunk.heading_hierarchy,
-                        "char_count": chunk.char_count,
-                        "token_estimate": chunk.token_estimate,
-                    },
+                    payload=self._chunk_payload(memory_id, doc_id, filename, chunk),
                 )
             )
 
@@ -657,6 +647,35 @@ class VectorStoreService:
             except Exception:
                 raise EmbeddingCollectionUnavailable("upsert_failed") from None
         return len(points)
+
+    @staticmethod
+    def _chunk_payload(memory_id: str, doc_id: str, filename: str, chunk: Chunk) -> dict:
+        """Payload of one stored passage; ``text`` stays the embedded string.
+
+        A temporal annotation is validated before any write so an invalid or
+        foreign fragment fails the generation instead of reaching the index.
+        """
+        payload = {
+            "memory_id": memory_id,
+            "doc_id": doc_id,
+            "filename": filename,
+            "text": chunk.text,
+            "chunk_index": chunk.index,
+            "total_chunks": chunk.total_chunks,
+            "section_title": chunk.section_title,
+            "article_number": chunk.article_number,
+            "heading_hierarchy": chunk.heading_hierarchy,
+            "char_count": chunk.char_count,
+            "token_estimate": chunk.token_estimate,
+        }
+        annotation = getattr(chunk, "annotation", None)
+        if annotation is not None:
+            try:
+                check_fragment(annotation, memory_id, doc_id, indexed_text=chunk.text)
+            except TemporalOutputError:
+                raise ValueError("invalid chunk annotation") from None
+            payload.update(annotation)
+        return payload
 
     @staticmethod
     def _validate_returned_payload(payload: object, memory_id: str) -> dict:
@@ -802,6 +821,7 @@ class VectorStoreService:
                     heading_hierarchy=payload.get("heading_hierarchy", []),
                     char_count=payload.get("char_count", 0),
                     token_estimate=payload.get("token_estimate", 0),
+                    annotation={key: payload[key] for key in ANNOTATION_KEYS if key in payload} or None,
                 ),
                 score=point.score,
             )
@@ -961,6 +981,18 @@ class VectorStoreService:
             payload = self._validate_returned_payload(
                 point["payload"], memory_id
             )
+            if any(key in payload for key in ANNOTATION_KEYS):
+                try:
+                    check_fragment(
+                        {key: payload[key] for key in ANNOTATION_KEYS if key in payload},
+                        memory_id,
+                        payload["doc_id"],
+                        indexed_text=payload.get("text"),
+                    )
+                except TemporalOutputError:
+                    raise EmbeddingCollectionReindexRequired(
+                        "backup_point_invalid"
+                    ) from None
             validated.append(
                 {
                     "id": point_id,
@@ -1334,19 +1366,7 @@ class VectorStoreService:
                 qmodels.PointStruct(
                     id=str(uuid4()),
                     vector=list(vector),
-                    payload={
-                        "memory_id": memory_id,
-                        "doc_id": doc_id,
-                        "filename": filename,
-                        "text": chunk.text,
-                        "chunk_index": chunk.index,
-                        "total_chunks": chunk.total_chunks,
-                        "section_title": chunk.section_title,
-                        "article_number": chunk.article_number,
-                        "heading_hierarchy": chunk.heading_hierarchy,
-                        "char_count": chunk.char_count,
-                        "token_estimate": chunk.token_estimate,
-                    },
+                    payload=self._chunk_payload(memory_id, doc_id, filename, chunk),
                 )
             )
 

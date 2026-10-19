@@ -266,3 +266,58 @@ def test_no_vendored_boto3_client_hardcodes_signature_without_mode_read():
         in modules_with_literals
     ), "guard lost its subject — storage.py no longer builds signed clients?"
     assert offenders == []
+
+
+@pytest.mark.parametrize('mode,signature', [('dual', 's3'), ('sigv4', 's3v4')])
+@pytest.mark.parametrize('status', [500, 301])
+async def test_legacy_get_is_one_attempt_with_bounded_sockets(monkeypatch, mode, signature, status):
+    """F4: real botocore error/region-redirect witnesses on localhost only."""
+    import threading
+    from hashlib import sha256
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from time import monotonic
+    import boto3
+    from botocore.exceptions import ClientError
+
+    svc = _make_storage(monkeypatch, mode)
+    config = svc._legacy_client.meta.config
+    assert config.signature_version == signature
+    assert config.retries['total_max_attempts'] == 1
+    assert config.connect_timeout == config.read_timeout == 1
+    assert config.proxies == svc._client.meta.config.proxies
+    assert svc._client.meta.config.retries['total_max_attempts'] > 1
+    calls = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            calls.append(self.path)
+            code = 'InternalError' if status == 500 else 'PermanentRedirect'
+            body = f'<Error><Code>{code}</Code></Error>'.encode()
+            self.send_response(status)
+            if status == 301:
+                self.send_header('x-amz-bucket-region', 'fr2')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *args):
+            pass
+    http = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=http.serve_forever, daemon=True)
+    thread.start()
+    original = svc._legacy_client
+    try:
+        # Keep the production configuration, replace only endpoint/credentials.
+        svc._legacy_client = boto3.client('s3', endpoint_url=f'http://127.0.0.1:{http.server_port}',
+            aws_access_key_id='test', aws_secret_access_key='test', region_name='fr1', config=config)
+        svc._guard_legacy_attempts(svc._legacy_client)
+        with pytest.raises(ClientError):
+            await svc.read_legacy_document('memory-one', 'memory-one/documents/x.txt',
+                                           sha256(b'x').hexdigest(), 100, monotonic() + 3)
+        assert len(calls) == 1
+    finally:
+        svc._legacy_client.close()
+        original.close()
+        svc._client.close()
+        svc._client_v4.close()
+        http.shutdown()
+        http.server_close()
+        thread.join(timeout=1)

@@ -1507,6 +1507,54 @@ remain available with `status: ok`, `partial: true` and explicit `warnings` whos
 `archive_destination_changed` or `archive_not_configured`, and `message` is "Archive evidence is unavailable;
 documentary results only." LONG search follows the same contract: these results
 must not be presented as covering all archives.
+
+Each returned passage (`rag_chunks[]`) keeps its earlier keys and adds the
+placement and temporal context stored with it: `indexed_text` (the embedded
+string, unchanged), `chunk_text` (the exact source quote), `source_ref`
+(`memory_id`, `doc_id`, original and retained-text hashes), `source_spans`
+(zero-based code-point ranges of the retained text), `source_context` (quoted
+headings, introductions and selected anchor proofs with their ranges),
+`temporal_annotations` (the complete occurrence records whose fact evidence
+overlaps the passage), `annotation_origin` (`extracted`, `context_only`,
+`legacy_unannotated`, or `null` for an unsupported extension), `context_status` (`complete`,
+`partial`, `unavailable`) and `occurrences_partial`. `text` renders these for
+clients that only read that field: source identity, context status, quoted
+context, the source passage, then each derived temporal annotation with its
+source, event and validity expressions, the selected anchor and its quoted
+proof; technical capture and ingestion times are labelled as not historical,
+and a relative expression is never resolved to a date. Embedding input,
+ranking, `RAG_CHUNK_LIMIT` and the score cutoff are unchanged. The response adds
+`partial` and `warnings` (`{memory_id, reason}`; reasons `legacy_unannotated`,
+`unsupported_temporal_schema`, `context_budget_exceeded`,
+`occurrence_budget_exceeded`). A passage indexed before this extension keeps
+the bounded legacy context reader's contract (`annotation_origin:
+legacy_unannotated`, no temporal annotation); an annotated passage is never
+reported as legacy. `context_only` marks a passage of a document ingested with
+occurrence extraction off, the 1.6.3 default (`TEMPORAL_OCCURRENCE_EXTRACTION`,
+experimental): placement and quoted context as above, never a temporal
+annotation. It means occurrences were not requested, not that none exist; it
+is kept through reindex, export and import whatever the current setting. A malformed or foreign stored extension is reported as an
+unaligned passage with `annotation_origin: null`, `context_status:
+unavailable` and the `unsupported_temporal_schema` warning, never as legacy or
+as known time. Context is bounded
+(2,048 code points per introduction, 8,192 per passage) and occurrences are
+bounded to 32 per passage and 128 records / 65,536 bytes per response, whole
+records only, and the response bounds apply again after document and archive
+results are interleaved. Warnings and `partial` from both namespaces are
+combined.
+
+The passage wording is repeated by design across `text`, `chunk_text`,
+`indexed_text` and `source_spans[].quote`, for verification. A client that
+forwards passages to a model should pass `rag_chunks[].text`, which already
+renders identity, context status and quoted context; serializing every field
+repeats each passage several times.
+
+Each relation listed under an entity (`entities[].relations[]`) carries
+`type`, `description`, the stored ends of the edge as `source` and `target`
+(entity names, `null` when absent; no `"?"` placeholder) and `direction`
+relative to the entity read: `outgoing`, `incoming`, or `self` for an edge from
+an entity to itself. Only neighbours of the same memory are returned. Stored
+relations need no re-extraction to report their ends.
 Reads do not create either destination. `readOnlyHint=True`, `check_access` only — no
 `manage`, no audit, no write. Strictly downstream / non-authoritative
 (ADR-0010).

@@ -430,6 +430,11 @@ async def memory_delete(
         # 2. Supprimer tous les fichiers S3 de la mémoire
         s3_result = {"deleted_count": 0, "error_count": 0}
         try:
+            # Retained extracted texts (T04b) first: exact-shape keys only, so
+            # an unexpected key refuses before any document is deleted.
+            text_result = await get_storage().delete_extracted_text_prefix(memory_id)
+            if text_result.get("error_count", 0):
+                raise RuntimeError("Graph retained text cleanup is incomplete")
             s3_result = await get_storage().delete_prefix(f"{memory_id}/documents/")
             if s3_result.get("error_count", 0):
                 raise RuntimeError("Graph document cleanup is incomplete")
@@ -1294,6 +1299,7 @@ async def question_answer(
         # 3. === RAG across active documents, with additive graph context ===
         rag_context_parts = []
         rag_chunks_used = 0
+        legacy_reader = None
         rag_mode = "graph+rag" if entities else "rag-only"
         from .core.vector_store import (
             EmbeddingCollectionReindexRequired,
@@ -1339,15 +1345,30 @@ async def question_answer(
             missing = {cr.chunk.doc_id for cr in chunk_results if cr.chunk.doc_id and cr.chunk.doc_id not in meta}
             if missing:
                 meta.update(await get_graph().get_documents_meta(memory_id, list(missing)))
+            from .core.temporal import LegacyContextReader, OccurrenceBudget
+            from .core.chunk_annotation import read_chunk
+            from .core.chunk_render import render_text
+            legacy_reader = LegacyContextReader(memory_id, get_graph(), get_storage)
+            occurrence_budget = OccurrenceBudget()
+            from .core.models import chunk_source_header
             for cr in chunk_results:
                 source = meta.get(cr.chunk.doc_id, {})
+                if getattr(cr.chunk, "annotation", None):
+                    # An annotated passage is never a legacy one: it carries its
+                    # own placement, context and records (T05).
+                    fields, _reasons, _incomplete = read_chunk(cr.chunk, memory_id, occurrence_budget)
+                    passage_text = render_text({**fields, "captured_at": source.get("captured_at"),
+                                                "ingested_at": source.get("ingested_at")})
+                else:
+                    passage_text = (await legacy_reader.enrich(cr.chunk, source))['text']
                 evidence = [f"Document id: {cr.chunk.doc_id}"]
                 for label, key in (("Source path", "source_path"), ("SHA256", "sha256"),
                                    ("Capture id", "preimage_id"), ("Captured at", "captured_at"),
                                    ("Ingested at", "ingested_at")):
                     if source.get(key):
                         evidence.append(f"{label}: {source[key]}")
-                rag_context_parts.append("[" + "; ".join(evidence) + "]\n" + cr.context_text)
+                rag_context_parts.append("[" + "; ".join(evidence) + "]\n"
+                                         + chunk_source_header(cr.chunk) + "\n" + passage_text)
                 rag_chunks_used += 1
                 # Ajouter les docs trouvés par RAG au source_documents
                 if cr.chunk.doc_id and cr.chunk.doc_id not in source_documents:
@@ -1454,11 +1475,19 @@ INSTRUCTIONS:
             "rag_chunks_used": rag_chunks_used,
             "source_documents": [{**doc, **_retrieval_source_fields(meta.get(doc_id, {}))}
                                  for doc_id, doc in source_documents.items()],
-            "context_used": graph_context
+            "context_used": graph_context,
+            **(legacy_reader.summary() if legacy_reader is not None else {}),
         }
         
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def _merged_passage_status(summary: dict, annotated_incomplete: bool, annotated_warnings: list) -> dict:
+    """One ``partial``/``warnings`` for annotated and legacy passages of a response."""
+    warnings = list(summary["warnings"])
+    warnings += [w for w in annotated_warnings if w not in warnings]
+    return {**summary, "partial": bool(summary["partial"] or annotated_incomplete), "warnings": warnings}
 
 
 @mcp.tool(description="Query structured memory data without LLM generation.")
@@ -1538,7 +1567,10 @@ async def memory_query(
                 "relations": [
                     {
                         "type": rel.get("type", "RELATED_TO"),
-                        "target": rel.get("target", rel.get("to", "?")),
+                        # Extrémités réelles : None si absentes, jamais de valeur factice "?".
+                        "source": rel.get("source"),
+                        "target": rel.get("target"),
+                        "direction": rel.get("direction"),
                         "description": rel.get("description", ""),
                     }
                     for rel in ctx.relations
@@ -1558,6 +1590,13 @@ async def memory_query(
         rag_mode = "graph+rag" if entities else "rag-only"
         rag_chunks_filtered = 0
         retained = []  # défini hors du try : utilisé plus bas même si le RAG échoue
+        from .core.chunk_annotation import read_chunk
+        from .core.chunk_render import render_text
+        from .core.temporal import OccurrenceBudget
+        occurrence_budget = OccurrenceBudget()
+        passage_warnings: list = []
+        passages_incomplete = False
+        annotated_rows: list = []  # parallel to rag_chunks: stored temporal annotation present
 
         from .core.vector_store import (
             EmbeddingCollectionReindexRequired,
@@ -1590,6 +1629,21 @@ async def memory_query(
             rag_chunks_filtered = total_before - len(retained)
             
             for cr in retained:
+                # Temporal fields of an annotated passage (T05): placement, context
+                # and the occurrence records that overlap it, from the stored
+                # annotation only. No model call, no re-extraction. A passage
+                # without the extension is legacy: the bounded compatibility
+                # reader below handles it.
+                annotated = bool(getattr(cr.chunk, "annotation", None))
+                annotated_rows.append(annotated)
+                fields = {}
+                if annotated:
+                    fields, reasons, incomplete = read_chunk(cr.chunk, memory_id, occurrence_budget)
+                    passages_incomplete = passages_incomplete or incomplete
+                    for reason in sorted(reasons):
+                        warning = {"memory_id": memory_id, "doc_id": cr.chunk.doc_id, "reason": reason}
+                        if warning not in passage_warnings:
+                            passage_warnings.append(warning)
                 rag_chunks.append({
                     "text": cr.chunk.text,
                     "score": round(cr.score, 4),
@@ -1598,6 +1652,10 @@ async def memory_query(
                     "section_title": cr.chunk.section_title or "",
                     "article_number": cr.chunk.article_number or "",
                     "chunk_index": cr.chunk.index if hasattr(cr.chunk, 'index') else 0,
+                    "memory_id": memory_id,
+                    "total_chunks": getattr(cr.chunk, "total_chunks", 0),
+                    "heading_hierarchy": list(getattr(cr.chunk, "heading_hierarchy", None) or []),
+                    **fields,
                 })
                 # Ajouter les docs trouvés par RAG
                 if cr.chunk.doc_id and cr.chunk.doc_id not in source_documents:
@@ -1634,13 +1692,24 @@ async def memory_query(
         enriched_sources = [{**base, **_retrieval_source_fields(meta.get(doc_id, {}))}
                             for doc_id, base in source_documents.items()]
 
+        # Same bounded compatibility contract as QA; no inference or index writes.
+        from .core.temporal import LegacyContextReader
+        legacy_reader = LegacyContextReader(memory_id, get_graph(), get_storage)
+        for ch, cr, annotated in zip(rag_chunks, retained, annotated_rows):
+            if not annotated:
+                ch.update(await legacy_reader.enrich(cr.chunk, meta.get(cr.chunk.doc_id, {})))
+
         # Enrichir rag_chunks (source_path + repo_path suffisent pour ouvrir le fichier Git)
-        for ch in rag_chunks:
+        for ch, annotated in zip(rag_chunks, annotated_rows):
             m = meta.get(ch.get("doc_id"), {})
             ch["source_path"] = m.get("source_path")
             ch["repo_path"] = m.get("repo_path")
             for key in ("sha256", "provenance", "captured_at", "preimage_id", "bank_path", "ingested_at"):
                 ch[key] = m.get(key)
+            if annotated:
+                # Directly usable rendering for clients that only read ``text``;
+                # ``indexed_text`` keeps the embedded string unchanged.
+                ch["text"] = render_text(ch)
 
         # 4. Retourner les données structurées (PAS d'appel LLM)
         return {
@@ -1650,6 +1719,7 @@ async def memory_query(
             "retrieval_mode": rag_mode,
             "entities": enriched_entities,
             "rag_chunks": rag_chunks,
+            **_merged_passage_status(legacy_reader.summary(), passages_incomplete, passage_warnings),
             "source_documents": enriched_sources,
             "stats": {
                 "entities_found": len(enriched_entities),

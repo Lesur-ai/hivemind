@@ -204,6 +204,13 @@ def _seed(storage: RecordingStorage, *, facts: str = FACTS) -> list[dict]:
         ("blank-create-reason", _output(_create(reason="\n")), FACTS),
         ("blank-invisible-content", _output(_create(content="\u200b")), FACTS),
         ("blank-control-reason", _output(_create(reason="\x00")), FACTS),
+        # #1052 / hivemind#124: an H1 alone cannot carry the claimed notes.
+        ("h1-only-create", _output(_create(content="# New\n")), FACTS),
+        (
+            "h1-only-rewrite",
+            _output({**_create("facts.md", content="# Facts\n"), "action": "rewrite"}),
+            FACTS,
+        ),
         (
             "ambiguous-heading",
             _output(_edit()),
@@ -255,6 +262,154 @@ async def test_invalid_normal_batch_changes_no_durable_object(
     assert result["operation_failures"], name
     assert storage.snapshot() == before, name
     assert NOTE in storage.objects, name
+
+
+@pytest.mark.parametrize(
+    ("filename", "action", "content", "refused"),
+    [
+        ("new.md", "create", "# New\n", True),
+        ("new.md", "create", "# New\n\n \t\n", True),
+        ("new.md", "create", "# New\n\n## Facts\n\n### Details\n", True),
+        ("new.md", "create", "# New\n\n```\n```\n", True),
+        ("new.md", "create", "# New\n\n```\n​\n```\n", True),
+        ("facts.md", "rewrite", "# Facts\n", True),
+        ("progress.md", "rewrite", "# Progress\n\n## Status\n", True),
+        ("new.md", "create", "# New\n\n```\n# not a heading\n```\n", False),
+        ("new.md", "create", "# New\r\n\r\n- note fact\r\n", False),
+        ("new.md", "create", "# New\n\n## Facts\n\n- note fact\n", False),
+        ("new.md", "create", "note fact without a title\n", False),
+        ("facts.md", "rewrite", "# Facts\n\nnote fact\n", False),
+    ],
+    ids=[
+        "create-h1-only",
+        "create-h1-and-blank-lines",
+        "create-headings-only",
+        "create-empty-fence",
+        "create-invisible-fenced-line",
+        "rewrite-existing-to-h1",
+        "rewrite-missing-canonical-to-headings",
+        "create-fenced-hash-line-is-body",
+        "create-crlf-body",
+        "create-body-under-child-heading",
+        "create-body-without-h1",
+        "rewrite-existing-with-body",
+    ],
+)
+async def test_create_or_rewrite_claiming_notes_needs_a_body_under_its_h1(
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    action: str,
+    content: str,
+    refused: bool,
+) -> None:
+    """#1052 / hivemind#124: notes are consumed only by a file that holds text.
+
+    Headings and bare fence delimiters are structure; a non-blank line inside a
+    fence is content.  The refusal names its own closed reason and happens
+    before any storage call, so the claimed note survives.
+    """
+
+    storage = RecordingStorage()
+    bank_files = _seed(storage)
+    before = storage.snapshot()
+    monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
+
+    result = await _service()._write_results(
+        space_id=SPACE,
+        llm_output=_output({**_create(filename, content=content), "action": action}),
+        bank_files=bank_files,
+        notes_keys=[NOTE],
+        notes_count=1,
+        usage={},
+        skip_meta=False,
+    )
+
+    if refused:
+        assert result["status"] == "error"
+        assert result["operation_failures"] == [
+            {"reason": "normal_create_without_body", "file_index": 0, "filename": filename}
+        ]
+        assert result["notes_deleted"] == 0
+        assert storage.snapshot() == before
+        assert NOTE in storage.objects
+    else:
+        assert result["status"] == "ok", result.get("operation_failures")
+        assert storage.objects[f"{SPACE}/bank/{filename}"] == content
+        assert result["notes_deleted"] == 1
+        assert NOTE not in storage.objects
+
+
+@pytest.mark.parametrize(
+    ("filename", "action", "content", "merged", "refused"),
+    [
+        (
+            "new.md", "create",
+            "# New\n\n## Facts\n\nnote one\n\n## Facts\n\nnote two\n",
+            "### Merged", True,
+        ),
+        (
+            "new.md", "create",
+            "# New\n\n## Facts\n\nnote one\n\n## Facts\n\nnote two\n",
+            "```\n```", True,
+        ),
+        (
+            "facts.md", "rewrite",
+            "# Facts\n\n## Status\n\nnote one\n\n## Status\n\nnote two\n",
+            "### Merged", True,
+        ),
+        (
+            "new.md", "create",
+            "# New\n\n## Facts\n\nnote one\n\n## Facts\n\nnote two\n",
+            "note one and note two", False,
+        ),
+    ],
+    ids=["create-merged-to-heading", "create-merged-to-empty-fence", "rewrite-merged-to-heading", "create-merged-with-text"],
+)
+async def test_duplicate_merge_cannot_erase_the_body_a_create_or_rewrite_claims(
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    action: str,
+    content: str,
+    merged: str,
+    refused: bool,
+) -> None:
+    """#1052 R1-F1: the body requirement also holds for the deduplicated bytes.
+
+    The planned content passes the guard; the real merge path then replaces the
+    duplicate sections' text with what the merge completion returns.
+    """
+
+    storage = RecordingStorage()
+    bank_files = _seed(storage)
+    before = storage.snapshot()
+    monkeypatch.setattr(consolidator_module, "get_storage", lambda: storage)
+    completion = Completion(merged)
+
+    result = await _service(completion)._write_results(
+        space_id=SPACE,
+        llm_output=_output({**_create(filename, content=content), "action": action}),
+        bank_files=bank_files,
+        notes_keys=[NOTE],
+        notes_count=1,
+        usage={},
+        skip_meta=False,
+    )
+
+    assert completion.calls == 1
+    if refused:
+        assert result["status"] == "error"
+        assert result["operation_failures"] == [
+            {"reason": "deduplication_contract_violation", "file_index": 0, "filename": filename}
+        ]
+        assert result["notes_deleted"] == 0
+        assert storage.snapshot() == before
+        assert NOTE in storage.objects
+    else:
+        assert result["status"] == "ok", result.get("operation_failures")
+        assert merged in storage.objects[f"{SPACE}/bank/{filename}"]
+        assert "note one\n" not in storage.objects[f"{SPACE}/bank/{filename}"]
+        assert result["notes_deleted"] == 1
+        assert NOTE not in storage.objects
 
 
 async def test_blank_normal_synthesis_with_a_valid_edit_changes_no_durable_object(

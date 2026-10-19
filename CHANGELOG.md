@@ -18,6 +18,88 @@ linked guides when installing or upgrading.
 
 ---
 
+## [1.6.3] — 2026-10-19
+
+Hivemind 1.6.3 is a maintenance release for LONG retrieval context and graph
+relation endpoints, plus a fix for silent MID note loss (#124). Asking the
+extraction model for temporal occurrences ships off by default and
+experimental; no answer-quality gain is claimed for it.
+
+**Release identity.** Hivemind now reports runtime version `1.6.3`.
+
+**Upgrade.** Rebuild the Hivemind and embedded Graph Memory images together
+from the same source. Nothing is migrated, reindexed or reingested: passages
+indexed before 1.6.3 get bounded context from their retained originals at read
+time, and stored relations report their real endpoints. Keep a pre-upgrade
+copy: a memory holding any document ingested by 1.6.3 is backed up in format
+`1.1`, which 1.6.2 refuses, so rolling back means restoring that copy into a
+separate 1.6.2 stack. `long_query` clients should forward `rag_chunks[].text`
+to a model rather than the whole response. See the
+[upgrade checklist](docs/DEPLOYMENT.md#upgrade-to-163).
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary; the Portal extension seam is described in
+[`docs/EXTENSION_POINTS.md`](docs/EXTENSION_POINTS.md).
+See the [migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+### Added
+
+- LONG passages carry their source context. For new ingestions, every passage
+  returned by `long_query` keeps its exact source range, the headings and
+  introductions of the sections it belongs to (bounded, with an explicit
+  `partial` status), and renders them in `rag_chunks[].text`. New fields:
+  `source_ref`, `source_spans`, `source_context`, `annotation_origin`,
+  `context_status`, `indexed_text`, `chunk_text`, plus response `partial` and
+  `warnings`. Embedding input, ranking, `RAG_CHUNK_LIMIT` and the score cutoff
+  are unchanged.
+- LONG keeps the exact extracted text of each ingested document
+  (`<memory>/extracted_text/`), with its hash, for the life of that document
+  generation. Full archives carry it, restore verifies it, and backups of a
+  memory that holds it use format `1.1`.
+- Experimental, off by default: `TEMPORAL_OCCURRENCE_EXTRACTION=true` also asks
+  the extraction model for source-anchored temporal occurrences and stores
+  them per document generation. Off, the extraction request is identical to
+  1.6.2, temporal fields returned unasked are discarded and counted, and
+  passages report `annotation_origin: context_only`. On, a whole document can
+  be rejected and ingestion costs more. Reindex, export and import keep each
+  document's origin whatever the current setting.
+
+### Fixed
+
+- Graph relations returned by `long_query` report the stored ends of each edge
+  as `source` and `target` (or `null`), with `direction` (`outgoing`,
+  `incoming`, `self`) relative to the entity read, instead of a `"?"` target.
+  Existing relations need no re-extraction.
+- Passages indexed before 1.6.3 receive bounded structural context (headings,
+  introductions) from their verified retained originals at read time, labelled
+  `annotation_origin: legacy_unannotated`, without any model call, reindex or
+  reingestion. Missing or unverifiable originals are reported as `unavailable`,
+  `ambiguous` or `partial`.
+- MID consolidation no longer deletes notes into files that hold only their
+  title (#124). In 1.6.2, the first consolidation of a custom-rules space,
+  whose bank starts empty, could create files reduced to their H1, delete the
+  notes they claimed and report success. A `create` or `rewrite` that claims
+  notes must now carry text under its H1; a title or headings alone are
+  refused before any write (`normal_create_without_body`). The model gets its
+  single corrective completion, and a second refusal keeps every note.
+  **Upgrade (1.6.3):** nothing to migrate. Notes already lost in an affected
+  space cannot be recovered; check custom-rules spaces consolidated on 1.6.2
+  for H1-only bank files. On earlier versions, pre-create the rules' files
+  with `##` sections through `mid_write` before the first consolidation.
+
+### Changed
+
+- Run routine PR/main CI on X64. Complete native ARM64 validation moves to
+  final release assembly, including the exact public tree before publication.
+
+### Security
+
+- Embedded Graph Memory: aiohttp 3.14.3 -> 3.14.4 (CVE-2026-111063,
+  CVE-2026-111064, GHSA-2g87-pp6c-29x5), with yarl 1.24.2 -> 1.25.1 as
+  aiohttp 3.14.4 requires. Rebuild the Graph Memory image with Hivemind.
+
+---
+
 ## [1.6.2] — 2026-10-12
 
 Hivemind 1.6.2 is a maintenance release for standard-space MID bootstrap,

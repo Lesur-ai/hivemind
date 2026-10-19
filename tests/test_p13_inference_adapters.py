@@ -2752,12 +2752,21 @@ class TestGeminiUnindexedEmbeddings:
         assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
 
     async def test_batch_deadline_is_shared_and_stops_later_inputs(self):
+        # #1024: the first (answered) request must fit inside the shared budget
+        # on a slow host under branch coverage, where it exceeded a 200 ms
+        # budget on the internal pool. A 1 s budget keeps the oracle intact:
+        # the stall on "b" is stopped by the total deadline, "c" is never
+        # sent, and the elapsed time is bounded. The lower bound proves the
+        # stall really consumed the budget (no early failure); the upper
+        # bound proves the batch does not hang.
+        budget = 1.0
         async with InferenceEmulator([{"body": gemini_embedding_payload()}, {"action": "stall"}]) as emulator:
             started = time.monotonic()
             with pytest.raises(InferenceError) as exc:
-                await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=0.2))
+                await embed_with(embedding_profile(emulator.v1_url, provider="gemini"), EmbeddingRequest(inputs=("a", "b", "c"), timeout_seconds=budget))
+            elapsed = time.monotonic() - started
         assert exc.value.category == "timeout"
-        assert time.monotonic() - started < 1
+        assert 0.9 * budget <= elapsed < 5, elapsed  # consumed the budget; bounded, not hanging
         assert [r["json"]["input"] for r in emulator.requests] == [["a"], ["b"]]
 
     async def test_batch_passes_only_remaining_budget_to_later_inputs(self, monkeypatch):

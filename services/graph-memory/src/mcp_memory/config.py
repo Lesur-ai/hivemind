@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     llmaas_temperature: float = 0.0
     extraction_max_text_length: int = 950000  # Max chars du texte envoyé au LLM (défaut ~950K)
     extraction_chunk_size: int = 25000  # Max chars par chunk d'extraction graph (~6K tokens, laisse marge pour prompt+réponse)
+    # Expérimental en 1.6.3 (#999) : demander au modèle d'extraction les
+    # occurrences temporelles ancrées (contrat LONG temporel v1). Désactivé par
+    # défaut : prompt identique à la 1.6.2 ; le texte extrait et le contexte
+    # source des chunks restent conservés (origine `context_only`).
+    temporal_occurrence_extraction: bool = False
 
     # =========================================================================
     # Embedding (compatibilité `.env` legacy uniquement — la taille de vecteur

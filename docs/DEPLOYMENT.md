@@ -21,6 +21,62 @@ should apply. The relevant decision boundaries are summarized in the
   mandatory, derived-only, non-authoritative component (ADR-0019 / ADR-0010).
 
 
+## Upgrade to 1.6.3
+
+1.6.3 changes what LONG stores for new ingestions and what `long_query`
+returns; it needs no migration, reindex or reingestion.
+
+1. **Keep a pre-upgrade copy.** Before the first 1.6.3 start, keep a copy you
+   can restore in isolation: Hivemind backups of each space (`backup_create`),
+   the native LONG backups of each memory taken with 1.6.2, and, for a
+   complete copy, the stopped `neo4j_data` and `qdrant_data` volumes together
+   with the S3 state. A memory that receives any document ingested by 1.6.3
+   (or any occurrence record) is backed up in format `1.1`, which 1.6.2
+   refuses; there is no downgrade path for that data.
+2. **Rebuild both images together** (Hivemind and the embedded Graph Memory)
+   from the same 1.6.3 source, then recreate the stack. Do not mix a 1.6.3
+   image with a 1.6.2 one.
+3. **Keep the default** `TEMPORAL_OCCURRENCE_EXTRACTION=false`
+   ([LONG temporal occurrences](#long-temporal-occurrences-experimental)).
+   With it, the extraction request is the 1.6.2 one: no additional extraction
+   output is requested and no temporal field can reject a document. Each new
+   document additionally keeps its exact extracted text in the LONG storage
+   (`<memory>/extracted_text/`). `true` is experimental: it can reject whole
+   documents and costs more.
+4. **Existing data stays readable as is.** Passages indexed before 1.6.3 keep
+   their embeddings and receive bounded structural context from their retained
+   originals at read time (`annotation_origin: legacy_unannotated`); see
+   [reading existing LONG chunks](MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md#reading-existing-long-chunks-without-reingestion).
+   Stored relations return their real endpoints without re-extraction.
+   Reingesting a document is optional and is a normal, separately planned
+   `long_ingest` operation.
+5. **Check `long_query` consumers.** Each passage now carries its wording in
+   several fields (`text`, `chunk_text`, `indexed_text`, `source_spans[].quote`)
+   plus `source_context`. A client that forwards passages to a model should
+   pass `rag_chunks[].text`, which already renders the source context;
+   serializing the whole response repeats each passage and can roughly double
+   the prompt size. Relations replace the `"?"` target with `source`, `target`
+   (or `null`) and `direction`.
+6. **Verify after rollout:** health, an authenticated `long_status`, one
+   `long_query` returning `annotation_origin` on its passages, and, for spaces
+   with custom rules, one MID consolidation.
+
+**Rollback.** Stop 1.6.3, bring up 1.6.2 on a separate, empty stack (new
+volumes, separate bucket or prefix) and restore the pre-upgrade copy there.
+Never point 1.6.2 at the volumes or S3 state written by 1.6.3: 1.6.2 refuses
+`1.1` backups, and its own export of upgraded LONG data silently omits the
+1.6.3 records, so it is not a preservation copy. Changes made after the
+upgrade are not carried back.
+
+**Known limits.** As in 1.6.2, an extraction response that fails validation
+still fails its whole document (`invalid_output`). An ordinary LONG ingestion
+then rolls back its candidate, including the uploaded original, and the queue
+keeps no copy: keep the original and submit it again. Only a retained MID
+archive capture keeps its source for `mid_archive_retry`. MID consolidation now refuses a note-claiming `create`
+or `rewrite` without text under its H1 (#124); notes already lost by a 1.6.2
+consolidation of a custom-rules space cannot be restored, so check such spaces
+for title-only bank files.
+
 ## MCP SDK 2 upgrade in 1.6.1
 
 Rebuild and roll out the core and embedded Graph images from the same source:
@@ -519,6 +575,22 @@ no opt-in `long` profile and no disabled-state release path.
   A slow, stale, or restarting embedded runtime never affects bank
   correctness.
 
+### LONG temporal occurrences (experimental)
+
+`TEMPORAL_OCCURRENCE_EXTRACTION` (default `false`) controls whether LONG
+ingestion also asks the extraction model for source-anchored temporal
+occurrences. Off, the extraction request is identical to 1.6.2 and temporal
+fields a model returns unasked are discarded and counted
+(`temporal_output_discarded` in the service log), never validated or stored.
+Either way each new document keeps its exact extracted text, and every passage
+keeps its source offsets, headings and introductions; off, passages report
+`annotation_origin: context_only` and carry no temporal annotation. On is
+experimental in 1.6.3: the additional output can reject a whole document and
+costs more. The setting is read at ingestion only. Already ingested documents
+keep their own origin through reindex, export and import; nothing is migrated
+or re-extracted when it changes. Set it in the shared root `.env` and recreate
+the embedded Graph Memory service.
+
 ### LONG extraction call sizing
 
 `EXTRACTION_CHUNK_SIZE` is the existing target for the source text sent to each
@@ -571,9 +643,11 @@ failures retain capped backoff.
 This setting applies to document extraction after the catalogue is frozen;
 initial automatic-ontology construction has its own context-budgeted batches.
 Changing the target neither recrafts the frozen catalogue nor changes the
-embedding identity. Failed extraction still fails the whole document, with its
-retained source available for retry; successful chunks of a failed document do
-not currently have a durable per-chunk resume checkpoint. Keep original sources
+embedding identity. Failed extraction still fails the whole document. An
+ordinary LONG ingestion rolls back its candidate, including the uploaded
+original, so a retry resubmits the caller's copy; a retained MID archive capture
+keeps its source for `mid_archive_retry`. Successful chunks of a failed document
+do not currently have a durable per-chunk resume checkpoint. Keep original sources
 and native backups, qualify all documents through sourced LONG retrieval, and
 check the persisted embedding model before declaring an archive complete.
 

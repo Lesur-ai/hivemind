@@ -756,8 +756,17 @@ async def test_gm_server_ingest_job_status_and_cancel_memory_scoping():
 # 6. Remplacement transactionnel (Safe Replace / Candidate Staging / Atomic Promotion)
 # =============================================================================
 
+@pytest.fixture
+def occurrence_extraction_on(monkeypatch):
+    """These pipeline doubles were written for the T03 occurrence path (#999)."""
+    from mcp_memory.config import get_settings
+    monkeypatch.setattr(get_settings(), "temporal_occurrence_extraction", True)
+
+
 @pytest.mark.asyncio
-async def test_run_ingest_pipeline_safe_replace_candidate_staging_and_atomic_promotion():
+@pytest.mark.usefixtures("occurrence_extraction_on")
+@pytest.mark.parametrize("source_shape", ["short", "converted_multiline"])
+async def test_run_ingest_pipeline_safe_replace_candidate_staging_and_atomic_promotion(source_shape):
     """Vérifie que le candidat est créé sans source_path actif (staging), promu atomiquement, puis l'ancien doc purgé."""
     from mcp_memory.core.ingest_pipeline import run_ingest_pipeline
     from mcp_memory.core.models import ExtractedEntity, ExtractedRelation, ExtractionResult
@@ -772,6 +781,7 @@ async def test_run_ingest_pipeline_safe_replace_candidate_staging_and_atomic_pro
 
     async def mock_add_doc(*args, **kwargs):
         execution_order.append(("add_document", kwargs.get("doc_id"), kwargs.get("source_path")))
+        execution_order.append(("text_record", kwargs.get("extracted_text")))
         return True
 
     async def mock_promote(*args, **kwargs):
@@ -788,14 +798,35 @@ async def test_run_ingest_pipeline_safe_replace_candidate_staging_and_atomic_pro
     mock_storage = MagicMock()
     mock_storage.upload_document = AsyncMock(return_value={"uri": "s3://bucket/new-doc.md", "size_bytes": 100})
 
-    mock_extractor = MagicMock()
-    mock_extraction = ExtractionResult(
-        entities=[ExtractedEntity(name="E1", type="Concept", description="D1")],
-        relations=[ExtractedRelation(from_entity="E1", to_entity="E1", type="REL", description="R1")],
-        summary="Sum",
-        key_topics=["T1"],
-    )
-    mock_extractor.extract_with_ontology_chunked = AsyncMock(return_value=mock_extraction)
+    async def mock_put_text(memory_id, doc_id, text):
+        execution_order.append(("put_extracted_text", doc_id, text))
+        return f"{memory_id}/extracted_text/{doc_id}.txt"
+    mock_storage.put_extracted_text = AsyncMock(side_effect=mock_put_text)
+
+    # Reuse the safe-replace harness with the real extractor/parser. The
+    # controlled provider proves the candidate handoff, not semantic quality.
+    import hashlib
+    import json
+    from types import SimpleNamespace
+    from mcp_memory.core.extractor import ExtractorService
+    unknown = {"status": "unknown", "expression": None, "expression_evidence": [],
+               "precision": "unknown", "normalized": None, "anchor": None,
+               "anchor_candidates": []}
+    fact = {"from_entity": "E1", "to_entity": "E1", "type": "RELATED_TO"}
+    body = {"entities": [{"name": "E1", "type": "Other"}], "relations": [fact],
+            "temporal_schema_version": 1, "occurrences": [{
+                "fact": fact, "fact_evidence": ["p0"], "scope_id": "s0",
+                "source_time": unknown, "event_time": unknown, "valid_time": None}]}
+    mock_extractor = object.__new__(ExtractorService)
+    source_text = "some text" if source_shape == "short" else "Converted paragraph, one line.\n" * 1400
+    async def completion(messages):
+        packet = json.loads(messages[1]["content"].split("TEMPORAL_SOURCE_JSON\n", 1)[1])
+        passage = next(p for p in packet["passages"] if p["in_slice"])
+        row = body["occurrences"][0]
+        row["fact_evidence"] = [passage["passage_id"]]
+        row["scope_id"] = passage["scope_id"]
+        return SimpleNamespace(text=json.dumps(body))
+    mock_extractor._complete = AsyncMock(side_effect=completion)
 
     mock_chunker = MagicMock()
     mock_chunker.chunk_document = MagicMock(return_value=[])
@@ -812,14 +843,14 @@ async def test_run_ingest_pipeline_safe_replace_candidate_staging_and_atomic_pro
          patch("mcp_memory.core.ingest_pipeline._extractor", return_value=mock_extractor), \
          patch("mcp_memory.core.ingest_pipeline._chunker", return_value=mock_chunker), \
          patch("mcp_memory.core.ingest_pipeline._vector_store", return_value=mock_vector), \
-         patch("mcp_memory.server._extract_text", return_value="some text"), \
+         patch("mcp_memory.server._extract_text", return_value=source_text), \
          patch("mcp_memory.core.ingest_pipeline.delete_document_everywhere", side_effect=mock_delete_everywhere):
 
         res = await run_ingest_pipeline(
             memory_id="test-mem",
             content=b"new content",
             filename="doc.md",
-            doc_hash="sha-new",
+            doc_hash=hashlib.sha256(b"new content").hexdigest(),
             source_path="docs/doc.md",
             replace_doc_id="old-doc-456",
         )
@@ -827,6 +858,34 @@ async def test_run_ingest_pipeline_safe_replace_candidate_staging_and_atomic_pro
         assert res["status"] == "ok"
         assert res["document_id"] is not None
         assert res["purge_status"] == "purged"
+        handoff = mock_graph.add_entities_and_relations.call_args.kwargs["extraction"]
+        assert handoff.temporal_schema_version == 1
+        assert len(handoff.occurrences) == (1 if source_shape == "short" else 2)
+        record = handoff.occurrences[0]
+        assert record.source_ref.doc_id == res["document_id"]
+        assert record.source_ref.memory_id == "test-mem"
+        assert record.source_ref.sha256 == hashlib.sha256(b"new content").hexdigest()
+        assert record.source_ref.text_sha256 == hashlib.sha256(source_text.encode()).hexdigest()
+        assert record.occurrence_id.startswith("occ1:")
+        assert handoff.source_text == source_text
+        assert handoff.text_provenance["converter_id"].endswith(":md")
+        assert handoff.text_provenance["encoding"] == "utf-8"
+        assert mock_extractor._complete.await_count == (1 if source_shape == "short" else 2)
+        if source_shape == "converted_multiline":
+            assert handoff.context_status == "partial"
+            assert handoff.context_warnings == ["context_budget_exceeded"]
+
+        # T04b: the exact text is retained under the candidate's derived key
+        # before any graph write, and the Document carries its record.
+        put = ("put_extracted_text", res["document_id"], source_text)
+        add_index = next(i for i, e in enumerate(execution_order) if e[0] == "add_document")
+        assert execution_order.index(put) < add_index
+        assert execution_order[add_index + 1] == ("text_record", {
+            "sha256": hashlib.sha256(source_text.encode()).hexdigest(), "encoding": "utf-8",
+            "converter_id": handoff.text_provenance["converter_id"],
+            "converter_version": handoff.text_provenance["converter_version"],
+            "storage_ref": f"test-mem/extracted_text/{res['document_id']}.txt",
+            "occurrences": "extracted"})  # occurrences were requested for this generation (#999)
 
         # 1. Le candidat DOIT être créé avec source_path=None (staging, pas de conflit d'unicité)
         add_entry = next(e for e in execution_order if e[0] == "add_document")
@@ -844,6 +903,7 @@ async def test_run_ingest_pipeline_safe_replace_candidate_staging_and_atomic_pro
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("occurrence_extraction_on")
 async def test_run_ingest_pipeline_safe_replace_purge_warning_is_observable():
     """Vérifie que les erreurs de purge post-commutation sont capturées et renvoyées (cleanup_pending)."""
     from mcp_memory.core.ingest_pipeline import run_ingest_pipeline
@@ -989,6 +1049,7 @@ async def test_run_ingest_pipeline_safe_replace_fault_injections_preserve_old_do
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("occurrence_extraction_on")
 async def test_run_ingest_pipeline_post_promotion_error_preserves_new_active_document():
     """Vérifie qu'une erreur post-promotion (ex: erreur de purge) ne détruit JAMAIS le nouveau document actif."""
     from mcp_memory.core.ingest_pipeline import run_ingest_pipeline
@@ -1260,6 +1321,7 @@ async def test_memory_query_filters_by_active_doc_ids():
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("occurrence_extraction_on")
 async def test_run_ingest_pipeline_with_ontology_override():
     """Vérifie que run_ingest_pipeline utilise l'ontologie fournie en override lors de l'extraction."""
     from mcp_memory.core.ingest_pipeline import run_ingest_pipeline

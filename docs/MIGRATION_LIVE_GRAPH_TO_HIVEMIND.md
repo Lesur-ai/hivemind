@@ -496,3 +496,69 @@ non-authoritative.
 - ADR-0014 — shared-space restore and forward-forcing recovery.
 - ADR-0019 — mandatory embedded long runtime.
 - ADR-0022 — manager delegation and per-space token grants.
+
+## Reading existing LONG chunks without reingestion
+
+Unannotated indexed passages can be enriched at read time from their retained
+originals. This is read-only compatibility: `annotation_origin` remains
+`legacy_unannotated`, `temporal_annotations` stays empty, and quoted source dates
+are context, never retroactive extraction annotations or normalized event dates.
+`indexed_text` preserves the stored embedding input. The usable `text` labels
+legacy provenance and context status; `chunk_text` and `source_spans` contain
+exact original wording only when placement is uniquely verified.
+
+The reader checks the authorized memory/document, successful active generation,
+storage bucket/key and original SHA-256, then rechecks generation metadata after
+reading. It reproduces valid UTF-8 TXT/Markdown decoding, both historical generated
+prefix rules and Unicode whitespace joining, retaining original code-point
+coordinates. Literal and stripped-prefix interpretations both participate in
+uniqueness checks. Chunk index, ingestion/capture times and a global date never
+prove position or temporal meaning. Containing Markdown headings and first
+introductory blocks supply structural context; unstructured text has only its
+document scope. At most 2,048 code points per introduction and 8,192 additional
+context code points per unit are returned. Truncation is explicitly partial.
+
+Within each namespace request, source reads are grouped by memory/document/hash
+and failures are cached too: at most one original GET per group. All groups share
+2 MiB of source bytes (one excess sentinel byte may be read to detect overflow),
+1,000,000 converted code points and a three-second monotonic enrichment deadline.
+Oversized advertised bodies are closed unread. Original I/O, decoding, scope
+construction, normalization and placement run
+in workers under the same deadline; a compact array maps normalized characters
+to source code points. The dedicated source client preserves signing/proxy
+settings, permits one total SDK attempt, and uses one-second connect/read
+timeouts. Error/region-redirect responses are refused before S3 retry handlers
+can issue another GET or HEAD. Timeout/cancellation discards late results and a worker closes the
+body without reading when its GET finishes after the deadline. A running worker
+can finish after caller cancellation; its result cannot publish a source proof.
+The existing normal source/maintenance clients keep their own retry policies.
+`legacy_context_cost` reports attempted source reads, observed body bytes,
+decoded code points, elapsed milliseconds and limits. `source_bytes_complete`
+is false when a started GET fails without a complete byte observation, including
+on deadline. A graph-only timeout keeps the zero-GET byte count complete;
+`text_codepoints_complete` is false if worker conversion times out before its
+count returns. Elapsed time ends with enrichment, excluding subsequent Q&A
+answer generation. Q&A intentionally uses the enriched rendering while keeping
+the existing filename/section/article citation header. The byte and text limits
+cover source processing, not pre-existing vector/graph I/O.
+Document/archive interleaving preserves each namespace's warnings and partial
+state; `legacy_context_costs` retains their separate measurements.
+
+Unavailable source, foreign reference, changed version/hash, unsupported
+conversion, no unique placement and exhausted budget preserve the indexed
+passage with `unavailable`, `ambiguous` or `partial` context plus namespace-bound
+warnings. Legacy-unannotated by itself is informational. Missing originals,
+PDF/Office/HTML or other conversions without compatible converter evidence,
+invalid UTF-8, unsupported historical transformations, duplicated passages and
+sources beyond these bounds cannot be repaired by this path. No model, index
+write, source write, reingestion or implicit `long_reindex` is invoked.
+
+An operator considering repair must first retain a verified backup/copy and
+inventory missing originals, generation/hash mismatches and converter versions.
+Recover the correct authorized original and qualify conversion/alignment on an
+isolated copy; inspect ambiguous passages rather than selecting the first.
+Any subsequent re-extraction/reingestion or migration is a separate exact-target
+operator action requiring authorization and its own validation/rollback plan.
+This compatibility reader neither schedules nor executes that repair. Existing
+annotated data/downgrade and backup-format rules still apply; use a preserved
+pre-upgrade copy for an unqualified old writer.

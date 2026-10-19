@@ -920,6 +920,47 @@ async def test_archive_provenance_reads_existing_metadata_without_exporting_arbi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["exact", "tolerant"])
+async def test_entity_context_projects_relation_endpoints_and_direction_on_both_routes(route):
+    """James -[MANAGES]-> Ned : lire Ned garde source=James, target=Ned, sens entrant ; un voisin n'est jamais renommé en target."""
+    from mcp_memory.core.graph import GraphService
+
+    service = GraphService()
+    ned = {"name": "Ned", "type": "Person"}
+    record = {"e": ned, "docs": [], "related": [
+        {"entity": {"name": "James", "type": "Person"}, "relation": {"type": "MANAGES", "description": None},
+         "source": "James", "target": "Ned", "direction": "incoming"},
+        {"entity": {"name": "Ada", "type": "Team"}, "relation": {"type": "OWNS", "description": "since 2026"},
+         "source": "Ned", "target": "Ada", "direction": "outgoing"},
+        # Boucle sur soi (E -> E) : direction contractuelle "self", voisin = l'entité lue elle-même.
+        {"entity": {"name": "Ned", "type": "Person"}, "relation": {"type": "NOTE_TO_SELF", "description": "reminder"},
+         "source": "Ned", "target": "Ned", "direction": "self"},
+    ]}
+    result = MagicMock()
+    # Route exacte : un seul appel. Route tolérante (CONTAINS) : la recherche exacte ne trouve rien, puis la seconde trouve Ned.
+    result.single = AsyncMock(side_effect=[record] if route == "exact" else [None, record])
+    session = AsyncMock()
+    session.run = AsyncMock(return_value=result)
+    with patch.object(service, "session") as context:
+        context.return_value.__aenter__.return_value = session
+        ctx = await service.get_entity_context("mem-1", "Ned")
+
+    assert len(session.run.await_args_list) == (1 if route == "exact" else 2)
+    for call in session.run.await_args_list:
+        cypher = call.args[0]
+        # Oracle directionnel : inverser ou retirer source/target fait échouer ces assertions.
+        assert "source: startNode(r).name, target: endNode(r).name" in cypher
+        assert "WHEN startNode(r) = endNode(r) THEN 'self' WHEN startNode(r) = e THEN 'outgoing' ELSE 'incoming'" in cypher
+        assert "other:Entity {memory_id: $memory_id}" in cypher
+    assert ctx.related_entities == [{"name": "James", "type": "Person"}, {"name": "Ada", "type": "Team"}, {"name": "Ned", "type": "Person"}]
+    assert ctx.relations == [
+        {"type": "MANAGES", "description": None, "source": "James", "target": "Ned", "direction": "incoming"},
+        {"type": "OWNS", "description": "since 2026", "source": "Ned", "target": "Ada", "direction": "outgoing"},
+        {"type": "NOTE_TO_SELF", "description": "reminder", "source": "Ned", "target": "Ned", "direction": "self"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_list_documents_catalog_pagination_and_tiebreaker_cypher_inspection():
     """Vérifie la pagination sur grand volume (>50 docs), le tri déterministe et inspecte le Cypher généré (R1-01, R1-06)."""
     from mcp_memory.core.graph import GraphService

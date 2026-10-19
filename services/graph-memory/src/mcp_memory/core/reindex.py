@@ -8,12 +8,14 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 from urllib.parse import quote as url_quote
 from uuid import uuid4
 
 from hivemind_inference import EmbeddingCollectionIdentity, EmbeddingResult
 
+from .chunk_annotation import annotate_chunks
 from .maintenance import (
     MAX_REINDEX_SOURCE_DOCUMENTS,
     MAX_REINDEX_SOURCE_TOTAL_BYTES,
@@ -23,6 +25,9 @@ from .maintenance import (
     get_maintenance_coordinator,
 )
 from .models import Chunk
+from .temporal import (
+    ExtractionSource, SourceRef, TemporalOutputError, annotation_origin_for, load_text_record,
+)
 from .validators import MAX_INGEST_SIZE_BYTES
 from .vector_store import (
     EmbeddingCollectionError,
@@ -125,6 +130,8 @@ class _SourceDocument:
     chunk_count: int
     object_key: str
     content: bytes = field(repr=False, compare=False)
+    # Raw retained-text record; None for a document ingested before retention.
+    text_record: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +271,7 @@ class ReindexService:
             list_documents = self._graph.list_reindex_documents
             list_objects = self._storage.list_reindex_objects
             get_ontology_uri = self._graph.get_reindex_ontology_uri
+            list_text_records = self._graph.list_reindex_text_records
 
             async def invoke(callable_):
                 return await callable_(memory_id)
@@ -272,9 +280,11 @@ class ReindexService:
                 documents_task = group.create_task(invoke(list_documents))
                 objects_task = group.create_task(invoke(list_objects))
                 ontology_task = group.create_task(invoke(get_ontology_uri))
+                records_task = group.create_task(invoke(list_text_records))
             raw_documents = documents_task.result()
             raw_objects = objects_task.result()
             ontology_uri = ontology_task.result()
+            text_records = records_task.result()
         except Exception as error:
             reason = (
                 "source_size_limit_exceeded"
@@ -282,7 +292,12 @@ class ReindexService:
                 else "source_inventory_unavailable"
             )
             raise ReindexValidationError(reason) from None
-        if type(raw_documents) is not list or type(raw_objects) is not list:
+        if (
+            type(raw_documents) is not list
+            or type(raw_objects) is not list
+            or type(text_records) is not dict
+            or any(type(key) is not str or type(value) is not str for key, value in text_records.items())
+        ):
             raise ReindexValidationError("source_inventory_invalid")
         if ontology_uri is not None and (
             type(ontology_uri) is not str or not ontology_uri
@@ -392,6 +407,7 @@ class ReindexService:
                     chunk_count=row["chunk_count"],
                     object_key=obj["key"],
                     content=content,
+                    text_record=text_records.get(row["document_id"]),
                 )
             )
 
@@ -408,6 +424,9 @@ class ReindexService:
                     "status": doc.status,
                     "chunk_count": doc.chunk_count,
                     "object_key": doc.object_key,
+                    # Only present for retained generations: legacy inventories
+                    # keep their historical fingerprint.
+                    **({"extracted_text": doc.text_record} if doc.text_record is not None else {}),
                 }
                 for doc in validated_documents
             ],
@@ -438,14 +457,22 @@ class ReindexService:
     ) -> dict[str, list[Chunk]]:
         chunks_by_document: dict[str, list[Chunk]] = {}
         for document in snapshot.documents:
-            try:
-                text = await asyncio.to_thread(
-                    self._text_extractor,
-                    document.content,
-                    document.filename,
-                )
-            except Exception:
-                raise ReindexValidationError("source_extraction_failed") from None
+            retained = None
+            if document.text_record is not None:
+                # The exact text the stored coordinates refer to: verified by
+                # hash, never re-converted, so a changed converter cannot move
+                # them. Facts are not re-extracted.
+                retained = await self._retained_source(document)
+                text = retained[1]
+            else:
+                try:
+                    text = await asyncio.to_thread(
+                        self._text_extractor,
+                        document.content,
+                        document.filename,
+                    )
+                except Exception:
+                    raise ReindexValidationError("source_extraction_failed") from None
             if type(text) is not str or not text.strip():
                 raise ReindexValidationError("source_extraction_failed")
             try:
@@ -475,8 +502,58 @@ class ReindexService:
                     )
                 chunk.doc_id = document.document_id
                 chunk.memory_id = document.memory_id
+            if retained is not None:
+                await self._annotate(document, chunks, retained)
             chunks_by_document[document.document_id] = chunks
         return chunks_by_document
+
+    async def _retained_source(self, document: _SourceDocument) -> tuple[dict, str]:
+        try:
+            record = load_text_record(document.text_record, document.memory_id, document.document_id)
+            text = await self._storage.read_extracted_text(
+                document.memory_id, document.document_id, record
+            )
+        except (TemporalOutputError, ValueError):
+            raise ReindexValidationError("retained_text_invalid") from None
+        except Exception:
+            raise ReindexValidationError("retained_text_unavailable") from None
+        return record, text
+
+    async def _annotate(self, document: _SourceDocument, chunks: list[Chunk], retained: tuple[dict, str]) -> None:
+        """Rebuild each passage's temporal payload from the stored occurrences."""
+        record, text = retained
+        try:
+            occurrences = await self._graph.list_reindex_occurrences(
+                document.memory_id, document.document_id
+            )
+        except TemporalOutputError:
+            raise ReindexValidationError("source_annotation_invalid") from None
+        except Exception as error:
+            if _contains_source_limit(error):
+                raise ReindexValidationError("source_size_limit_exceeded") from None
+            raise ReindexValidationError("source_annotation_unavailable") from None
+        ref = SourceRef(
+            memory_id=document.memory_id,
+            doc_id=document.document_id,
+            sha256=document.sha256,
+            text_sha256=record["sha256"],
+        )
+        # Every record must belong to this exact namespace, generation and text
+        # version: a record of another source is never attached to these passages.
+        if any(row.source_ref != ref for row in occurrences):
+            raise ReindexValidationError("source_annotation_invalid")
+        # The origin is this generation's, from its own record, never from the
+        # current setting (#999); annotate_chunks refuses records under a
+        # generation that did not request occurrences.
+        origin = annotation_origin_for(record)
+        extension = document.filename.lower().rsplit(".", 1)[-1] if "." in document.filename else ""
+        try:
+            await asyncio.to_thread(
+                partial(annotate_chunks, chunks, ExtractionSource(text, markdown=extension == "md"),
+                        occurrences, ref, origin=origin)
+            )
+        except (TemporalOutputError, ValueError):
+            raise ReindexValidationError("source_annotation_invalid") from None
 
     @staticmethod
     def _evidence(result: EmbeddingResult) -> tuple:

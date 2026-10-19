@@ -29,6 +29,10 @@ from .models import (
     EntityType, RelationType
 )
 from .ontology import Ontology, get_ontology_manager
+from .temporal import (
+    ExtractionSource, TemporalOutputError, parse_occurrences,
+    merge_occurrences, temporal_prompt,
+)
 
 
 # Minimal extraction prompt used as a fallback without an ontology.
@@ -200,6 +204,8 @@ class ExtractorService:
         known_entity_types: Optional[set] = None,
         *,
         strict: bool = False,
+        source_slice=None,
+        discard_temporal_output: bool = False,
     ) -> ExtractionResult:
         """
         Parse la réponse JSON du LLM.
@@ -211,7 +217,12 @@ class ExtractorService:
             known_entity_types: Types d'entités connus (depuis l'ontologie).
                                  Permet d'accepter les types dynamiques (ex: Differentiator, KPI…).
                                  Si None, seuls les 12 types de base sont reconnus.
+            discard_temporal_output: occurrence extraction off (#999). Temporal
+                                 fields the model emitted unasked are removed
+                                 before any validation and only counted.
         """
+        if discard_temporal_output and source_slice is not None:
+            raise AssertionError("occurrences cannot be both requested and discarded")
         try:
             content = content.strip()
             if strict:
@@ -226,6 +237,15 @@ class ExtractorService:
                     end = content.rfind("}") + 1
                     content = content[start:end]
                 data = json.loads(content)
+            discarded = 0
+            if discard_temporal_output:
+                if type(data) is dict:
+                    # Not requested, so neither validated nor kept: the 1.6.2
+                    # contract ignores them and no temporal rejection can occur.
+                    discarded = sum(key in data for key in ("temporal_schema_version", "occurrences"))
+                    data = {k: v for k, v in data.items() if k not in ("temporal_schema_version", "occurrences")}
+                    if discarded:
+                        print(f"⚠️ [Extractor] temporal_output_discarded={discarded}", file=sys.stderr)
             if strict:
                 if (type(data) is not dict or type(data.get("entities")) is not list
                         or type(data.get("relations")) is not list):
@@ -268,7 +288,17 @@ class ExtractorService:
                     description=r.get("description")
                 ))
             
+            temporal = source_slice is not None or "temporal_schema_version" in data or "occurrences" in data
+            try:
+                occurrences = parse_occurrences(data, source_slice, relations) if temporal else []
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise TemporalOutputError("invalid_temporal_output") from None
             return ExtractionResult(
+                temporal_schema_version=1 if temporal else None,
+                occurrences=occurrences,
+                context_status=source_slice.context_status if source_slice is not None else "complete",
+                context_warnings=source_slice.warnings if source_slice is not None else [],
+                temporal_output_discarded=discarded,
                 entities=entities,
                 relations=relations,
                 summary=data.get("summary"),
@@ -276,6 +306,8 @@ class ExtractorService:
             )
             
         except (json.JSONDecodeError, AttributeError, TypeError, ValueError) as e:
+            if isinstance(e, TemporalOutputError) and not strict:
+                raise
             if strict:
                 raise FrozenOntologyOutputError("Invalid extraction for frozen ontology") from None
             # ADR-0027 : AUCUN fragment de complétion dans les logs. Un JSON
@@ -357,8 +389,11 @@ class ExtractorService:
 
     async def _extract_frozen_catalogue(
         self, prompt: str, entity_types: set[str], relation_types: set[str],
+        *, source_slice=None, discard_temporal_output: bool = False,
     ) -> ExtractionResult:
         """Validate closed vocabularies; permit one explicit output correction."""
+        if source_slice is not None:
+            prompt += temporal_prompt(source_slice)
         entity_types = entity_types | {"Other"}
         relation_types = relation_types | {"OTHER", "RELATED_TO"}
         vocabulary = (
@@ -375,7 +410,8 @@ class ExtractorService:
             try:
                 return self._parse_extraction(
                     chat_result.text or "", known_entity_types=entity_types,
-                    known_relation_types=relation_types, strict=True,
+                    known_relation_types=relation_types, strict=True, source_slice=source_slice,
+                    discard_temporal_output=discard_temporal_output,
                 )
             except ValueError:
                 if attempt:
@@ -389,6 +425,10 @@ class ExtractorService:
                 messages.append({"role": "user", "content": (
                     "The output did not conform to the frozen catalogue or JSON structure. "
                     "Return a corrected complete JSON object with entities and relations arrays. "
+                    + ("Also include integer temporal_schema_version:1 and occurrences for every relation. "
+                       "Use only the supplied passage and owning scope references; preserve original "
+                       "expressions, unknown/ambiguous statuses and supported validity evidence. "
+                       "Do not normalize relatives or drop the temporal fields. " if source_slice is not None else "")
                     + vocabulary
                 )})
         raise AssertionError("unreachable")
@@ -398,6 +438,8 @@ class ExtractorService:
         self,
         text: str,
         ontology_name: str = "default",
+        *, source_context: ExtractionSource | None = None,
+        discard_temporal_output: bool = False,
     ) -> ExtractionResult:
         """
         Extrait les entités et relations d'un texte en utilisant une ontologie.
@@ -410,6 +452,10 @@ class ExtractorService:
             ExtractionResult avec entités, relations, résumé
         """
         # Charger l'ontologie — OBLIGATOIRE
+        if source_context is not None and discard_temporal_output:
+            raise ValueError("occurrences cannot be both requested and discarded")
+        if source_context is not None and source_context.text != text:
+            raise TemporalOutputError("temporal_source_text_mismatch")
         ontology_manager = get_ontology_manager()
         ontology = ontology_manager.get_ontology(ontology_name)
         
@@ -438,6 +484,8 @@ class ExtractorService:
             
             result = await self._extract_frozen_catalogue(
                 prompt, ontology_entity_types, ontology_relation_types,
+                source_slice=source_context.slice(0, len(text)) if source_context is not None else None,
+                discard_temporal_output=discard_temporal_output,
             )
             
             print(f"✅ [Extractor] Extracted ({ontology.name}): {len(result.entities)} entities, {len(result.relations)} relations", file=sys.stderr)
@@ -461,6 +509,8 @@ class ExtractorService:
         text: str,
         ontology_name: str = "default",
         progress_callback=None,
+        *, source_context: ExtractionSource | None = None,
+        discard_temporal_output: bool = False,
     ) -> ExtractionResult:
         """
         Extrait les entités et relations d'un texte long en le découpant en chunks.
@@ -478,6 +528,10 @@ class ExtractorService:
         Returns:
             ExtractionResult fusionné avec toutes les entités et relations
         """
+        if source_context is not None and discard_temporal_output:
+            raise ValueError("occurrences cannot be both requested and discarded")
+        if source_context is not None and source_context.text != text:
+            raise TemporalOutputError("temporal_source_text_mismatch")
         settings = get_settings()
         chunk_size = settings.extraction_chunk_size
         
@@ -502,7 +556,9 @@ class ExtractorService:
                     "chunks_total": 1, "chunk_current": 1,
                     "text_length": len(text), "mode": "single"
                 })
-            result = await self.extract_with_ontology(text, ontology_name)
+            result = await self.extract_with_ontology(
+                text, ontology_name, **({"source_context": source_context} if source_context is not None else {}),
+                **({"discard_temporal_output": True} if discard_temporal_output else {}))
             if progress_callback:
                 await progress_callback("extraction_chunk_done", {
                     "chunk": 1, "chunks_total": 1,
@@ -549,6 +605,10 @@ class ExtractorService:
         all_summaries: List[str] = []
         all_key_topics: List[str] = []
         
+        all_occurrences = []
+        context_warnings = []
+        discarded = 0
+        source_cursor = 0
         for i, chunk_text in enumerate(chunks):
             chunk_num = i + 1
             
@@ -564,15 +624,27 @@ class ExtractorService:
             # Construire le prompt avec contexte cumulatif
             prompt = ontology.build_prompt(chunk_text, cumulative_context=cumulative_context)
             
+            source_slice = None
+            if source_context is not None:
+                start = text.find(chunk_text, source_cursor)
+                if start < 0:
+                    raise TemporalOutputError("unmapped_extraction_slice")
+                source_cursor = start + len(chunk_text)
+                source_slice = source_context.slice(start, source_cursor)
+
             try:
                 result = await self._extract_frozen_catalogue(
                     prompt, ontology_entity_types, ontology_relation_types,
+                    source_slice=source_slice, discard_temporal_output=discard_temporal_output,
                 )
                 
                 print(f"✅ [Extractor] Chunk {chunk_num}: +{len(result.entities)} entities, "
                       f"+{len(result.relations)} relations", file=sys.stderr)
                 
                 # Accumuler les résultats
+                all_occurrences.extend(result.occurrences)
+                context_warnings.extend(result.context_warnings)
+                discarded += result.temporal_output_discarded
                 all_entities.extend(result.entities)
                 all_relations.extend(result.relations)
                 if result.summary:
@@ -597,7 +669,12 @@ class ExtractorService:
                 raise
         
         # Fusionner les résultats
-        merged = self._merge_extraction_results(all_entities, all_relations, all_summaries, all_key_topics)
+        merged = self._merge_extraction_results(
+            all_entities, all_relations, all_summaries, all_key_topics, all_occurrences,
+            temporal_schema_version=1 if source_context is not None else None)
+        merged.context_warnings = sorted(set(context_warnings))
+        merged.context_status = "partial" if context_warnings else "complete"
+        merged.temporal_output_discarded = discarded
         
         print(f"🏁 [Extractor] Chunked extraction completed: "
               f"{len(merged.entities)} entities, {len(merged.relations)} relations "
@@ -717,7 +794,9 @@ class ExtractorService:
         all_entities: List[ExtractedEntity],
         all_relations: List[ExtractedRelation],
         all_summaries: List[str],
-        all_key_topics: List[str]
+        all_key_topics: List[str],
+        all_occurrences=None,
+        *, temporal_schema_version=None,
     ) -> ExtractionResult:
         """
         Fusionne les résultats de N extractions chunked.
@@ -770,6 +849,15 @@ class ExtractorService:
                     )
         
         # Fusionner les résumés
+        canonical_occurrences = []
+        for occurrence in all_occurrences or []:
+            fact = occurrence.fact
+            relation = relation_map.get((fact.from_entity.strip().lower(), fact.to_entity.strip().lower(), fact.type))
+            if relation is None:
+                raise TemporalOutputError("unknown_temporal_fact")
+            canonical_occurrences.append(occurrence.model_copy(update={
+                "fact": fact.model_copy(update={"from_entity": relation.from_entity,
+                                                "to_entity": relation.to_entity})}))
         merged_summary = " ".join(all_summaries) if all_summaries else None
         
         # Dédupliquer les topics
@@ -782,6 +870,8 @@ class ExtractorService:
                 unique_topics.append(topic.strip())
         
         return ExtractionResult(
+            temporal_schema_version=temporal_schema_version,
+            occurrences=merge_occurrences(canonical_occurrences),
             entities=list(entity_map.values()),
             relations=list(relation_map.values()),
             summary=merged_summary,

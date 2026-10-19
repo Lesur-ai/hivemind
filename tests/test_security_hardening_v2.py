@@ -1009,7 +1009,7 @@ class TestLM2_26_DependencyBounds:
         requirements = GRAPH_REQUIREMENTS.read_text(encoding="utf-8")
         expected = {
             "cryptography": ((50, 0, 0), "CVE-2026-69247"),
-            "aiohttp": ((3, 14, 3), "CVE-2026-69244"),
+            "aiohttp": ((3, 14, 4), "CVE-2026-111063/111064, GHSA-2g87-pp6c-29x5"),
             "pypdf": ((6, 16, 1), "GHSA-763m-79hh-57f2"),
             "h2": ((4, 4, 1), "GHSA-6hr6-w5qg-qmwg"),
             "PyJWT": ((2, 15, 1), "CVE-2026-101918 / library padding regression"),
@@ -1048,9 +1048,9 @@ class TestLM2_26_DependencyBounds:
         match = re.search(r"^aiohttp==(\d+\.\d+\.\d+)(?:\s|$)", lock, re.MULTILINE)
         assert match, "Pin aiohttp introuvable dans le lock Graph Memory"
         version = tuple(int(part) for part in match.group(1).split("."))
-        assert version >= (3, 14, 3), (
+        assert version >= (3, 14, 4), (
             f"Graph Memory épingle aiohttp {match.group(1)}, vulnérable à "
-            "CVE-2026-69244"
+            "CVE-2026-111063/111064, GHSA-2g87-pp6c-29x5"
         )
 
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from copy import deepcopy
+import json
 
 from hivemind_inference import (
     InferenceConfig,
@@ -31,6 +33,36 @@ from hivemind_inference import (
 # that accepts an arbitrary operator endpoint, and ``.invalid`` (RFC 2606) can
 # never resolve, so an accidental real connection cannot succeed.
 DEFAULT_ENDPOINT = "http://provider.p13-1c.invalid/v1"
+
+
+def temporal_unknown_payload(payload, document_prompt):
+    """Controlled structural output; never an oracle for semantic extraction.
+
+    Reuse the real packet's references, without injecting expected answers into
+    inference input. Existing product harnesses keep all of their old oracles.
+    """
+    packet = json.loads(document_prompt.split("TEMPORAL_SOURCE_JSON\n", 1)[1])
+    passage = next(p for p in packet["passages"] if p["in_slice"])
+    unknown = {"status": "unknown", "expression": None, "expression_evidence": [],
+               "precision": "unknown", "normalized": None, "anchor": None,
+               "anchor_candidates": []}
+    result = deepcopy(payload)
+    result.update(temporal_schema_version=1, occurrences=[{
+        "fact": {k: relation[k] for k in ("from_entity", "to_entity", "type")},
+        "fact_evidence": [passage["passage_id"]], "scope_id": passage["scope_id"],
+        "source_time": unknown, "event_time": unknown, "valid_time": None,
+    } for relation in payload["relations"]])
+    return result
+
+
+def enable_occurrence_extraction(monkeypatch) -> None:
+    """Opt a harness into the experimental occurrence path (#999).
+
+    Occurrence extraction is off by default in 1.6.3. Harnesses written for
+    the T03-T05 path turn it on explicitly and keep their oracles unchanged.
+    """
+    from mcp_memory.config import get_settings
+    monkeypatch.setattr(get_settings(), "temporal_occurrence_extraction", True)
 
 
 def make_chat_profile(**overrides) -> ResolvedChatProfile:

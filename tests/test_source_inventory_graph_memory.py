@@ -310,7 +310,7 @@ def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
         "FROM python:3.14.8-slim-bookworm@sha256:"
         "48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83"
     ) in dockerfile
-    assert "aiohttp==3.14.3" in lock
+    assert "aiohttp==3.14.4" in lock
     assert "boto3==1.43.108" in lock
     assert "botocore==1.43.109" in lock
     assert "--require-hashes -r requirements.lock" in dockerfile
