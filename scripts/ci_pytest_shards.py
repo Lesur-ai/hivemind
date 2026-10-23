@@ -27,6 +27,8 @@ import xml.etree.ElementTree as ET
 MAX_TEST_SECONDS = 1680
 COVERAGE_SOURCE = "src/live_mem,src/hivemind_inference,scripts"
 PLAIN_SELECTION_POLICY = Path(".github/ci-plain-sentinels.json")
+# #1069: estimated test seconds per impact shard (setup and collection excluded).
+IMPACT_SHARD_SECONDS = 300
 COLLECTOR = """
 import faulthandler, json, os, re
 from pathlib import Path
@@ -176,6 +178,42 @@ def select_sentinels(nodes, policy):
     return [node for node in nodes if node.split("[", 1)[0] in selected]
 
 
+def _safe_relative(value):
+    # Canonical only: pytest node IDs never contain "./", "//" or "..", so a
+    # noncanonical selector must not earn the empty-module exemption.
+    parts = value.split("/")
+    return parts[0] == "tests" and len(parts) > 1 and all(part not in {"", ".", ".."} for part in parts)
+
+
+def select_impact(nodes, selection, existing=frozenset()):
+    """Collected cases owned by a base-policy impact selection (#1069).
+
+    ``existing`` names the selected module files still in the tree: such a
+    module may collect nothing (a test_* helper), so nothing is lost.
+    """
+    _nodeids(nodes)
+    require(isinstance(selection, dict) and type(selection.get("schema_version")) is int
+            and selection["schema_version"] == 1, "invalid impact selection schema")
+    selectors = selection.get("selectors")
+    require(isinstance(selectors, list) and bool(selectors)
+            and all(isinstance(value, str) and value for value in selectors), "invalid impact selectors")
+    modules = {value for value in selectors if "::" not in value}
+    definitions = [value for value in selectors if "::" in value]
+    chosen = [node for node in nodes if node.split("::", 1)[0] in modules
+              or any(node == value or node.startswith(value + "::") or node.startswith(value + "[")
+                     for value in definitions)]
+    require(bool(chosen), "empty impact selection")
+    # Every owner and baseline obligation must still be collected; a missing
+    # one (renamed, deleted or uncollectable) never shrinks the selection.
+    collected = {node.split("::", 1)[0] for node in chosen}
+    missing = sorted(value for value in modules if value not in collected and value not in existing)
+    missing += sorted(value for value in definitions
+                      if not any(node == value or node.startswith(value + "::") or node.startswith(value + "[")
+                                 for node in chosen))
+    require(not missing, "impact selector not collected: " + ", ".join(missing[:5]))
+    return chosen
+
+
 def read_selection_policy(root, path=None):
     canonical = root / PLAIN_SELECTION_POLICY
     requested = root / path if path is not None and not path.is_absolute() else path
@@ -217,23 +255,32 @@ def capacity_policy(value, count):
 
 
 def make_plan(nodes, count, *, source_sha, source_digest, mode, weights=None, git_head=None, selection_policy=None,
-              capacities=None):
+              capacities=None, impact_selection=None, existing_modules=frozenset()):
     _nodeids(nodes)
     require(mode in {"plain", "coverage"}, "invalid shard mode")
     full_collection_digest = digest(nodes)
     if selection_policy is not None:
         require(mode == "plain", "sentinel selection is allowed only in plain mode")
         nodes = select_sentinels(nodes, selection_policy)
+    weights = weights or {}
+    default = 0.1 if mode == "plain" else 0.2
+    if impact_selection is not None:
+        require(mode == "plain" and selection_policy is None and capacities is None,
+                "impact selection is allowed only in uniform plain mode")
+        nodes = select_impact(nodes, impact_selection, existing_modules)
+        estimate = sum(number(weights.get(node, weights.get(node.split("::", 1)[0], default)), MAX_TEST_SECONDS)
+                       for node in nodes)
+        require(type(count) is int and count >= 1, "invalid shard count")
+        count = max(1, min(count, len(nodes), math.ceil(estimate / IMPACT_SHARD_SECONDS)))
     require(type(count) is int and 1 <= count <= min(64, len(nodes)), "invalid shard count")
+
     if capacities is not None:
         require(mode == "coverage", "relative capacities are allowed only in coverage mode")
         require(isinstance(capacities, list) and len(capacities) == count, "invalid shard capacities")
         require(all(not isinstance(capacity, bool) and isinstance(capacity, (int, float))
                     and 0 < capacity <= sys.float_info.max and math.isfinite(capacity)
                     for capacity in capacities), "invalid shard capacity")
-    weights = weights or {}
-    default = 0.1 if mode == "plain" else 0.2
-    costs = {node: number(weights.get(node, default), MAX_TEST_SECONDS) for node in nodes}
+    costs = {node: number(weights.get(node, weights.get(node.split("::", 1)[0], default)), MAX_TEST_SECONDS) for node in nodes}
     buckets = [[] for _ in range(count)]
     positions = {node: index for index, node in enumerate(nodes)}
     ordered = sorted(nodes, key=lambda item: (-costs[item], positions[item]))
@@ -257,9 +304,10 @@ def make_plan(nodes, count, *, source_sha, source_digest, mode, weights=None, gi
     value = {
         "schema_version": 2, "source_sha": source_sha, "source_digest": source_digest,
         "git_head": git_head or source_sha, "mode": mode, "runtime": runtime(),
-        "scope": "plain-sentinels" if selection_policy is not None else "complete",
+        "scope": "plain-sentinels" if selection_policy is not None else "impact" if impact_selection is not None else "complete",
         "full_collection_digest": full_collection_digest,
-        "selection_policy_digest": digest(selection_policy) if selection_policy is not None else None,
+        "selection_policy_digest": digest(selection_policy) if selection_policy is not None
+        else digest(impact_selection) if impact_selection is not None else None,
         "run_id": os.environ.get("GITHUB_RUN_ID", "local"),
         "max_test_seconds": MAX_TEST_SECONDS,
         "collection_digest": digest(nodes), "nodeids": nodes,
@@ -281,12 +329,12 @@ def validate_plan(value):
     for name, length in (("source_sha", 40), ("git_head", 40), ("source_digest", 64), ("plan_digest", 64), ("collection_digest", 64), ("full_collection_digest", 64)):
         require(isinstance(value[name], str) and re.fullmatch(f"[0-9a-f]{{{length}}}", value[name]), f"invalid {name}")
     require(value["mode"] in {"plain", "coverage"} and value["max_test_seconds"] == MAX_TEST_SECONDS, "invalid plan budget/mode")
-    require(value["scope"] in {"complete", "plain-sentinels"}, "invalid plan scope")
+    require(value["scope"] in {"complete", "plain-sentinels", "impact"}, "invalid plan scope")
     if value["scope"] == "complete":
         require(value["selection_policy_digest"] is None, "complete scope cannot use a selection policy")
         require(value["full_collection_digest"] == value["collection_digest"], "incomplete full collection")
     else:
-        require(value["mode"] == "plain", "sentinel scope requires plain mode")
+        require(value["mode"] == "plain", "selected scope requires plain mode")
         require(isinstance(value["selection_policy_digest"], str) and re.fullmatch("[0-9a-f]{64}", value["selection_policy_digest"]), "invalid selection_policy_digest")
     require(isinstance(value["run_id"], str) and (value["run_id"] == "local" or re.fullmatch("[1-9][0-9]*", value["run_id"])), "invalid run identity")
     require(isinstance(value["runtime"], dict) and set(value["runtime"]) == {"implementation", "python", "machine"}, "invalid runtime")
@@ -431,6 +479,11 @@ def verify_collection(root, plan, *, selection_policy=None):
         policy = selection_policy if selection_policy is not None else read_selection_policy(root)
         require(digest(policy) == plan["selection_policy_digest"], "sentinel policy changed")
         nodes = select_sentinels(nodes, policy)
+    elif plan["scope"] == "impact":
+        # The unchanged full collection binds the plan; the base-owned
+        # selection chose its ordered subset.
+        planned = set(plan["nodeids"])
+        nodes = [node for node in nodes if node in planned]
     require(nodes == plan["nodeids"], "collection selection changed")
 
 
@@ -599,6 +652,7 @@ def main():
     prepare.add_argument("--weights", type=Path)
     prepare.add_argument("--selection-policy", type=Path)
     prepare.add_argument("--capacity-policy", type=Path)
+    prepare.add_argument("--impact-selection", type=Path)
     prepare.add_argument("--output", type=Path, required=True)
     for name in ("run", "verify"):
         sub = commands.add_parser(name)
@@ -621,7 +675,11 @@ def main():
             require(args.capacity_policy is None or args.mode == "coverage", "capacity policy is allowed only in coverage mode")
             capacities = capacity_policy(read_json(args.capacity_policy), args.shards)[0] if args.capacity_policy is not None else None
             git_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-            value = make_plan(collect(root), args.shards, source_sha=args.source_sha, source_digest=source_digest(root), mode=args.mode, weights=weights, git_head=git_head, selection_policy=policy, capacities=capacities)
+            impact = read_json(args.impact_selection) if args.impact_selection is not None else None
+            existing = frozenset(value for value in (impact or {}).get("selectors", [])
+                                 if isinstance(value, str) and "::" not in value and value.endswith(".py")
+                                 and _safe_relative(value) and (root / value).is_file())
+            value = make_plan(collect(root), args.shards, source_sha=args.source_sha, source_digest=source_digest(root), mode=args.mode, weights=weights, git_head=git_head, selection_policy=policy, capacities=capacities, impact_selection=impact, existing_modules=existing)
             write_json(args.output, value)
             print(f"Planned {len(value['nodeids'])} cases in {len(value['shards'])} disjoint shards; max estimated test time {max(row['estimated_seconds'] for row in value['shards']):.1f}s")
         elif args.command == "run":

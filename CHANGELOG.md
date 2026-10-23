@@ -18,6 +18,34 @@ linked guides when installing or upgrading.
 
 ---
 
+## [1.6.4] — 2026-10-23
+
+Hivemind 1.6.4 is a security maintenance release for the 1.6 line.
+
+**Release identity.** Hivemind now reports runtime version `1.6.4`.
+
+### Security
+
+- Update certifi to 2026.10.19 in the Hivemind and embedded Graph Memory
+  environments, removing emSign ECC Root CA G3 (GHSA-6q48-6c7w-9gw2).
+- Update pypdf to 6.21.2 in both environments, addressing crafted-PDF
+  infinite loops and memory exhaustion (CVE-2026-113792/113793/113794/113795),
+  and unvalidated JPEG image data loading (CVE-2026-113786,
+  GHSA-5hx5-vpf9-5wcv). Also prevent repeated file scans and excessive
+  cross-reference-table processing (CVE-2026-115572/115580/115585).
+
+**Upgrade.** Rebuild the Hivemind and embedded Graph Memory images together.
+No data migration, reindexing or reingestion is required. The 1.6.3 backup
+compatibility and downgrade requirements remain in effect; see the
+[upgrade checklist](docs/DEPLOYMENT.md#upgrade-to-163).
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary; the Portal extension seam is described in
+[`docs/EXTENSION_POINTS.md`](docs/EXTENSION_POINTS.md).
+See the [migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+---
+
 ## [1.6.3] — 2026-10-19
 
 Hivemind 1.6.3 is a maintenance release for LONG retrieval context and graph

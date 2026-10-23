@@ -1,6 +1,7 @@
 """Real parser and JWT compatibility checks for the locked dependencies."""
 
 import base64
+import re
 import threading
 from io import BytesIO
 
@@ -10,7 +11,7 @@ from h2.config import H2Configuration
 from h2.connection import H2Connection
 from h2.events import RequestReceived
 from h2.exceptions import ProtocolError
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 
@@ -146,6 +147,63 @@ def test_document_pdf_oversized_unicode_token_is_rejected_by_parser_bound(
 @pytest.mark.parametrize("content", [b"", b"not a PDF"])
 def test_document_pdf_malformed_input_keeps_failure_contract(extract_text, content):
     assert extract_text(content, "notes.pdf") is None
+
+
+class _FullReadCountingStream:
+    """Count full-file scans without supplying BytesIO's getbuffer shortcut."""
+
+    def __init__(self, content):
+        self.stream = BytesIO(content)
+        self.full_reads = 0
+
+    def read(self, size=-1):
+        if size == -1:
+            self.full_reads += 1
+        return self.stream.read(size)
+
+    def seek(self, *args):
+        return self.stream.seek(*args)
+
+    def tell(self):
+        return self.stream.tell()
+
+
+def test_document_pdf_repeated_missing_object_scans_only_once():
+    """CVE-2026-115572: cached missing objects must not rescan the file."""
+    stream = _FullReadCountingStream(_pdf())
+    reader = PdfReader(stream)
+    stream.full_reads = 0
+    for _ in range(3):
+        assert reader.get_object(9999) is None
+    assert stream.full_reads == 1
+
+
+def test_document_pdf_xref_count_is_bounded_by_input_size(extract_text, capsys):
+    """CVE-2026-115580: a tiny PDF cannot declare a disproportionate xref."""
+    document = _pdf()
+    # Leave room for the longer replacement header itself in the byte limit.
+    declared = len(document) // 20 + 2
+    malicious, replacements = re.subn(
+        rb"xref\n0 \d+\n", f"xref\n0 {declared}\n".encode(), document, count=1,
+    )
+    assert replacements == 1 and len(malicious) < 4096
+    assert extract_text(malicious, "notes.pdf") is None
+    assert f"Declared size {declared} exceeds allowed limit" in capsys.readouterr().err
+
+
+def test_document_pdf_malformed_xref_entries_share_one_recovery_scan():
+    """CVE-2026-115585: each invalid entry must reuse the recovery scan."""
+    body = bytearray(b"%PDF-1.7\n")
+    body += b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+    body += b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n"
+    xref_offset = len(body)
+    body += b"xref\n0 8\n" + b"x" * 20 * 8
+    body += b"trailer\n<< /Root 1 0 R /Size 3 >>\nstartxref\n"
+    body += str(xref_offset).encode() + b"\n%%EOF\n"
+    stream = _FullReadCountingStream(bytes(body))
+    reader = PdfReader(stream)
+    assert stream.full_reads == 1
+    assert len(reader.pages) == 0
 
 
 def _receive_request(hosts):
