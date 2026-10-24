@@ -46,7 +46,7 @@ pydantic-settings==2.14.2
 python-dotenv==1.2.3
 
 # === Utilitaires ===
-tenacity==9.1.4           # Retry logic avec backoff
+tenacity==9.2.1           # Retry logic avec backoff
 python-multipart==0.0.32  # File uploads
 aiofiles==25.1.0          # Async file operations
 PyYAML==6.0.3             # Parsing des ontologies YAML
