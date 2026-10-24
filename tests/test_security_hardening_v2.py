@@ -1010,7 +1010,7 @@ class TestLM2_26_DependencyBounds:
         expected = {
             "cryptography": ((50, 0, 0), "CVE-2026-69247"),
             "aiohttp": ((3, 14, 4), "CVE-2026-111063/111064, GHSA-2g87-pp6c-29x5"),
-            "pypdf": ((6, 16, 1), "GHSA-763m-79hh-57f2"),
+            "pypdf": ((6, 21, 2), "CVE-2026-115572/115580/115585; GHSA-6c7f-9265-g8fw, GHSA-gmh7-3g9r-mjh5, GHSA-jr96-gvgh-j3r4"),
             "h2": ((4, 4, 1), "GHSA-6hr6-w5qg-qmwg"),
             "PyJWT": ((2, 15, 1), "CVE-2026-101918 / library padding regression"),
             "urllib3": ((2, 8, 0), "CVE-2026-97687/97688/97689"),
@@ -1028,7 +1028,7 @@ class TestLM2_26_DependencyBounds:
             )
 
     @pytest.mark.parametrize("package,minimum", [
-        ("pypdf", (6, 16, 1)), ("h2", (4, 4, 1)),
+        ("pypdf", (6, 21, 2)), ("h2", (4, 4, 1)),
         ("pyjwt", (2, 15, 1)), ("urllib3", (2, 8, 0)),
     ])
     def test_document_dependency_floors_cover_root_and_embedded_locks(self, package, minimum):

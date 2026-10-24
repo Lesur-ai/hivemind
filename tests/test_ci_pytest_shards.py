@@ -1,6 +1,7 @@
 """Evidence must prove that bounded CI shards ran the complete collected suite."""
 
 from copy import deepcopy
+import sys
 
 import pytest
 
@@ -759,3 +760,120 @@ def test_default_owned_process_uses_the_doubled_deadline(tmp_path, monkeypatch):
         assert signals == ([(12345, signal.SIGTERM), (12345, signal.SIGKILL)] if escalate else [(12345, signal.SIGTERM)])
         assert 'test_safe.py' in str(raised.value) and 'PASSWORD' not in str(raised.value)
         assert '/private/path' not in str(raised.value) and len(str(raised.value)) < 4300
+
+
+def test_impact_plan_selects_owned_cases_and_sizes_shards_by_volume(monkeypatch):
+    """#1069: the impact scope keeps the full collection binding, a subset and a sized count."""
+    from scripts import ci_pytest_shards as shards
+    from scripts.ci_pytest_shards import digest, verify_collection
+
+    nodes = [*NODES, "tests/test_other.py::test_other", "tests/test_heavy.py::test_heavy[0]"]
+    selection = {"schema_version": 1, "selectors": ["tests/test_example.py::test_case", "tests/test_heavy.py"]}
+    weights = {node: 100 for node in nodes}
+    value = make_plan(nodes, 64, source_sha=SOURCE, source_digest=DIGEST, mode="plain",
+                      weights=weights, impact_selection=selection)
+    assert value["scope"] == "impact"
+    assert value["nodeids"] == [*NODES, "tests/test_heavy.py::test_heavy[0]"]
+    assert value["full_collection_digest"] == digest(nodes)
+    assert value["selection_policy_digest"] == digest(selection)
+    # 13 cases x 100 s against 300 s per shard: five shards, not the line maximum.
+    assert len(value["shards"]) == 5
+    assert verify_results(value, results(value), SOURCE, DIGEST) == 5.0
+    small = make_plan(nodes, 64, source_sha=SOURCE, source_digest=DIGEST, mode="plain",
+                      impact_selection={"schema_version": 1, "selectors": ["tests/test_other.py"]})
+    assert small["nodeids"] == ["tests/test_other.py::test_other"] and len(small["shards"]) == 1
+    # Workers re-collect: an unchanged collection passes, a changed one fails closed.
+    monkeypatch.setattr(shards, "collect", lambda root: list(nodes))
+    verify_collection(None, value)
+    monkeypatch.setattr(shards, "collect", lambda root: [*nodes, "tests/test_new.py::test_new"])
+    with pytest.raises(ShardError, match="full collection changed"):
+        verify_collection(None, value)
+
+
+@pytest.mark.parametrize("selection", [
+    {},
+    {"schema_version": 2, "selectors": ["tests/test_example.py"]},
+    {"schema_version": 1, "selectors": []},
+    {"schema_version": 1, "selectors": [""]},
+    {"schema_version": 1, "selectors": ["tests/test_absent.py"]},
+    # Codex R1 (#1151): one collected selector cannot hide a missing one.
+    {"schema_version": 1, "selectors": ["tests/test_example.py", "tests/test_absent.py"]},
+    {"schema_version": 1, "selectors": ["tests/test_example.py::test_case", "tests/test_example.py::test_renamed"]},
+])
+def test_invalid_or_empty_impact_selection_fails_closed(selection):
+    with pytest.raises(ShardError):
+        make_plan(NODES, 4, source_sha=SOURCE, source_digest=DIGEST, mode="plain",
+                  impact_selection=selection)
+
+
+def test_impact_selection_tolerates_only_an_existing_module_without_cases():
+    """A test_* helper module collects nothing; a vanished module never shrinks the run."""
+    selection = {"schema_version": 1, "selectors": ["tests/test_example.py", "tests/test_helper_policy.py"]}
+    value = make_plan(NODES, 4, source_sha=SOURCE, source_digest=DIGEST, mode="plain",
+                      impact_selection=selection, existing_modules=frozenset({"tests/test_helper_policy.py"}))
+    assert value["scope"] == "impact" and value["nodeids"] == NODES
+    with pytest.raises(ShardError, match="not collected: tests/test_helper_policy.py"):
+        make_plan(NODES, 4, source_sha=SOURCE, source_digest=DIGEST, mode="plain", impact_selection=selection)
+    definition = {"schema_version": 1, "selectors": ["tests/test_example.py::test_renamed", "tests/test_example.py"]}
+    with pytest.raises(ShardError, match="not collected: tests/test_example.py::test_renamed"):
+        make_plan(NODES, 4, source_sha=SOURCE, source_digest=DIGEST, mode="plain", impact_selection=definition,
+                  existing_modules=frozenset({"tests/test_example.py"}))
+
+
+def test_impact_cli_counts_only_tracked_helper_modules_as_existing(tmp_path, monkeypatch):
+    from scripts import ci_pytest_shards as shards
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_helper_policy.py").write_text("VALUE = 1\n")
+    selection = tmp_path / "selection.json"
+    selection.write_text('{"schema_version": 1, "selectors": ["tests/test_example.py", "tests/test_helper_policy.py"]}')
+    captured = {}
+    monkeypatch.setattr(shards, "collect", lambda root: list(NODES))
+    monkeypatch.setattr(shards, "source_digest", lambda root: DIGEST)
+    monkeypatch.setattr(shards.subprocess, "check_output", lambda *a, **k: SOURCE + "\n")
+    real = shards.make_plan
+    monkeypatch.setattr(shards, "make_plan", lambda *a, **k: captured.update(k) or real(*a, **k))
+    monkeypatch.setattr(sys, "argv", ["ci_pytest_shards.py", "plan", "--root", str(tmp_path), "--source-sha", SOURCE,
+                                      "--mode", "plain", "--shards", "4", "--impact-selection", str(selection),
+                                      "--output", str(tmp_path / "plan.json")])
+    assert shards.main() == 0
+    assert captured["existing_modules"] == frozenset({"tests/test_helper_policy.py"})
+    # An escaping or noncanonical path is never an existing module: the plan
+    # fails closed (Codex R2 on #1153).
+    for noncanonical in ("../tests/test_helper_policy.py", "tests/./test_helper_policy.py",
+                         "tests//test_helper_policy.py", "./tests/test_helper_policy.py"):
+        selection.write_text('{"schema_version": 1, "selectors": ["tests/test_example.py", "%s"]}' % noncanonical)
+        (tmp_path / "plan.json").unlink(missing_ok=True)
+        assert shards.main() == 2, noncanonical
+
+
+def test_impact_scope_is_plain_only_and_cannot_combine_with_another_selection():
+    selection = {"schema_version": 1, "selectors": ["tests/test_example.py"]}
+    with pytest.raises(ShardError, match="uniform plain"):
+        make_plan(NODES, 4, source_sha=SOURCE, source_digest=DIGEST, mode="coverage", impact_selection=selection)
+    with pytest.raises(ShardError, match="uniform plain"):
+        make_plan(NODES, 4, source_sha=SOURCE, source_digest=DIGEST, mode="plain",
+                  impact_selection=selection, capacities=[1.0] * 4)
+    value = make_plan(NODES, 4, source_sha=SOURCE, source_digest=DIGEST, mode="plain", impact_selection=selection)
+    forged = deepcopy(value)
+    forged["scope"] = "complete"
+    with pytest.raises(ShardError):
+        validate_plan(forged)
+
+
+def test_new_case_module_cost_is_used_without_overriding_exact_measurement():
+    nodes=['tests/test_archive.py::test_measured','tests/test_archive.py::test_new_case',
+           'tests/test_other.py::test_unprofiled']
+    value=make_plan(nodes,2,source_sha=SOURCE,source_digest=DIGEST,mode='plain',
+        weights={nodes[0]:2.0,'tests/test_archive.py':100.0})
+    estimates=sorted(row['estimated_seconds'] for row in value['shards'])
+    assert estimates==[2.1,100.0]
+    assert sorted(n for row in value['shards'] for n in row['nodeids'])==sorted(nodes)
+    verify_results(value,results(value),SOURCE,DIGEST)
+
+
+@pytest.mark.parametrize('cost',[True,-1,float('nan'),float('inf'),1681])
+def test_invalid_module_cost_fails_closed(cost):
+    # The capacity half already has its 1.6 guard above; keep these cases on weights.
+    with pytest.raises(ShardError):
+        make_plan(NODES,4,source_sha=SOURCE,source_digest=DIGEST,mode='plain',
+            weights={'tests/test_example.py':cost})
