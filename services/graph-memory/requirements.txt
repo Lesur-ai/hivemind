@@ -24,7 +24,7 @@ starlette==1.7.0
 
 # === HTTP Client (async) ===
 httpx==0.28.1
-httpx2==2.13.1          # MCP 2 transport; inference/datastores keep owned httpx clients.
+httpx2==2.15.1          # MCP 2 transport; inference/datastores keep owned httpx clients.
 h2==4.4.1               # HTTP/2 support for datastore client dependencies
 
 # === Neo4j Driver ===
