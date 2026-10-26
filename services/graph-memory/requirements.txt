@@ -18,7 +18,7 @@ PyJWT==2.15.1           # CVE-2026-102274/101918; restore PyJWT library padding 
 urllib3==2.8.0          # CVE-2026-97687/97688/97689; constrain botocore/Qdrant.
 
 # === Web Framework (pour FastMCP Streamable HTTP) ===
-fastapi==0.139.2
+fastapi==0.161.1
 uvicorn[standard]==0.54.0
 starlette==1.7.0
 
