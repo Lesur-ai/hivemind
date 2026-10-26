@@ -24,7 +24,7 @@ dependencies = [
     "rich>=13.0",
     "prompt-toolkit>=3.0",
     "httpx>=0.28",
-    "httpx2==2.15.1",         # Owned MCP 2 transport clients; inference remains on httpx.
+    "httpx2==2.16.0",         # Owned MCP 2 transport clients; inference remains on httpx.
     "boto3>=1.40",
     "openai>=1.50",
     "python-dotenv>=1.0",
