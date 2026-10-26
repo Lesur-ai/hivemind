@@ -15,6 +15,59 @@ linked guides when installing or upgrading.
 
 ## [Unreleased] — Hivemind public release
 
+---
+
+## [1.6.5] — 2026-10-25
+
+Hivemind 1.6.5 is a dependency maintenance release for the 1.6 line.
+**Release identity.** Hivemind now reports runtime version `1.6.5`.
+The Python package version is also `1.6.5`.
+
+### Changed
+
+- Build the WAF with matching, immutable Caddy 2.11.7 builder/runtime images.
+  Keep the pinned Coraza and rate-limit plugins and production configuration.
+  This includes upstream reverse-proxy hardening and the fixes for 2.11.6's
+  POST/SSE streams cut off after one minute and HTTP/2 idle-stream resets.
+- Update httpx2 and httpcore2 together from 2.13.1 to 2.15.1 in Hivemind
+  and embedded Graph Memory. This fixes repeated Linux TLS trust setup on
+  OpenSSL older than 3.4, including the pinned OpenSSL 3.0.22 runtime.
+  The upstream CPU optimization primarily benefits long-lived clients; no
+  measured CPU or latency improvement is claimed for the per-call MCP bridge.
+  All unrelated resolved package versions are retained.
+
+### Upgrade
+
+Rebuild the Hivemind, embedded Graph Memory and WAF images from the same source.
+No new data migration, reindexing or reingestion is required. The 1.6.3 backup
+compatibility and downgrade requirements still apply; see the
+[upgrade checklist](docs/DEPLOYMENT.md#upgrade-to-163).
+
+Caddy now configures a nominal 16 KiB request-header limit (HTTP/1.1 parser
+read-ahead can tolerate some extra bytes). Large cookies or tokens can receive
+`431 Request Header Fields Too Large`; size them appropriately or explicitly
+set a reviewed `max_header_size` in the server configuration. Header names
+containing a dot are dropped by default. Custom WAF builds require Go 1.26.
+New one-minute idle read/write deadlines can affect stalled uploads or writes;
+2.11.7 fixes the regressions affecting POST/SSE and quiet HTTP/2 streams.
+Validate any operator-edited Caddyfile before restarting: stricter config
+validation can reject previously accepted configurations. Review `timeouts`
+and `expected_dot_headers` if the deployment needs explicit overrides.
+See the [upstream Caddy release notes](https://github.com/caddyserver/caddy/releases/tag/v2.11.7).
+
+The MCP bridge continues to honor operator `SSL_CERT_FILE`/`SSL_CERT_DIR`
+without enabling environment proxies. The CLI retains environment proxy
+support. httpx2 2.14's proxy/`NO_PROXY` validation changes also apply: check
+existing values when upgrading. No TLS certificate or hostname verification
+is disabled, and no authentication, protocol or storage feature is added.
+Integrators using their own httpx2 clients with `trust_env=False` on Linux
+now use OS trust and ignore `SSL_CERT_FILE`/`SSL_CERT_DIR`; pass an explicit
+CA context if those clients need operator-provided roots.
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary; the Portal extension seam is described in
+[`docs/EXTENSION_POINTS.md`](docs/EXTENSION_POINTS.md).
+See the [migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
 
 ---
 
