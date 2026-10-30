@@ -15,6 +15,18 @@ linked guides when installing or upgrading.
 
 ## [Unreleased] — Hivemind public release
 
+### Fixed
+
+- `space_create` now seeds the six-document standard MID bank whenever the
+  rules are the shipped standard rules, including when they are passed
+  explicitly (`--rules-file RULES/live-mem.standard.memory.bank.md`, as in the
+  README quickstart). Before this fix, only a space created without rules got
+  the bank. A space created with explicit standard rules started with an empty
+  bank, and its first consolidation could fail with `normal_create_without_body`.
+  Custom rules keep the empty bank.
+  **Upgrade:** existing spaces are unchanged. To repair one that has an empty
+  bank, write the standard documents with `mid_write` before consolidating.
+
 ---
 
 ## [1.6.5] — 2026-10-25
