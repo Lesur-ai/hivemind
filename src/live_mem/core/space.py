@@ -135,10 +135,10 @@ class SpaceService:
         # Resolve defaults in the shared service before any durable mutation.
         # The clone and Docker /app both ship this path; custom paths remain
         # authoritative and are never silently replaced after a read failure.
-        initial_bank = None
+        from .bank_template import STANDARD_BANK, STANDARD_RULES_SHA256
+
         if not rules.strip():
             from ..config import get_settings
-            from .bank_template import STANDARD_BANK, STANDARD_RULES_SHA256
 
             standard_path = Path("RULES/live-mem.standard.memory.bank.md")
             rules_path = Path(get_settings().default_rules_file or standard_path)
@@ -150,8 +150,11 @@ class SpaceService:
             rules = rules_path.read_text(encoding="utf-8")
             if not rules.strip():
                 return {"status": "error", "message": "Default rules file is empty"}
-            if hashlib.sha256(rules.encode("utf-8")).hexdigest() == STANDARD_RULES_SHA256:
-                initial_bank = STANDARD_BANK
+        # The bank template follows rule content, however the rules arrived:
+        # explicit standard rules (README quickstart) get the same seed.
+        initial_bank = None
+        if hashlib.sha256(rules.encode("utf-8")).hexdigest() == STANDARD_RULES_SHA256:
+            initial_bank = STANDARD_BANK
 
         # VULN-07 fix : valider les tailles des champs
         if len(rules) > MAX_RULES_SIZE:
