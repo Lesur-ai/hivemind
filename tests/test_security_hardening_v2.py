@@ -995,6 +995,12 @@ class TestLM2_26_DependencyBounds:
             "CVE-2026-69247"
         )
 
+    def test_pydantic_requires_2142_or_later(self, pyproject_content):
+        """Unlocked Core installs must get the patched Pydantic validator."""
+        match = re.search(r'"pydantic>=(\d+\.\d+\.\d+)"', pyproject_content)
+        assert match, "Missing Core Pydantic minimum version"
+        assert tuple(map(int, match.group(1).split("."))) >= (2, 14, 2)
+
     def test_graph_runtime_lock_pins_patched_cryptography(self):
         lock = GRAPH_REQUIREMENTS_LOCK.read_text(encoding="utf-8")
         match = re.search(r"^cryptography==(\d+\.\d+\.\d+)(?:\s|$)", lock, re.MULTILINE)
@@ -1010,7 +1016,8 @@ class TestLM2_26_DependencyBounds:
         expected = {
             "cryptography": ((50, 0, 0), "CVE-2026-69247"),
             "aiohttp": ((3, 14, 4), "CVE-2026-111063/111064, GHSA-2g87-pp6c-29x5"),
-            "pypdf": ((6, 21, 2), "CVE-2026-115572/115580/115585; GHSA-6c7f-9265-g8fw, GHSA-gmh7-3g9r-mjh5, GHSA-jr96-gvgh-j3r4"),
+            "pypdf": ((6, 21, 4), "CVE-2026-119203/119204/119205/119206/119207/119208/119209; GHSA-5849-834g-hvw5, GHSA-cggf-277g-3q54, GHSA-mfr5-77xh-9j7h, GHSA-42gh-23hr-vphw, GHSA-4vqv-7265-gm2w, GHSA-62m5-6wh8-28x7, GHSA-x3rh-gjgm-fmqc"),
+            "pydantic": ((2, 14, 2), "GHSA-qpmf-fgh3-ff25 / GHSA-3r8g-cqwr-jr29"),
             "h2": ((4, 4, 1), "GHSA-6hr6-w5qg-qmwg"),
             "PyJWT": ((2, 15, 1), "CVE-2026-101918 / library padding regression"),
             "urllib3": ((2, 8, 0), "CVE-2026-97687/97688/97689"),
@@ -1028,8 +1035,9 @@ class TestLM2_26_DependencyBounds:
             )
 
     @pytest.mark.parametrize("package,minimum", [
-        ("pypdf", (6, 21, 2)), ("h2", (4, 4, 1)),
+        ("pypdf", (6, 21, 4)), ("h2", (4, 4, 1)),
         ("pyjwt", (2, 15, 1)), ("urllib3", (2, 8, 0)),
+        ("pydantic", (2, 14, 2)),
     ])
     def test_document_dependency_floors_cover_root_and_embedded_locks(self, package, minimum):
         document = tomllib.loads(UV_LOCK.read_text(encoding="utf-8"))

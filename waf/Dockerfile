@@ -11,14 +11,14 @@
 # caddy-ratelimit testé. Toute mise à jour doit conserver les digests/commits.
 
 # Stage 1 : Build Caddy avec plugins
-FROM caddy:2.11.7-builder@sha256:8910fe662f448b860e8d16ef1c9a4f8946d3193bdc3e971bf0c55c9a2cf246f6 AS builder
+FROM caddy:2.11.7-builder@sha256:c4cd20eaa0b69112fd5d4f721ffc9671687e1d5d0b155c8620cf7546dbef94c0 AS builder
 
 RUN xcaddy build \
     --with github.com/corazawaf/coraza-caddy/v2@55c03d45dc552b6bbb493908d1af5d8969e864e0 \
     --with github.com/mholt/caddy-ratelimit@5625512f24f6f59d6f64fb3aafe5eecff0b286db
 
 # Stage 2 : Image finale
-FROM caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+FROM caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
 
 # Copier le binaire Caddy custom (avec Coraza + Rate Limit)
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy

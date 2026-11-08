@@ -78,6 +78,8 @@ class ConsolidationJob:
     guarantee: str = QUEUE_GUARANTEE
     progress: dict[str, Any] = field(default_factory=dict)
     kind: str = "consolidation"
+    # #1420: selective-maintenance ownership held from acceptance to settlement.
+    ticket: Any = field(default=None, repr=False, compare=False)
 
 
 class ConsolidationQueueService:
@@ -165,6 +167,12 @@ class ConsolidationQueueService:
                     if existing_id:
                         return self._job_payload(self._jobs[existing_id])
 
+                from .selective_maintenance import get_controller
+
+                # Ownership starts at acceptance, before any state exists, so a
+                # closed barrier refuses cleanly and an accepted job always
+                # keeps its right to finish.
+                ticket = get_controller().hold("mutation", space_id)
                 job_id = f"consol_{uuid.uuid4().hex}"
                 job = ConsolidationJob(
                     job_id=job_id,
@@ -180,6 +188,7 @@ class ConsolidationQueueService:
                         "batches_done": 0,
                         "current_batch": 0,
                     },
+                    ticket=ticket,
                 )
                 self._jobs[job_id] = job
 
@@ -295,6 +304,12 @@ class ConsolidationQueueService:
 
                 job = self._jobs[active_id]
 
+            if job.ticket is not None:
+                # The worker predates any later barrier closure: run the job
+                # under the ownership taken at acceptance, never a new one.
+                from .selective_maintenance import get_controller
+
+                get_controller().bind(job.ticket)
             completed_result = None
             try:
                 async def progress_callback(progress: dict) -> None:
@@ -465,6 +480,28 @@ class ConsolidationQueueService:
     def _finish_active_locked(self, space_id: str, job_id: str) -> None:
         if self._active_jobs.get(space_id) == job_id:
             self._active_jobs.pop(space_id, None)
+        job = self._jobs.get(job_id)
+        if job is not None and job.ticket is not None:
+            # Settle exactly once. Only a cancelled job leaves an unknown
+            # physical effect; an ordinary failure has settled its work.
+            from .selective_maintenance import get_controller
+
+            ticket, job.ticket = job.ticket, None
+            result = job.result or {}
+            compaction = result.get("auto_compaction")
+            # A cancelled consolidation, or a cancelled/unresolved automatic
+            # compaction recorded under the preserved consolidation result,
+            # leaves effects nobody can vouch for.
+            unresolved = (
+                isinstance(compaction, dict)
+                and (compaction.get("recovery_required") is True
+                     or compaction.get("status") == "cancelled")
+            )
+            get_controller().finish(
+                ticket,
+                unknown=result.get("failure_reason") == "consolidation_cancelled"
+                or unresolved,
+            )
         self._trim_history_locked()
 
     def _queue_position_locked(self, job: ConsolidationJob) -> int:

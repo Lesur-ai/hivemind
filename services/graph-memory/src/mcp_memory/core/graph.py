@@ -10,6 +10,7 @@ Gère toutes les opérations sur le graphe de connaissances :
 
 import asyncio
 import hashlib
+import inspect
 import json
 import sys
 from typing import Optional, List, Dict, Any
@@ -166,6 +167,63 @@ def _guard_graph_import(method):
     return guarded
 
 
+class _MutationResult:
+    """Observe deferred SDK outcomes before application error handling."""
+
+    def __init__(self, result, failed):
+        self._result = result
+        self._failed = failed
+
+    def __getattr__(self, name):
+        value = getattr(self._result, name)
+        if not callable(value):
+            return value
+
+        def observed(*args, **kwargs):
+            try:
+                result = value(*args, **kwargs)
+            except BaseException as error:
+                self._failed(error)
+                raise
+            if not inspect.isawaitable(result):
+                return result
+
+            async def completed():
+                try:
+                    return await result
+                except BaseException as error:
+                    self._failed(error)
+                    raise
+            return completed()
+        return observed
+
+    def __aiter__(self):
+        async def observed():
+            try:
+                async for record in self._result:
+                    yield record
+            except BaseException as error:
+                self._failed(error)
+                raise
+        return observed()
+
+
+class _MutationSession:
+    """Only the run API used by captured-state mutations is exposed."""
+
+    def __init__(self, session, failed):
+        self._session = session
+        self._failed = failed
+
+    async def run(self, *args, **kwargs):
+        try:
+            result = await self._session.run(*args, **kwargs)
+        except BaseException as error:
+            self._failed(error)
+            raise
+        return _MutationResult(result, self._failed)
+
+
 class GraphService:
     """
     Service de gestion du Knowledge Graph (Neo4j).
@@ -234,6 +292,45 @@ class GraphService:
                         session.cancel()
                     except Exception:
                         pass
+                    raise
+
+    @asynccontextmanager
+    async def mutation_session(self, scope: str) -> AsyncSession:
+        """Retain mutation ownership through auto-result commit/session close.
+
+        A cancelled Neo4j request can still commit remotely; cancellation and
+        transport errors therefore remain unknown even after local close/cancel.
+        """
+        from .selective_maintenance import get_controller
+
+        from neo4j import exceptions as driver_errors
+
+        rejected = getattr(driver_errors, "ClientError", None)
+
+        def known_rejection(error):
+            return isinstance(rejected, type) and isinstance(error, rejected)
+
+        controller = get_controller()
+        body_error = None
+
+        def outcome_unknown(error):
+            # Definitive server rejection is settled, including during close.
+            if known_rejection(error):
+                return False
+            # SDK errors have already marked the ticket at their origin. A
+            # logical caller refusal settles only after successful session exit.
+            return error is not body_error or not isinstance(error, Exception)
+
+        with controller.physical(scope, outcome_unknown=outcome_unknown) as ticket:
+            def sdk_failed(error):
+                if not known_rejection(error):
+                    controller.mark_unknown(ticket)
+
+            async with self.session() as session:
+                try:
+                    yield _MutationSession(session, sdk_failed)
+                except BaseException as error:
+                    body_error = error
                     raise
 
     @staticmethod
@@ -332,7 +429,7 @@ class GraphService:
         """
         ns = self._ns(memory_id)
         
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             # Vérifier si la mémoire existe déjà
             check = await session.run(
                 "MATCH (m:Memory {id: $id}) RETURN m",
@@ -426,7 +523,7 @@ class GraphService:
         conditional write also verifies incarnation, previous state and the
         absence of documents. After freeze only an exact replay is admitted.
         """
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             result = await session.run(
                 "MATCH (m:Memory {id: $id}) RETURN m", id=memory_id
             )
@@ -494,7 +591,7 @@ class GraphService:
         Returns:
             La mémoire mise à jour, ou None si non trouvée.
         """
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             # Construire dynamiquement la clause SET
             set_parts = []
             params = {"id": memory_id}
@@ -541,7 +638,7 @@ class GraphService:
         """
         ns = self._ns(memory_id)
         
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             # Supprimer tous les nœuds du namespace
             # Les labels dynamiques ne sont pas supportés directement,
             # donc on utilise apoc ou on supprime par propriété memory_id
@@ -817,7 +914,7 @@ class GraphService:
         """Publish durable completion only after migration and DDL succeeded."""
 
         try:
-            async with self.session() as session:
+            async with self.mutation_session("*") as session:
                 result = await session.run(
                     Query(
                         """
@@ -913,7 +1010,7 @@ class GraphService:
                 self._doc_migration_marker_ready = True
             if not self._doc_source_normalization_done:
                 try:
-                    async with self.session() as session:
+                    async with self.mutation_session("*") as session:
                         while True:
                             result = await session.run(
                                 Query(
@@ -1025,7 +1122,7 @@ class GraphService:
         if not self._document_schema_is_ready():
             await self.ensure_document_constraints()
 
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             # Neo4j n'accepte que les types primitifs, convertir metadata en JSON string
             metadata_json = json.dumps(metadata) if metadata else "{}"
             # source_path normalisé : null si absent (compatibilité contrainte d'unicité)
@@ -1104,7 +1201,7 @@ class GraphService:
         UNIQUEMENT après succès de toutes les étapes (Neo4j + Qdrant). C'est ce
         marqueur durable qui empêche un faux `skipped` sur ingestion partielle.
         """
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             result = await session.run(
                 """
                 MATCH (d:Document {id: $doc_id, memory_id: $memory_id})
@@ -1141,7 +1238,7 @@ class GraphService:
         2. Le nouveau document reçoit le source_path canonique et passe en status 'succeeded'.
         """
         norm_source_path = self.normalize_source_path(canonical_source_path)
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             result = await session.run(
                 """
                 MATCH (old:Document {id: $old_doc_id, memory_id: $memory_id})
@@ -1655,7 +1752,7 @@ class GraphService:
         3. Les entités orphelines (non mentionnées par d'autres documents)
         4. Les relations RELATED_TO impliquant des entités orphelines
         """
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             # D'abord, récupérer les entités mentionnées UNIQUEMENT par ce document
             # (celles qui deviendront orphelines après suppression)
             orphan_result = await session.run(
@@ -1765,7 +1862,7 @@ class GraphService:
         relations_merged = 0
         occurrence_rows = persisted_rows(extraction, memory_id, doc_id)
 
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             if occurrence_rows:
                 # Same generation-scoped ID with another annotation (or owner)
                 # is a conflict: refuse the candidate before any graph write.
@@ -2676,7 +2773,7 @@ class GraphService:
             "mentions": 0
         }
         
-        async with self.session() as session:
+        async with self.mutation_session(memory_id) as session:
             # 1. Recréer le nœud Memory
             await self._run_consumed(
                 session,

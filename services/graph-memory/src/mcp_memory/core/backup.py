@@ -458,7 +458,7 @@ class BackupService:
         
         for filename, content, content_type in files_to_upload:
             key = f"{backup_prefix}/{filename}"
-            self._storage._client.put_object(
+            self._storage._write_call(self._storage._client.put_object,
                 Bucket=self._storage._bucket,
                 Key=key,
                 Body=content,
@@ -1174,7 +1174,7 @@ class BackupService:
                 # Upload directement avec la clé originale
                 try:
                     content_type = self._storage._guess_content_type(doc_filename)
-                    self._storage._client.put_object(
+                    self._storage._write_call(self._storage._client.put_object,
                         Bucket=self._storage._bucket,
                         Key=s3_key,
                         Body=doc_content,
@@ -1281,7 +1281,7 @@ class BackupService:
         # Fixed names, not manifest-provided deletion targets. Delete the
         # manifest last so a partial failure can be retried with ownership proof.
         for filename in files:
-            self._storage._client.delete_object(
+            self._storage._write_call(self._storage._client.delete_object,
                 Bucket=self._storage._bucket, Key=f"{prefix}/{filename}"
             )
         result = {"deleted_count": len(files), "error_count": 0}

@@ -99,8 +99,8 @@ class TokenManager:
             expires_at = datetime.utcnow() + timedelta(days=expires_in_days)
         
         # Stocker dans Neo4j
-        async with self.graph.session() as session:
-            await session.run(
+        async with self.graph.mutation_session("*") as session:
+            await self.graph._run_consumed(session,
                 """
                 CREATE (t:Token {
                     hash: $hash,
@@ -186,7 +186,7 @@ class TokenManager:
         Returns:
             True si révoqué, False si non trouvé
         """
-        async with self.graph.session() as session:
+        async with self.graph.mutation_session("*") as session:
             result = await session.run(
                 """
                 MATCH (t:Token {hash: $hash})
@@ -269,7 +269,7 @@ class TokenManager:
         Returns:
             Dict avec les nouvelles memory_ids, ou None si token non trouvé
         """
-        async with self.graph.session() as session:
+        async with self.graph.mutation_session("*") as session:
             # Récupérer le token
             result = await session.run(
                 "MATCH (t:Token {hash: $hash, is_active: true}) RETURN t",
@@ -298,7 +298,7 @@ class TokenManager:
                 new_memories = sorted(memory_set)
             
             # Mettre à jour dans Neo4j
-            await session.run(
+            await self.graph._run_consumed(session,
                 """
                 MATCH (t:Token {hash: $hash})
                 SET t.memory_ids = $memory_ids, t.updated_at = datetime()
@@ -342,7 +342,7 @@ class TokenManager:
                 f"Invalid permissions: {invalid}. Valid values: {valid_permissions}"
             )
         
-        async with self.graph.session() as session:
+        async with self.graph.mutation_session("*") as session:
             # Récupérer le token
             result = await session.run(
                 "MATCH (t:Token {hash: $hash, is_active: true}) RETURN t",
@@ -357,7 +357,7 @@ class TokenManager:
             previous_permissions = list(node.get("permissions", []))
             
             # Mettre à jour dans Neo4j
-            await session.run(
+            await self.graph._run_consumed(session,
                 """
                 MATCH (t:Token {hash: $hash})
                 SET t.permissions = $permissions, t.updated_at = datetime()
@@ -382,7 +382,7 @@ class TokenManager:
         email: str
     ) -> Optional[dict]:
         """Met à jour l'email d'un token."""
-        async with self.graph.session() as session:
+        async with self.graph.mutation_session("*") as session:
             result = await session.run(
                 "MATCH (t:Token {hash: $hash, is_active: true}) RETURN t",
                 hash=token_hash
@@ -392,7 +392,7 @@ class TokenManager:
                 return None
             node = record["t"]
             previous_email = node.get("email")
-            await session.run(
+            await self.graph._run_consumed(session,
                 "MATCH (t:Token {hash: $hash}) SET t.email = $email, t.updated_at = datetime()",
                 hash=token_hash, email=email
             )

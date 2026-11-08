@@ -192,6 +192,10 @@ async def test_existing_record_is_never_overwritten_and_conflict_precedes_entity
         with pytest.raises(TemporalOccurrenceConflict, match="^temporal_occurrence_conflict$"):
             await service.add_entities_and_relations(MEMORY, DOC_A, extraction)
         assert len(session.calls) == 1 and "WHERE o.id IN $ids" in session.calls[0][0]
+        from mcp_memory.core.selective_maintenance import get_controller
+        controller = get_controller()
+        assert controller.status()["unknown"] == 0
+        assert controller.pause(str(uuid.uuid4()), ["*"], "background")["state"] == "background_paused"
         return
     result = await service.add_entities_and_relations(MEMORY, DOC_A, extraction)
     assert result["occurrences_stored"] == 1

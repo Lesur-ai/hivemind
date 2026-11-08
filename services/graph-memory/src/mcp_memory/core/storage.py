@@ -35,6 +35,35 @@ from .validators import MAX_INGEST_SIZE_BYTES, VALID_MEMORY_ID, validate_documen
 _redact_proxy_errors = redact_proxy_errors_async
 
 
+def _s3_outcome_unknown(error: BaseException) -> bool:
+    """A first-attempt 4xx rejection settles; retries/timeouts/5xx do not."""
+    from botocore.exceptions import ParamValidationError, NoCredentialsError
+
+    if isinstance(error, (ParamValidationError, NoCredentialsError)):
+        return False  # static-client serialization/signing refused before dispatch
+    if not isinstance(error, ClientError):
+        return True
+    response = error.response
+    metadata = response.get("ResponseMetadata", {})
+    if metadata.get("RetryAttempts", 0) != 0:
+        return True  # an earlier attempt may still have an unknown effect
+    status = metadata.get("HTTPStatusCode")
+    code = response.get("Error", {}).get("Code")
+    return not (type(status) is int and 400 <= status < 500 and status != 408
+                and code not in {"RequestTimeout", "RequestTimeoutException", "InternalError",
+                                 "InternalFailure", "ServiceUnavailable"})
+
+
+def _record_s3_retry_uncertainty(response) -> None:
+    # A later response cannot certify settlement of an earlier timed-out SDK
+    # attempt. Fail closed without replacing the existing client/retry policy.
+    if isinstance(response, dict) and response.get("ResponseMetadata", {}).get("RetryAttempts", 0) != 0:
+        from .selective_maintenance import get_controller
+
+        controller = get_controller()
+        controller.mark_unknown(controller.current())
+
+
 class StorageService:
     """
     Service de stockage S3 pour les documents.
@@ -176,6 +205,37 @@ class StorageService:
         return f"{memory_id}/documents/{filename}"
     
     @staticmethod
+    def _write_scope(key: str) -> str:
+        # Backups can use a configured prefix, including multiple segments.
+        prefix = get_settings().s3_backup_prefix.strip("/")
+        if prefix and key.startswith(prefix + "/"):
+            scope = key[len(prefix) + 1:].split("/", 1)[0]
+        else:
+            scope = key.split("/", 1)[0]
+        return "*" if not scope or scope.startswith("_") else scope
+
+    @staticmethod
+    def _admit_write(key: str) -> None:
+        """Preflight only; raw dispatch must use _write_call as well."""
+        if key == "_health_check/test.txt":
+            return
+        from .selective_maintenance import get_controller
+
+        get_controller().check_physical(StorageService._write_scope(key))
+
+    def _write_call(self, func, /, **kwargs):
+        """Own the synchronous SDK call even when its caller handles errors."""
+        key = kwargs["Key"]
+        if key == "_health_check/test.txt":
+            return func(**kwargs)
+        from .selective_maintenance import get_controller
+
+        with get_controller().physical(self._write_scope(key), outcome_unknown=_s3_outcome_unknown):
+            response = func(**kwargs)
+            _record_s3_retry_uncertainty(response)
+            return response
+
+    @staticmethod
     def compute_hash(content: bytes) -> str:
         """Calcule le hash SHA256 d'un contenu."""
         return hashlib.sha256(content).hexdigest()
@@ -230,8 +290,9 @@ class StorageService:
             'uploaded-at': datetime.utcnow().isoformat()
         })
         
+        self._admit_write(key)
         try:
-            self._client.put_object(
+            self._write_call(self._client.put_object,
                 Bucket=self._bucket,
                 Key=key,
                 Body=content,
@@ -330,8 +391,9 @@ class StorageService:
         """
         key = self.document_key(memory_id, key_or_uri)
         
+        self._admit_write(key)
         try:
-            self._client.delete_object(Bucket=self._bucket, Key=key)
+            self._write_call(self._client.delete_object, Bucket=self._bucket, Key=key)
             print(f"🗑️ [S3] Document deleted: {key}", file=sys.stderr)
             return True
             
@@ -353,7 +415,8 @@ class StorageService:
         if type(text) is not str:
             raise ValueError("extracted text must be a string")
         content = text.encode("utf-8")
-        self._client.put_object(
+        self._admit_write(key)
+        self._write_call(self._client.put_object,
             Bucket=self._bucket,
             Key=key,
             Body=content,
@@ -389,8 +452,9 @@ class StorageService:
         from .temporal import extracted_text_key
 
         key = extracted_text_key(memory_id, doc_id)
+        self._admit_write(key)
         try:
-            self._client.delete_object(Bucket=self._bucket, Key=key)
+            self._write_call(self._client.delete_object, Bucket=self._bucket, Key=key)
             return True
         except ClientError as e:
             print(f"❌ [S3] Deletion error: {redact_proxy_secrets(str(e))}", file=sys.stderr)
@@ -418,10 +482,12 @@ class StorageService:
             except ValueError:
                 raise ValueError("Unexpected object in the retained text namespace") from None
             keys.append(key)
+        for key in keys:
+            self._admit_write(key)
         deleted_count = error_count = 0
         for key in keys:
             try:
-                self._client.delete_object(Bucket=self._bucket, Key=key)
+                self._write_call(self._client.delete_object, Bucket=self._bucket, Key=key)
                 deleted_count += 1
             except ClientError as e:
                 error_count += 1
@@ -868,8 +934,10 @@ class StorageService:
             for reference in keys
         ]
         for key in document_keys:
+            self._admit_write(key)
+        for key in document_keys:
             try:
-                self._client.delete_object(Bucket=self._bucket, Key=key)
+                self._write_call(self._client.delete_object, Bucket=self._bucket, Key=key)
                 deleted_count += 1
                 print(f"🗑️ [S3] Deleted: {key}", file=sys.stderr)
             except ClientError as e:

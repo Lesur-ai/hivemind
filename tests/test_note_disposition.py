@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from unittest.mock import AsyncMock
 
 import pytest
 
+from hivemind_inference.records import ChatResult
 from live_mem.core import consolidator as consolidator_module
 from live_mem.core.consolidator import (
     _NORMAL_MODEL_COMPLETION_FAULT_REASONS,
@@ -254,33 +256,54 @@ async def test_corrective_completion_replaces_the_incomplete_plan_in_full(
     assert all(key not in storage.objects for key in note_keys)
 
 
-async def test_second_incomplete_plan_fails_the_batch_and_never_requests_a_third(
+async def test_second_incomplete_plan_isolates_the_batch_and_its_poison_note_never_gets_a_third(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     storage = RecordingStorage()
     _seed_bank(storage)
     note_keys = _seed_notes(storage, 2)
     before_bank = storage.objects[f"{SPACE}/bank/facts.md"]
     _bind_direct_local(monkeypatch, storage)
+    caplog.set_level(logging.WARNING, logger="live_mem.consolidator")
     service = _service()
     service._batch_size = 2
     service._validation_enabled = False
     service._bank_file_max_size = 35000
 
     incomplete = _plan([_edit([1])])
-    complete = _plan([_edit([1, 2])])
+    # #1769: the twice-refused batch is replayed note by note; its first note
+    # alone is refused twice too (no disposition), so it is the poison note.
+    unclassified_alone = _plan()
+    complete = _plan([_edit([1])])
     service._call_llm = AsyncMock(
-        side_effect=[_ok(incomplete), _ok(incomplete), _ok(complete)]
+        side_effect=[
+            _ok(incomplete),
+            _ok(incomplete),
+            _ok(unclassified_alone),
+            _ok(unclassified_alone),
+            _ok(complete),
+        ]
     )
 
     result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
 
-    # Two application completions at most: the valid third answer is never asked for.
-    assert service._call_llm.await_count == 2
+    # Two completions at most per unit: the valid third answer for the poison
+    # note is never asked for.
+    assert service._call_llm.await_count == 4
     assert result["status"] == "error"
     assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "plan_validation"
     assert result["failed_batch"] == 1
-    assert {"reason": "normal_notes_unclassified", "missing_notes": [2]} in result[
+    assert result["failed_note"] == 1
+    assert result["isolated_batches"] == 1
+    # The batch-level omission is reported by the isolation log line; the run
+    # report carries the poison sub-batch's own refusal.
+    isolation = next(
+        r.getMessage() for r in caplog.records if "isolating it into" in r.getMessage()
+    )
+    assert '{"missing_notes":[2],"reason":"normal_notes_unclassified"}' in isolation
+    assert {"reason": "normal_notes_unclassified", "missing_notes": [1]} in result[
         "operation_failures"
     ]
     assert result["notes_deleted"] == 0
@@ -310,16 +333,23 @@ async def test_rejected_corrective_completion_still_counts_its_usage(
                 "operation_failures": [{"reason": "invalid_normal_root_schema"}],
                 "usage": {"total_tokens": 7, "prompt_tokens": 5, "completion_tokens": 2},
             },
+            # #1769: the schema refusal of the correction is a model form
+            # fault, so both notes are then replayed alone and pass.
+            _ok(_plan([_edit([1])]), total=5),
+            _ok(_plan([_edit([1])]), total=5),
         ]
     )
 
     result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
 
-    assert result["status"] == "error"
-    assert result["failure_reason"] == "batch_llm_failed"
-    assert result["llm_tokens_used"] == 17
-    assert result["llm_prompt_tokens"] == 14
-    assert result["llm_completion_tokens"] == 3
+    assert result["status"] == "ok"
+    assert result["isolated_batches"] == 1
+    # The rejected correction (7) is still counted, exactly once, next to the
+    # first refusal (10) and the two single-note completions (5 + 5).
+    assert result["llm_tokens_used"] == 27
+    assert result["llm_prompt_tokens"] == 22
+    assert result["llm_completion_tokens"] == 5
+    assert result["isolation_llm_tokens_used"] == 10
 
 
 async def test_disposition_overlap_gets_the_single_corrective_completion(
@@ -830,6 +860,9 @@ async def test_failure_before_any_mutation_on_an_all_discarded_first_batch_is_er
 
     assert result["status"] == "error"
     assert result["failure_reason"] == "batch_write_failed"
+    # The plan was valid: the failure belongs to the write stage, even though
+    # this all-discarded batch had nothing durable to change.
+    assert result["failure_stage"] == "persistence"
 
 
 async def test_failure_after_a_prepared_write_stays_partial(
@@ -850,6 +883,7 @@ async def test_failure_after_a_prepared_write_stays_partial(
 
     assert result["status"] == "partial"
     assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "persistence"
 
 
 # ── deleted_note_keys: exact selection only ──────────────────────────────────
@@ -1395,18 +1429,31 @@ async def test_second_form_fault_refuses_the_batch_with_closed_diagnostics_in_th
     service._bank_file_max_size = 35000
 
     faulty = _plan([_edit([1, 2], content=_SETEXT_BODY)])
-    valid_but_never_requested = _plan([_edit([1, 2])])
+    # #1769: the twice-refused batch is replayed note by note; its first note
+    # alone repeats the same fault twice and stops the run as the poison note.
+    faulty_alone = _plan([_edit([1], content=_SETEXT_BODY)])
+    valid_but_never_requested = _plan([_edit([1])])
     service._call_llm = AsyncMock(
-        side_effect=[_ok(faulty), _ok(faulty), _ok(valid_but_never_requested)]
+        side_effect=[
+            _ok(faulty),
+            _ok(faulty),
+            _ok(faulty_alone),
+            _ok(faulty_alone),
+            _ok(valid_but_never_requested),
+        ]
     )
 
     result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
 
-    # Absolute bound: two completions, the valid third answer is never asked for.
-    assert service._call_llm.await_count == 2
+    # Absolute bound: two completions per unit, the valid third answer for the
+    # poison note is never asked for.
+    assert service._call_llm.await_count == 4
     assert result["status"] == "error"
     assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "plan_validation"
     assert result["failed_batch"] == 1
+    assert result["failed_note"] == 1
+    assert result["isolated_batches"] == 1
     assert {
         "reason": "invalid_normal_replacement_structure",
         "file_index": 0,
@@ -1428,6 +1475,19 @@ async def test_second_form_fault_refuses_the_batch_with_closed_diagnostics_in_th
     assert '"detail":"setext_heading"' in error
     assert '"filename":"facts.md"' in error
     assert "injected hierarchy" not in error
+    # The batch-level refusal that triggered the replay is logged once, with
+    # the same closed diagnostics and no content.
+    isolation = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "isolating it into" in r.getMessage()
+    ]
+    assert len(isolation) == 1
+    assert "Batch 1/1 refused twice" in isolation[0]
+    assert "2 single-note sub-batch(es)" in isolation[0]
+    assert "reasons=['invalid_normal_replacement_structure']" in isolation[0]
+    assert '"detail":"setext_heading"' in isolation[0]
+    assert "injected hierarchy" not in isolation[0]
 
 
 async def test_environment_fault_refuses_at_once_without_a_corrective_completion(
@@ -1456,6 +1516,9 @@ async def test_environment_fault_refuses_at_once_without_a_corrective_completion
     assert service._call_llm.await_count == 1
     assert result["status"] == "error"
     assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "plan_validation"
+    assert result["isolated_batches"] == 0
+    assert "failed_note" not in result
     assert {
         "reason": "invalid_normal_source_structure",
         "file_index": 0,
@@ -1495,6 +1558,326 @@ async def test_mixed_model_and_environment_faults_refuse_at_once(
     assert result["status"] == "error"
     reasons = {failure["reason"] for failure in result["operation_failures"]}
     assert {"invalid_normal_replacement_structure", "invalid_normal_source_structure"} <= reasons
+    assert storage.objects == before
+    assert all(key in storage.objects for key in note_keys)
+    assert result["isolated_batches"] == 0
+
+
+# ── #1769 — a batch refused twice for form faults is replayed note by note ──
+# A residual model form fault on a multi-note batch no longer stops the run:
+# the batch is replayed as single-note sub-batches, in order, each on the
+# normal path.  Only a single note refused twice (the poison note) stops it.
+
+_NOTE_DETAIL_RE = re.compile(r"Note (\d+) detail")
+
+
+def _prompted_notes(messages: list[dict]) -> list[int]:
+    """Run-level note numbers whose content reached this completion's prompt."""
+    return sorted(
+        {
+            int(n)
+            for message in messages
+            for n in _NOTE_DETAIL_RE.findall(str(message.get("content", "")))
+        }
+    )
+
+
+def _omits_last_note(count: int) -> dict:
+    return _plan([_edit(list(range(1, count)))])
+
+
+def _duplicates_the_target(count: int) -> dict:
+    return _plan(
+        [
+            _edit(list(range(1, count))),
+            _edit([count], heading="## Section 2"),
+        ]
+    )
+
+
+def _isolation_llm(
+    calls: list[list[int]],
+    batch_fault,
+    *,
+    faulty_first_note: int = 1,
+    poison: int | None = None,
+    discard_alone: bool = False,
+):
+    """Fake chat: the batch holding ``faulty_first_note`` always gets the faulty
+    plan, every other batch and every note alone passes, except ``poison``.
+    With ``discard_alone`` a note alone is declared useless (no bank write)."""
+
+    async def call_llm(messages: list[dict]) -> dict:
+        notes = _prompted_notes(messages)
+        calls.append(notes)
+        if len(notes) > 1 and faulty_first_note in notes:
+            return _ok(batch_fault(len(notes)), total=10)
+        if notes == [poison]:
+            return _ok(_plan(), total=3)
+        if discard_alone and len(notes) == 1:
+            return _ok(_plan(discarded=[_discard(1)]), total=5)
+        content = "- facts " + ",".join(str(n) for n in notes)
+        return _ok(_plan([_edit(list(range(1, len(notes) + 1)), content=content)]), total=5)
+
+    return call_llm
+
+
+def _isolation_service(batch_size: int) -> object:
+    service = _service()
+    service._batch_size = batch_size
+    service._validation_enabled = False
+    service._bank_file_max_size = 35000
+    return service
+
+
+@pytest.mark.parametrize(
+    ("batch_fault", "batch_reason"),
+    [
+        (_omits_last_note, "normal_notes_unclassified"),
+        (_duplicates_the_target, "duplicate_normal_target"),
+    ],
+)
+async def test_batch_refused_twice_for_form_faults_is_replayed_note_by_note_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    batch_fault,
+    batch_reason: str,
+) -> None:
+    storage = RecordingStorage()
+    _seed_bank(storage)
+    note_keys = _seed_notes(storage, 7)
+    _bind_direct_local(monkeypatch, storage)
+    caplog.set_level(logging.WARNING, logger="live_mem.consolidator")
+    service = _isolation_service(batch_size=5)
+    calls: list[list[int]] = []
+    service._call_llm = _isolation_llm(calls, batch_fault)
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    # The batch got its two completions, then each of its notes alone, in
+    # order, then the run resumed at the next batch.
+    assert calls == [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5], [1], [2], [3], [4], [5], [6, 7]]
+    assert result["status"] == "ok"
+    assert "failure_reason" not in result
+    assert "failed_batch" not in result
+    assert "failed_note" not in result
+    assert "failure_stage" not in result
+    assert "operation_failures" not in result
+    assert result["isolated_batches"] == 1
+    assert result["batches_completed"] == result["batches_total"] == 2
+    assert result["notes_applied"] == [1, 2, 3, 4, 5, 6, 7]
+    assert result["notes_deleted"] == 7
+    assert all(key not in storage.objects for key in note_keys)
+    bank = storage.objects[f"{SPACE}/bank/facts.md"]
+    positions = [bank.index(f"- facts {n}\n") for n in ("1", "2", "3", "4", "5", "6,7")]
+    assert positions == sorted(positions)
+    # Isolation is paid and bounded: 2 batch completions + one per note + the
+    # next batch; the five single-note completions are the isolation cost.
+    assert result["llm_tokens_used"] == 10 + 10 + 5 * 5 + 5
+    assert result["isolation_llm_tokens_used"] == 5 * 5
+    isolation = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "isolating it into" in r.getMessage()
+    ]
+    assert len(isolation) == 1
+    assert "Batch 1/2 refused twice" in isolation[0]
+    assert "5 single-note sub-batch(es)" in isolation[0]
+    assert f"reasons=['{batch_reason}']" in isolation[0]
+    assert "Note 1 detail" not in isolation[0]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_schema_refusal_after_the_correction_is_replayed_note_by_note_through_call_llm(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Review F1: a parsed plan the real ``_call_llm`` gate rejects for the
+    closed grammar (``invalid_normal_schema``) twice is a model form fault too;
+    only the provider seam is faked here."""
+    storage = RecordingStorage()
+    _seed_bank(storage)
+    note_keys = _seed_notes(storage, 3)
+    _bind_direct_local(monkeypatch, storage)
+    caplog.set_level(logging.WARNING, logger="live_mem.consolidator")
+    service = _isolation_service(batch_size=3)
+    calls: list[list[int]] = []
+
+    async def complete_chat(messages, output_budget, *, retry_policy="bounded", normal_json=False):
+        notes = _prompted_notes(messages)
+        calls.append(notes)
+        if len(notes) > 1:
+            plan = {"file_edits": [], "synthesis": "x"}  # discarded_notes missing
+        else:
+            plan = _plan([_edit([1], content=f"- facts {notes[0]}")])
+        return ChatResult(
+            text=json.dumps(plan),
+            configured_model="test-model",
+            model_evidence="configured_only",
+            finish_reason="stop",
+        )
+
+    service._complete_chat = complete_chat
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    assert calls == [[1, 2, 3], [1, 2, 3], [1], [2], [3]]
+    assert result["status"] == "ok"
+    assert result["isolated_batches"] == 1
+    assert result["notes_applied"] == [1, 2, 3]
+    assert all(key not in storage.objects for key in note_keys)
+    bank = storage.objects[f"{SPACE}/bank/facts.md"]
+    positions = [bank.index(f"- facts {n}\n") for n in (1, 2, 3)]
+    assert positions == sorted(positions)
+    isolation = next(
+        r.getMessage() for r in caplog.records if "isolating it into" in r.getMessage()
+    )
+    assert "reasons=['invalid_normal_root_schema']" in isolation
+
+
+async def test_poison_note_stops_the_run_and_only_the_prefix_is_consumed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = RecordingStorage()
+    _seed_bank(storage)
+    note_keys = _seed_notes(storage, 7)
+    _bind_direct_local(monkeypatch, storage)
+    service = _isolation_service(batch_size=5)
+    calls: list[list[int]] = []
+    service._call_llm = _isolation_llm(calls, _omits_last_note, poison=3)
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    # Note 3 alone got its two completions; nothing after it was prompted.
+    assert calls == [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5], [1], [2], [3], [3]]
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "plan_validation"
+    assert result["failed_batch"] == 1
+    assert result["failed_note"] == 3
+    assert result["isolated_batches"] == 1
+    assert result["batches_completed"] == 0
+    assert {"reason": "normal_notes_unclassified", "missing_notes": [1]} in result[
+        "operation_failures"
+    ]
+    # Only the committed prefix (notes 1 and 2) is integrated and deleted.
+    assert result["notes_applied"] == [1, 2]
+    assert result["notes_deleted"] == 2
+    assert result["notes_remaining"] == 5
+    assert [key in storage.objects for key in note_keys] == [
+        False, False, True, True, True, True, True,
+    ]
+    bank = storage.objects[f"{SPACE}/bank/facts.md"]
+    assert "- facts 1\n" in bank and "- facts 2\n" in bank
+    assert "- facts 3" not in bank
+    assert result["llm_tokens_used"] == 10 + 10 + 5 + 5 + 3 + 3
+    assert result["isolation_llm_tokens_used"] == 5 + 5 + 3 + 3
+    assert "stopped at batch 1/2 (batch_write_failed)" in result["message"]
+    assert "stopped at note 3." in result["message"]
+
+
+async def test_poison_after_a_discarded_prefix_is_partial_not_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Notes replayed alone and declared useless write nothing to the bank, but
+    they are consumed: a later poison note cannot be reported as ``error``
+    ("nothing changed") while the prefix is deleted."""
+    storage = RecordingStorage()
+    _seed_bank(storage)
+    note_keys = _seed_notes(storage, 5)
+    _bind_direct_local(monkeypatch, storage)
+    service = _isolation_service(batch_size=5)
+    calls: list[list[int]] = []
+    service._call_llm = _isolation_llm(
+        calls, _omits_last_note, poison=3, discard_alone=True
+    )
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    assert calls == [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5], [1], [2], [3], [3]]
+    assert result["status"] == "partial"
+    assert result["failed_note"] == 3
+    assert result["notes_discarded"] == [1, 2]
+    assert result["notes_deleted"] == 2
+    assert [key in storage.objects for key in note_keys] == [False, False, True, True, True]
+
+
+async def test_persistence_failure_of_an_isolated_note_keeps_the_written_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A note replayed alone that fails after its bank write invalidates the
+    earlier note's readback evidence, exactly like a later batch would: the
+    prefix written by note 1 is retained, never deleted."""
+    storage = RecordingStorage()
+    _seed_bank(storage)
+    note_keys = _seed_notes(storage, 3)
+    _bind_direct_local(monkeypatch, storage)
+    service = _isolation_service(batch_size=3)
+    calls: list[list[int]] = []
+    service._call_llm = _isolation_llm(calls, _omits_last_note)
+    write_results = service._write_results
+    writes = 0
+
+    async def fail_after_the_second_write(**kwargs):
+        nonlocal writes
+        writes += 1
+        result = await write_results(**kwargs)
+        if writes == 2:
+            raise RuntimeError("injected after the bank write")
+        return result
+
+    service._write_results = fail_after_the_second_write
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    assert calls == [[1, 2, 3], [1, 2, 3], [1], [2]]
+    assert "- facts 2\n" in storage.objects[f"{SPACE}/bank/facts.md"]
+    assert result["status"] == "partial"
+    assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "persistence"
+    assert result["failed_batch"] == 1
+    assert result["failed_note"] == 2
+    assert result["notes_deleted"] == 0
+    assert result["notes_delete_failed"] == 1
+    assert all(key in storage.objects for key in note_keys)
+
+
+async def test_environment_fault_after_a_form_fault_correction_stays_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The batch is refused a second time, but for an environment fault: the
+    model cannot repair the bank, so no note-by-note replay is attempted."""
+    storage = RecordingStorage()
+    _seed_bank(storage)
+    storage.objects[f"{SPACE}/bank/broken.md"] = "# Broken\n\n## Part\n```\nopen fence\n"
+    note_keys = _seed_notes(storage, 2)
+    before = dict(storage.objects)
+    _bind_direct_local(monkeypatch, storage)
+    service = _isolation_service(batch_size=2)
+    service._call_llm = AsyncMock(
+        side_effect=[
+            _ok(_plan([_edit([1])])),
+            _ok(_plan([_edit([1, 2], heading="## Part", filename="broken.md")])),
+            _ok(_plan([_edit([1])])),
+            _ok(_plan([_edit([1])])),
+        ]
+    )
+
+    result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
+
+    assert service._call_llm.await_count == 2
+    assert result["status"] == "error"
+    assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "plan_validation"
+    assert result["failed_batch"] == 1
+    assert "failed_note" not in result
+    assert result["isolated_batches"] == 0
+    assert {
+        "reason": "invalid_normal_source_structure",
+        "file_index": 0,
+        "operation_index": 0,
+        "filename": "broken.md",
+    } in result["operation_failures"]
     assert storage.objects == before
     assert all(key in storage.objects for key in note_keys)
 
@@ -1563,17 +1946,34 @@ async def test_h1_only_creates_kept_by_the_correction_refuse_the_batch_and_keep_
     before = dict(storage.objects)
     service = _issue_service()
     h1_only = _plan([_issue_create(name, f"{title}\n") for name, title in _ISSUE_FILES])
-    service._call_llm = AsyncMock(side_effect=[_ok(_issue_split_plan()), _ok(h1_only)])
+    # #1769: the twice-refused batch is replayed note by note; the first note
+    # alone keeps answering with title-only creates and is the poison note.
+    h1_only_alone = _plan(
+        [
+            {**_issue_create(name, f"{title}\n"), "notes": [1]}
+            for name, title in _ISSUE_FILES
+        ]
+    )
+    service._call_llm = AsyncMock(
+        side_effect=[
+            _ok(_issue_split_plan()),
+            _ok(h1_only),
+            _ok(h1_only_alone),
+            _ok(h1_only_alone),
+        ]
+    )
 
     result = await service.consolidate(space_id=SPACE, enforce_cooldown=False)
 
-    assert service._call_llm.await_count == 2
+    assert service._call_llm.await_count == 4
     assert result["notes_deleted"] == 0
     assert _bank_keys(storage) == []
     assert storage.objects == before
     assert all(key in storage.objects for key in note_keys)
     assert result["status"] == "error"
     assert result["failure_reason"] == "batch_write_failed"
+    assert result["failure_stage"] == "plan_validation"
+    assert result["failed_note"] == 1
     assert [f["reason"] for f in result["operation_failures"]] == [
         "normal_create_without_body"
     ] * len(_ISSUE_FILES)

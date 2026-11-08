@@ -67,11 +67,25 @@ async def test_second_fault_after_nonterminal_answer_never_buys_a_third(
         second = _completion({"file_edits": []})
     else:
         second = _completion(plan, finish=second_fault)
-    service._complete_chat = AsyncMock(side_effect=[first, second, _completion(plan)])
+    side_effect = [first, second, _completion(plan)]
+    expected_calls = 2
+    if second_fault == "schema":
+        # #1769: the correction is refused for a model form fault only, so the
+        # batch itself never gets a third completion but is replayed note by
+        # note; its first note alone repeats the schema fault twice (poison).
+        side_effect = [first, second, second, second, _completion(plan)]
+        expected_calls = 4
+    service._complete_chat = AsyncMock(side_effect=side_effect)
     result = await service.consolidate(SPACE, enforce_cooldown=False)
-    assert service._complete_chat.await_count == 2
+    assert service._complete_chat.await_count == expected_calls
     assert result["status"] == "error" and storage.objects == before
     assert result["notes_remaining"] == 2
+    if second_fault == "schema":
+        assert result["isolated_batches"] == 1
+        assert result["failed_note"] == 1
+        assert result["failure_reason"] == "batch_llm_failed"
+    else:
+        assert result["isolated_batches"] == 0
 
 
 def _create(content):

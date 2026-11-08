@@ -858,7 +858,9 @@ async def test_consolidate_full_flow_refuses_the_batch_and_leaves_the_queue_in_o
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A refused file stops the run at its batch; nothing is written,
-    nothing is consumed, and the message names the batch and the waiting notes."""
+    nothing is consumed, and the message names the batch and the waiting notes.
+    #1769: the batch is first replayed note by note; the same plan keeps
+    failing for its first note alone, which stops the run as the poison note."""
     from live_mem.core import engines
     from live_mem.core.write_sink import DirectLocalWriteSink
 
@@ -930,6 +932,8 @@ async def test_consolidate_full_flow_refuses_the_batch_and_leaves_the_queue_in_o
         "Consolidation stopped at batch 1/1 (batch_write_failed)"
     )
     assert "2 notes remain in order" in result["message"]
+    assert result["isolated_batches"] == 1
+    assert result["failed_note"] == 1
     assert note_keys[0] in storage.objects
     assert note_keys[1] in storage.objects
     assert storage.objects[f"{SPACE}/bank/facts.md"] == before_bank

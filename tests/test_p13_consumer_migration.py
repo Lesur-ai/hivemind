@@ -1089,6 +1089,7 @@ class TestStartupAndShutdownWiring:
             "release_reusable=window.release)"
         ], "the process window is not bound to the positive lifecycle contract"
         assert registered["on_startup"] == [
+            "window.guard(_start_selective_maintenance)",
             "window.guard(_migrate_target_pairing_admission_anchors)",
             "window.guard(_validate_inference_startup)",
             "window.guard(_start_mid_archive_projection)",
@@ -1101,6 +1102,7 @@ class TestStartupAndShutdownWiring:
         assert registered["on_shutdown"] == [
             "window.guard(_stop_mid_archive_projection)",
             "window.guard(_close_core_process_resources)",
+            "window.guard(_release_selective_maintenance)",
             "window.guard(_close_inference_runtime)",
         ]
 
@@ -1139,11 +1141,13 @@ class TestStartupAndShutdownWiring:
             "release_reusable=window.release)"
         ]
         assert registered["on_startup"] == [
+            "window.guard(_start_selective_maintenance)",
             "window.guard(_validate_inference_startup)",
             "window.guard(_initialize_graph_document_schema)",
         ]
         assert registered["on_shutdown"] == [
             "window.guard(_close_llm_singletons)",
+            "window.guard(_release_selective_maintenance)",
             "window.guard(_close_inference_runtime)",
         ], "the extractor/embedder close and the transport release are not siblings"
 

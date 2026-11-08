@@ -2549,8 +2549,11 @@ async def ontology_import(
             }
 
         filepath = existing or os.path.join(directory, f"{name}.yaml")
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(content_yaml.rstrip() + "\n")
+        from .core.selective_maintenance import get_controller
+
+        with get_controller().physical("*"):
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content_yaml.rstrip() + "\n")
 
         from .core.ontology import get_ontology_manager
         get_ontology_manager().reload()
@@ -2591,8 +2594,11 @@ async def ontology_update(
                 "message": "The YAML 'name' field must remain unchanged. Use import to create a new ontology."
             }
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(content_yaml.rstrip() + "\n")
+        from .core.selective_maintenance import get_controller
+
+        with get_controller().physical("*"):
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content_yaml.rstrip() + "\n")
 
         from .core.ontology import get_ontology_manager
         get_ontology_manager().reload()
@@ -2636,7 +2642,10 @@ async def ontology_delete(
                 "used_by": users,
             }
 
-        os.remove(filepath)
+        from .core.selective_maintenance import get_controller
+
+        with get_controller().physical("*"):
+            os.remove(filepath)
         from .core.ontology import get_ontology_manager
         get_ontology_manager().reload()
         return {
@@ -3690,6 +3699,19 @@ async def _close_llm_singletons() -> None:
         raise outcome
 
 
+def _start_selective_maintenance() -> None:
+    """Load the durable barrier before serving; corrupt state refuses startup."""
+    from .core.selective_maintenance import get_controller
+
+    get_controller()
+
+
+def _release_selective_maintenance() -> None:
+    from .core.selective_maintenance import release_if_initialized
+
+    release_if_initialized()
+
+
 def _validate_inference_startup() -> None:
     """Resolve the shared inference configuration fail-closed, once per window.
 
@@ -3747,6 +3769,12 @@ _process_window = ProcessWindowGate(service="Graph Memory")
 def _create_app(*, debug: bool = False):
     """Build the final Graph Memory ASGI stack with one process owner."""
 
+    # #1420: selective maintenance gate over every handler, installed once
+    # before the ASGI stack is built so MCP dispatch and /api/tool share it.
+    from .core.maintenance_gate import install as _install_maintenance_gate
+
+    _install_maintenance_gate(mcp)
+
     base_app = mcp.streamable_http_app(
         host=settings.mcp_server_host,
         max_request_body_size=settings.mcp_request_max_bytes,
@@ -3767,11 +3795,13 @@ def _create_app(*, debug: bool = False):
                 release_reusable=window.release,
             ),
             on_startup=(
+                window.guard(_start_selective_maintenance),
                 window.guard(_validate_inference_startup),
                 window.guard(_initialize_graph_document_schema),
             ),
             on_shutdown=(
                 window.guard(_close_llm_singletons),
+                window.guard(_release_selective_maintenance),
                 window.guard(_close_inference_runtime),
             ),
         ),

@@ -31,6 +31,9 @@ _GRAPH_ENVIRONMENT = {
     "LLMAAS_API_KEY": "test-llm-key",
     "LLMAAS_API_URL": "http://llm.test.invalid/v1",
     "NEO4J_PASSWORD": "test-neo4j-password",
+    # Memory-only selective-maintenance state: the real subprocess must not
+    # write under the image path /app.
+    "HIVEMIND_MAINTENANCE_STATE_DIR": "",
 }
 
 
