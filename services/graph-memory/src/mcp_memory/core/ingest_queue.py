@@ -104,6 +104,8 @@ class IngestJob:
     finished_at: Optional[str] = None
     cancel_requested: bool = False
     result: Optional[dict] = None
+    # #1420: selective-maintenance ownership held from acceptance to settlement.
+    _ticket: Any = field(default=None, repr=False, compare=False)
     # Payload d'entrée (libéré dès consommation par le worker)
     _content: Optional[bytes] = None
     _metadata: Optional[dict] = None
@@ -223,6 +225,12 @@ class IngestQueueService:
                 }
 
             # 7. Création du job (le worker rejouera resolve_ingestion avant le pipeline)
+            from .selective_maintenance import get_controller
+
+            # Ownership starts at acceptance (after every refusal above, before
+            # any state exists): a closed barrier refuses cleanly, an accepted
+            # job keeps its right to finish through the pause.
+            ticket = get_controller().hold("mutation", memory_id)
             job = IngestJob(
                 job_id=jid,
                 memory_id=memory_id,
@@ -238,6 +246,7 @@ class IngestQueueService:
                 _source_modified_at=source_modified_at,
                 _content_size=content_size,
                 _automatic_ontology=_automatic_ontology,
+                _ticket=ticket,
             )
             # On mémorise la décision/replace_doc_id pour le worker
             job.result = {"_replace_doc_id": replace_doc_id}
@@ -311,7 +320,9 @@ class IngestQueueService:
                         owned = {jid for jid, job in self._jobs.items()
                                  if job.memory_id == memory_id and job.batch_id == batch_id}
                         for jid in owned:
-                            self._release_content_locked(self._jobs.pop(jid))
+                            undone = self._jobs.pop(jid)
+                            self._release_content_locked(undone)
+                            self._settle_ticket(undone)
                         if self._active_jobs.get(memory_id) in owned:
                             self._active_jobs.pop(memory_id)
                         if memory_id in self._queues:
@@ -444,6 +455,7 @@ class IngestQueueService:
                 job.finished_at = _now()
                 job.updated_at = _now()
                 self._release_automatic_batch_if_terminal_locked(job)
+                self._settle_ticket(job)
                 return {"status": "cancelled", "job_id": job_id, "message": "Queued job cancelled"}
             # running : annulation coopérative (le pipeline s'arrête à la prochaine frontière)
             job.cancel_requested = True
@@ -480,6 +492,13 @@ class IngestQueueService:
                 self._release_content_locked(job)
                 job.result = None
 
+            if job._ticket is not None:
+                # The worker predates any later barrier closure: run under the
+                # ownership taken at acceptance, never a fresh admission.
+                from .selective_maintenance import get_controller
+
+                get_controller().bind(job._ticket)
+
             # Annulation demandée avant démarrage effectif
             if job.cancel_requested:
                 async with self._state_lock:
@@ -498,6 +517,9 @@ class IngestQueueService:
                 decision = await resolve_ingestion(
                     memory_id, job.source_path, job.sha256, job.replace_existing
                 )
+            except asyncio.CancelledError:
+                await self._on_worker_cancelled(memory_id, job)
+                raise
             except Exception as e:
                 # Ne JAMAIS ingérer à l'aveugle si l'idempotence ne peut pas être
                 # re-résolue (Neo4j indisponible, etc.) → échec explicite du job.
@@ -563,6 +585,9 @@ class IngestQueueService:
                 async with self._state_lock:
                     self._apply_result_locked(job, {"status": "cancelled"})
                     self._finish_active_locked(memory_id, job.job_id)
+            except asyncio.CancelledError:
+                await self._on_worker_cancelled(memory_id, job)
+                raise
             except Exception as e:  # pragma: no cover - défensif
                 logger.exception("Ingest job failed — job=%s", job.job_id)
                 async with self._state_lock:
@@ -662,10 +687,40 @@ class IngestQueueService:
         self._active_jobs[memory_id] = job_id
         return job_id
 
-    def _finish_active_locked(self, memory_id: str, job_id: str) -> None:
+    @staticmethod
+    def _settle_ticket(job: IngestJob, *, unknown: bool = False) -> None:
+        """Retire a job's selective-maintenance ownership exactly once (#1420)."""
+        if job._ticket is not None:
+            from .selective_maintenance import get_controller
+
+            ticket, job._ticket = job._ticket, None
+            get_controller().finish(ticket, unknown=unknown)
+
+    async def _on_worker_cancelled(self, memory_id: str, job: IngestJob) -> None:
+        """Settle a job whose worker task was cancelled mid-flight (#1420).
+
+        Its physical effects are unknown, so the ticket settles as unknown
+        (durable, blocks capture and resume). Accepted queued siblings keep
+        their own tickets and content: hand them to a replacement worker.
+        """
+        async with self._state_lock:
+            job.status = "failed"
+            job.current_step = "failed"
+            job.error = "Ingestion was cancelled; its effects are unknown."
+            job.finished_at = _now()
+            job.updated_at = _now()
+            self._finish_active_locked(memory_id, job.job_id, unknown=True)
+            task = asyncio.current_task()
+            if self._workers.get(memory_id) is task:
+                self._workers.pop(memory_id, None)
+                if self._queues.get(memory_id):
+                    self._ensure_worker_locked(memory_id)
+
+    def _finish_active_locked(self, memory_id: str, job_id: str, *, unknown: bool = False) -> None:
         if self._active_jobs.get(memory_id) == job_id:
             self._active_jobs.pop(memory_id, None)
         self._release_automatic_batch_if_terminal_locked(self._jobs[job_id])
+        self._settle_ticket(self._jobs[job_id], unknown=unknown)
         self._trim_history_locked()
 
     def _release_automatic_batch_if_terminal_locked(self, job: IngestJob) -> None:

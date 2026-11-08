@@ -74,6 +74,13 @@ def register_all_tools(mcp: MCPServer) -> int:
         declared_registration_count=count,
     )
 
+    # #1420: selective maintenance gate over every handler. After validation
+    # so the registry is total; before the proxy reference is published so MCP
+    # dispatch and /api/tool share the same wrapped handlers.
+    from .maintenance_gate import install as install_maintenance_gate
+
+    install_maintenance_gate(mcp)
+
     # Store reference for the /api/tool proxy
     _mcp_ref = mcp
 

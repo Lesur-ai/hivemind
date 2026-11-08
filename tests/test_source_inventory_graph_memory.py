@@ -308,7 +308,7 @@ def test_graph_runtime_transitives_are_hash_locked_and_installed_fail_closed():
     dockerfile = (_SVC / "Dockerfile").read_text(encoding="utf-8")
     assert (
         "FROM python:3.14.8-slim-bookworm@sha256:"
-        "48b13b003dda20b16f9442b8475aa05fe21bf6579a8c881db92ffb4d8fd20f83"
+        "44e000a07b48bef1517a2b14adc93c17af728ca98858b5e24c6e1b18de1b2ef2"
     ) in dockerfile
     assert "aiohttp==3.14.4" in lock
     assert "boto3==1.43.108" in lock

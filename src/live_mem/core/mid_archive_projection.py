@@ -364,7 +364,13 @@ async def start_mid_archive_projector():
     async def run():
         while True:
             try:
-                await worker.run_once()
+                # #1420: a periodic background writer. It is owned work while it
+                # runs (a pause drains it) and is skipped while mutations are
+                # closed; the refusal below is retried on the next tick.
+                from .selective_maintenance import get_controller
+
+                with get_controller().operation('mutation', '*'):
+                    await worker.run_once()
             except asyncio.CancelledError:
                 raise
             except Exception:

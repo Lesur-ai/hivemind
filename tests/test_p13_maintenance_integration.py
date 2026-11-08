@@ -417,6 +417,7 @@ async def test_vector_mutations_share_one_gate_across_service_instances(
 
         def upsert(self, *, collection_name, points, wait):
             effects.append((self.label, "upsert", collection_name, len(points), wait))
+            return SimpleNamespace(status="completed")
 
         def count(self, *, collection_name, count_filter, exact):
             effects.append((self.label, "count", collection_name, exact))
@@ -424,9 +425,11 @@ async def test_vector_mutations_share_one_gate_across_service_instances(
 
         def delete(self, *, collection_name, points_selector, wait):
             effects.append((self.label, "delete", collection_name, wait))
+            return SimpleNamespace(status="completed")
 
         def delete_collection(self, *, collection_name):
             effects.append((self.label, "delete_collection", collection_name))
+            return True
 
     def make_store(label: str) -> VectorStoreService:
         service = VectorStoreService(

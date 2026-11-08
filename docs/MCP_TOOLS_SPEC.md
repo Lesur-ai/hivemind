@@ -944,6 +944,35 @@ Additional result fields:
   **without** a fabricated `failed_batch`; `note_delete_failed` is reserved
   for a **completed** bank integration whose source-note deletion alone was
   incomplete (the retained notes stay eligible for a controlled retry).
+  `failed_batch` always indexes the original batches (`1..batches_total`).
+- `isolated_batches` (1.6.6, integer) — batches replayed note by note in this
+  run. A batch of several notes whose single corrective completion is still
+  refused **only** for model form faults (plan grammar, note dispositions,
+  edit structure: for example `normal_notes_unclassified` or
+  `duplicate_normal_target`) is replayed as single-note sub-batches, in order,
+  each with one completion plus the single correction, before the run resumes
+  at the next batch. Environment faults (bank snapshot, source Markdown,
+  storage, readback), mixed model/environment faults, malformed or unusable
+  completions and provider failures stay terminal at once, without isolation.
+  `batches_completed` counts an isolated batch once, when its last note
+  completes. One content-free log line (batch index, sub-batch count, closed
+  reasons) records each isolation.
+- `isolation_llm_tokens_used` (1.6.6, integer) — tokens of the single-note
+  completions of isolated batches; already included in `llm_tokens_used`.
+  At most two completions per note of an isolated batch.
+- `failed_note` (1.6.6, optional, one-based) — present with `failed_batch`
+  only when the run stopped while that batch was replayed note by note: the
+  run-level index of the note being replayed (same index space as
+  `notes_applied`). A note refused twice on its own is the poison note; no
+  later note is integrated and `notes_deleted` stays limited to the committed
+  prefix. The note indexes inside `operation_failures` of that stop are
+  relative to the single-note sub-batch.
+- `failure_stage` (1.6.6, optional) — closed token present only with
+  `failure_reason="batch_write_failed"`: `plan_validation` when the batch plan
+  was refused (or its preparation failed) before any storage call, so nothing
+  of that batch was written; `persistence` when the failure happened in the
+  write stage (bank, synthesis or metadata write or readback). `status` still
+  states whether anything durable may remain.
 - `failure_reason` — stable structured token: `batch_prompt_failed`,
   `batch_llm_failed`, `batch_refresh_failed`, `batch_write_failed`,
   `consolidation_cancelled`, `note_delete_failed`, `exact_selection_truncated`,

@@ -205,6 +205,11 @@ async def test_assignment_guards_preserve_prior_state(graph_env, fault):
     assert backend.node.get("automatic_ontology_json") == prior.get("automatic_ontology_json")
     assert backend.node["ontology"] == prior["ontology"]
     assert backend.node.get("ontology_uri") == prior.get("ontology_uri")
+    from mcp_memory.core.selective_maintenance import get_controller
+    from uuid import uuid4
+    controller = get_controller()
+    assert controller.status()["unknown"] == 0
+    assert controller.pause(str(uuid4()), ["*"], "background")["state"] == "background_paused"
 
 
 @pytest.mark.parametrize("bad", ["not-json", "[]", '{"version":2}', '{"version":NaN}'])

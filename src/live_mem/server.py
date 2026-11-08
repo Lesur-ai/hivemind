@@ -186,6 +186,20 @@ async def _close_core_process_resources() -> None:
     await close_consolidator_if_initialized()
 
 
+async def _start_selective_maintenance() -> None:
+    """Load the durable barrier before serving: a held pause survives restart
+    and a corrupt controller refuses startup instead of being recreated (#1420)."""
+    from .core.selective_maintenance import get_controller
+
+    get_controller()
+
+
+async def _release_selective_maintenance() -> None:
+    from .core.selective_maintenance import release_if_initialized
+
+    release_if_initialized()
+
+
 async def _start_mid_archive_projection() -> None:
     from .core.mid_archive_projection import start_mid_archive_projector
 
@@ -519,6 +533,7 @@ def create_app():
                 release_reusable=window.release,
             ),
             on_startup=(
+                window.guard(_start_selective_maintenance),
                 window.guard(_migrate_target_pairing_admission_anchors),
                 window.guard(_validate_inference_startup),
                 window.guard(_start_mid_archive_projection),
@@ -526,6 +541,7 @@ def create_app():
             on_shutdown=(
                 window.guard(_stop_mid_archive_projection),
                 window.guard(_close_core_process_resources),
+                window.guard(_release_selective_maintenance),
                 window.guard(_close_inference_runtime),
             ),
         ),

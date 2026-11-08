@@ -32,6 +32,7 @@ import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from collections import deque
 from collections.abc import Iterable
 import datetime as _calendar  # parsing seam, distinct from the replaceable clock below
 from datetime import datetime, timezone
@@ -4169,7 +4170,12 @@ class ConsolidatorService:
 
             Champs additionnels : ``failed_batch`` (index 1-based, présent
             uniquement pour un échec de lot identifiable), ``failure_reason``
-            (raison structurée stable), message client générique. La phase de
+            (raison structurée stable), message client générique.
+            #1769 : ``isolated_batches`` et ``isolation_llm_tokens_used``
+            (lots rejoués note par note), ``failed_note`` (note rejouée seule
+            sur laquelle le run s'est arrêté) et ``failure_stage``
+            (``plan_validation`` | ``persistence``, seulement avec
+            ``batch_write_failed``). La phase de
             progression terminale est ``done`` pour ``ok`` uniquement,
             ``failed`` pour ``error`` et ``partial``.
         """
@@ -4297,6 +4303,13 @@ class ConsolidatorService:
         # _write_results, même sur exception).
         runtime_failure_reason: str | None = None
         failed_batch: int | None = None
+        # #1769: `batch_write_failed` covers both a plan refused before any
+        # storage call and a write/readback failure; this closed stage tells
+        # them apart without changing the stable token.
+        failure_stage: str | None = None
+        # #1769: run-level index of the note being replayed alone when the run
+        # stopped inside an isolated batch (with `failed_batch`, the poison).
+        failed_note: int | None = None
         durable_write_may_have_started = False
 
         # ── Étape 1b : plus aucune compaction ici ; l'indicateur
@@ -4338,6 +4351,12 @@ class ConsolidatorService:
         pending_dispositions: dict[str, str] = {}
         deleted_note_keys: list[str] = []
         batches_completed = 0
+        # Units (whole batches or isolated single notes) whose notes joined the
+        # pending prefix.  Prefix safety and the honest status key on this, not
+        # on `batches_completed`, which counts only fully completed batches.
+        units_completed = 0
+        isolated_batches = 0
+        isolation_tokens = 0
         # A completed prefix is safe to consume only until a later batch
         # reaches persistence and then fails.  That later attempt can have
         # overwritten a prefix-owned key (or raced a direct writer), so the
@@ -4386,14 +4405,39 @@ class ConsolidatorService:
         )
 
         # ── Étape 3 : Traiter chaque lot ──────────────────
+        # #1769: units of work in run order.  A unit is an original batch, or
+        # one note of a batch isolated after a second refusal for model form
+        # faults only (`isolated` = its 1-based position and the batch size).
+        # Sub-units go to the FRONT of the queue, in order, so no later note
+        # is ever integrated before an earlier one.  `batch_idx` stays the
+        # original batch index: `batches_total` and `failed_batch` keep their
+        # documented meaning.
+        units: deque[tuple[int, list, list, tuple[int, int] | None]] = deque(
+            (idx, notes, keys, None) for idx, (notes, keys) in enumerate(batches, 1)
+        )
+        units_started = 0
+        current_isolated_note: int | None = None
         batch_start_offset = 0
-        for batch_idx, (batch_notes, batch_keys) in enumerate(batches, 1):
-            logger.info(
-                "Batch %d/%d — %d notes",
-                batch_idx,
-                batch_count,
-                len(batch_notes),
+        while units:
+            batch_idx, batch_notes, batch_keys, isolated = units.popleft()
+            units_started += 1
+            current_isolated_note = (
+                batch_start_offset + 1 if isolated is not None else None
             )
+            if isolated is None:
+                logger.info(
+                    "Batch %d/%d — %d notes",
+                    batch_idx,
+                    batch_count,
+                    len(batch_notes),
+                )
+            else:
+                logger.info(
+                    "Batch %d/%d — isolated note %d/%d",
+                    batch_idx,
+                    batch_count,
+                    *isolated,
+                )
             await emit_progress(
                 {
                     "phase": "batch_running",
@@ -4411,7 +4455,7 @@ class ConsolidatorService:
 
             # Relire la bank et la synthèse pour les lots suivants
             # (le lot précédent a pu modifier les fichiers bank)
-            if batch_idx > 1:
+            if units_started > 1:
                 try:
                     current_bank = await storage.list_and_get(f"{space_id}/bank/")
                     current_synthesis = await storage.get(
@@ -4462,6 +4506,7 @@ class ConsolidatorService:
             batch_usage: dict = {}
             llm_result: dict = {}
             prepared_batch: _PreparedNormalBatch | None = None
+            isolation_failures: list[dict[str, object]] | None = None
             attempt_messages = messages
             transient_retries_used = 0  # Shared across both correction operations.
             for attempt in (1, 2):
@@ -4577,6 +4622,19 @@ class ConsolidatorService:
                             messages, llm_result.get("data"), valid_llm_failures
                         )
                         continue
+                    # #1769: a parsed plan still breaking the closed grammar
+                    # after the correction is a model form fault like a
+                    # refused preparation: same note-by-note replay.  Malformed
+                    # JSON, unusable completions and provider errors are not
+                    # `schema_fault` and stay terminal.
+                    if (
+                        attempt == 2
+                        and schema_fault
+                        and isolated is None
+                        and len(batch_notes) > 1
+                    ):
+                        isolation_failures = valid_llm_failures
+                        break
                     runtime_failure_reason = "batch_llm_failed"
                     failed_batch = batch_idx
                     operation_failures.extend(valid_llm_failures)
@@ -4605,6 +4663,7 @@ class ConsolidatorService:
                     )
                 except Exception:
                     runtime_failure_reason = "batch_write_failed"
+                    failure_stage = "plan_validation"
                     failed_batch = batch_idx
                     logger.exception(
                         "Batch %d/%d preparation failed unexpectedly",
@@ -4631,7 +4690,22 @@ class ConsolidatorService:
                             messages, llm_result["data"], batch_failures
                         )
                         continue
+                    # #1769: a multi-note batch whose corrective completion is
+                    # still refused for model form faults only does not stop
+                    # the run: it is replayed note by note below.  Nothing was
+                    # written (preparation is storage-free).  Environment or
+                    # mixed faults, and a single note (the poison), stay
+                    # terminal.
+                    if (
+                        attempt == 2
+                        and isolated is None
+                        and len(batch_notes) > 1
+                        and _normal_model_form_faults_only(batch_failures)
+                    ):
+                        isolation_failures = batch_failures
+                        break
                     runtime_failure_reason = "batch_write_failed"
+                    failure_stage = "plan_validation"
                     failed_batch = batch_idx
                     total_ops_failed += len(batch_failures)
                     operation_failures.extend(batch_failures)
@@ -4651,9 +4725,44 @@ class ConsolidatorService:
                 # A batch refused after one or two paid completions still
                 # reports what it cost: the write path never
                 # runs for it, so its usage is added here, exactly once.
-                total_tokens += batch_usage.get("total_tokens") or 0
+                unit_tokens = batch_usage.get("total_tokens") or 0
+                total_tokens += unit_tokens
                 total_prompt_tokens += batch_usage.get("prompt_tokens") or 0
                 total_completion_tokens += batch_usage.get("completion_tokens") or 0
+                if isolated is not None:
+                    isolation_tokens += unit_tokens
+                if isolation_failures is not None and runtime_failure_reason is None:
+                    # #1769: one content-free line per isolation (closed
+                    # reasons and the sanitized relay schema only, as #484).
+                    isolated_batches += 1
+                    logger.warning(
+                        "Batch %d/%d refused twice for %d model form fault(s) "
+                        "only — isolating it into %d single-note sub-batch(es) "
+                        "replayed in order: reasons=%s failures=%s",
+                        batch_idx,
+                        batch_count,
+                        len(isolation_failures),
+                        len(batch_notes),
+                        sorted({str(f["reason"]) for f in isolation_failures}),
+                        _normal_failures_log_summary(isolation_failures),
+                    )
+                    sub_count = len(batch_notes)
+                    units.extendleft(
+                        reversed(
+                            [
+                                (
+                                    batch_idx,
+                                    [batch_notes[i]],
+                                    [batch_keys[i]],
+                                    (i + 1, sub_count),
+                                )
+                                for i in range(sub_count)
+                            ]
+                        )
+                    )
+                    # `batch_start_offset` is deliberately not advanced: the
+                    # first sub-unit starts at this batch's first note.
+                    continue
                 break
 
             # Apply the prepared bank/synthesis bundle. Source notes remain
@@ -4679,11 +4788,12 @@ class ConsolidatorService:
                 )
             except Exception:
                 runtime_failure_reason = "batch_write_failed"
+                failure_stage = "persistence"
                 failed_batch = batch_idx
                 # A batch without bank writes performs no durable
                 # mutation (no synthesis, no metadata); even a read failure
                 # inside it leaves the completed prefix safe to finalize.
-                if batches_completed > 0 and prepared_batch.bank_writes:
+                if units_completed > 0 and prepared_batch.bank_writes:
                     completed_prefix_finalization_safe = False
                 logger.exception(
                     "Batch %d/%d write failed unexpectedly", batch_idx, batch_count
@@ -4717,10 +4827,11 @@ class ConsolidatorService:
             write_integration_failed = persistence_failed
             if write_integration_failed:
                 runtime_failure_reason = "batch_write_failed"
+                failure_stage = "persistence"
                 failed_batch = batch_idx
                 # Same rule: only a batch that could have written the bank
                 # can make the completed prefix unsafe.
-                if batches_completed > 0 and prepared_batch.bank_writes:
+                if units_completed > 0 and prepared_batch.bank_writes:
                     completed_prefix_finalization_safe = False
                 logger.error(
                     "Batch %d/%d bank persistence failed — sources retained",
@@ -4767,7 +4878,7 @@ class ConsolidatorService:
                     write_integration_failed = True
                     # Only a batch that could have written the bank can make
                     # the completed prefix unsafe (same rule as the write path).
-                    if batches_completed > 0 and prepared_batch.bank_writes:
+                    if units_completed > 0 and prepared_batch.bank_writes:
                         completed_prefix_finalization_safe = False
                     logger.error(
                         "Batch %d/%d did not return an exact deferred finalization proof "
@@ -4811,6 +4922,8 @@ class ConsolidatorService:
                     )
             total_ops_failed += write_result.get("operations_failed", 0)
             total_tokens += write_result.get("llm_tokens_used", 0)
+            if isolated is not None:
+                isolation_tokens += write_result.get("llm_tokens_used", 0)
             total_prompt_tokens += write_result.get("llm_prompt_tokens", 0)
             total_completion_tokens += write_result.get("llm_completion_tokens", 0)
             total_notes_deleted += write_result.get("notes_deleted", 0)
@@ -4828,7 +4941,10 @@ class ConsolidatorService:
                 total_bank = reported_total_bank
 
             if not write_integration_failed:
-                batches_completed += 1
+                units_completed += 1
+                # An isolated batch counts as completed with its last note.
+                if isolated is None or isolated[0] == isolated[1]:
+                    batches_completed += 1
                 await emit_progress(
                     {
                         "phase": "batch_done",
@@ -4933,7 +5049,13 @@ class ConsolidatorService:
         # invalidates the prefix's earlier readback evidence until a recovery
         # mechanism exists, so every deferred source remains durable.
 
-        if total_notes > 0 and batches_completed > 0:
+        # #1769: the stop location of an isolated batch is its note.
+        if failed_batch is not None:
+            failed_note = current_isolated_note
+
+        # Completed units, not whole batches: the notes replayed alone before
+        # a poison note form part of the committed prefix.
+        if total_notes > 0 and units_completed > 0:
             if not completed_prefix_finalization_safe:
                 total_notes_delete_failed = len(pending_note_keys)
                 logger.error(
@@ -5029,7 +5151,7 @@ class ConsolidatorService:
         # ou que l'état durable est ambigu, l'issue est `partial`.
         is_error = (
             runtime_failure_reason is not None
-            and batches_completed == 0
+            and units_completed == 0
             and not durable_write_may_have_started
         )
         is_partial = not is_error and (
@@ -5101,6 +5223,10 @@ class ConsolidatorService:
             "llm_completion_tokens": total_completion_tokens,
             "batches_total": batch_count,
             "batches_completed": batches_completed,
+            # #1769: batches replayed note by note, and the tokens of those
+            # single-note completions (already included in llm_tokens_used).
+            "isolated_batches": isolated_batches,
+            "isolation_llm_tokens_used": isolation_tokens,
             "batch_size": batch_size,
             "duration_seconds": duration,
         }
@@ -5120,8 +5246,14 @@ class ConsolidatorService:
             result["operation_failures"] = safe_operation_failures
         if failure_reason is not None:
             result["failure_reason"] = failure_reason
+        # Only meaningful next to its own token: a later reason (for example a
+        # finalization plan mismatch) never inherits a stale stage.
+        if failure_reason == "batch_write_failed" and failure_stage is not None:
+            result["failure_stage"] = failure_stage
         if failed_batch is not None:
             result["failed_batch"] = failed_batch
+            if failed_note is not None:
+                result["failed_note"] = failed_note
         if metadata_update_failed:
             result["metadata_update_failed"] = True
         if status == "error":
@@ -5172,6 +5304,12 @@ class ConsolidatorService:
                     "Consolidation completed with a partial outcome; inspect "
                     "the counters and failure reason."
                 )
+        if "failed_note" in result and "message" in result:
+            result["message"] += (
+                f" Batch {failed_batch} was replayed note by note after a "
+                "second model form-fault refusal; the run stopped at note "
+                f"{failed_note}."
+            )
         # P12-1 : la phase terminale de progression est honnête — `done`
         # UNIQUEMENT pour un succès complet, `failed` pour `error`/`partial`.
         await emit_progress(

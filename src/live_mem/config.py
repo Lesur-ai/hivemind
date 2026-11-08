@@ -156,6 +156,13 @@ class Settings(BaseSettings):
     # en 0600 pour survivre aux redémarrages. Local-only, hors de tout espace S3.
     long_embedded_token_file: str = "/data/secrets/long_embedded_token"
 
+    # Private directory of the selective-maintenance controller state (#1420).
+    # Deliberately NOT under /data/secrets: the one-shot volume initializer
+    # accepts an exact entry grammar there and would refuse the next start.
+    # The image creates this directory (0700, service user); it survives a
+    # container restart, not a re-creation. Empty = memory only (tests).
+    maintenance_state_dir: str = "/var/lib/hivemind-maintenance"
+
     # ─── Proxy HTTP sortant ───────────────────────────────────
     # Variable custom (pas HTTP_PROXY/HTTPS_PROXY) pour ne pas affecter
     # toutes les libs Python qui lisent automatiquement les vars d'env OS.

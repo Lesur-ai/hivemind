@@ -160,3 +160,23 @@ def _isolate_reservation_guard_checkers():
         yield
     finally:
         reservation_guard.restore_for_tests(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_selective_maintenance_controller():
+    """Give every test an in-memory selective-maintenance controller (#1420).
+
+    The production controller persists under a private volume path. Tests must
+    never touch it, and one test's pause must never close another's writes.
+    """
+    from live_mem.core import selective_maintenance as sm
+
+    from mcp_memory.core import selective_maintenance as graph_sm
+
+    sm.reset_controller_for_tests(sm.SelectiveController(None))
+    graph_sm.reset_controller_for_tests(graph_sm.SelectiveController(None))
+    try:
+        yield
+    finally:
+        sm.reset_controller_for_tests(None)
+        graph_sm.reset_controller_for_tests(None)

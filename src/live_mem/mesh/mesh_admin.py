@@ -23,6 +23,8 @@ from ..core.hivemind import hive_status
 from .pairing_service import MeshPairingService, MeshPairingServiceError
 from .pairing_state import MeshPairingState
 
+from ..core.selective_maintenance import MaintenanceRefused, get_controller
+
 _PREFIX = "/api/admin/mesh/"
 _MAX_BODY_BYTES = 262_144
 _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
@@ -44,6 +46,24 @@ class MeshAdminMiddleware:
         self._process_lock = process_lock
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and str(scope.get("path", "")).startswith(_PREFIX):
+            # #1420: admin Mesh requests are owned work for the selective
+            # barrier: mutations close at ``background``, reads at ``cutover``.
+            # Refusal is explicit and retryable.
+            kind = "read" if scope.get("method") in ("GET", "HEAD") else "mutation"
+            try:
+                with get_controller().operation(kind, "*"):
+                    await self._serve(scope, receive, send)
+            except MaintenanceRefused:
+                await self._json(
+                    send,
+                    {"status": "error", "error": "maintenance_admission_closed"},
+                    status=503,
+                )
+            return
+        await self._serve(scope, receive, send)
+
+    async def _serve(self, scope: dict, receive: Any, send: Any) -> None:
         if scope.get("type") != "http" or not str(scope.get("path", "")).startswith(_PREFIX):
             await self._app(scope, receive, send)
             return

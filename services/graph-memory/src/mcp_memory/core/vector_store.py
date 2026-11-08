@@ -190,6 +190,25 @@ class VectorStoreService:
         self._memory_locks: dict[str, threading.RLock] = {}
         self._memory_async_locks: dict[str, asyncio.Lock] = {}
 
+    def _write_call(self, memory_id: str, func, /, *args, **kwargs):
+        """Account for the actual SDK effect, including worker-thread effects."""
+        from .selective_maintenance import get_controller
+
+        def outcome_unknown(error):
+            from qdrant_client.http.exceptions import UnexpectedResponse
+            from qdrant_client.common.client_exceptions import ResourceExhaustedResponse
+
+            if isinstance(error, ResourceExhaustedResponse):
+                return False  # explicit 429/Retry-After rejection, not an ACK
+            return not (isinstance(error, UnexpectedResponse)
+                        and type(error.status_code) is int
+                        and 400 <= error.status_code < 500 and error.status_code != 408)
+
+        with get_controller().physical(memory_id, outcome_unknown=outcome_unknown):
+            result = func(*args, **kwargs)
+            self._require_completed_mutation(result)
+            return result
+
     def _memory_lock(self, memory_id: str) -> threading.RLock:
         with self._locks_guard:
             return self._memory_locks.setdefault(memory_id, threading.RLock())
@@ -484,7 +503,7 @@ class VectorStoreService:
         except EmbeddingIdentityError as error:
             self._raise_identity_error(error)
         try:
-            self._client.create_collection(
+            self._write_call(memory_id, self._client.create_collection,
                 collection_name=name,
                 vectors_config=qmodels.VectorParams(
                     size=identity.dimensions,
@@ -492,13 +511,13 @@ class VectorStoreService:
                 ),
                 metadata=identity.to_mapping(),
             )
-            self._client.create_payload_index(
+            self._write_call(memory_id, self._client.create_payload_index,
                 collection_name=name,
                 field_name="doc_id",
                 field_schema=qmodels.PayloadSchemaType.KEYWORD,
                 wait=True,
             )
-            self._client.create_payload_index(
+            self._write_call(memory_id, self._client.create_payload_index,
                 collection_name=name,
                 field_name="memory_id",
                 field_schema=qmodels.PayloadSchemaType.KEYWORD,
@@ -589,7 +608,7 @@ class VectorStoreService:
                 raise EmbeddingCollectionUnavailable("collection_race")
             self._validate_owner(resolved.name, memory_id, resolved.points_count)
             try:
-                self._client.delete_collection(collection_name=resolved.name)
+                self._write_call(memory_id, self._client.delete_collection, collection_name=resolved.name)
             except Exception:
                 raise EmbeddingCollectionUnavailable("delete_failed") from None
         return True
@@ -639,7 +658,7 @@ class VectorStoreService:
                 raise EmbeddingCollectionUnavailable("collection_race")
             self._validate_owner(resolved.name, memory_id, resolved.points_count)
             try:
-                self._client.upsert(
+                self._write_call(memory_id, self._client.upsert,
                     collection_name=resolved.name,
                     points=points,
                     wait=True,
@@ -862,7 +881,7 @@ class VectorStoreService:
                 resolved.points_count,
             )
             try:
-                self._client.delete(
+                self._write_call(memory_id, self._client.delete,
                     collection_name=resolved.name,
                     points_selector=qmodels.FilterSelector(filter=delete_filter),
                     wait=True,
@@ -1157,7 +1176,7 @@ class VectorStoreService:
                     for point in batch
                 ]
                 try:
-                    self._client.upsert(
+                    self._write_call(memory_id, self._client.upsert,
                         collection_name=resolved.name,
                         points=structs,
                         wait=True,
@@ -1257,7 +1276,7 @@ class VectorStoreService:
                 raise EmbeddingCollectionReindexRequired("shadow_collision")
             try:
                 self._require_completed_mutation(
-                    self._client.create_collection(
+                    self._write_call(memory_id, self._client.create_collection,
                         collection_name=name,
                         vectors_config=qmodels.VectorParams(
                             size=identity.dimensions,
@@ -1272,7 +1291,7 @@ class VectorStoreService:
                     ("chunk_index", qmodels.PayloadSchemaType.INTEGER),
                 ):
                     self._require_completed_mutation(
-                        self._client.create_payload_index(
+                        self._write_call(memory_id, self._client.create_payload_index,
                             collection_name=name,
                             field_name=field_name,
                             field_schema=field_schema,
@@ -1382,7 +1401,7 @@ class VectorStoreService:
             if resolved.identity != identity:
                 raise EmbeddingCollectionReindexRequired("shadow_invalid")
             try:
-                self._client.upsert(
+                self._write_call(memory_id, self._client.upsert,
                     collection_name=name,
                     points=points,
                     wait=True,
@@ -1593,7 +1612,7 @@ class VectorStoreService:
             )
 
             try:
-                switched = self._client.update_collection_aliases(operations)
+                switched = self._write_call(memory_id, self._client.update_collection_aliases, operations)
             except Exception:
                 raise ReindexPostSwitchError("activation_unverified") from None
             if switched is not True:

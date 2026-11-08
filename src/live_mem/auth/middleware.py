@@ -370,7 +370,39 @@ class StaticFilesMiddleware:
             os.path.dirname(os.path.dirname(__file__)), "static"
         )
 
+    @staticmethod
+    def _is_functional_read(path: str, method: str) -> bool:
+        """REST routes that return memory content (#1420).
+
+        They call services directly, not a registered tool, so the tool gate
+        cannot see them. Health, static pages, login/logout and the
+        maintenance control plane stay exempt on purpose.
+        """
+        return method == "GET" and (
+            path == "/api/spaces"
+            or path.startswith(("/api/space/", "/api/live/", "/api/bank/"))
+        )
+
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and self._is_functional_read(
+            scope.get("path", ""), scope.get("method", "GET")
+        ):
+            # An owned read ticket makes ``cutover`` refuse AND drain these.
+            from ..core.selective_maintenance import MaintenanceRefused, get_controller
+
+            try:
+                with get_controller().operation("read", "*"):
+                    await self._serve(scope, receive, send)
+            except MaintenanceRefused:
+                await self._send_json(
+                    send,
+                    {"status": "error", "error": "maintenance_admission_closed"},
+                    503,
+                )
+            return
+        await self._serve(scope, receive, send)
+
+    async def _serve(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -413,6 +445,11 @@ class StaticFilesMiddleware:
         # API REST — Tool proxy (admin console)
         if path == "/api/tool" and method == "POST":
             await self._api_tool_call(receive, send)
+            return
+
+        # API REST — selective maintenance control plane (#1420)
+        if path == "/api/maintenance" and method == "POST":
+            await self._api_maintenance(scope, receive, send)
             return
 
         # API REST — Login (LM2-04 fix : émet un cookie HttpOnly)
@@ -653,6 +690,90 @@ class StaticFilesMiddleware:
             logger.exception("/api/tool error")
             from ..auth.context import safe_error
             await self._send_json(send, safe_error(e, "/api/tool"), 500)
+
+    async def _api_maintenance(self, scope, receive, send):
+        """
+        POST /api/maintenance — operator control of the selective barrier.
+
+        Deliberately NOT routed through the tool registry: the control plane
+        must stay usable while mutations (or reads, at ``cutover``) are
+        closed. Admin permission only, and an explicit bearer credential: an
+        ambient console cookie is refused so a cross-site request can never
+        pause the deployment. Body: ``{"action": status|pause|resume,
+        "operation_id": UUID, "scopes": [...], "mode": ...}``.
+        """
+        from ..auth.context import check_admin_permission, safe_error
+        from ..core.selective_maintenance import MaintenanceRefused, get_controller
+
+        try:
+            bearer = any(
+                k == b"authorization" and v[:7].lower() == b"bearer "
+                for k, v in scope.get("headers", [])
+            )
+            if not bearer:
+                await self._send_json(
+                    send, {"status": "error", "message": "Bearer credential required"}, 401
+                )
+                return
+            denied = check_admin_permission()
+            if denied:
+                await self._send_json(send, denied, 403)
+                return
+            body = b""
+            more = True
+            while more:
+                message = await receive()
+                if message["type"] != "http.request":
+                    break
+                body += message.get("body", b"")
+                more = message.get("more_body", False)
+                if len(body) > 4096:
+                    await self._send_json(
+                        send, {"status": "error", "message": "Request body too large"}, 413
+                    )
+                    return
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+                if not isinstance(payload, dict):
+                    raise ValueError
+            except (ValueError, UnicodeDecodeError):
+                await self._send_json(
+                    send, {"status": "error", "message": "Invalid JSON body"}, 400
+                )
+                return
+            controller = get_controller()
+            action = payload.get("action")
+            operation = payload.get("operation_id")
+            try:
+                if action == "status":
+                    result = controller.status(operation)
+                elif action == "pause":
+                    result = controller.pause(
+                        operation, payload.get("scopes"), payload.get("mode")
+                    )
+                elif action == "resume":
+                    result = controller.resume(operation)
+                else:
+                    raise MaintenanceRefused("maintenance_input")
+            except MaintenanceRefused as refusal:
+                await self._send_json(
+                    send, {"status": "error", "error": refusal.code}, 409
+                )
+                return
+            audit_logger.info(
+                json.dumps(
+                    {
+                        "event": "maintenance_control",
+                        "request_id": current_request_id.get(),
+                        "action": action,
+                        "client": (current_token_info.get() or {}).get("client_name", "?"),
+                    }
+                )
+            )
+            await self._send_json(send, {"status": "ok", **result})
+        except Exception as e:
+            logger.exception("/api/maintenance error")
+            await self._send_json(send, safe_error(e, "/api/maintenance"), 500)
 
     async def _api_login(self, scope, receive, send):
         """

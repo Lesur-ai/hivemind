@@ -141,6 +141,35 @@ def _register_empty_s3_continue_guard(client) -> None:
     )
 
 
+def _s3_outcome_unknown(error: BaseException) -> bool:
+    """A first-attempt 4xx rejection settles; retries/timeouts/5xx do not."""
+    from botocore.exceptions import ParamValidationError, NoCredentialsError
+
+    if isinstance(error, (ParamValidationError, NoCredentialsError)):
+        return False  # static-client serialization/signing refused before dispatch
+    if not isinstance(error, ClientError):
+        return True
+    response = error.response
+    metadata = response.get("ResponseMetadata", {})
+    if metadata.get("RetryAttempts", 0) != 0:
+        return True  # an earlier attempt may still have an unknown effect
+    status = metadata.get("HTTPStatusCode")
+    code = response.get("Error", {}).get("Code")
+    return not (type(status) is int and 400 <= status < 500 and status != 408
+                and code not in {"RequestTimeout", "RequestTimeoutException", "InternalError",
+                                 "InternalFailure", "ServiceUnavailable"})
+
+
+def _record_s3_retry_uncertainty(response) -> None:
+    # A later response cannot certify settlement of an earlier timed-out SDK
+    # attempt. Fail closed without replacing the existing client/retry policy.
+    if isinstance(response, dict) and response.get("ResponseMetadata", {}).get("RetryAttempts", 0) != 0:
+        from .selective_maintenance import get_controller
+
+        controller = get_controller()
+        controller.mark_unknown(controller.current())
+
+
 class StorageService:
     """
     Service S3 supportant deux modes de signature : ``dual`` (Dell ECS
@@ -257,6 +286,35 @@ class StorageService:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
+    @staticmethod
+    def _write_scope(key: str) -> str:
+        parts = key.split("/")
+        scope = parts[1] if parts[0] == "_backups" and len(parts) > 2 else parts[0]
+        return "*" if not scope or scope.startswith("_") else scope
+
+    @staticmethod
+    def _admit_write(key: str) -> None:
+        """Batch preflight; every SDK dispatch also retains ownership."""
+        if key.startswith("_health_check/"):
+            return
+        from .selective_maintenance import get_controller
+
+        get_controller().check_physical(StorageService._write_scope(key))
+
+    async def _run_write(self, key: str, func, /, **kwargs):
+        if key.startswith("_health_check/"):
+            return await self._run(func, **kwargs)
+        from .selective_maintenance import get_controller
+
+        def write():
+            response = func(**kwargs)
+            _record_s3_retry_uncertainty(response)
+            return response
+
+        return await get_controller().run_physical(
+            self._write_scope(key), write, outcome_unknown=_s3_outcome_unknown,
+        )
+
     # ─────────────────────────────────────────────────────────────
     # PUT — Écriture (data client)
     # ─────────────────────────────────────────────────────────────
@@ -288,8 +346,8 @@ class StorageService:
             content: Contenu texte à écrire
             content_type: Type MIME (défaut: text/plain)
         """
-        await self._run(
-            self._client_data.put_object,
+        await self._run_write(
+            key, self._client_data.put_object,
             Bucket=self.bucket,
             Key=key,
             Body=content.encode("utf-8"),
@@ -366,8 +424,8 @@ class StorageService:
         Args:
             key: Clé S3
         """
-        await self._run(
-            self._client_data.delete_object,
+        await self._run_write(
+            key, self._client_data.delete_object,
             Bucket=self.bucket,
             Key=key,
         )
@@ -389,6 +447,10 @@ class StorageService:
         """
         if not keys:
             return 0
+        # The loop below downgrades per-key failures to warnings; a refusal
+        # must never be counted as a partial success, so check every key first.
+        for key in keys:
+            self._admit_write(key)
 
         deleted = 0
         for key in keys:
@@ -396,6 +458,9 @@ class StorageService:
                 await self.delete(key)
                 deleted += 1
             except Exception as e:
+                from .selective_maintenance import MaintenanceRefused
+                if isinstance(e, MaintenanceRefused):
+                    raise
                 # VULN-13 fix : logger les erreurs au lieu de les ignorer
                 logger.warning("delete_many: failed to delete '%s': %s", key, e)
 
@@ -649,8 +714,8 @@ class StorageService:
             dest_key: Clé destination
         """
         copy_source = {"Bucket": self.bucket, "Key": source_key}
-        await self._run(
-            self._client_data.copy_object,
+        await self._run_write(
+            dest_key, self._client_data.copy_object,
             CopySource=copy_source,
             Bucket=self.bucket,
             Key=dest_key,

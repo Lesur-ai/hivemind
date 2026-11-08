@@ -41,7 +41,7 @@ boto3==1.43.108
 openai==2.54.0
 
 # === Configuration ===
-pydantic==2.13.5
+pydantic==2.14.2           # GHSA-qpmf-fgh3-ff25 and GHSA-3r8g-cqwr-jr29.
 pydantic-settings==2.14.2
 python-dotenv==1.2.3
 
@@ -53,7 +53,7 @@ PyYAML==6.0.3             # Parsing des ontologies YAML
 
 # === Document Processing ===
 python-docx==1.2.0        # Lecture fichiers .docx
-pypdf==6.21.2             # Lecture fichiers PDF
+pypdf==6.21.4             # Lecture fichiers PDF; CVE-2026-119203..119209 (GHSA-5849-834g-hvw5 and siblings)
 
 # === HTML Processing ===
 beautifulsoup4==4.15.0

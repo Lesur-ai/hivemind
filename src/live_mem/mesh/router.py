@@ -50,6 +50,8 @@ from .wire import (
 )
 
 
+from ..core.selective_maintenance import MaintenanceRefused, get_controller
+
 logger = logging.getLogger("live_mem.mesh.router")
 
 MAX_REQUEST_HEADERS: Final = 64
@@ -177,9 +179,15 @@ class MeshNamespaceRouter:
             await self._send_unsigned(send, 503)
             return
         try:
-            await self._handle(scope, receive, send)
+            # #1420: every peer request may apply replay/pairing state, so it is
+            # mutation work. A closed barrier answers an explicit retryable 503;
+            # the peer's all-ACK retry keeps the event, nothing is dropped.
+            with get_controller().operation("mutation", "*"):
+                await self._handle(scope, receive, send)
         except _EdgeRefusal as refusal:
             await self._send_unsigned(send, refusal.status)
+        except MaintenanceRefused:
+            await self._send_unsigned(send, 503)
         except Exception:
             # Never serialize or log exception text: lower layers may carry an
             # endpoint, corrupt stored bytes, or another sensitive value.

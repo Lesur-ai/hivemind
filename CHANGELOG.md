@@ -17,6 +17,83 @@ linked guides when installing or upgrading.
 
 ---
 
+## [1.6.6] — 2026-11-07
+
+Hivemind 1.6.6 is a maintenance release for the 1.6 line.
+**Release identity.** Hivemind now reports runtime version `1.6.6`.
+The Python package version is also `1.6.6`.
+
+### Added
+
+- **Source-side selective maintenance for the 1.7 upgrade.** Core and Graph
+  gain a durable, staged mutation barrier driven by the admin-only, bearer-only
+  `POST /api/maintenance` (`status`, `pause`, `resume`) on each service:
+  `background` closes structural and background mutations, `all` also closes
+  SHORT writes, and `cutover` also closes reads, while admitted work settles
+  instead of being dropped. A pause survives a process restart; a crash or a
+  cancelled owner becomes a durable `unknown` that never auto-clears. No
+  registry, data-format, authorization or deployment change. This endpoint
+  is the 1.6-side requirement of the live-source 1.7 upgrade path; earlier
+  1.6 versions must be upgraded first. See `docs/SELECTIVE_MAINTENANCE.md`.
+
+### Fixed
+
+- Count read-originated physical writes before maintenance readiness. Core
+  and Graph acquire scoped mutation ownership before physical dispatch and
+  retain it through SDK completion, so read labels, stale or copied tickets
+  and wrong scopes cannot bypass a pause; ambiguous outcomes remain durable
+  unknowns. Reads stay open through capture and new SHORT writes close only
+  at the final freeze.
+
+- A residual model form fault no longer stops a long consolidation run. A
+  batch of several notes whose single corrective completion is still refused
+  only for the model's own plan faults (for example an unclassified note or a
+  duplicate target) is now replayed note by note, in order, and the run then
+  resumes at the next batch. Only a note still refused twice on its own stops
+  the run: `failed_batch` and the new `failed_note` name it, no later note is
+  integrated and only the committed prefix is deleted. Environment faults,
+  malformed JSON and provider failures stay terminal at once. The run result
+  adds `isolated_batches`, `isolation_llm_tokens_used` (already included in
+  `llm_tokens_used`) and, next to the unchanged
+  `failure_reason = "batch_write_failed"`, a closed `failure_stage`
+  (`plan_validation` or `persistence`) that separates a refused plan from a
+  storage failure.
+
+### Security
+
+- Update pypdf to 6.21.4 in the embedded Graph Memory environment, addressing
+  crafted-PDF infinite loops and memory exhaustion
+  (CVE-2026-119203/119204/119205/119206/119207/119208/119209;
+  GHSA-5849-834g-hvw5, GHSA-cggf-277g-3q54, GHSA-mfr5-77xh-9j7h,
+  GHSA-42gh-23hr-vphw, GHSA-4vqv-7265-gm2w, GHSA-62m5-6wh8-28x7,
+  GHSA-x3rh-gjgm-fmqc).
+- Update Pydantic to 2.14.2 in Core and embedded Graph Memory. This fixes
+  upstream validation bypasses involving typed extra keys and aliased fields
+  (GHSA-qpmf-fgh3-ff25 and GHSA-3r8g-cqwr-jr29).
+- Refresh the immutable base-image digests without changing versions: Caddy
+  2.11.7 builder and runtime images and the Python 3.14.8 slim runtime of the
+  Hivemind and Graph Memory images, picking up their base operating-system
+  patches. Plugins, Go toolchain and Python ABI are unchanged.
+
+### Upgrade
+
+Rebuild the Hivemind, embedded Graph Memory and WAF images from the same source.
+No data migration, reindexing or reingestion is required. The 1.6.3 backup
+compatibility and downgrade requirements still apply; see the
+[upgrade checklist](docs/DEPLOYMENT.md#upgrade-to-163). The new admin-only
+`POST /api/maintenance` endpoint is inert until an operator calls it; a pause
+survives a restart, so resume or clear one before downgrading. Consolidation
+consumers may read the additive `failure_stage`, `failed_note`,
+`isolated_batches` and `isolation_llm_tokens_used` result fields; existing
+fields and the stable `failure_reason` tokens are unchanged.
+
+Hivemind OSS is strictly mono-tenant; `space_id` allowlist is NOT a tenant
+boundary; the Portal extension seam is described in
+[`docs/EXTENSION_POINTS.md`](docs/EXTENSION_POINTS.md).
+See the [migration guide](docs/MIGRATION_LIVE_GRAPH_TO_HIVEMIND.md).
+
+---
+
 ## [1.6.5] — 2026-10-25
 
 Hivemind 1.6.5 is a dependency maintenance release for the 1.6 line.
