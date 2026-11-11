@@ -77,6 +77,20 @@ async def test_explicit_rules_are_not_replaced_or_standard_seeded(wired):
     assert not any(k.endswith(".md") for k in storage.objects if k.startswith("custom/bank/"))
 
 
+async def test_explicit_standard_rules_seed_the_standard_bank(wired):
+    from live_mem.core.bank_template import STANDARD_BANK
+    storage, _ = wired
+    rules = STANDARD.read_text(encoding="utf-8")
+    result = await SpaceService().create("fresh", "Synthetic", rules, bootstrap_admin=True)
+    assert result["status"] == "created"
+    assert storage.objects["fresh/_rules.md"] == rules
+    files = {key.removeprefix("fresh/bank/") for key in storage.objects if key.startswith("fresh/bank/") and not key.endswith(".keep")}
+    assert files == FILENAMES
+    for filename in files:
+        assert storage.objects[f"fresh/bank/{filename}"] == STANDARD_BANK[filename]
+        assert storage.events.index(f"put:fresh/bank/{filename}") < storage.events.index("put:fresh/_meta.json")
+
+
 async def test_invalid_custom_default_path_does_not_mutate(wired, monkeypatch, tmp_path):
     storage, _ = wired
     monkeypatch.setattr("live_mem.config.get_settings", lambda: SimpleNamespace(default_rules_file=str(tmp_path / "missing.md")))
